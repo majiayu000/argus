@@ -57,9 +57,7 @@ impl Transport for HttpTransport {
         if let Some(len_str) = resp.header("Content-Length") {
             if let Ok(len) = len_str.parse::<u64>() {
                 if len > max_bytes {
-                    bail!(
-                        "Content-Length {len} exceeds cap {max_bytes} for {url}"
-                    );
+                    bail!("Content-Length {len} exceeds cap {max_bytes} for {url}");
                 }
             }
         }
@@ -73,9 +71,7 @@ impl Transport for HttpTransport {
             .read_to_end(&mut body)
             .with_context(|| format!("read body of {url}"))?;
         if body.len() as u64 > max_bytes {
-            return Err(anyhow!(
-                "response body for {url} exceeded cap {max_bytes}"
-            ));
+            return Err(anyhow!("response body for {url} exceeded cap {max_bytes}"));
         }
         Ok(body)
     }

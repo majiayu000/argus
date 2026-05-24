@@ -129,12 +129,8 @@ pub fn fetch_and_scan(
     transport: &dyn Transport,
 ) -> Result<ScanReport> {
     // 1. Fetch packument.
-    let registry_host = host_of(&opts.registry).with_context(|| {
-        format!(
-            "registry URL has no parseable host: {}",
-            opts.registry
-        )
-    })?;
+    let registry_host = host_of(&opts.registry)
+        .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
     let packument_url = format!(
         "{}/{}",
         opts.registry.trim_end_matches('/'),
@@ -226,9 +222,7 @@ fn host_of(url: &str) -> Result<String> {
 
 fn validate_tarball_url(tarball_url: &str, registry_host: &str) -> Result<()> {
     if !tarball_url.starts_with("https://") {
-        bail!(
-            "refusing non-HTTPS tarball URL `{tarball_url}` (registry-supplied)"
-        );
+        bail!("refusing non-HTTPS tarball URL `{tarball_url}` (registry-supplied)");
     }
     let host = host_of(tarball_url)?;
     if host != registry_host {
