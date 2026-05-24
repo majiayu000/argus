@@ -33,6 +33,7 @@ base64 = "0.22"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+subtle = "2"
 
 [profile.release]
 lto = "thin"
