@@ -23,6 +23,7 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 
 | Class | Vector | Recent example |
 |-------|--------|----------------|
+| **AI-agent context poisoning** | Postinstall writes attacker prompt into `.cursorrules`/`CLAUDE.md`; loaded as authoritative maintainer guidance by the user's next coding-agent session | TrapDoor (May 2026) |
 | **Maintainer phishing** | Look-alike npm/PyPI login domain harvests token | eslint-config-prettier (Jul 2025, `npnjs.com`) |
 | **Token theft + targeted republish** | Stolen token used to push a malicious version | event-stream (2018), Bitwarden CLI (Apr 2026) |
 | **Self-replicating worm** | Postinstall script harvests local creds, then republishes every package the victim can publish | Shai-Hulud (Sep 2025), Mini Shai-Hulud (Apr–May 2026) |
@@ -41,6 +42,45 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 ## Incident timeline (newest first)
 
 ### 2026
+
+#### TrapDoor — first cross-registry crypto-jacking with AI-context poisoning (2026-05-24)
+
+**Facts** [source: Socket.dev "TrapDoor Crypto Stealer..." 2026-05-24]
+- 34 malicious packages across **three** registries simultaneously: 21 npm, 7 PyPI, 6 crates.io.
+- 381 versions/variants published from attacker-controlled accounts (`asdxzxc`, `asdmini67`, `dae5411`).
+- Trigger surfaces: npm `postinstall`, crates.io `build.rs` at compile, PyPI on-import.
+- npm dropper: `trap-core.js` (1,149 lines, 48,485 bytes).
+- crates.io payload: XOR-encrypted with key string `cargo-build-helper-2026`.
+- PyPI fetches JS payload from `ddjidd564.github.io/defi-security-best-practices/`.
+- Targets: SSH keys; **Sui, Solana, Aptos** wallets (Move-focused crates list confirms targeting of Move/Sui devs); crypto wallet browser extensions; browser profile + login DB; AWS creds; GitHub tokens; env vars; API keys.
+- Exfil: GitHub Gists, attacker-owned GitHub Pages, GitHub raw-content webhook config.
+- **Novel persistence primitive**: writes attacker instructions to `.cursorrules` AND `CLAUDE.md`. The next Cursor/Claude Code/aider session loads those as authoritative maintainer context, so the attacker's prompt persists across sessions.
+- Other persistence: Git hooks, shell hooks, systemd, cron, SSH-based lateral movement.
+- Detection metric (Socket telemetry): median 5min 27s, fastest 58s from publish to flag.
+- Campaign marker `P-2024-001`.
+
+**Targeted npm package names** [source: same Socket post]
+> async-pipeline-builder, build-scripts-utils, chain-key-validator, crypto-credential-scanner, defi-env-auditor, defi-threat-scanner, deployment-key-auditor, dev-env-bootstrapper, eth-wallet-sentinel, llm-context-compressor, mnemonic-safety-check, model-switch-router, node-setup-helpers, project-init-tools, prompt-engineering-toolkit, solidity-deploy-guard, token-usage-tracker, wallet-backup-verifier, wallet-security-checker, web3-secrets-detector, workspace-config-loader
+
+**Difference from Shai-Hulud family**
+[inference, medium] Socket's TrapDoor write-up does not reference Shai-Hulud, and TTPs differ — TrapDoor uses fresh attacker accounts + lookalike package names targeting Move/Sui/Solana devs, whereas Shai-Hulud is a self-propagating worm hijacking legitimate maintainer accounts. These look like **separate campaigns by different actors**. "TrapDoor" is a malware-family name, not an actor designation; no source attributes it to a named group.
+
+**argus coverage on the npm half (21 packages)**
+- ✅ `lifecycle-script` — postinstall fires.
+- ✅ `ai-context-poisoning` (new in PR #18) — writes to `.cursorrules` + `CLAUDE.md` fire.
+- ✅ `credential-access` — `.ssh/id_rsa`, `.aws/credentials` literals.
+- ✅ `network-exfiltration` — POST to the attacker GitHub Pages host.
+- ⚠️ `token-harvest` — fires only when the dropper reads `~/.npmrc` literally OR pairs env-token reads with npm-publish/github-write.
+
+**argus coverage on PyPI (7) and crates.io (6)**
+- ⛔ Out of ecosystem scope. PyPI parity is a tracked gap; crates.io parity has no issue yet (argus is npm-first by SPEC).
+
+**Crates.io significance**
+[inference, medium] Combined with the Contagious Interview campaign and the earlier 2026 `faster_log` / `async_println` incident, this is the second time in 2026 we see crates.io as a deliberate vector for a multi-ecosystem campaign. The "crates.io is the clean registry" assumption no longer holds.
+
+**Gap**: argus has no defense for crates.io or PyPI. The PyPI worker's on-import payload would also dodge npm-style postinstall detection even if we eventually ported the lifecycle-script rule directly.
+
+---
 
 #### Mini Shai-Hulud wave 5 — atool maintainer compromise (2026-05-19)
 
@@ -348,6 +388,8 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 
 | Incident (Year) | Initial vector | Payload class | argus rule(s) | Verdict |
 |---|---|---|---|---|
+| TrapDoor (2026-05) — npm half | fresh-account lookalike publish | crypto-jacking + AI-context poisoning | lifecycle-script + ai-context-poisoning + credential-access + network-exfiltration | ✅ corpus fixture `trapdoor-ai-context` |
+| TrapDoor (2026-05) — PyPI + crates.io halves | same | same | — | ⛔ ecosystem gap |
 | Mini Shai-Hulud wave 5 atool (2026-05) | maintainer compromise | worm | lifecycle-script + token-harvest + github-write-api + npm-publish | ✅ catches post-install |
 | Microsoft durabletask (2026-05) | maintainer compromise | cred stealer | — (PyPI) | ⛔ ecosystem gap |
 | node-ipc (2026-05) | maintainer compromise | runtime cred stealer | runtime-hook + network-exfiltration | ⚠️ heavy obfuscation in single bundle |
@@ -369,9 +411,9 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 | event-stream (2018-10) | social engineering of exhausted maintainer | targeted bitcoin theft | lifecycle-script | ⚠️ Copay-specific unpack hard to model |
 
 **Summary** (2025–2026 incidents only):
-- ✅ Direct catch: 7 / 16 incidents
-- ⚠️ Partial / bypassable: 4 / 16 incidents
-- ⛔ Ecosystem/architecture gap: 5 / 16 incidents (4 PyPI, 1 GitHub Actions)
+- ✅ Direct catch: 8 / 18 incidents (TrapDoor npm half added)
+- ⚠️ Partial / bypassable: 4 / 18 incidents
+- ⛔ Ecosystem/architecture gap: 6 / 18 incidents (4 PyPI, 1 crates.io [TrapDoor], 1 GitHub Actions)
 
 ---
 
@@ -432,6 +474,7 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 - Snyk advisory: [SNYK-JS-ESLINTCONFIGPRETTIER-10873299 (CVE-2025-54313)](https://security.snyk.io/vuln/SNYK-JS-ESLINTCONFIGPRETTIER-10873299)
 - JFrog: [eslint-config-prettier Hijack — 10.1.6 is safe](https://research.jfrog.com/post/eslint-config-prettier-hijack-10-1-6-safe/)
 - Socket: [Malicious npm Packages Impersonate Flashbots SDKs](https://socket.dev/blog/malicious-npm-packages-impersonate-flashbots-sdks-targeting-ethereum-wallet-credentials)
+- Socket: [TrapDoor Crypto Stealer Supply Chain Attack Hits 34 Packages and Hundreds of Versions Across npm, PyPI, and Crates.io (2026-05-24)](https://socket.dev/blog/trapdoor-crypto-stealer-npm-pypi-crates)
 - GitGuardian: [No Off Season — three campaigns in 48 hours](https://blog.gitguardian.com/three-supply-chain-campaigns-hit-npm-pypi-and-docker-hub-in-48-hours/)
 - Tenable: [Mini Shai-Hulud Supply Chain Attack CVE-2026-45321 FAQ](https://www.tenable.com/blog/mini-shai-hulud-frequently-asked-questions)
 - Trend Micro: [Inside the LiteLLM Supply Chain Compromise](https://www.trendmicro.com/en_us/research/26/c/inside-litellm-supply-chain-compromise.html)
