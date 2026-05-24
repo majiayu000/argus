@@ -49,7 +49,7 @@ pub struct PackageContext {
 }
 
 /// Maximum size we attempt to read as text. Larger files are treated as binary.
-const TEXT_MAX_BYTES: u64 = 1 * 1024 * 1024;
+const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Top-level entry: scan a package directory, return a full report.
 pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
@@ -131,9 +131,7 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 /// File extensions that should always be treated as native artifacts even when
 /// the underlying file happens to be ASCII (fixtures use placeholder text).
-pub const NATIVE_BIN_EXTS: &[&str] = &[
-    ".so", ".dll", ".dylib", ".node", ".exe",
-];
+pub const NATIVE_BIN_EXTS: &[&str] = &[".so", ".dll", ".dylib", ".node", ".exe"];
 
 pub fn has_native_bin_ext(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();

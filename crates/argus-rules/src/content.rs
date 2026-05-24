@@ -5,8 +5,8 @@
 //! review time, so a rule fires only when its real-attack pattern is present.
 
 use crate::{all_script_bodies, PackageContext, TextFile};
-use regex::Regex;
 use argus_core::{Finding, Severity};
+use regex::Regex;
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     let script_blob = all_script_bodies(&ctx.package);
@@ -153,8 +153,10 @@ fn cred_paths_regex() -> Regex {
 }
 
 fn token_env_regex() -> Regex {
-    Regex::new(r#"process\.env\.(NPM_TOKEN|GITHUB_TOKEN|GH_TOKEN|NODE_AUTH_TOKEN|NPM_AUTH_TOKEN)\b"#)
-        .unwrap()
+    Regex::new(
+        r#"process\.env\.(NPM_TOKEN|GITHUB_TOKEN|GH_TOKEN|NODE_AUTH_TOKEN|NPM_AUTH_TOKEN)\b"#,
+    )
+    .unwrap()
 }
 
 fn npmrc_read_regex() -> Regex {

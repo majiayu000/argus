@@ -1,8 +1,8 @@
 //! Lifecycle-script and pre-scan marker rules.
 
 use crate::PackageContext;
-use regex::Regex;
 use argus_core::{Finding, Severity};
+use regex::Regex;
 
 const LIFECYCLE_SCRIPT_NAMES: &[&str] = &[
     "preinstall",

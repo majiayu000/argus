@@ -30,13 +30,7 @@ pub const POPULAR_PACKAGES: &[&str] = &[
 ];
 
 /// Substrings that strongly suggest an unscoped, internal-looking package name.
-pub const INTERNAL_HINTS: &[&str] = &[
-    "internal",
-    "corp",
-    "company",
-    "private",
-    "intranet",
-];
+pub const INTERNAL_HINTS: &[&str] = &["internal", "corp", "company", "private", "intranet"];
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     let name = match ctx.package.name.as_deref() {
@@ -108,8 +102,7 @@ fn closest_within(name: &str, max_distance: usize) -> Option<&'static str> {
     POPULAR_PACKAGES
         .iter()
         .copied()
-        .filter(|p| levenshtein(&name_l, p) <= max_distance)
-        .next()
+        .find(|p| levenshtein(&name_l, p) <= max_distance)
 }
 
 fn is_dep_confusion(name: &str) -> bool {
@@ -121,9 +114,7 @@ fn is_dep_confusion(name: &str) -> bool {
 }
 
 fn has_platform_optdeps(ctx: &PackageContext) -> bool {
-    let platform_tokens = [
-        "darwin", "linux", "win32", "freebsd", "netbsd", "openbsd",
-    ];
+    let platform_tokens = ["darwin", "linux", "win32", "freebsd", "netbsd", "openbsd"];
     let arch_tokens = ["arm64", "x64", "x86", "ia32", "arm"];
 
     ctx.package.optional_dependencies.keys().any(|k| {
@@ -154,9 +145,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=m {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (curr[j - 1] + 1)
-                .min(prev[j] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }

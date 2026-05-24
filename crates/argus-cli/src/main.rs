@@ -1,21 +1,25 @@
 //! argus CLI binary.
 //!
 //! Two subcommands at Milestone 0:
-//! - `argus scan <path>`         — scan one package directory or lockfile.
-//! - `argus corpus test ...`     — run the regression corpus and diff against
-//!                                 each case's `expectedDecision` + `rules`.
+//! - `argus scan <path>` — scan one package directory or lockfile.
+//! - `argus corpus test ...` — run the regression corpus and diff against
+//!   each case's `expectedDecision` + `rules`.
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
 use argus_core::{Decision, ScanReport};
 use argus_rules::{scan_lockfile, scan_package_dir};
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
-#[command(name = "argus", version, about = "Supply-chain install guard for npm/JS")]
+#[command(
+    name = "argus",
+    version,
+    about = "Supply-chain install guard for npm/JS"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -81,7 +85,9 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Scan { path, format } => cmd_scan(&path, format),
-        Cmd::Corpus { op: CorpusOp::Test { corpus } } => cmd_corpus_test(&corpus),
+        Cmd::Corpus {
+            op: CorpusOp::Test { corpus },
+        } => cmd_corpus_test(&corpus),
     }
 }
 
@@ -115,10 +121,7 @@ fn print_report_text(report: &ScanReport) {
     println!(
         "decision: {}  package: {}",
         report.decision.as_str(),
-        report
-            .package_name
-            .as_deref()
-            .unwrap_or("<unnamed>"),
+        report.package_name.as_deref().unwrap_or("<unnamed>"),
     );
     println!("path: {}", report.path.display());
     if report.findings.is_empty() {
@@ -128,7 +131,13 @@ fn print_report_text(report: &ScanReport) {
     println!("findings:");
     for f in &report.findings {
         let loc = f.location.as_deref().unwrap_or("");
-        println!("  - [{}] {} — {} ({})", severity_tag(f), f.rule_id, f.detail, loc);
+        println!(
+            "  - [{}] {} — {} ({})",
+            severity_tag(f),
+            f.rule_id,
+            f.detail,
+            loc
+        );
     }
 }
 
