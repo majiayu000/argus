@@ -44,8 +44,9 @@ enum Cmd {
         /// Registry base URL.
         #[arg(long, default_value = "https://registry.npmjs.org")]
         registry: String,
-        /// Directory for cached tarballs + scratch extraction. Defaults to
-        /// `$TMPDIR/argus`.
+        /// Persistent scratch parent for tarballs and extraction. When
+        /// omitted, each fetch uses a fresh private system temp dir
+        /// (mode 0700 on Unix) to avoid multi-user races in shared `/tmp`.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -129,7 +130,7 @@ fn cmd_fetch(
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
     let opts = FetchOptions {
         registry,
-        cache_dir: cache_dir.unwrap_or_else(|| std::env::temp_dir().join("argus")),
+        cache_dir,
         ..FetchOptions::default()
     };
     let transport = HttpTransport::new();
@@ -138,14 +139,23 @@ fn cmd_fetch(
     emit_report(&report, format)
 }
 
+/// Exit codes are part of the CLI contract.
+///
+/// - `0` — `allow` (clean)
+/// - `1` — `block` (a rule fired and the package must not be installed)
+/// - `2` — `allow-with-approval` (only a recognised native-build pattern
+///   fired; a human reviewer must sign off before install). Distinct from
+///   `allow` so CI gates can require explicit approval rather than silently
+///   passing.
 fn emit_report(report: &ScanReport, format: Format) -> Result<ExitCode> {
     match format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         Format::Text => print_report_text(report),
     }
     let code = match report.decision {
-        Decision::Allow | Decision::AllowWithApproval => 0,
+        Decision::Allow => 0,
         Decision::Block => 1,
+        Decision::AllowWithApproval => 2,
     };
     Ok(ExitCode::from(code))
 }

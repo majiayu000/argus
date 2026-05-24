@@ -70,30 +70,32 @@ pub fn hash(alg: HashAlg, bytes: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Verify `bytes` against the SSRI string. Returns `Ok(())` if at least one
-/// entry matches; otherwise an error naming the strongest expected
-/// algorithm.
+/// Verify `bytes` against the SSRI string.
+///
+/// Only the **strongest declared algorithm** is checked. A registry response
+/// that contains both `sha256-<correct>` and `sha512-<forged>` would pass
+/// any-entry-matches semantics by virtue of the sha256 entry, defeating the
+/// stronger sha512 guarantee that the publisher intended. We refuse that
+/// downgrade by verifying only the strongest entry per SRI spec
+/// recommendations.
 pub fn verify_ssri(bytes: &[u8], ssri: &str) -> Result<()> {
     let entries = parse_ssri(ssri)?;
-    let mut strongest = HashAlg::Sha256;
-    for entry in &entries {
-        if matches!(
-            (strongest, entry.alg),
-            (HashAlg::Sha256, HashAlg::Sha384 | HashAlg::Sha512)
-                | (HashAlg::Sha384, HashAlg::Sha512)
-        ) {
-            strongest = entry.alg;
-        }
-    }
-    for entry in &entries {
-        let actual = hash(entry.alg, bytes);
-        if subtle_eq(&actual, &entry.digest) {
-            return Ok(());
-        }
+    let strongest = entries
+        .iter()
+        .max_by_key(|e| match e.alg {
+            HashAlg::Sha512 => 3,
+            HashAlg::Sha384 => 2,
+            HashAlg::Sha256 => 1,
+        })
+        .expect("parse_ssri guarantees a non-empty entry list");
+    let actual = hash(strongest.alg, bytes);
+    if subtle_eq(&actual, &strongest.digest) {
+        return Ok(());
     }
     Err(anyhow!(
-        "integrity mismatch: no SSRI entry matched (expected {:?})",
-        strongest
+        "integrity mismatch: strongest entry ({:?}) did not match the {} downloaded bytes",
+        strongest.alg,
+        bytes.len()
     ))
 }
 
@@ -139,16 +141,32 @@ mod tests {
     }
 
     #[test]
-    fn multiple_entries_any_match_passes() {
+    fn strongest_entry_must_match_even_if_weaker_does() {
+        let bytes = b"argus";
+        let sha256 = hash(HashAlg::Sha256, bytes);
+        let mut forged_sha512 = hash(HashAlg::Sha512, bytes);
+        forged_sha512[0] ^= 0xff; // tamper the sha512 digest
+
+        // Attacker scenario: tampered packument supplies a correct sha256
+        // alongside a forged sha512. We must NOT accept by virtue of the
+        // sha256 match — sha512 is the strongest declared entry and is
+        // the one verified.
+        let ssri = format!(
+            "sha256-{} sha512-{}",
+            STANDARD.encode(&sha256),
+            STANDARD.encode(&forged_sha512),
+        );
+        assert!(verify_ssri(bytes, &ssri).is_err());
+    }
+
+    #[test]
+    fn correct_strongest_entry_passes_even_with_weaker_present() {
         let bytes = b"argus";
         let sha256 = hash(HashAlg::Sha256, bytes);
         let sha512 = hash(HashAlg::Sha512, bytes);
-        // First entry is wrong-by-truncation; second is correct.
-        let mut wrong = sha256.clone();
-        wrong[0] ^= 0xff;
         let ssri = format!(
             "sha256-{} sha512-{}",
-            STANDARD.encode(&wrong),
+            STANDARD.encode(&sha256),
             STANDARD.encode(&sha512),
         );
         verify_ssri(bytes, &ssri).unwrap();

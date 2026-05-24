@@ -8,6 +8,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::read::GzDecoder;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use tar::EntryType;
 
@@ -66,13 +67,13 @@ pub fn extract_tarball(
             }
         }
 
-        let size = entry.header().size().unwrap_or(0);
-        total = total
-            .checked_add(size)
-            .ok_or_else(|| anyhow!("tar size overflow"))?;
-        if total > max_extracted_bytes {
-            bail!("extracted size {total} exceeds cap {max_extracted_bytes}");
-        }
+        // `entry.header().size()` is attacker-controlled in the tar header,
+        // so we cannot trust it for the cap (review M-2). Read at most
+        // `remaining + 1` bytes from the entry stream and bail if the
+        // actual write would push past `max_extracted_bytes`.
+        let remaining = max_extracted_bytes
+            .checked_sub(total)
+            .ok_or_else(|| anyhow!("tar size accounting overflow"))?;
 
         let dest = dest_root.join(&header_path);
         if let Some(parent) = dest.parent() {
@@ -81,7 +82,18 @@ pub fn extract_tarball(
         }
         let mut out =
             std::fs::File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out).with_context(|| format!("write {}", dest.display()))?;
+        let mut limited = entry.by_ref().take(remaining + 1);
+        let written = std::io::copy(&mut limited, &mut out)
+            .with_context(|| format!("write {}", dest.display()))?;
+        if written > remaining {
+            bail!(
+                "extracted size exceeds cap {max_extracted_bytes} (entry {} overran)",
+                header_path.display()
+            );
+        }
+        total = total
+            .checked_add(written)
+            .ok_or_else(|| anyhow!("tar size accounting overflow"))?;
 
         if header_path
             .components()
