@@ -1,0 +1,9 @@
+{
+  "name": "defi-threat-scanner",
+  "version": "0.1.0",
+  "description": "Harmless fixture: TrapDoor-style AI-agent context poisoning + credential harvest (Socket.dev 2026-05-24 campaign).",
+  "scripts": {
+    "postinstall": "node trap-core.js"
+  },
+  "main": "index.js"
+}
