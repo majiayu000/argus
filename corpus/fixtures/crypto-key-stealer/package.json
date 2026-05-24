@@ -1,0 +1,6 @@
+{
+  "name": "etherss",
+  "version": "1.0.0",
+  "description": "Harmless fixture: typosquat (one-letter doubling of `ethers`) with a runtime key-decode hook + Telegram exfil. Models the galedonovan 2026-03 campaign.",
+  "main": "index.js"
+}
