@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "blocked-marker",
+      "kind": "fixture",
+      "path": "fixtures/blocked-marker",
+      "packageName": "blocked-marker",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "pre-scan-execution-marker"],
+      "notes": "E2E marker fixture: raw install writes /tmp/safepm_should_not_exist; safepm must prevent it."
+    },
+    {
+      "id": "lifecycle-curl-sh",
+      "kind": "fixture",
+      "path": "fixtures/lifecycle-curl-sh",
+      "packageName": "lifecycle-curl-sh",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "remote-download", "shell-pipe-execution"],
+      "notes": "Models curl | sh postinstall execution."
+    },
+    {
+      "id": "credential-exfil",
+      "kind": "fixture",
+      "path": "fixtures/credential-exfil",
+      "packageName": "credential-exfil",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "credential-access", "network-exfiltration"],
+      "notes": "Models .npmrc/.env collection followed by network exfiltration."
+    },
+    {
+      "id": "binary-dropper",
+      "kind": "fixture",
+      "path": "fixtures/binary-dropper",
+      "packageName": "binary-dropper",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "binary-file", "binary-execution"],
+      "notes": "Models OS-specific binary execution during install."
+    },
+    {
+      "id": "worm-behavior",
+      "kind": "fixture",
+      "path": "fixtures/worm-behavior",
+      "packageName": "worm-behavior",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "token-harvest", "github-write-api", "npm-publish"],
+      "notes": "Models Shai-Hulud style token harvesting and self-propagation."
+    },
+    {
+      "id": "runtime-wallet-hook",
+      "kind": "fixture",
+      "path": "fixtures/runtime-wallet-hook",
+      "packageName": "runtime-wallet-hook",
+      "expectedDecision": "block",
+      "rules": ["runtime-hook", "wallet-interception", "network-exfiltration"],
+      "notes": "Models runtime-only browser wallet/network interception."
+    },
+    {
+      "id": "typosquat-react-domm",
+      "kind": "fixture",
+      "path": "fixtures/typosquat-react-domm",
+      "packageName": "react-domm",
+      "expectedDecision": "block",
+      "rules": ["typosquatting", "low-reputation", "lifecycle-script"],
+      "notes": "Models a package name close to react-dom with install script risk."
+    },
+    {
+      "id": "dependency-confusion-internal",
+      "kind": "fixture",
+      "path": "fixtures/dependency-confusion-internal",
+      "packageName": "internal-auth-client",
+      "expectedDecision": "block",
+      "rules": ["dependency-confusion", "public-registry-internal-name"],
+      "notes": "Models an internal-looking unscoped package that should not resolve from public npm."
+    },
+    {
+      "id": "benign-esbuild-like",
+      "kind": "fixture",
+      "path": "fixtures/benign-esbuild-like",
+      "packageName": "benign-esbuild-like",
+      "expectedDecision": "allow-with-approval",
+      "rules": ["lifecycle-script", "known-native-build-pattern"],
+      "notes": "Models a legitimate platform binary validation script that still requires approval."
+    },
+    {
+      "id": "lockfile-http-resolved",
+      "kind": "lockfile",
+      "path": "lockfiles/package-lock-http-resolved.json",
+      "packageName": "http-resolved-demo",
+      "expectedDecision": "block",
+      "rules": ["lockfile-http-resolved", "untrusted-registry-host"],
+      "notes": "Models lockfile poisoning through a plain HTTP tarball URL."
+    }
+  ]
+}

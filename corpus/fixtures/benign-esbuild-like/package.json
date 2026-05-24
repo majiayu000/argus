@@ -1,0 +1,12 @@
+{
+  "name": "benign-esbuild-like",
+  "version": "1.0.0",
+  "description": "Harmless fixture for legitimate native build approval flow.",
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "optionalDependencies": {
+    "@benign-esbuild-like/darwin-arm64": "1.0.0"
+  },
+  "main": "index.js"
+}

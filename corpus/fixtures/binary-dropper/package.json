@@ -1,0 +1,9 @@
+{
+  "name": "binary-dropper",
+  "version": "1.0.0",
+  "description": "Harmless fixture for binary execution during install.",
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "main": "index.js"
+}

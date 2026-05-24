@@ -14,10 +14,10 @@
 
 ```bash
 # Scan one package directory
-cargo run -p argus-cli -- scan ../safepm-test-corpus/fixtures/lifecycle-curl-sh
+cargo run -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh
 
 # Run the full regression corpus (10 fixtures + 1 lockfile)
-cargo run -p argus-cli -- corpus test --corpus ../safepm-test-corpus
+cargo run -p argus-cli -- corpus test
 
 # Machine-readable output
 cargo run -p argus-cli -- scan path/to/pkg --format json

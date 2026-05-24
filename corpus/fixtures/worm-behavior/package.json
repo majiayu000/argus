@@ -1,0 +1,9 @@
+{
+  "name": "worm-behavior",
+  "version": "1.0.0",
+  "description": "Harmless fixture for npm worm behavior.",
+  "scripts": {
+    "preinstall": "node worm.js"
+  },
+  "main": "index.js"
+}
