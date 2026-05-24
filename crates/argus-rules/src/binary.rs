@@ -2,7 +2,7 @@
 //! that would be loaded or executed at install/runtime.
 
 use crate::{has_native_bin_ext, PackageContext};
-use safepm_core::{Finding, Severity};
+use argus_core::{Finding, Severity};
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     let mut matched: Vec<String> = Vec::new();

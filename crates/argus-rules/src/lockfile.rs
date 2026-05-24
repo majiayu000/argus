@@ -3,7 +3,7 @@
 //! non-allowlisted registry host.
 
 use anyhow::{Context, Result};
-use safepm_core::{ArtifactKind, Decision, Finding, ScanReport, Severity};
+use argus_core::{ArtifactKind, Decision, Finding, ScanReport, Severity};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;

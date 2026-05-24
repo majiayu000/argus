@@ -6,7 +6,7 @@
 
 use crate::{all_script_bodies, PackageContext, TextFile};
 use regex::Regex;
-use safepm_core::{Finding, Severity};
+use argus_core::{Finding, Severity};
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     let script_blob = all_script_bodies(&ctx.package);

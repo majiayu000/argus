@@ -1,13 +1,13 @@
 [package]
-name = "safepm-rules"
+name = "argus-rules"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Static detection rules for safepm scans."
+description = "Static detection rules for argus scans."
 
 [dependencies]
-safepm-core = { workspace = true }
+argus-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }

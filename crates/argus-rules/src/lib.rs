@@ -1,4 +1,4 @@
-//! Static detection rules for safepm.
+//! Static detection rules for argus.
 //!
 //! Each rule is a pure function that takes a [`PackageContext`] (for
 //! directory scans) or a parsed lockfile, and appends `Finding`s.
@@ -8,7 +8,7 @@
 //! artifact — files are read as text or treated as opaque bytes.
 
 use anyhow::{Context, Result};
-use safepm_core::{ArtifactKind, Decision, Finding, ScanReport};
+use argus_core::{ArtifactKind, Decision, Finding, ScanReport};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -68,6 +68,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "argus-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-rules",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "argus-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "argus-rules"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "walkdir",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,38 +221,6 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
-
-[[package]]
-name = "safepm-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "safepm-core",
- "safepm-rules",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "safepm-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "safepm-rules"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "safepm-core",
- "serde",
- "serde_json",
- "walkdir",
-]
 
 [[package]]
 name = "same-file"

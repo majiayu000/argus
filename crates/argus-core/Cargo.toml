@@ -1,10 +1,10 @@
 [package]
-name = "safepm-core"
+name = "argus-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core types for safepm (Decision, Finding, ScanReport)."
+description = "Core types for argus (Decision, Finding, ScanReport)."
 
 [dependencies]
 serde = { workspace = true }

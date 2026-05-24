@@ -2,7 +2,7 @@
 
 use crate::PackageContext;
 use regex::Regex;
-use safepm_core::{Finding, Severity};
+use argus_core::{Finding, Severity};
 
 const LIFECYCLE_SCRIPT_NAMES: &[&str] = &[
     "preinstall",

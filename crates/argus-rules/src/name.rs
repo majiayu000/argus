@@ -1,7 +1,7 @@
 //! Name-based rules: typosquatting, dependency confusion, native-build pattern.
 
 use crate::PackageContext;
-use safepm_core::{Finding, Severity};
+use argus_core::{Finding, Severity};
 
 /// Popular npm package names that are common typosquat targets. Kept tiny on
 /// purpose — full reputation data belongs in the registry-intelligence phase.

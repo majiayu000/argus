@@ -6,7 +6,7 @@
 //! `AllowWithApproval`.
 
 use crate::PackageContext;
-use safepm_core::{Decision, Finding};
+use argus_core::{Decision, Finding};
 use std::collections::BTreeSet;
 
 const DOWNGRADE_SAFE_RULES: &[&str] = &["lifecycle-script", "known-native-build-pattern"];

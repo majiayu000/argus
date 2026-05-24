@@ -1,18 +1,18 @@
 [package]
-name = "safepm-cli"
+name = "argus-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "safepm command-line binary: scan packages and run the regression corpus."
+description = "argus command-line binary: scan packages and run the regression corpus."
 
 [[bin]]
-name = "safepm"
+name = "argus"
 path = "src/main.rs"
 
 [dependencies]
-safepm-core = { workspace = true }
-safepm-rules = { workspace = true }
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

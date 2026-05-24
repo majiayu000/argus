@@ -1,4 +1,4 @@
-//! Core types for safepm.
+//! Core types for argus.
 //!
 //! A scan over a package directory or lockfile produces a [`ScanReport`].
 //! Each report carries a list of [`Finding`]s and a derived [`Decision`].

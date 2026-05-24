@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/safepm-core",
-    "crates/safepm-rules",
-    "crates/safepm-cli",
+    "crates/argus-core",
+    "crates/argus-rules",
+    "crates/argus-cli",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/majiayu000/safepm"
+repository = "https://github.com/majiayu000/argus"
 rust-version = "1.75"
 
 [workspace.dependencies]
@@ -21,8 +21,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 
-safepm-core = { path = "crates/safepm-core" }
-safepm-rules = { path = "crates/safepm-rules" }
+argus-core = { path = "crates/argus-core" }
+argus-rules = { path = "crates/argus-rules" }
 
 [profile.release]
 lto = "thin"
