@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use subtle::ConstantTimeEq;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlg {
@@ -89,7 +90,7 @@ pub fn verify_ssri(bytes: &[u8], ssri: &str) -> Result<()> {
         })
         .expect("parse_ssri guarantees a non-empty entry list");
     let actual = hash(strongest.alg, bytes);
-    if subtle_eq(&actual, &strongest.digest) {
+    if bool::from(actual.ct_eq(&strongest.digest)) {
         return Ok(());
     }
     Err(anyhow!(
@@ -97,20 +98,6 @@ pub fn verify_ssri(bytes: &[u8], ssri: &str) -> Result<()> {
         strongest.alg,
         bytes.len()
     ))
-}
-
-/// Constant-time byte comparison. We only verify integrity (not secrets),
-/// but using constant-time eq here costs nothing and keeps the intent
-/// explicit.
-fn subtle_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]
