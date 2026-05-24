@@ -1,0 +1,15 @@
+[package]
+name = "safepm-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Static detection rules for safepm scans."
+
+[dependencies]
+safepm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+anyhow = { workspace = true }
+walkdir = { workspace = true }
