@@ -5,7 +5,14 @@ use argus_core::{Finding, Severity};
 
 /// Popular npm package names that are common typosquat targets. Kept tiny on
 /// purpose — full reputation data belongs in the registry-intelligence phase.
+///
+/// The crypto / web3 cluster is included because 2025–2026 supply-chain
+/// attacks (galedonovan crypto stealer in 2026-03, chalk/debug wallet
+/// rewriter in 2025-09, @solana/web3.js compromise in 2024-12) all routed
+/// through typosquats of these names. See
+/// `docs/supply-chain-attacks.md`.
 pub const POPULAR_PACKAGES: &[&str] = &[
+    // general
     "react",
     "react-dom",
     "react-native",
@@ -27,6 +34,21 @@ pub const POPULAR_PACKAGES: &[&str] = &[
     "uuid",
     "minimist",
     "ua-parser-js",
+    "debug",
+    // crypto / web3 (heavy 2025–2026 attack target)
+    "ethers",
+    "web3",
+    "viem",
+    "wagmi",
+    "hardhat",
+    "truffle",
+    "bs58",
+    "ethereumjs-tx",
+    "ethereumjs-util",
+    "secp256k1",
+    "tweetnacl",
+    "elliptic",
+    "bitcoinjs-lib",
 ];
 
 /// Substrings that strongly suggest an unscoped, internal-looking package name.

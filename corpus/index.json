@@ -83,6 +83,15 @@
       "notes": "Models a legitimate platform binary validation script that still requires approval."
     },
     {
+      "id": "crypto-key-stealer",
+      "kind": "fixture",
+      "path": "fixtures/crypto-key-stealer",
+      "packageName": "etherss",
+      "expectedDecision": "block",
+      "rules": ["typosquatting", "low-reputation", "runtime-hook", "network-exfiltration"],
+      "notes": "Models galedonovan 2026-03: crypto-library typosquat + runtime hook on key decode + Telegram exfil. Combined name-rules and runtime-rules in one fixture."
+    },
+    {
       "id": "lockfile-http-resolved",
       "kind": "lockfile",
       "path": "lockfiles/package-lock-http-resolved.json",
