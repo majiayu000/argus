@@ -45,6 +45,7 @@ The compiled binary is named `argus` and exits non-zero on `block`.
 | binary    | `binary-file` |
 | name      | `typosquatting`, `low-reputation`, `dependency-confusion`, `public-registry-internal-name`, `known-native-build-pattern` |
 | lockfile  | `lockfile-http-resolved`, `untrusted-registry-host` |
+| provenance | `missing-provenance` (info), `provenance-verified-subject` (info), `provenance-subject-mismatch` (block), `provenance-fetch-blocked` / `provenance-fetch-failed` / `provenance-parse-failed` (operational errors) |
 
 ## Layout
 

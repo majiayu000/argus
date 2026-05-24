@@ -20,6 +20,7 @@ mod lifecycle;
 mod lockfile;
 mod name;
 
+pub use decision::derive_from_findings as derive_decision_from_findings;
 pub use lockfile::scan_lockfile;
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.
