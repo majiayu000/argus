@@ -1,0 +1,9 @@
+{
+  "name": "credential-exfil",
+  "version": "1.0.0",
+  "description": "Harmless fixture for credential access plus network exfiltration.",
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "main": "index.js"
+}

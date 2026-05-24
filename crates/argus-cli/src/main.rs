@@ -41,7 +41,7 @@ enum CorpusOp {
     /// Run every case in the corpus and verify expected decision and rules.
     Test {
         /// Path to the corpus directory (must contain `index.json`).
-        #[arg(long, default_value = "../safepm-test-corpus")]
+        #[arg(long, default_value = "corpus")]
         corpus: PathBuf,
     },
 }

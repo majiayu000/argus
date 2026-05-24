@@ -1,0 +1,9 @@
+{
+  "name": "blocked-marker",
+  "version": "1.0.0",
+  "description": "Harmless marker fixture for proving blocked lifecycle scripts did not execute.",
+  "scripts": {
+    "postinstall": "node marker.js"
+  },
+  "main": "index.js"
+}

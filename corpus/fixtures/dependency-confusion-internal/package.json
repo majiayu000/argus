@@ -1,0 +1,6 @@
+{
+  "name": "internal-auth-client",
+  "version": "99.99.99",
+  "description": "Harmless fixture for dependency confusion through an internal-looking public package.",
+  "main": "index.js"
+}

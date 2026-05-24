@@ -1,0 +1,9 @@
+{
+  "name": "react-domm",
+  "version": "1.0.0",
+  "description": "Harmless fixture for react-dom typosquatting.",
+  "scripts": {
+    "postinstall": "node setup.js"
+  },
+  "main": "index.js"
+}
