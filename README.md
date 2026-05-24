@@ -1,5 +1,8 @@
 # argus
 
+[![CI](https://github.com/majiayu000/argus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/majiayu000/argus/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 > "100-eyed guardian." Static install-time scanner for npm / JavaScript supply-chain attacks.
 
 `argus` is a Rust CLI that decides whether a package directory or npm lockfile is safe to install, before any lifecycle script runs. It implements the deterministic-rule layer of the design at `../docs/todo/safepm-install-guard-spec-2026-05-13.md` (Milestone 0).
