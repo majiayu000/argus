@@ -33,8 +33,8 @@ struct LockEntry {
 pub fn scan_lockfile(path: &Path) -> Result<ScanReport> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read lockfile {}", path.display()))?;
-    let parsed: NpmLockfile = serde_json::from_str(&raw)
-        .with_context(|| format!("parse lockfile {}", path.display()))?;
+    let parsed: NpmLockfile =
+        serde_json::from_str(&raw).with_context(|| format!("parse lockfile {}", path.display()))?;
 
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -111,7 +111,9 @@ fn display_key(key: &str) -> &str {
 }
 
 fn host_of(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
     let end = rest.find('/').unwrap_or(rest.len());
     Some(rest[..end].to_ascii_lowercase())
 }

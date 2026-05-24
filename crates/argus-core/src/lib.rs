@@ -126,6 +126,9 @@ mod tests {
                 Finding::new("lifecycle-script", Severity::High, "postinstall"),
             ],
         };
-        assert_eq!(report.rule_ids(), vec!["lifecycle-script", "remote-download"]);
+        assert_eq!(
+            report.rule_ids(),
+            vec!["lifecycle-script", "remote-download"]
+        );
     }
 }
