@@ -13,8 +13,13 @@
 ## Usage
 
 ```bash
-# Scan one package directory
+# Scan one local package directory
 cargo run -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh
+
+# Fetch a real npm package: packument -> tarball -> SHA-512 verify -> safe
+# extract -> scan. No lifecycle script ever runs.
+cargo run -p argus-cli -- fetch chalk@5.3.0
+cargo run -p argus-cli -- fetch '@types/node@20.10.0' --format json
 
 # Run the full regression corpus (10 fixtures + 1 lockfile)
 cargo run -p argus-cli -- corpus test
