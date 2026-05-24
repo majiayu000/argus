@@ -30,6 +30,17 @@ pub struct Dist {
     /// SSRI string, e.g. `sha512-base64hash` (may carry multiple
     /// space-separated entries — we accept any one that matches).
     pub integrity: String,
+    /// npm OIDC provenance bundle pointer. Optional — only packages
+    /// published with `npm publish --provenance` carry this.
+    #[serde(default)]
+    pub attestations: Option<AttestationsRef>,
+}
+
+/// Sub-object of `dist.attestations`. We only need the URL to fetch the
+/// bundle; the `predicateType` summary inside is informational.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttestationsRef {
+    pub url: String,
 }
 
 /// Resolve a user-supplied version reference against a packument.

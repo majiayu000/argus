@@ -105,11 +105,10 @@ fn fetch_and_scan_allow_path() {
 
     let report = fetch_and_scan(&pkg, &opts, &transport).unwrap();
     assert_eq!(report.decision, Decision::Allow);
-    assert!(
-        report.findings.is_empty(),
-        "got findings: {:?}",
-        report.findings
-    );
+    // Packument has no `dist.attestations` → expect `missing-provenance`
+    // (info-level, does not block) and nothing else.
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert_eq!(rule_ids, vec!["missing-provenance"], "got: {rule_ids:?}");
     assert_eq!(report.package_name.as_deref(), Some("argus-demo"));
 }
 
@@ -254,5 +253,144 @@ fn fetch_rejects_http_tarball() {
     assert!(
         err.contains("non-HTTPS") || err.contains("http://"),
         "expected http rejection, got: {err}"
+    );
+}
+
+// ---------- provenance integration tests (#10) ----------
+
+/// Build an attestations JSON document whose subject sha512 matches `sha512_hex`.
+fn fake_attestations_json(subject_name: &str, sha512_hex: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let stmt = serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v0.1",
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "subject": [{ "name": subject_name, "digest": { "sha512": sha512_hex } }],
+        "predicate": {
+            "buildDefinition": { "buildType": "https://github.com/actions/runner/v1" }
+        }
+    });
+    let payload_b64 =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&stmt).unwrap());
+    serde_json::json!({
+        "attestations": [{
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "bundle": {
+                "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.2",
+                "dsseEnvelope": { "payload": payload_b64 }
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn sha512_hex(bytes: &[u8]) -> String {
+    let d = Sha512::digest(bytes);
+    let mut s = String::with_capacity(d.len() * 2);
+    for b in d {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+#[test]
+fn fetch_provenance_subject_matches_records_info_finding() {
+    let cache = tempfile::tempdir().unwrap();
+    let registry = "https://mock.registry";
+    let tarball = make_targz(&[(
+        "package/package.json",
+        br#"{"name":"argus-demo","version":"1.0.0"}"#,
+    )]);
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&tarball)));
+    let tarball_hex = sha512_hex(&tarball);
+    let tarball_url = format!("{registry}/argus-demo/-/argus-demo-1.0.0.tgz");
+    let attestations_url = format!("{registry}/-/npm/v1/attestations/argus-demo@1.0.0");
+    let packument = format!(
+        r#"{{
+          "name": "argus-demo",
+          "dist-tags": {{"latest": "1.0.0"}},
+          "versions": {{
+            "1.0.0": {{"dist": {{
+              "tarball": "{tarball_url}",
+              "integrity": "{integrity}",
+              "attestations": {{"url": "{attestations_url}"}}
+            }}}}
+          }}
+        }}"#
+    );
+    let attestations = fake_attestations_json("pkg:npm/argus-demo@1.0.0", &tarball_hex);
+
+    let transport = MockTransport::new();
+    transport.insert(&format!("{registry}/argus-demo"), packument.into_bytes());
+    transport.insert(&tarball_url, tarball);
+    transport.insert(&attestations_url, attestations);
+
+    let opts = FetchOptions {
+        registry: registry.to_string(),
+        cache_dir: Some(cache.path().to_path_buf()),
+        ..FetchOptions::default()
+    };
+    let pkg = PackageRef::parse("argus-demo").unwrap();
+    let report = fetch_and_scan(&pkg, &opts, &transport).unwrap();
+    assert_eq!(report.decision, Decision::Allow);
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert_eq!(rule_ids, vec!["provenance-verified-subject"]);
+    // Detail should mention the builder we encoded.
+    assert!(
+        report.findings[0]
+            .detail
+            .contains("github.com/actions/runner"),
+        "detail: {}",
+        report.findings[0].detail
+    );
+}
+
+#[test]
+fn fetch_provenance_subject_mismatch_blocks() {
+    let cache = tempfile::tempdir().unwrap();
+    let registry = "https://mock.registry";
+    let tarball = make_targz(&[(
+        "package/package.json",
+        br#"{"name":"argus-demo","version":"1.0.0"}"#,
+    )]);
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&tarball)));
+    let tarball_url = format!("{registry}/argus-demo/-/argus-demo-1.0.0.tgz");
+    let attestations_url = format!("{registry}/-/npm/v1/attestations/argus-demo@1.0.0");
+    let packument = format!(
+        r#"{{
+          "name": "argus-demo",
+          "dist-tags": {{"latest": "1.0.0"}},
+          "versions": {{
+            "1.0.0": {{"dist": {{
+              "tarball": "{tarball_url}",
+              "integrity": "{integrity}",
+              "attestations": {{"url": "{attestations_url}"}}
+            }}}}
+          }}
+        }}"#
+    );
+    // Attestation claims a wrong digest — packument or attestations have
+    // been tampered with.
+    let fake_digest = "0".repeat(128);
+    let attestations = fake_attestations_json("pkg:npm/argus-demo@1.0.0", &fake_digest);
+
+    let transport = MockTransport::new();
+    transport.insert(&format!("{registry}/argus-demo"), packument.into_bytes());
+    transport.insert(&tarball_url, tarball);
+    transport.insert(&attestations_url, attestations);
+
+    let opts = FetchOptions {
+        registry: registry.to_string(),
+        cache_dir: Some(cache.path().to_path_buf()),
+        ..FetchOptions::default()
+    };
+    let pkg = PackageRef::parse("argus-demo").unwrap();
+    let report = fetch_and_scan(&pkg, &opts, &transport).unwrap();
+    assert_eq!(report.decision, Decision::Block);
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        rule_ids.contains(&"provenance-subject-mismatch"),
+        "got: {rule_ids:?}"
     );
 }

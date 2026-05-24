@@ -6,17 +6,20 @@
 //! --to-command`, or any post-extract hook.
 
 use anyhow::{anyhow, bail, Context, Result};
-use argus_core::ScanReport;
+use argus_core::{Finding, ScanReport, Severity};
+use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 
 mod extract;
 mod integrity;
 mod packument;
+mod provenance;
 mod transport;
 
 pub use extract::extract_tarball;
 pub use integrity::{parse_ssri, verify_ssri};
 pub use packument::{resolve_version, Packument};
+pub use provenance::{check_subject_digest, parse_attestations, AttestationSummary, SubjectCheck};
 pub use transport::{HttpTransport, Transport};
 
 /// Cap for the packument JSON body. Real packuments are hundreds of KB; we
@@ -204,8 +207,120 @@ pub fn fetch_and_scan(
     .context("safe-extract tarball")?;
 
     // 7. Scan with existing rules.
-    let report = argus_rules::scan_package_dir(&pkg_dir).context("scan extracted package")?;
+    let mut report = argus_rules::scan_package_dir(&pkg_dir).context("scan extracted package")?;
+
+    // 8. Provenance cross-check. We compute the tarball SHA-512 (already
+    //    proved equal to `dist.integrity` in step 5), fetch the attestations
+    //    bundle if one is advertised, and verify that an attestation subject
+    //    digest agrees with the bytes we hold. This catches a tampered
+    //    packument where attestations point at the wrong artifact. Full
+    //    Sigstore signature verification — catching forged attestations —
+    //    is the M2 follow-up tracked in #10-followup.
+    let tarball_sha512_hex = hex_sha512(&tarball_bytes);
+    let provenance_findings = check_provenance(
+        &dist.attestations,
+        &tarball_sha512_hex,
+        &registry_host,
+        &opts.tarball_host_allowlist,
+        transport,
+    );
+    report.findings.extend(provenance_findings);
+    report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+
     Ok(report)
+}
+
+fn hex_sha512(bytes: &[u8]) -> String {
+    let digest = Sha512::digest(bytes);
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Resolve the attestations URL (if any) and produce findings describing
+/// the provenance state. Never returns an error: provenance is layered on
+/// top of the existing decision, and a fetch failure becomes a finding,
+/// not a hard error that hides the rest of the scan.
+fn check_provenance(
+    attestations: &Option<packument::AttestationsRef>,
+    tarball_sha512_hex: &str,
+    registry_host: &str,
+    allowlist: &[String],
+    transport: &dyn Transport,
+) -> Vec<Finding> {
+    let Some(att_ref) = attestations else {
+        return vec![Finding::new(
+            "missing-provenance",
+            Severity::Info,
+            "package was not published with `npm publish --provenance`; no OIDC attestation to cross-check",
+        )];
+    };
+
+    // Same-host / HTTPS / allowlist guard as we apply to tarballs.
+    if let Err(e) = validate_tarball_url(&att_ref.url, registry_host, allowlist) {
+        return vec![Finding::new(
+            "provenance-fetch-blocked",
+            Severity::High,
+            format!("attestations URL rejected by host/scheme guard: {e}"),
+        )];
+    }
+
+    let bytes = match transport.get(&att_ref.url, MAX_PACKUMENT_BYTES) {
+        Ok(b) => b,
+        Err(e) => {
+            return vec![Finding::new(
+                "provenance-fetch-failed",
+                Severity::High,
+                format!("could not fetch attestations from {}: {e}", att_ref.url),
+            )];
+        }
+    };
+
+    let summaries = match parse_attestations(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![Finding::new(
+                "provenance-parse-failed",
+                Severity::High,
+                format!("attestations document is unparseable: {e}"),
+            )];
+        }
+    };
+
+    match check_subject_digest(&summaries, tarball_sha512_hex) {
+        SubjectCheck::Matched {
+            subject_name,
+            predicate_type,
+            builder_id,
+        } => {
+            let detail = match builder_id {
+                Some(b) => format!(
+                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball; builder `{b}` — signature NOT cryptographically verified (see #10-followup)"
+                ),
+                None => format!(
+                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball; signature NOT cryptographically verified (see #10-followup)"
+                ),
+            };
+            vec![Finding::new("provenance-verified-subject", Severity::Info, detail)]
+        }
+        SubjectCheck::Mismatch { expected, actual_hex } => {
+            vec![Finding::new(
+                "provenance-subject-mismatch",
+                Severity::Critical,
+                format!(
+                    "attestations claim digest(s) {expected:?} but downloaded tarball is sha512:{actual_hex} — packument or attestations have been tampered with"
+                ),
+            )]
+        }
+        SubjectCheck::NoSha512Subject => vec![Finding::new(
+            "provenance-no-sha512-subject",
+            Severity::Medium,
+            "attestations were present but none carried a sha512 subject digest; nothing to cross-check",
+        )],
+    }
 }
 
 /// npm registry URL-encodes only the `/` in scoped names; everything else is
