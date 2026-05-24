@@ -92,6 +92,15 @@
       "notes": "Models galedonovan 2026-03: crypto-library typosquat + runtime hook on key decode + Telegram exfil. Combined name-rules and runtime-rules in one fixture."
     },
     {
+      "id": "trapdoor-ai-context",
+      "kind": "fixture",
+      "path": "fixtures/trapdoor-ai-context",
+      "packageName": "defi-threat-scanner",
+      "expectedDecision": "block",
+      "rules": ["lifecycle-script", "ai-context-poisoning", "credential-access", "network-exfiltration"],
+      "notes": "Models the TrapDoor campaign (Socket.dev 2026-05-24): postinstall dropper poisons .cursorrules / CLAUDE.md, harvests SSH + AWS creds, exfils to attacker GitHub Pages. The ai-context-poisoning rule is novel here."
+    },
+    {
       "id": "lockfile-http-resolved",
       "kind": "lockfile",
       "path": "lockfiles/package-lock-http-resolved.json",

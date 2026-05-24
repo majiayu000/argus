@@ -144,12 +144,77 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
             .at(&file.rel),
         );
     }
+
+    // ai-context-poisoning: writes to local AI-agent context files.
+    // Pioneered at scale by TrapDoor (Socket.dev 2026-05-24), this attack
+    // class plants instructions in `.cursorrules`, `CLAUDE.md`, and similar
+    // files that later get loaded by Cursor / Claude Code / aider /
+    // Continue.dev / Codex as authoritative agent context — meaning the
+    // attacker's prompt can override the user's intent on every future
+    // session. Distinct from credential theft because the value is
+    // persistent, silent, and operates against the developer's AI tools
+    // rather than their cloud creds.
+    if let Some(target) = ai_context_write(body) {
+        findings.push(
+            Finding::new(
+                "ai-context-poisoning",
+                Severity::Critical,
+                format!(
+                    "writes to AI-agent context file `{target}` — pretends to be a maintainer-authored instruction, persists across sessions"
+                ),
+            )
+            .at(&file.rel),
+        );
+    }
 }
 
 // ---------- regex helpers (lazy-compiled per call; the corpus is tiny) ----------
 
 fn cred_paths_regex() -> Regex {
     Regex::new(r#"[\"'](\.npmrc|\.env|\.ssh/[^\"']+|\.aws/credentials)[\"']"#).unwrap()
+}
+
+/// AI-agent context files. A package that writes here is impersonating a
+/// maintainer-authored instruction file and will be loaded by the user's
+/// agent on every future session. Match a write call (`writeFileSync`,
+/// `appendFileSync`, `writeFile`, `outputFileSync`, etc.) targeting one
+/// of the well-known path names — quoted, in a template literal, or as a
+/// `path.join(..., 'CLAUDE.md')` final argument.
+fn ai_context_paths_regex() -> Regex {
+    // Match a write call (`writeFileSync`, `appendFileSync`, `writeFile`,
+    // `outputFileSync`, etc.) whose first 400 characters of arguments
+    // mention one of the well-known AI-agent context filenames.
+    //
+    // We deliberately do NOT require quote/template delimiters around the
+    // filename: real attacks construct the path via template literals
+    // (``${homedir}/.cursorrules``) where the only character immediately
+    // before the filename is the `/` that follows `${...}`. Rust regex has
+    // no lookbehind, so we just match the filename anywhere inside the
+    // call argument list.
+    //
+    // Capture group 1 returns the matched filename for the finding detail.
+    Regex::new(
+        r#"(?x)
+        (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? \s* \(
+        [^)]{0,400}?
+        ( \.cursorrules
+        | CLAUDE\.md
+        | \.claude/[^\"'`)\s]+
+        | AGENTS\.md
+        | \.aider\.conf\.yml
+        | \.continuerules
+        | \.codexrules
+        | \.windsurfrules
+        )
+        "#,
+    )
+    .unwrap()
+}
+
+fn ai_context_write(body: &str) -> Option<String> {
+    ai_context_paths_regex()
+        .captures(body)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
 
 fn token_env_regex() -> Regex {
