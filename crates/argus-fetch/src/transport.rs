@@ -132,10 +132,7 @@ mod tests {
         // If the caller already accepted http (e.g. a private local mirror),
         // we do not introduce a new requirement here. The tarball-URL check
         // in `lib.rs` already refuses non-HTTPS tarball URLs separately.
-        check_no_scheme_downgrade(
-            "http://localhost:4873/chalk",
-            "http://localhost:4873/chalk",
-        )
-        .unwrap();
+        check_no_scheme_downgrade("http://localhost:4873/chalk", "http://localhost:4873/chalk")
+            .unwrap();
     }
 }
