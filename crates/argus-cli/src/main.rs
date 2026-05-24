@@ -49,6 +49,12 @@ enum Cmd {
         /// (mode 0700 on Unix) to avoid multi-user races in shared `/tmp`.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Additional host name that the tarball URL is allowed to resolve
+        /// to (the registry host is always accepted). Pass multiple times
+        /// for multiple hosts. Use this for custom registries that delegate
+        /// tarball storage to a separate CDN or object store.
+        #[arg(long = "allow-tarball-host", value_name = "HOST")]
+        allow_tarball_host: Vec<String>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
@@ -108,8 +114,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             pkg,
             registry,
             cache_dir,
+            allow_tarball_host,
             format,
-        } => cmd_fetch(&pkg, registry, cache_dir, format),
+        } => cmd_fetch(&pkg, registry, cache_dir, allow_tarball_host, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -125,12 +132,14 @@ fn cmd_fetch(
     pkg: &str,
     registry: String,
     cache_dir: Option<PathBuf>,
+    allow_tarball_host: Vec<String>,
     format: Format,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
     let opts = FetchOptions {
         registry,
         cache_dir,
+        tarball_host_allowlist: allow_tarball_host,
         ..FetchOptions::default()
     };
     let transport = HttpTransport::new();

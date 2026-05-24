@@ -21,6 +21,12 @@ cargo run -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh
 cargo run -p argus-cli -- fetch chalk@5.3.0
 cargo run -p argus-cli -- fetch '@types/node@20.10.0' --format json
 
+# Custom registry that serves tarballs from a separate CDN/host:
+cargo run -p argus-cli -- fetch internal-tool@1.2.3 \
+  --registry https://npm.corp.example \
+  --allow-tarball-host cdn.corp.example \
+  --allow-tarball-host objects.corp.example
+
 # Run the full regression corpus (10 fixtures + 1 lockfile)
 cargo run -p argus-cli -- corpus test
 
