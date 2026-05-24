@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/argus-core",
     "crates/argus-rules",
+    "crates/argus-fetch",
     "crates/argus-cli",
 ]
 
@@ -23,6 +24,15 @@ walkdir = "2"
 
 argus-core = { path = "crates/argus-core" }
 argus-rules = { path = "crates/argus-rules" }
+argus-fetch = { path = "crates/argus-fetch" }
+
+# fetch-only deps (HTTP + crypto + archive) live in argus-fetch.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

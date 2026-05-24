@@ -1,0 +1,20 @@
+[package]
+name = "argus-fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fetch an npm package tarball, verify integrity, extract safely, then hand off to argus-rules."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }

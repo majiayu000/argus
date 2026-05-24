@@ -1,12 +1,15 @@
 //! argus CLI binary.
 //!
-//! Two subcommands at Milestone 0:
+//! Subcommands:
 //! - `argus scan <path>` — scan one package directory or lockfile.
+//! - `argus fetch <pkg>[@version]` — download from npm, verify integrity,
+//!   extract, scan.
 //! - `argus corpus test ...` — run the regression corpus and diff against
 //!   each case's `expectedDecision` + `rules`.
 
 use anyhow::{bail, Context, Result};
 use argus_core::{Decision, ScanReport};
+use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
 use argus_rules::{scan_lockfile, scan_package_dir};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -30,6 +33,22 @@ enum Cmd {
     /// Scan a package directory or an npm lockfile.
     Scan {
         path: PathBuf,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a package from an npm registry, verify integrity, extract, and scan.
+    Fetch {
+        /// Package spec: `<name>` or `<name>@<version>` or `<name>@<dist-tag>`.
+        /// Scoped names like `@types/node@20.10.0` are supported.
+        pkg: String,
+        /// Registry base URL.
+        #[arg(long, default_value = "https://registry.npmjs.org")]
+        registry: String,
+        /// Persistent scratch parent for tarballs and extraction. When
+        /// omitted, each fetch uses a fresh private system temp dir
+        /// (mode 0700 on Unix) to avoid multi-user races in shared `/tmp`.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
@@ -85,6 +104,12 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Scan { path, format } => cmd_scan(&path, format),
+        Cmd::Fetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -93,16 +118,44 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
 fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
     let report = scan_path(path)?;
+    emit_report(&report, format)
+}
+
+fn cmd_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
+    let opts = FetchOptions {
+        registry,
+        cache_dir,
+        ..FetchOptions::default()
+    };
+    let transport = HttpTransport::new();
+    let report = fetch_and_scan(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+/// Exit codes are part of the CLI contract.
+///
+/// - `0` — `allow` (clean)
+/// - `1` — `block` (a rule fired and the package must not be installed)
+/// - `2` — `allow-with-approval` (only a recognised native-build pattern
+///   fired; a human reviewer must sign off before install). Distinct from
+///   `allow` so CI gates can require explicit approval rather than silently
+///   passing.
+fn emit_report(report: &ScanReport, format: Format) -> Result<ExitCode> {
     match format {
-        Format::Json => {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Format::Text => print_report_text(&report),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => print_report_text(report),
     }
     let code = match report.decision {
         Decision::Allow => 0,
-        Decision::AllowWithApproval => 0,
         Decision::Block => 1,
+        Decision::AllowWithApproval => 2,
     };
     Ok(ExitCode::from(code))
 }
