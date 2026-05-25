@@ -43,11 +43,21 @@ impl Transport for HttpTransport {
     fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
         // ureq 2.x returns Err for non-2xx, so a successful `call()` is
         // already a 2xx response — no extra status branch needed.
+        // Deliberately do NOT send an explicit Accept header. crates.io's
+        // download endpoint (`/api/v1/crates/<n>/<v>/download`) does
+        // content negotiation: with `Accept: application/json` it returns
+        // a 200 JSON body `{"url": "...static.crates.io/..."}` *instead
+        // of* a 302 redirect, which means ureq can't follow it
+        // automatically and we end up with a 67-byte JSON body where we
+        // expected an 83 KB `.crate` archive. Sending no Accept (ureq
+        // default `*/*` semantics) makes crates.io serve the redirect
+        // that points at the actual artifact. The npm and PyPI metadata
+        // endpoints both return JSON regardless of Accept, so this is
+        // pure upside.
         let resp = self
             .agent
             .get(url)
             .set("User-Agent", &self.user_agent)
-            .set("Accept", "application/json, application/octet-stream")
             .call()
             .with_context(|| format!("HTTP GET {url}"))?;
 

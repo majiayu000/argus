@@ -16,9 +16,19 @@ use argus_core::{Decision, Finding};
 use std::collections::BTreeSet;
 
 /// Rules that never push the decision toward block on their own.
-/// `missing-provenance` is a recommendation, not a verdict — many packages
-/// predate OIDC publishing.
-const INFO_ONLY_RULES: &[&str] = &["missing-provenance", "provenance-verified-subject"];
+/// These are pure structural signals (presence of a build.rs, presence
+/// of a proc-macro crate, etc.) that are universally suspicious but
+/// universally also legitimate, so a finding alone is not a verdict.
+const INFO_ONLY_RULES: &[&str] = &[
+    "missing-provenance",
+    "provenance-verified-subject",
+    // crates.io: structural meta-findings
+    "proc-macro-crate",
+    "build-rs-execution",
+    "embedded-binary-blob",
+    // PyPI: structural meta-findings
+    "pypi-sdist-no-manifest",
+];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
 /// decision from Block to AllowWithApproval.

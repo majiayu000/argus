@@ -1,0 +1,25 @@
+[package]
+name = "argus-crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "crates.io ecosystem support for argus: fetch .crate file, verify SHA-256, scan build.rs + Rust sources."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tar = { workspace = true }
+flate2 = { workspace = true }
