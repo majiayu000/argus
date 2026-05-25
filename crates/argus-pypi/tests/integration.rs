@@ -1,50 +1,12 @@
 //! End-to-end tests for `fetch_and_scan_pypi` via MockTransport.
 
-use anyhow::{anyhow, Result};
 use argus_core::Decision;
-use argus_pypi::{
-    fetch_and_scan_pypi, PreferredFormat, PypiFetchOptions, PypiPackageRef, Transport,
-};
+use argus_pypi::{fetch_and_scan_pypi, PreferredFormat, PypiFetchOptions, PypiPackageRef};
+use argus_test_support::MockTransport;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Mutex;
-
-struct MockTransport {
-    routes: Mutex<HashMap<String, Vec<u8>>>,
-}
-
-impl MockTransport {
-    fn new() -> Self {
-        Self {
-            routes: Mutex::new(HashMap::new()),
-        }
-    }
-    fn insert(&self, url: &str, body: Vec<u8>) {
-        self.routes.lock().unwrap().insert(url.to_string(), body);
-    }
-}
-
-impl Transport for MockTransport {
-    fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        let body = self
-            .routes
-            .lock()
-            .unwrap()
-            .get(url)
-            .cloned()
-            .ok_or_else(|| anyhow!("MockTransport: no route for {url}"))?;
-        if body.len() as u64 > max_bytes {
-            return Err(anyhow!(
-                "MockTransport: body for {url} ({} bytes) exceeds cap {max_bytes}",
-                body.len()
-            ));
-        }
-        Ok(body)
-    }
-}
 
 /// Build a minimal sdist tarball whose single top-level directory is
 /// `<name>-<version>/` (PyPI convention). `files` is a list of

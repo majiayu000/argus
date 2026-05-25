@@ -6,6 +6,7 @@
 //! --to-command`, or any post-extract hook.
 
 use anyhow::{anyhow, bail, Context, Result};
+use argus_core::url::{host_of, validate_artifact_url};
 use argus_core::{Finding, ScanReport, Severity};
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
@@ -172,7 +173,7 @@ pub fn fetch_and_scan(
     //    mirror), so we refuse anything other than HTTPS on the same host as
     //    the registry. Operators with multi-host setups can extend this
     //    later; defaulting closed is the right behaviour for an MVP.
-    validate_tarball_url(&dist.tarball, &registry_host, &opts.tarball_host_allowlist)?;
+    validate_artifact_url(&dist.tarball, &registry_host, &opts.tarball_host_allowlist)?;
 
     // 4. Download tarball under a streaming cap.
     let tarball_bytes = transport
@@ -260,7 +261,7 @@ fn check_provenance(
     };
 
     // Same-host / HTTPS / allowlist guard as we apply to tarballs.
-    if let Err(e) = validate_tarball_url(&att_ref.url, registry_host, allowlist) {
+    if let Err(e) = validate_artifact_url(&att_ref.url, registry_host, allowlist) {
         return vec![Finding::new(
             "provenance-fetch-blocked",
             Severity::High,
@@ -329,42 +330,6 @@ fn url_encode_pkg(name: &str) -> String {
     name.replace('/', "%2F")
 }
 
-fn host_of(url: &str) -> Result<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow!("URL has no http(s) scheme: {url}"))?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let host = rest[..end].to_ascii_lowercase();
-    if host.is_empty() {
-        bail!("URL has empty host: {url}");
-    }
-    Ok(host)
-}
-
-fn validate_tarball_url(
-    tarball_url: &str,
-    registry_host: &str,
-    allowlist: &[String],
-) -> Result<()> {
-    if !tarball_url.starts_with("https://") {
-        bail!("refusing non-HTTPS tarball URL `{tarball_url}` (registry-supplied)");
-    }
-    let host = host_of(tarball_url)?;
-    if host == registry_host {
-        return Ok(());
-    }
-    if allowlist
-        .iter()
-        .any(|allowed| host == allowed.to_ascii_lowercase())
-    {
-        return Ok(());
-    }
-    bail!(
-        "tarball host `{host}` is not the registry host `{registry_host}` and not in --allow-tarball-host (URL {tarball_url})"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,90 +370,4 @@ mod tests {
         assert!(PackageRef::parse("   ").is_err());
     }
 
-    fn empty_allowlist() -> Vec<String> {
-        Vec::new()
-    }
-
-    #[test]
-    fn validate_tarball_url_accepts_same_host_https() {
-        validate_tarball_url(
-            "https://registry.npmjs.org/chalk/-/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &empty_allowlist(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn validate_tarball_url_rejects_http() {
-        assert!(validate_tarball_url(
-            "http://registry.npmjs.org/chalk/-/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &empty_allowlist(),
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn validate_tarball_url_rejects_cross_host() {
-        assert!(validate_tarball_url(
-            "https://evil.example.invalid/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &empty_allowlist(),
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn validate_tarball_url_accepts_allowlisted_host() {
-        validate_tarball_url(
-            "https://cdn.npmjs.org/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &["cdn.npmjs.org".to_string()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn validate_tarball_url_allowlist_is_case_insensitive() {
-        validate_tarball_url(
-            "https://CDN.NPMJS.ORG/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &["cdn.npmjs.org".to_string()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn validate_tarball_url_allowlist_does_not_bypass_https_requirement() {
-        // Even an allowlisted host must be served over HTTPS.
-        assert!(validate_tarball_url(
-            "http://cdn.npmjs.org/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &["cdn.npmjs.org".to_string()],
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn validate_tarball_url_rejects_non_allowlisted_host() {
-        // Allowlist names cdn.npmjs.org but tarball comes from a different
-        // CDN — still rejected.
-        assert!(validate_tarball_url(
-            "https://evil.example.invalid/chalk-5.3.0.tgz",
-            "registry.npmjs.org",
-            &["cdn.npmjs.org".to_string()],
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn validate_tarball_url_rejects_file_scheme() {
-        assert!(validate_tarball_url(
-            "file:///etc/passwd",
-            "registry.npmjs.org",
-            &empty_allowlist()
-        )
-        .is_err());
-    }
 }

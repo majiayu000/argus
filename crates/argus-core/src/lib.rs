@@ -2,6 +2,14 @@
 //!
 //! A scan over a package directory or lockfile produces a [`ScanReport`].
 //! Each report carries a list of [`Finding`]s and a derived [`Decision`].
+//!
+//! Shared URL + integrity helpers live in [`url`]; the per-artifact
+//! intermediate scan shape lives in [`scan`].
+
+pub mod scan;
+pub mod url;
+
+pub use scan::ArtifactScan;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

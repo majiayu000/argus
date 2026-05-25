@@ -101,8 +101,12 @@ dependencies = [
 name = "argus-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]
@@ -113,6 +117,7 @@ dependencies = [
  "argus-core",
  "argus-fetch",
  "argus-rules",
+ "argus-test-support",
  "flate2",
  "hex",
  "regex",
@@ -132,6 +137,7 @@ dependencies = [
  "anyhow",
  "argus-core",
  "argus-rules",
+ "argus-test-support",
  "base64",
  "flate2",
  "serde",
@@ -151,6 +157,7 @@ dependencies = [
  "argus-core",
  "argus-fetch",
  "argus-rules",
+ "argus-test-support",
  "flate2",
  "hex",
  "regex",
@@ -174,6 +181,14 @@ dependencies = [
  "serde",
  "serde_json",
  "walkdir",
+]
+
+[[package]]
+name = "argus-test-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-fetch",
 ]
 
 [[package]]
