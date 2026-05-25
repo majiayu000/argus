@@ -24,6 +24,11 @@ cargo run -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh
 cargo run -p argus-cli -- fetch chalk@5.3.0
 cargo run -p argus-cli -- fetch '@types/node@20.10.0' --format json
 
+# Fetch a real PyPI package: JSON API -> sdist/wheel -> SHA-256 verify -> safe
+# extract -> scan. setup.py never runs.
+cargo run -p argus-cli -- pypi-fetch requests@2.31.0 --prefer wheel
+cargo run -p argus-cli -- pypi-fetch django@5.0.0 --prefer both --format json
+
 # Custom registry that serves tarballs from a separate CDN/host:
 cargo run -p argus-cli -- fetch internal-tool@1.2.3 \
   --registry https://npm.corp.example \
@@ -51,10 +56,22 @@ The compiled binary is named `argus` and exits non-zero on `block`.
 | provenance | `missing-provenance` (info), `provenance-verified-subject` (info), `provenance-subject-mismatch` (block), `provenance-fetch-blocked` / `provenance-fetch-failed` / `provenance-parse-failed` (operational errors) |
 | ai-context | `ai-context-poisoning` — writes to `.cursorrules`, `CLAUDE.md`, `.claude/*`, `AGENTS.md`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, `.windsurfrules`. Pioneered at scale by the TrapDoor campaign (Socket.dev 2026-05-24). |
 
+## PyPI rule coverage (Milestone 1)
+
+| Family | Rules |
+|--------|-------|
+| sdist install-time | `setup-py-execution`, `setup-subprocess`, `setup-remote-download`, `setup-eval` |
+| wheel + sdist | `import-time-hook` (rewriting `sys.modules` / `__builtins__` at module load) |
+| structural | `pypi-sdist-no-manifest` (info) |
+| ported from npm rules (file-content scan) | `credential-access`, `ai-context-poisoning`, `runtime-hook`, `wallet-interception` |
+| name | `typosquatting` against 60+ Python package names |
+
 ## Layout
 
 - `crates/argus-core` — data types (`Decision`, `Finding`, `ScanReport`).
 - `crates/argus-rules` — static detection rules.
+- `crates/argus-fetch` — npm registry client.
+- `crates/argus-pypi` — PyPI registry client (sdist + wheel).
 - `crates/argus-cli` — the `argus` binary.
 
 ## Status

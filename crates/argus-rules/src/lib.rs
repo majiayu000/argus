@@ -20,8 +20,10 @@ mod lifecycle;
 mod lockfile;
 mod name;
 
+pub use content::scan_text_file;
 pub use decision::derive_from_findings as derive_decision_from_findings;
 pub use lockfile::scan_lockfile;
+pub use name::levenshtein;
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.
 #[derive(Debug, Clone, Deserialize)]
@@ -123,9 +125,10 @@ fn collect_files(root: &Path) -> Result<(Vec<TextFile>, Vec<String>)> {
     Ok((texts, bins))
 }
 
-/// Cheap binary heuristic: NUL byte in first 4 KiB, or extension is a known
-/// native artifact suffix.
-fn looks_binary(bytes: &[u8]) -> bool {
+/// Cheap binary heuristic: NUL byte in first 4 KiB. Exposed so
+/// per-ecosystem crates (`argus-pypi`, future `argus-crates`) can reuse
+/// the same heuristic when walking their own extracted artifact trees.
+pub fn looks_binary(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(4096)];
     head.contains(&0)
 }

@@ -1,0 +1,26 @@
+[package]
+name = "argus-pypi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PyPI ecosystem support for argus: fetch sdist/wheel, verify integrity, scan setup.py + Python sources."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tar = { workspace = true }
+flate2 = { workspace = true }

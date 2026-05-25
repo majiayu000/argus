@@ -26,11 +26,13 @@ pub fn extract_tarball(
     dest_root: &Path,
     max_extracted_bytes: u64,
 ) -> Result<PathBuf> {
+    use std::collections::BTreeSet;
+
     let gz = GzDecoder::new(tarball_bytes);
     let mut archive = tar::Archive::new(gz);
 
     let mut total: u64 = 0;
-    let mut saw_package_dir = false;
+    let mut top_level_dirs: BTreeSet<std::ffi::OsString> = BTreeSet::new();
 
     for entry in archive.entries().context("read tar entries")? {
         let mut entry = entry.context("read tar entry")?;
@@ -42,20 +44,19 @@ pub fn extract_tarball(
         check_path_safety(&header_path)
             .with_context(|| format!("unsafe entry path: {}", header_path.display()))?;
 
+        // Track the first path component of every entry so we can return a
+        // sensible package root. npm uses `package/`, PyPI sdist uses
+        // `<name>-<version>/`, crates.io `.crate` uses `<name>-<version>/`.
+        if let Some(first) = header_path.components().next() {
+            top_level_dirs.insert(first.as_os_str().to_os_string());
+        }
+
         match entry.header().entry_type() {
             EntryType::Regular | EntryType::Continuous => {}
             EntryType::Directory => {
                 let dest = dest_root.join(&header_path);
                 std::fs::create_dir_all(&dest)
                     .with_context(|| format!("mkdir {}", dest.display()))?;
-                if header_path
-                    .components()
-                    .next()
-                    .map(|c| c.as_os_str() == "package")
-                    .unwrap_or(false)
-                {
-                    saw_package_dir = true;
-                }
                 continue;
             }
             other => {
@@ -94,19 +95,15 @@ pub fn extract_tarball(
         total = total
             .checked_add(written)
             .ok_or_else(|| anyhow!("tar size accounting overflow"))?;
-
-        if header_path
-            .components()
-            .next()
-            .map(|c| c.as_os_str() == "package")
-            .unwrap_or(false)
-        {
-            saw_package_dir = true;
-        }
     }
 
-    Ok(if saw_package_dir {
-        dest_root.join("package")
+    // Auto-detect the single common top-level dir. If every entry sits under
+    // one directory, return that. Otherwise return the extraction root so
+    // the caller can scan the whole thing.
+    Ok(if top_level_dirs.len() == 1 {
+        // Safe: just checked len == 1.
+        let only = top_level_dirs.into_iter().next().expect("len == 1");
+        dest_root.join(only)
     } else {
         dest_root.to_path_buf()
     })
