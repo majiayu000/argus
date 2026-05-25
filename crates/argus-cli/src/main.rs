@@ -10,6 +10,10 @@
 use anyhow::{bail, Context, Result};
 use argus_core::{Decision, ScanReport};
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
+use argus_pypi::{
+    fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
+    PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
+};
 use argus_rules::{scan_lockfile, scan_package_dir};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -58,11 +62,44 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Fetch a package from PyPI, verify SHA-256, safe-extract sdist/wheel, scan.
+    PypiFetch {
+        /// Package spec: `<name>` or `<name>@<version>`.
+        pkg: String,
+        /// PyPI registry base URL.
+        #[arg(long, default_value = "https://pypi.org")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        /// Which artifact format(s) to scan.
+        #[arg(long, value_enum, default_value_t = PypiFormat::Both)]
+        prefer: PypiFormat,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Regression-corpus operations.
     Corpus {
         #[command(subcommand)]
         op: CorpusOp,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum PypiFormat {
+    Sdist,
+    Wheel,
+    Both,
+}
+
+impl From<PypiFormat> for PypiPreferredFormat {
+    fn from(f: PypiFormat) -> Self {
+        match f {
+            PypiFormat::Sdist => PypiPreferredFormat::Sdist,
+            PypiFormat::Wheel => PypiPreferredFormat::Wheel,
+            PypiFormat::Both => PypiPreferredFormat::Both,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -117,6 +154,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             allow_tarball_host,
             format,
         } => cmd_fetch(&pkg, registry, cache_dir, allow_tarball_host, format),
+        Cmd::PypiFetch {
+            pkg,
+            registry,
+            cache_dir,
+            prefer,
+            format,
+        } => cmd_pypi_fetch(&pkg, registry, cache_dir, prefer.into(), format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -125,6 +169,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
 fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
     let report = scan_path(path)?;
+    emit_report(&report, format)
+}
+
+fn cmd_pypi_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    prefer: PypiPreferredFormat,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        PypiPackageRef::parse(pkg).with_context(|| format!("parse PyPI package spec `{pkg}`"))?;
+    let opts = PypiFetchOptions {
+        registry,
+        cache_dir,
+        prefer,
+        ..PypiFetchOptions::default()
+    };
+    let transport = PypiHttpTransport::new();
+    let report = fetch_and_scan_pypi(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

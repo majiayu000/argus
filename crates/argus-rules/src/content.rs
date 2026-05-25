@@ -37,6 +37,19 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     }
 }
 
+/// Apply the ecosystem-agnostic content rules (credential-access,
+/// network-exfiltration, runtime-hook, wallet-interception,
+/// ai-context-poisoning, binary-execution, github-write-api, npm-publish,
+/// token-harvest) to a single text file.
+///
+/// This is the same scan that `run` performs on every file in an npm
+/// package directory. argus-pypi and argus-crates call it for each Python
+/// or Rust file they extract — none of these rules are npm-specific in
+/// behaviour, only in the regex literals they look for (e.g. `.npmrc`).
+pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
+    scan_file(file, findings);
+}
+
 fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
     let body = &file.content;
 
@@ -181,21 +194,30 @@ fn cred_paths_regex() -> Regex {
 /// of the well-known path names — quoted, in a template literal, or as a
 /// `path.join(..., 'CLAUDE.md')` final argument.
 fn ai_context_paths_regex() -> Regex {
-    // Match a write call (`writeFileSync`, `appendFileSync`, `writeFile`,
-    // `outputFileSync`, etc.) whose first 400 characters of arguments
-    // mention one of the well-known AI-agent context filenames.
+    // Match a write call whose first 400 characters of arguments mention
+    // one of the well-known AI-agent context filenames. Recognises both
+    // JS-flavour writes (`writeFileSync`, `appendFileSync`, `writeFile`,
+    // `outputFileSync`, etc.) and Python-flavour writes (pathlib's
+    // `write_text` / `write_bytes`). The Python sdist TrapDoor variant
+    // poisons `~/.cursorrules` via `Path(...).write_text(...)`.
     //
     // We deliberately do NOT require quote/template delimiters around the
-    // filename: real attacks construct the path via template literals
-    // (``${homedir}/.cursorrules``) where the only character immediately
-    // before the filename is the `/` that follows `${...}`. Rust regex has
+    // filename: real attacks construct the path via interpolation
+    // (``${homedir}/.cursorrules`` in JS, `Path.home() / ".cursorrules"`
+    // in Python) where the only character immediately before the
+    // filename is the `/` that follows the interpolation. Rust regex has
     // no lookbehind, so we just match the filename anywhere inside the
     // call argument list.
     //
     // Capture group 1 returns the matched filename for the finding detail.
     Regex::new(
         r#"(?x)
-        (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? \s* \(
+        (?:
+            (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? |
+            write_text |
+            write_bytes
+        )
+        \s* \(
         [^)]{0,400}?
         ( \.cursorrules
         | CLAUDE\.md
@@ -211,8 +233,38 @@ fn ai_context_paths_regex() -> Regex {
     .unwrap()
 }
 
+/// Pathlib-style reverse shape: filename literal first, then a chained
+/// `.write_text(` / `.write_bytes(` call within ~200 chars. Catches
+/// `(home / ".cursorrules").write_text(...)` which the forward regex
+/// misses because the filename sits OUTSIDE the parenthesized arg list.
+fn ai_context_paths_regex_reverse() -> Regex {
+    Regex::new(
+        r#"(?x)
+        [\"'`/]
+        ( \.cursorrules
+        | CLAUDE\.md
+        | \.claude/[^\"'`)\s]+
+        | AGENTS\.md
+        | \.aider\.conf\.yml
+        | \.continuerules
+        | \.codexrules
+        | \.windsurfrules
+        )
+        [\"'`)]?
+        [^\n]{0,200}?
+        \.\s*
+        (?: write_text | write_bytes | write )
+        \s* \(
+        "#,
+    )
+    .unwrap()
+}
+
 fn ai_context_write(body: &str) -> Option<String> {
-    ai_context_paths_regex()
+    if let Some(c) = ai_context_paths_regex().captures(body) {
+        return c.get(1).map(|m| m.as_str().to_string());
+    }
+    ai_context_paths_regex_reverse()
         .captures(body)
         .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
@@ -286,11 +338,18 @@ fn curl_sh_pipe(blob: &str) -> Option<String> {
     re.find(blob).map(|m| m.as_str().to_string())
 }
 
-/// Find a fetch/axios POST to a non-local, non-github host. Returns the host
-/// portion so the finding detail can name it.
+/// Find a JS fetch/axios call to a non-local, non-github host. Returns the
+/// host portion so the finding detail can name it.
 ///
-/// The fetch-name match is case-insensitive so wrapped references like
+/// The match is case-insensitive so wrapped references like
 /// `originalFetch(...)` (a stored copy of `globalThis.fetch`) still fire.
+///
+/// Note: this rule is intentionally JS-only. Python additions
+/// (`urllib.request.urlopen`, `requests.get`, `httpx.get`) were trialled
+/// and reverted: real Python libraries embed `requests.get('https://...')`
+/// inside docstring examples, which produces unmanageable false-positive
+/// rates. PyPI install-time network calls are caught by argus-pypi's
+/// `setup-remote-download` rule instead.
 fn external_fetch(body: &str) -> Option<String> {
     let re = Regex::new(
         r#"(?i)(?:fetch|axios\.(?:post|put|patch|request))\s*\(\s*[\"']https?://([^\"'/]+)"#,

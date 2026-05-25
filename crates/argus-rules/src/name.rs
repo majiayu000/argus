@@ -147,8 +147,10 @@ fn has_platform_optdeps(ctx: &PackageContext) -> bool {
 }
 
 /// Iterative Levenshtein distance. Inputs are short package names, so the
-/// O(n*m) table is fine.
-fn levenshtein(a: &str, b: &str) -> usize {
+/// O(n*m) table is fine. Exposed publicly so per-ecosystem crates
+/// (`argus-pypi`, future `argus-crates`) can reuse it for their own
+/// typosquat dictionaries without duplicating the algorithm.
+pub fn levenshtein(a: &str, b: &str) -> usize {
     if a == b {
         return 0;
     }
