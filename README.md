@@ -29,6 +29,11 @@ cargo run -p argus-cli -- fetch '@types/node@20.10.0' --format json
 cargo run -p argus-cli -- pypi-fetch requests@2.31.0 --prefer wheel
 cargo run -p argus-cli -- pypi-fetch django@5.0.0 --prefer both --format json
 
+# Fetch a real crates.io crate: JSON API -> .crate -> SHA-256 verify -> safe
+# extract -> scan. build.rs never runs.
+cargo run -p argus-cli -- crates-fetch serde@1.0.228
+cargo run -p argus-cli -- crates-fetch tokio --format json
+
 # Custom registry that serves tarballs from a separate CDN/host:
 cargo run -p argus-cli -- fetch internal-tool@1.2.3 \
   --registry https://npm.corp.example \
@@ -66,12 +71,22 @@ The compiled binary is named `argus` and exits non-zero on `block`.
 | ported from npm rules (file-content scan) | `credential-access`, `ai-context-poisoning`, `runtime-hook`, `wallet-interception` |
 | name | `typosquatting` against 60+ Python package names |
 
+## crates.io rule coverage (Milestone 1)
+
+| Family | Rules |
+|--------|-------|
+| build.rs compile-time | `build-rs-subprocess` (shells / curl / wget / scripting interpreters only — plain `Command::new("rustc")` is allow-listed), `build-rs-network`, `build-rs-include-bytes` (binary blob + XOR loop), `xor-decryption-loop` |
+| structural | `build-rs-execution` (info), `proc-macro-crate` (info), `embedded-binary-blob` (info) |
+| ported from npm rules (file-content scan) | `credential-access`, `ai-context-poisoning`, `runtime-hook` |
+| name | `typosquatting` against 70+ crate names |
+
 ## Layout
 
 - `crates/argus-core` — data types (`Decision`, `Finding`, `ScanReport`).
 - `crates/argus-rules` — static detection rules.
 - `crates/argus-fetch` — npm registry client.
 - `crates/argus-pypi` — PyPI registry client (sdist + wheel).
+- `crates/argus-crates` — crates.io registry client (.crate + build.rs).
 - `crates/argus-cli` — the `argus` binary.
 
 ## Status

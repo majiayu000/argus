@@ -9,6 +9,9 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::{Decision, ScanReport};
+use argus_crates::{
+    fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
+};
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
 use argus_pypi::{
     fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
@@ -75,6 +78,19 @@ enum Cmd {
         /// Which artifact format(s) to scan.
         #[arg(long, value_enum, default_value_t = PypiFormat::Both)]
         prefer: PypiFormat,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources.
+    CratesFetch {
+        /// Crate spec: `<name>` or `<name>@<version>`.
+        pkg: String,
+        /// crates.io registry base URL.
+        #[arg(long, default_value = "https://crates.io")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
@@ -161,6 +177,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             prefer,
             format,
         } => cmd_pypi_fetch(&pkg, registry, cache_dir, prefer.into(), format),
+        Cmd::CratesFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -169,6 +191,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
 fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
     let report = scan_path(path)?;
+    emit_report(&report, format)
+}
+
+fn cmd_crates_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref = CrateRef::parse(pkg).with_context(|| format!("parse crates.io spec `{pkg}`"))?;
+    let opts = CratesFetchOptions {
+        registry,
+        cache_dir,
+        ..CratesFetchOptions::default()
+    };
+    let transport = CratesHttpTransport::new();
+    let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("crates-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

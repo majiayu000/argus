@@ -5,6 +5,7 @@ members = [
     "crates/argus-rules",
     "crates/argus-fetch",
     "crates/argus-pypi",
+    "crates/argus-crates",
     "crates/argus-cli",
 ]
 
@@ -27,6 +28,7 @@ argus-core = { path = "crates/argus-core" }
 argus-rules = { path = "crates/argus-rules" }
 argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }
+argus-crates = { path = "crates/argus-crates" }
 
 # fetch-only deps (HTTP + crypto + archive) live in argus-fetch / argus-pypi.
 ureq = { version = "2", default-features = false, features = ["tls"] }

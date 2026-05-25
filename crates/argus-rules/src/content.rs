@@ -183,8 +183,23 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
 
 // ---------- regex helpers (lazy-compiled per call; the corpus is tiny) ----------
 
+/// Quoted string that mentions a host credential path anywhere inside.
+///
+/// The earlier strict shape `["']<path>["']` required the path to be the
+/// entire quoted content. That misses real attack code that builds the
+/// path with `format!("{}/.aws/credentials", home)` — the literal sits
+/// inside a string with extra characters on either side.
+///
+/// The intra-string scan stops at the next quote OR newline. Without the
+/// newline bound, the regex would happily match an opening `"` on one
+/// statement, eat through whitespace and unrelated code across multiple
+/// lines, and close on a far-away `"` that happens to be on the right
+/// side of a `.npmrc` token. JavaScript template literals (backticks)
+/// are not in the class, so paths inside template literals fall through
+/// to the npmrc-read regex instead.
 fn cred_paths_regex() -> Regex {
-    Regex::new(r#"[\"'](\.npmrc|\.env|\.ssh/[^\"']+|\.aws/credentials)[\"']"#).unwrap()
+    Regex::new(r#"[\"'][^\"'\n]*(\.npmrc|\.env|\.ssh/[^\"'\n]+|\.aws/credentials)[^\"'\n]*[\"']"#)
+        .unwrap()
 }
 
 /// AI-agent context files. A package that writes here is impersonating a
@@ -213,11 +228,11 @@ fn ai_context_paths_regex() -> Regex {
     Regex::new(
         r#"(?x)
         (?:
-            (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? |
-            write_text |
-            write_bytes
+            (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? \s* \(           |  # JS
+            write_text \s* \(                                                     |  # Python pathlib
+            write_bytes \s* \(                                                    |  # Python pathlib
+            format \s* ! \s* \(                                                      # Rust path-builder macro
         )
-        \s* \(
         [^)]{0,400}?
         ( \.cursorrules
         | CLAUDE\.md
