@@ -109,4 +109,3 @@ fn display_key(key: &str) -> &str {
         key
     }
 }
-

@@ -369,5 +369,4 @@ mod tests {
         assert!(PackageRef::parse("").is_err());
         assert!(PackageRef::parse("   ").is_err());
     }
-
 }
