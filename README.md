@@ -89,6 +89,20 @@ The compiled binary is named `argus` and exits non-zero on `block`.
 - `crates/argus-crates` — crates.io registry client (.crate + build.rs).
 - `crates/argus-cli` — the `argus` binary.
 
+## Development
+
+Enable the git hooks once per clone so `cargo fmt` drift can't reach CI:
+
+```sh
+uv tool install pre-commit        # or: pipx install pre-commit
+pre-commit install                # pre-commit stage: cargo fmt + file hygiene
+pre-commit install -t pre-push    # pre-push stage: cargo clippy -D warnings
+```
+
+CI is the authoritative gate (`cargo fmt --check`, clippy, `cargo test`,
+`argus corpus test`); the hooks just give faster local feedback. Run the full
+local set anytime with `pre-commit run --all-files`.
+
 ## Status
 
 Milestone 0 only — no tarball fetch, no registry intelligence, no install-wrapper. See the SPEC for the milestone roadmap.
