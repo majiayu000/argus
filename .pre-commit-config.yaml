@@ -1,0 +1,56 @@
+# Pre-commit hooks for the argus workspace.
+#
+# Setup (once per clone):
+#   uv tool install pre-commit         # or: pipx install pre-commit
+#   pre-commit install                 # installs the pre-commit stage
+#   pre-commit install -t pre-push     # installs the slower pre-push stage
+#
+# Run manually against everything:
+#   pre-commit run --all-files
+#
+# Stage split:
+#   pre-commit  -> fast: cargo fmt (auto-fix) + file hygiene. Mirrors the
+#                  CI `cargo fmt --check` step that previously failed silently.
+#   pre-push    -> slower: cargo clippy -D warnings.
+#   CI only     -> cargo test + argus corpus test (too slow / need the built
+#                  binary; see .github/workflows/ci.yml).
+
+minimum_pre_commit_version: "3.5.0"
+
+# Captured-from-production fixtures (Sigstore attestations, packuments,
+# `.crate`/sdist/wheel samples) must stay byte-exact: a trailing-newline or
+# whitespace "fix" can corrupt a fixture that is later digest- or
+# signature-verified. Exclude those trees from the mutating hygiene hooks.
+exclude: '(^|/)(testdata|fixtures)/'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        # Auto-formats then lets pre-commit block the commit if anything
+        # changed, so you re-stage. This is what would have caught the
+        # trailing-blank-line CI failure on PR #26.
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (workspace, -D warnings)
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
