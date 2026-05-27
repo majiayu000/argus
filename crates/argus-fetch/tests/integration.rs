@@ -5,51 +5,15 @@
 //! the full fetch pipeline against a `MockTransport` that hands back the
 //! right bytes for the right URLs.
 
-use anyhow::{anyhow, Result};
 use argus_core::Decision;
-use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef, Transport};
+use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
+use argus_test_support::MockTransport;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha512};
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tar::Header;
-
-struct MockTransport {
-    routes: Mutex<HashMap<String, Vec<u8>>>,
-}
-
-impl MockTransport {
-    fn new() -> Self {
-        Self {
-            routes: Mutex::new(HashMap::new()),
-        }
-    }
-    fn insert(&self, url: &str, body: Vec<u8>) {
-        self.routes.lock().unwrap().insert(url.to_string(), body);
-    }
-}
-
-impl Transport for MockTransport {
-    fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        let body = self
-            .routes
-            .lock()
-            .unwrap()
-            .get(url)
-            .cloned()
-            .ok_or_else(|| anyhow!("MockTransport: no route for {url}"))?;
-        if body.len() as u64 > max_bytes {
-            return Err(anyhow!(
-                "MockTransport: body for {url} ({} bytes) exceeds cap {max_bytes}",
-                body.len()
-            ));
-        }
-        Ok(body)
-    }
-}
 
 fn make_targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());

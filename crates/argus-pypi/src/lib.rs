@@ -16,8 +16,8 @@
 //! file as opaque text or bytes.
 
 use anyhow::{anyhow, bail, Context, Result};
+use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
 use argus_core::{Finding, ScanReport, Severity};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 mod metadata;
@@ -25,9 +25,15 @@ mod rules;
 mod sdist;
 mod wheel;
 
+pub use argus_core::ArtifactScan;
 pub use argus_fetch::{HttpTransport, Transport};
 pub use metadata::{resolve_version, PypiPackument, PypiUrl};
 pub use rules::POPULAR_PYTHON_PACKAGES;
+
+/// PyPI serves package files from `*.pythonhosted.org` (canonically
+/// `files.pythonhosted.org`), not from `pypi.org`. The subdomain-suffix
+/// entry accepts every legitimate Warehouse CDN host.
+const PYPI_CDN_ALLOWLIST: &[&str] = &[".pythonhosted.org"];
 pub use sdist::scan_sdist_dir;
 pub use wheel::scan_wheel_zip;
 
@@ -180,7 +186,7 @@ pub fn fetch_and_scan_pypi(
     let mut last_name: Option<String> = None;
     let mut last_version: Option<String> = None;
     for art in &artifacts {
-        validate_artifact_url(&art.url, &registry_host)?;
+        validate_artifact_url(&art.url, &registry_host, PYPI_CDN_ALLOWLIST)?;
         let bytes = transport
             .get(&art.url, opts.max_artifact_bytes)
             .with_context(|| format!("download artifact {}", art.url))?;
@@ -228,64 +234,6 @@ pub fn fetch_and_scan_pypi(
     })
 }
 
-fn host_of(url: &str) -> Result<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow!("URL has no http(s) scheme: {url}"))?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let host = rest[..end].to_ascii_lowercase();
-    if host.is_empty() {
-        bail!("URL has empty host: {url}");
-    }
-    Ok(host)
-}
-
-/// PyPI itself serves package files from `files.pythonhosted.org`, not
-/// from `pypi.org`. We accept both. Operators with private registries
-/// can extend via a future allowlist (mirrors argus-fetch #9).
-fn validate_artifact_url(art_url: &str, registry_host: &str) -> Result<()> {
-    if !art_url.starts_with("https://") {
-        bail!("refusing non-HTTPS PyPI artifact URL `{art_url}`");
-    }
-    let host = host_of(art_url)?;
-    if host == registry_host
-        || host == "files.pythonhosted.org"
-        || host.ends_with(".pythonhosted.org")
-    {
-        return Ok(());
-    }
-    bail!(
-        "PyPI artifact host `{host}` is neither the registry host `{registry_host}` nor pythonhosted.org (URL {art_url})"
-    );
-}
-
-fn verify_sha256_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
-    if expected_hex.is_empty() {
-        bail!("expected SHA-256 is empty — PyPI did not advertise an integrity digest");
-    }
-    let expected = hex::decode(expected_hex)
-        .with_context(|| format!("decode expected SHA-256 hex `{expected_hex}`"))?;
-    let actual = Sha256::digest(bytes);
-    use subtle::ConstantTimeEq;
-    if bool::from(actual.as_slice().ct_eq(&expected)) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "SHA-256 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
-            bytes.len()
-        ))
-    }
-}
-
-/// Internal representation of a per-artifact scan result. Returned by
-/// `scan_sdist_dir` / `scan_wheel_zip` and merged in `fetch_and_scan_pypi`.
-pub struct ArtifactScan {
-    pub findings: Vec<Finding>,
-    pub name: Option<String>,
-    pub version: Option<String>,
-}
-
 /// Build a Finding with the given rule_id/severity/detail and no location.
 pub(crate) fn finding(rule: &str, sev: Severity, detail: impl Into<String>) -> Finding {
     Finding::new(rule, sev, detail)
@@ -321,31 +269,28 @@ mod tests {
         validate_artifact_url(
             "https://files.pythonhosted.org/packages/foo/bar.tar.gz",
             "pypi.org",
+            PYPI_CDN_ALLOWLIST,
         )
         .unwrap();
     }
 
     #[test]
     fn validate_artifact_rejects_http() {
-        assert!(
-            validate_artifact_url("http://files.pythonhosted.org/foo.tar.gz", "pypi.org",).is_err()
-        );
+        assert!(validate_artifact_url(
+            "http://files.pythonhosted.org/foo.tar.gz",
+            "pypi.org",
+            PYPI_CDN_ALLOWLIST,
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_artifact_rejects_random_host() {
-        assert!(
-            validate_artifact_url("https://evil.example.invalid/foo.tar.gz", "pypi.org",).is_err()
-        );
-    }
-
-    #[test]
-    fn sha256_roundtrip() {
-        let b = b"argus";
-        let expected = hex::encode(Sha256::digest(b));
-        verify_sha256_hex(b, &expected).unwrap();
-        let mut tampered = b.to_vec();
-        tampered[0] ^= 0x01;
-        assert!(verify_sha256_hex(&tampered, &expected).is_err());
+        assert!(validate_artifact_url(
+            "https://evil.example.invalid/foo.tar.gz",
+            "pypi.org",
+            PYPI_CDN_ALLOWLIST,
+        )
+        .is_err());
     }
 }

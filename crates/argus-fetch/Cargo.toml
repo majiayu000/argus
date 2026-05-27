@@ -19,3 +19,6 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 subtle = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }

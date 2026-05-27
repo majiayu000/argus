@@ -62,7 +62,7 @@ pub fn scan_lockfile(path: &Path) -> Result<ScanReport> {
                 .at(&file_label),
             );
         }
-        if let Some(host) = host_of(resolved) {
+        if let Ok(host) = argus_core::url::host_of(resolved) {
             // Trust requires both an allow-listed host *and* HTTPS. A plain-
             // HTTP URL is untrusted even when the host name itself is the
             // public npm registry, because the transport is MITM-able.
@@ -108,12 +108,4 @@ fn display_key(key: &str) -> &str {
     } else {
         key
     }
-}
-
-fn host_of(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    Some(rest[..end].to_ascii_lowercase())
 }

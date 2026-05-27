@@ -13,18 +13,24 @@
 //!   JSON API's `checksum` field.
 
 use anyhow::{anyhow, bail, Context, Result};
+use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
 use argus_core::{Finding, ScanReport};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 mod metadata;
 mod rules;
 mod scan;
 
+pub use argus_core::ArtifactScan;
 pub use argus_fetch::{HttpTransport, Transport};
 pub use metadata::{resolve_version, CrateVersion, CratesPackument};
 pub use rules::POPULAR_CRATES;
 pub use scan::scan_crate_archive;
+
+/// crates.io serves `.crate` archives from `*.crates.io` (canonically
+/// `static.crates.io`). The subdomain-suffix entry accepts every
+/// legitimate registry CDN host.
+const CRATES_CDN_ALLOWLIST: &[&str] = &[".crates.io"];
 
 /// Cap for the crates.io JSON packument body. Real crate metadata is a
 /// few hundred KB at most.
@@ -120,7 +126,7 @@ pub fn fetch_and_scan_crate(
         opts.registry.trim_end_matches('/'),
         ver_meta.dl_path
     );
-    validate_artifact_url(&download_url, &registry_host)?;
+    validate_artifact_url(&download_url, &registry_host, CRATES_CDN_ALLOWLIST)?;
 
     let crate_bytes = transport
         .get(&download_url, opts.max_artifact_bytes)
@@ -159,62 +165,6 @@ pub fn fetch_and_scan_crate(
     Ok(report)
 }
 
-fn host_of(url: &str) -> Result<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow!("URL has no http(s) scheme: {url}"))?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let host = rest[..end].to_ascii_lowercase();
-    if host.is_empty() {
-        bail!("URL has empty host: {url}");
-    }
-    Ok(host)
-}
-
-/// Accept the registry host plus `static.crates.io` (and subdomains of
-/// `.crates.io`) for `.crate` file delivery. Same idea as PyPI's
-/// `files.pythonhosted.org` allowance.
-fn validate_artifact_url(art_url: &str, registry_host: &str) -> Result<()> {
-    if !art_url.starts_with("https://") {
-        bail!("refusing non-HTTPS .crate URL `{art_url}`");
-    }
-    let host = host_of(art_url)?;
-    if host == registry_host || host == "static.crates.io" || host.ends_with(".crates.io") {
-        return Ok(());
-    }
-    bail!(
-        ".crate host `{host}` is neither the registry host `{registry_host}` nor a known crates.io CDN (URL {art_url})"
-    );
-}
-
-fn verify_sha256_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
-    if expected_hex.is_empty() {
-        bail!("expected SHA-256 is empty — crates.io did not advertise a checksum");
-    }
-    let expected = hex::decode(expected_hex)
-        .with_context(|| format!("decode expected SHA-256 hex `{expected_hex}`"))?;
-    let actual = Sha256::digest(bytes);
-    use subtle::ConstantTimeEq;
-    if bool::from(actual.as_slice().ct_eq(&expected)) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "SHA-256 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
-            bytes.len()
-        ))
-    }
-}
-
-/// Internal scan-result shape. Returned from `scan_crate_archive` so the
-/// caller can decorate it with name + version metadata before producing
-/// the final `ScanReport`.
-pub struct ArtifactScan {
-    pub findings: Vec<Finding>,
-    pub name: Option<String>,
-    pub version: Option<String>,
-}
-
 pub(crate) fn finding(rule: &str, sev: argus_core::Severity, detail: impl Into<String>) -> Finding {
     Finding::new(rule, sev, detail)
 }
@@ -249,34 +199,28 @@ mod tests {
         validate_artifact_url(
             "https://static.crates.io/crates/serde/serde-1.0.0.crate",
             "crates.io",
+            CRATES_CDN_ALLOWLIST,
         )
         .unwrap();
     }
 
     #[test]
     fn validate_artifact_rejects_http() {
-        assert!(
-            validate_artifact_url("http://static.crates.io/crates/serde/x.crate", "crates.io")
-                .is_err()
-        );
+        assert!(validate_artifact_url(
+            "http://static.crates.io/crates/serde/x.crate",
+            "crates.io",
+            CRATES_CDN_ALLOWLIST,
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_artifact_rejects_random_host() {
         assert!(validate_artifact_url(
             "https://evil.example.invalid/serde-1.0.0.crate",
-            "crates.io"
+            "crates.io",
+            CRATES_CDN_ALLOWLIST,
         )
         .is_err());
-    }
-
-    #[test]
-    fn sha256_roundtrip() {
-        let b = b"argus";
-        let h = hex::encode(Sha256::digest(b));
-        verify_sha256_hex(b, &h).unwrap();
-        let mut tampered = b.to_vec();
-        tampered[0] ^= 0x01;
-        assert!(verify_sha256_hex(&tampered, &h).is_err());
     }
 }

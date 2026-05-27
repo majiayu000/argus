@@ -19,8 +19,8 @@ regex = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
-subtle = { workspace = true }
 
 [dev-dependencies]
+argus-test-support = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
