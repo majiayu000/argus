@@ -18,7 +18,6 @@ hex = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
-subtle = { workspace = true }
 
 [dev-dependencies]
 argus-test-support = { workspace = true }
