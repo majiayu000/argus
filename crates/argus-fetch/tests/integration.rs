@@ -248,6 +248,21 @@ fn fake_attestations_json(subject_name: &str, sha512_hex: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn malformed_statement_attestations_json() -> Vec<u8> {
+    let payload_b64 = STANDARD.encode(br#"{"not":"a statement"}"#);
+    serde_json::json!({
+        "attestations": [{
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "bundle": {
+                "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.2",
+                "dsseEnvelope": { "payload": payload_b64 }
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
+}
+
 fn sha512_hex(bytes: &[u8]) -> String {
     let d = Sha512::digest(bytes);
     let mut s = String::with_capacity(d.len() * 2);
@@ -357,4 +372,55 @@ fn fetch_provenance_subject_mismatch_blocks() {
         rule_ids.contains(&"provenance-subject-mismatch"),
         "got: {rule_ids:?}"
     );
+}
+
+#[test]
+fn fetch_provenance_malformed_payload_records_parse_failed() -> anyhow::Result<()> {
+    let cache = tempfile::tempdir()?;
+    let registry = "https://mock.registry";
+    let tarball = make_targz(&[(
+        "package/package.json",
+        br#"{"name":"argus-demo","version":"1.0.0"}"#,
+    )]);
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&tarball)));
+    let tarball_url = format!("{registry}/argus-demo/-/argus-demo-1.0.0.tgz");
+    let attestations_url = format!("{registry}/-/npm/v1/attestations/argus-demo@1.0.0");
+    let packument = format!(
+        r#"{{
+          "name": "argus-demo",
+          "dist-tags": {{"latest": "1.0.0"}},
+          "versions": {{
+            "1.0.0": {{"dist": {{
+              "tarball": "{tarball_url}",
+              "integrity": "{integrity}",
+              "attestations": {{"url": "{attestations_url}"}}
+            }}}}
+          }}
+        }}"#
+    );
+
+    let transport = MockTransport::new();
+    transport.insert(&format!("{registry}/argus-demo"), packument.into_bytes());
+    transport.insert(&tarball_url, tarball);
+    transport.insert(&attestations_url, malformed_statement_attestations_json());
+
+    let opts = FetchOptions {
+        registry: registry.to_string(),
+        cache_dir: Some(cache.path().to_path_buf()),
+        ..FetchOptions::default()
+    };
+    let pkg = PackageRef::parse("argus-demo")?;
+    let report = fetch_and_scan(&pkg, &opts, &transport)?;
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+
+    assert_eq!(report.decision, Decision::Block);
+    assert!(
+        rule_ids.contains(&"provenance-parse-failed"),
+        "got: {rule_ids:?}"
+    );
+    assert!(
+        !rule_ids.contains(&"provenance-no-sha512-subject"),
+        "got: {rule_ids:?}"
+    );
+    Ok(())
 }
