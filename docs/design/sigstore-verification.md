@@ -209,4 +209,23 @@ What M2 still does NOT prevent, even with full Sigstore verification:
 - **Builder-workflow compromise**: a malicious change to a reusable workflow in the allowlist would produce attestations that pass M2 but ship attacker code. This is the case M3 builder-workflow pinning would address.
 - **Trust-root rotation**: if the Sigstore Fulcio root is rotated and we have not pulled an updated trust bundle, valid signatures will fail M2 with `provenance-signature-invalid` until we ship an update.
 
-Documenting these gaps in the M2 PR description is mandatory (per project honest-threat-disclosure preference).
+### Day 2 implementation gap (current, blocking real-npm Verified verdicts)
+
+`sigstore-verify` 0.8.0 cannot end-to-end verify the Sigstore bundle format that npm actually publishes today:
+
+- npm-published v0.2 bundles carry tlog entries with `kindVersion = {kind: "intoto", version: "0.0.2"}` AND zero `rfc3161Timestamps` — they instead rely on Rekor's SET over a non-zero `integratedTime`.
+- `sigstore-verify` 0.8.0's `helpers.rs:202` requires either an RFC3161 timestamp OR a V1 tlog entry (`version == "0.0.1"` AND `kind in {"hashedrekord", "dsse"}`). The `intoto/0.0.2` case falls into the gap and surfaces as `SignatureInvalid` with the diagnostic `"V2 bundle requires RFC3161 timestamp"`.
+- cosign hit the same shape ([sigstore/cosign#3926](https://github.com/sigstore/cosign/issues/3926)).
+
+**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped — but every real npm v0.2 attestation reaches `SignatureInvalid`. The `npm_keyring_public_key_hint` path and tampered-artifact path both return the operationally correct verdicts (`Unsupported`, `SignatureInvalid`).
+
+**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the current `SignatureInvalid` diagnostic so an upstream fix flips the test red and we will notice immediately.
+
+**Resolution paths**, in order of preference:
+
+1. Wait for prefix-dev/sigstore-rust to widen the V1 fallback to accept `intoto/0.0.2`. Cheapest if it lands soon; the in-tree wrapper plus a future `s/include_str/include_str/` trust-root refresh is the entire migration.
+2. Fork `sigstore-verify` and patch `verify_impl/helpers.rs` to treat `intoto/0.0.2` + non-zero `integratedTime` + SET as a valid V1-equivalent timestamp source. Adds ongoing maintenance.
+3. Replace `sigstore-verify` with the official `sigstore` crate (async, heavier) once it gains the same wrapper-friendly API surface.
+4. Implement Fulcio chain + Rekor SET verification ourselves on top of the existing `argus-verify::dsse` primitive. Largest scope; largest security surface.
+
+This gap is the most honest statement of where M2 actually lands today: the architecture is in place, the vendored trust root is real, and the only thing blocking a green "Verified" verdict for real npm packages is one strict version check inside an upstream crate.
