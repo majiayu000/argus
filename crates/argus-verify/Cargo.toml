@@ -17,6 +17,10 @@ p384 = { workspace = true }
 ecdsa = { workspace = true }
 x509-cert = { workspace = true }
 spki = { workspace = true }
+sigstore-verify = { version = "0.8.0", default-features = false }
+sigstore-types = { version = "0.8.0", default-features = false }
+sigstore-trust-root = { version = "0.8.0", default-features = false }
+regex = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }

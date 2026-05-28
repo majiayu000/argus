@@ -12,5 +12,7 @@
 //! attestation can be treated as trustworthy.
 
 mod dsse;
+mod sigstore;
 
 pub use dsse::{verify_bundle_dsse, verify_dsse_signature, DsseVerdict};
+pub use sigstore::{verify_bundle_full, IdentityAllowlist, SigstoreVerdict};
