@@ -7,6 +7,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
 use std::io::Write;
+use std::path::PathBuf;
 
 /// Build a minimal sdist tarball whose single top-level directory is
 /// `<name>-<version>/` (PyPI convention). `files` is a list of
@@ -49,6 +50,113 @@ fn make_wheel(files: &[(&str, &[u8])]) -> Vec<u8> {
 
 fn sha256_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
+}
+
+fn packument_for_artifact(
+    name: &str,
+    version: &str,
+    filename: &str,
+    url: &str,
+    packagetype: &str,
+    sha256: &str,
+) -> String {
+    format!(
+        r#"{{
+          "info": {{"name": "{name}", "version": "{version}"}},
+          "releases": {{
+            "{version}": [{{
+              "filename": "{filename}",
+              "url": "{url}",
+              "packagetype": "{packagetype}",
+              "digests": {{"sha256": "{sha256}"}}
+            }}]
+          }}
+        }}"#
+    )
+}
+
+fn fetch_error_for_artifact_filename(
+    filename: &str,
+    cache_dir: Option<PathBuf>,
+) -> anyhow::Result<String> {
+    let registry = "https://mock.registry";
+    let sdist = make_sdist(
+        "demo",
+        "1.0.0",
+        &[(
+            "setup.py",
+            b"from setuptools import setup\nsetup(name='demo', version='1.0.0')\n",
+        )],
+    );
+    let sdist_url = format!("{registry}/p/demo-1.0.0.tar.gz");
+    let packument = packument_for_artifact(
+        "demo",
+        "1.0.0",
+        filename,
+        &sdist_url,
+        "sdist",
+        &sha256_hex(&sdist),
+    );
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/pypi/demo/json"),
+        packument.into_bytes(),
+    );
+    transport.insert(&sdist_url, sdist);
+
+    let opts = PypiFetchOptions {
+        registry: registry.to_string(),
+        cache_dir,
+        prefer: PreferredFormat::Sdist,
+        ..PypiFetchOptions::default()
+    };
+    let pkg = PypiPackageRef::parse("demo")?;
+    Ok(match fetch_and_scan_pypi(&pkg, &opts, &transport) {
+        Ok(report) => {
+            anyhow::bail!(
+                "expected invalid artifact filename, got successful scan at {}",
+                report.path.display()
+            );
+        }
+        Err(err) => format!("{err:#}"),
+    })
+}
+
+#[test]
+fn pypi_rejects_parent_dir_artifact_filename_before_extracting() -> anyhow::Result<()> {
+    let cache_parent = tempfile::tempdir()?;
+    let escaped_dir = cache_parent.path().join("escaped-pypi-artifact");
+
+    let err = fetch_error_for_artifact_filename(
+        "../escaped-pypi-artifact",
+        Some(cache_parent.path().to_path_buf()),
+    )?;
+
+    assert!(err.contains("invalid PyPI artifact filename"), "got: {err}");
+    assert!(
+        !escaped_dir.exists(),
+        "registry filename escaped scratch root: {}",
+        escaped_dir.display()
+    );
+    Ok(())
+}
+
+#[test]
+fn pypi_rejects_absolute_artifact_filename_before_extracting() -> anyhow::Result<()> {
+    let outside_parent = tempfile::tempdir()?;
+    let absolute_dir = outside_parent.path().join("absolute-pypi-artifact");
+    let filename = absolute_dir.to_string_lossy().into_owned();
+
+    let err = fetch_error_for_artifact_filename(&filename, None)?;
+
+    assert!(err.contains("invalid PyPI artifact filename"), "got: {err}");
+    assert!(
+        !absolute_dir.exists(),
+        "registry filename escaped scratch root: {}",
+        absolute_dir.display()
+    );
+    Ok(())
 }
 
 #[test]
