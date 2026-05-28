@@ -62,6 +62,26 @@ enum Cmd {
         /// tarball storage to a separate CDN or object store.
         #[arg(long = "allow-tarball-host", value_name = "HOST")]
         allow_tarball_host: Vec<String>,
+        /// Layer full Sigstore signature verification (Fulcio chain +
+        /// Rekor inclusion + DSSE + OIDC identity allowlist) on top of
+        /// the always-on subject-digest check. Requires argus-fetch
+        /// built with `--features sigstore`; without that feature the
+        /// flag is parsed but only emits an informational finding.
+        #[arg(long = "verify-sigstore")]
+        verify_sigstore: bool,
+        /// OIDC issuer the leaf cert must carry when `--verify-sigstore`
+        /// is on. Defaults to GitHub Actions.
+        #[arg(
+            long = "sigstore-issuer",
+            default_value = "https://token.actions.githubusercontent.com",
+            value_name = "URL"
+        )]
+        sigstore_issuer: String,
+        /// Regex pattern allowlist for the leaf cert SAN URI when
+        /// `--verify-sigstore` is on. Pass multiple times for OR.
+        /// Anchored patterns (`^…$`) are recommended.
+        #[arg(long = "sigstore-identity", value_name = "REGEX")]
+        sigstore_identity: Vec<String>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
@@ -168,8 +188,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             registry,
             cache_dir,
             allow_tarball_host,
+            verify_sigstore,
+            sigstore_issuer,
+            sigstore_identity,
             format,
-        } => cmd_fetch(&pkg, registry, cache_dir, allow_tarball_host, format),
+        } => cmd_fetch(
+            &pkg,
+            registry,
+            cache_dir,
+            allow_tarball_host,
+            verify_sigstore,
+            sigstore_issuer,
+            sigstore_identity,
+            format,
+        ),
         Cmd::PypiFetch {
             pkg,
             registry,
@@ -233,18 +265,30 @@ fn cmd_pypi_fetch(
     emit_report(&report, format)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_fetch(
     pkg: &str,
     registry: String,
     cache_dir: Option<PathBuf>,
     allow_tarball_host: Vec<String>,
+    verify_sigstore: bool,
+    sigstore_issuer: String,
+    sigstore_identity: Vec<String>,
     format: Format,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
+    if verify_sigstore && sigstore_identity.is_empty() {
+        anyhow::bail!(
+            "--verify-sigstore requires at least one --sigstore-identity regex (an empty allowlist silently rejects every signed bundle)"
+        );
+    }
     let opts = FetchOptions {
         registry,
         cache_dir,
         tarball_host_allowlist: allow_tarball_host,
+        verify_sigstore,
+        sigstore_issuer,
+        sigstore_identity_patterns: sigstore_identity,
         ..FetchOptions::default()
     };
     let transport = HttpTransport::new();
