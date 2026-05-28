@@ -23,6 +23,8 @@ use spki::DecodePublicKey;
 use x509_cert::der::{Decode, Encode};
 use x509_cert::Certificate;
 
+/// id-ecPublicKey — the algorithm OID every EC SubjectPublicKeyInfo carries.
+const OID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
 /// secp256r1 / prime256v1 (NIST P-256).
 const OID_P256: &str = "1.2.840.10045.3.1.7";
 /// secp384r1 (NIST P-384).
@@ -139,6 +141,20 @@ pub fn verify_dsse_signature(
     let cert = Certificate::from_der(leaf_cert_der).context("parse leaf certificate DER")?;
     let spki = &cert.tbs_certificate.subject_public_key_info;
     let spki_der = spki.to_der().context("re-encode certificate SPKI to DER")?;
+
+    // Only EC keys (id-ecPublicKey) carry a named-curve OID we can match.
+    // An RSA/Ed25519/etc. leaf cert is not something this module verifies;
+    // surface it as Unsupported rather than a misleading "decode EC
+    // named-curve" parse error from ec_curve_oid below.
+    if spki.algorithm.oid.to_string() != OID_EC_PUBLIC_KEY {
+        return Ok(DsseVerdict::Unsupported {
+            reason: format!(
+                "leaf certificate public key algorithm is {} (not id-ecPublicKey); \
+                 only NIST P-256/P-384 ECDSA is supported",
+                spki.algorithm.oid
+            ),
+        });
+    }
 
     let curve_oid = ec_curve_oid(spki)?;
     let pae = pae(payload_type, payload);

@@ -171,3 +171,85 @@ fn malformed_bundle_json_errors() {
     let err = verify_bundle_dsse(b"not json").unwrap_err();
     assert!(err.to_string().contains("parse Sigstore bundle JSON"));
 }
+
+#[test]
+fn wrong_payload_type_is_invalid() {
+    // Sign over payloadType "A", verify claiming payloadType "B". The PAE
+    // binds the type, so the signature must fail — guards against a future
+    // bug that drops the type from the PAE.
+    let (key, cert_der) = keypair_and_cert();
+    let sig: Signature = key.sign(&pae("application/vnd.in-toto+json", PAYLOAD));
+    let sig_der = sig.to_der();
+
+    let verdict = verify_dsse_signature(
+        "application/vnd.different+json",
+        PAYLOAD,
+        sig_der.as_bytes(),
+        &cert_der,
+    )
+    .unwrap();
+    match verdict {
+        DsseVerdict::SignatureInvalid { .. } => {}
+        other => panic!("expected SignatureInvalid for mismatched payloadType, got {other:?}"),
+    }
+}
+
+#[test]
+fn empty_signatures_array_errors() {
+    // A bundle with zero signatures must never reach Verified; it errors.
+    let (_key, cert_der) = keypair_and_cert();
+    let bundle = serde_json::json!({
+        "verificationMaterial": {
+            "x509CertificateChain": {
+                "certificates": [ { "rawBytes": STANDARD.encode(&cert_der) } ]
+            }
+        },
+        "dsseEnvelope": {
+            "payload": STANDARD.encode(PAYLOAD),
+            "payloadType": PAYLOAD_TYPE,
+            "signatures": []
+        }
+    });
+    let err = verify_bundle_dsse(bundle.to_string().as_bytes()).unwrap_err();
+    assert!(err.to_string().contains("no signatures"), "got: {err}");
+}
+
+#[test]
+fn empty_cert_chain_is_unsupported() {
+    // x509CertificateChain present but with zero certs → no leaf to verify
+    // against → Unsupported (not a panic, not Verified).
+    let bundle = serde_json::json!({
+        "verificationMaterial": {
+            "x509CertificateChain": { "certificates": [] }
+        },
+        "dsseEnvelope": {
+            "payload": STANDARD.encode(PAYLOAD),
+            "payloadType": PAYLOAD_TYPE,
+            "signatures": [ { "sig": STANDARD.encode(b"whatever") } ]
+        }
+    });
+    let verdict = verify_bundle_dsse(bundle.to_string().as_bytes()).unwrap();
+    match verdict {
+        DsseVerdict::Unsupported { .. } => {}
+        other => panic!("expected Unsupported for empty cert chain, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_ec_leaf_cert_is_unsupported() {
+    // An Ed25519 leaf cert (algorithm OID 1.3.101.112, not id-ecPublicKey)
+    // must resolve to Unsupported with a clear message, not a confusing
+    // "decode EC named-curve" parse error.
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 keypair");
+    let params =
+        rcgen::CertificateParams::new(vec!["argus-test-ed25519".to_string()]).expect("params");
+    let cert = params.self_signed(&key).expect("self-sign ed25519 cert");
+
+    let verdict = verify_dsse_signature(PAYLOAD_TYPE, PAYLOAD, b"dummy-sig", cert.der()).unwrap();
+    match verdict {
+        DsseVerdict::Unsupported { reason } => {
+            assert!(reason.contains("id-ecPublicKey"), "got reason: {reason}");
+        }
+        other => panic!("expected Unsupported for Ed25519 cert, got {other:?}"),
+    }
+}
