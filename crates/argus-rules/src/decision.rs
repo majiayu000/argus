@@ -22,6 +22,9 @@ use std::collections::BTreeSet;
 const INFO_ONLY_RULES: &[&str] = &[
     "missing-provenance",
     "provenance-verified-subject",
+    "provenance-signature-verified",
+    "provenance-signature-untrusted-issuer",
+    "provenance-signature-unverified",
     // crates.io: structural meta-findings
     "proc-macro-crate",
     "build-rs-execution",
@@ -103,6 +106,16 @@ mod tests {
             )]),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn sigstore_info_only_findings_are_allow() {
+        let findings = [
+            Finding::new("provenance-signature-verified", Severity::Info, ""),
+            Finding::new("provenance-signature-untrusted-issuer", Severity::Info, ""),
+            Finding::new("provenance-signature-unverified", Severity::Info, ""),
+        ];
+        assert_eq!(derive_from_findings(&findings), Decision::Allow);
     }
 
     #[test]

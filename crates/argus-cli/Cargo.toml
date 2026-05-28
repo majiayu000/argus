@@ -10,6 +10,13 @@ description = "argus command-line binary: scan packages and run the regression c
 name = "argus"
 path = "src/main.rs"
 
+[features]
+default = []
+# Pass-through to argus-fetch's `sigstore` feature. Off by default
+# because it pulls in a network-stack-shaped dependency tree (~450
+# transitive crates). Build the CLI with `--features sigstore` to opt in.
+sigstore = ["argus-fetch/sigstore"]
+
 [dependencies]
 argus-core = { workspace = true }
 argus-rules = { workspace = true }

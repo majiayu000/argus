@@ -116,6 +116,21 @@ pub struct FetchOptions {
     /// default — public npm tarballs live on the same host as the
     /// packument.
     pub tarball_host_allowlist: Vec<String>,
+    /// Opt-in to full Sigstore signature verification (Fulcio chain +
+    /// Rekor inclusion + DSSE + OIDC identity allowlist) layered on top
+    /// of the always-on subject-digest cross-check. Requires `argus-fetch`
+    /// to be built with `--features sigstore`; with the feature off, the
+    /// flag is parsed but ignored with an `Info`-level finding.
+    pub verify_sigstore: bool,
+    /// Literal OIDC issuer the leaf cert must carry when
+    /// `verify_sigstore` is on. For GitHub Actions this is
+    /// `"https://token.actions.githubusercontent.com"`.
+    pub sigstore_issuer: String,
+    /// Regex patterns matched against the leaf cert's SAN URI. Match
+    /// against any one pattern is sufficient. Empty when
+    /// `verify_sigstore` is on is a misconfiguration that the verifier
+    /// will reject loudly.
+    pub sigstore_identity_patterns: Vec<String>,
 }
 
 impl Default for FetchOptions {
@@ -126,6 +141,9 @@ impl Default for FetchOptions {
             max_tarball_bytes: 100 * 1024 * 1024,
             max_extracted_bytes: 500 * 1024 * 1024,
             tarball_host_allowlist: Vec::new(),
+            verify_sigstore: false,
+            sigstore_issuer: "https://token.actions.githubusercontent.com".to_string(),
+            sigstore_identity_patterns: Vec::new(),
         }
     }
 }
@@ -221,9 +239,11 @@ pub fn fetch_and_scan(
     let provenance_findings = check_provenance(
         &dist.attestations,
         &tarball_sha512_hex,
+        &tarball_bytes,
         &registry_host,
         &opts.tarball_host_allowlist,
         transport,
+        opts,
     );
     report.findings.extend(provenance_findings);
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
@@ -248,9 +268,11 @@ fn hex_sha512(bytes: &[u8]) -> String {
 fn check_provenance(
     attestations: &Option<packument::AttestationsRef>,
     tarball_sha512_hex: &str,
+    tarball_bytes: &[u8],
     registry_host: &str,
     allowlist: &[String],
     transport: &dyn Transport,
+    opts: &FetchOptions,
 ) -> Vec<Finding> {
     let Some(att_ref) = attestations else {
         return vec![Finding::new(
@@ -291,36 +313,207 @@ fn check_provenance(
         }
     };
 
-    match check_subject_digest(&summaries, tarball_sha512_hex) {
+    let mut findings = match check_subject_digest(&summaries, tarball_sha512_hex) {
         SubjectCheck::Matched {
             subject_name,
             predicate_type,
             builder_id,
         } => {
+            let suffix = if opts.verify_sigstore {
+                " — full Sigstore signature verification follows (see provenance-signature-* findings)"
+            } else {
+                " — signature NOT cryptographically verified (re-run with --verify-sigstore to layer on Fulcio chain + Rekor)"
+            };
             let detail = match builder_id {
                 Some(b) => format!(
-                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball; builder `{b}` — signature NOT cryptographically verified (see #10-followup)"
+                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball; builder `{b}`{suffix}"
                 ),
                 None => format!(
-                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball; signature NOT cryptographically verified (see #10-followup)"
+                    "OIDC attestation subject `{subject_name}` (`{predicate_type}`) matches the downloaded tarball{suffix}"
                 ),
             };
-            vec![Finding::new("provenance-verified-subject", Severity::Info, detail)]
-        }
-        SubjectCheck::Mismatch { expected, actual_hex } => {
             vec![Finding::new(
+                "provenance-verified-subject",
+                Severity::Info,
+                detail,
+            )]
+        }
+        SubjectCheck::Mismatch {
+            expected,
+            actual_hex,
+        } => {
+            // A subject-digest mismatch is decisive — do not bother running
+            // the Sigstore layer on top of a tampered packument/attestation.
+            return vec![Finding::new(
                 "provenance-subject-mismatch",
                 Severity::Critical,
                 format!(
                     "attestations claim digest(s) {expected:?} but downloaded tarball is sha512:{actual_hex} — packument or attestations have been tampered with"
                 ),
-            )]
+            )];
         }
         SubjectCheck::NoSha512Subject => vec![Finding::new(
             "provenance-no-sha512-subject",
             Severity::Medium,
             "attestations were present but none carried a sha512 subject digest; nothing to cross-check",
         )],
+    };
+
+    if opts.verify_sigstore {
+        findings.extend(verify_provenance_signatures(&bytes, tarball_bytes, opts));
+    }
+
+    findings
+}
+
+/// Full Sigstore signature verification (Fulcio chain, Rekor inclusion,
+/// DSSE signature, OIDC identity allowlist) for every attestation in the
+/// attestations document. Emits one finding per attestation.
+///
+/// With the `sigstore` feature OFF, emits a single
+/// `provenance-signature-unverified` finding so the report makes the gap
+/// visible rather than silently doing nothing.
+#[cfg_attr(not(feature = "sigstore"), allow(unused_variables))]
+fn verify_provenance_signatures(
+    raw_attestations: &[u8],
+    tarball_bytes: &[u8],
+    opts: &FetchOptions,
+) -> Vec<Finding> {
+    #[cfg(not(feature = "sigstore"))]
+    {
+        vec![Finding::new(
+            "provenance-signature-unverified",
+            Severity::Info,
+            "--verify-sigstore was requested but argus-fetch was built without the \
+             `sigstore` feature; signature verification skipped. Rebuild argus-cli \
+             with `--features sigstore` to enable.",
+        )]
+    }
+    #[cfg(feature = "sigstore")]
+    {
+        sigstore_impl::verify(raw_attestations, tarball_bytes, opts)
+    }
+}
+
+#[cfg(feature = "sigstore")]
+mod sigstore_impl {
+    use super::*;
+    use argus_verify::{verify_bundle_full, IdentityAllowlist, SigstoreVerdict};
+
+    pub(super) fn verify(
+        raw_attestations: &[u8],
+        tarball_bytes: &[u8],
+        opts: &FetchOptions,
+    ) -> Vec<Finding> {
+        let patterns: Vec<regex::Regex> = match opts
+            .sigstore_identity_patterns
+            .iter()
+            .map(|p| regex::Regex::new(p))
+            .collect()
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return vec![Finding::new(
+                    "provenance-signature-unverified",
+                    Severity::High,
+                    format!(
+                        "--verify-sigstore identity allowlist pattern is not a valid regex: {e}"
+                    ),
+                )];
+            }
+        };
+
+        let allowlist = IdentityAllowlist {
+            issuer: &opts.sigstore_issuer,
+            san_uri_patterns: &patterns,
+        };
+
+        // Split the attestations document into individual bundles and
+        // verify each one. The npm attestations document is
+        // `{"attestations":[{...bundle}, ...]}` where each bundle is what
+        // argus-verify::verify_bundle_full consumes.
+        let bundles = match split_bundles(raw_attestations) {
+            Ok(b) => b,
+            Err(e) => {
+                return vec![Finding::new(
+                    "provenance-signature-unverified",
+                    Severity::High,
+                    format!("attestations document could not be split into bundles: {e}"),
+                )];
+            }
+        };
+
+        let mut findings = Vec::with_capacity(bundles.len());
+        for (i, bundle_json) in bundles.iter().enumerate() {
+            let verdict = match verify_bundle_full(bundle_json, tarball_bytes, &allowlist) {
+                Ok(v) => v,
+                Err(e) => {
+                    findings.push(Finding::new(
+                        "provenance-signature-unverified",
+                        Severity::High,
+                        format!(
+                            "Sigstore verification raised a hard error on attestation[{i}]: {e}"
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            findings.push(verdict_to_finding(i, verdict));
+        }
+        findings
+    }
+
+    fn verdict_to_finding(index: usize, verdict: SigstoreVerdict) -> Finding {
+        match verdict {
+            SigstoreVerdict::Verified { identity, issuer } => Finding::new(
+                "provenance-signature-verified",
+                Severity::Info,
+                format!(
+                    "attestation[{index}] passed full Sigstore verification (issuer={issuer}, identity={identity})"
+                ),
+            ),
+            SigstoreVerdict::SignatureInvalid { reason } => Finding::new(
+                "provenance-signature-invalid",
+                Severity::Critical,
+                format!("attestation[{index}] failed Sigstore verification: {reason}"),
+            ),
+            SigstoreVerdict::UntrustedIssuer {
+                actual_identity,
+                actual_issuer,
+            } => Finding::new(
+                "provenance-signature-untrusted-issuer",
+                Severity::Info,
+                format!(
+                    "attestation[{index}] is cryptographically valid but the OIDC identity is not in the operator allowlist (issuer={actual_issuer}, identity={actual_identity})"
+                ),
+            ),
+            SigstoreVerdict::Unsupported { reason } => Finding::new(
+                "provenance-signature-unverified",
+                Severity::Info,
+                format!("attestation[{index}] uses verification material this build cannot handle: {reason}"),
+            ),
+        }
+    }
+
+    /// Pull out each `attestations[i].bundle` from the npm attestations
+    /// document as a standalone JSON string ready for
+    /// [`verify_bundle_full`].
+    fn split_bundles(raw_attestations: &[u8]) -> anyhow::Result<Vec<String>> {
+        use anyhow::Context;
+        let doc: serde_json::Value =
+            serde_json::from_slice(raw_attestations).context("parse npm attestations JSON")?;
+        let arr = doc
+            .get("attestations")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow::anyhow!("attestations document has no `attestations` array"))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, entry) in arr.iter().enumerate() {
+            let bundle = entry
+                .get("bundle")
+                .ok_or_else(|| anyhow::anyhow!("attestations[{i}] has no `bundle` field"))?;
+            out.push(bundle.to_string());
+        }
+        Ok(out)
     }
 }
 
