@@ -36,6 +36,7 @@ argus-verify = { path = "crates/argus-verify" }
 
 # fetch-only deps (HTTP + crypto + archive) live in argus-fetch / argus-pypi.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+url = "2"
 sha2 = "0.10"
 base64 = "0.22"
 flate2 = "1"
