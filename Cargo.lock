@@ -148,6 +148,7 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+ "url",
 ]
 
 [[package]]
