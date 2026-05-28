@@ -82,9 +82,9 @@ pub struct AttestationSummary {
 
 /// Parse the JSON document at `dist.attestations.url`. Returns one
 /// `AttestationSummary` per attestation entry whose subject carries a
-/// SHA-512 digest. Attestations that cannot be parsed are skipped with no
-/// error — callers should treat an empty result as "no verifiable
-/// attestation present" rather than as proof.
+/// SHA-512 digest. Malformed attestation payloads are errors: provenance
+/// data that exists but cannot be decoded must remain visible to policy,
+/// not collapse into "no subject digest present".
 pub fn parse_attestations(raw: &[u8]) -> Result<Vec<AttestationSummary>> {
     let file: AttestationsFile =
         serde_json::from_slice(raw).context("parse npm attestations JSON")?;
@@ -93,18 +93,8 @@ pub fn parse_attestations(raw: &[u8]) -> Result<Vec<AttestationSummary>> {
         let payload_bytes = STANDARD
             .decode(att.bundle.dsse_envelope.payload.as_bytes())
             .with_context(|| format!("decode DSSE payload for {}", att.predicate_type))?;
-        let stmt: InTotoStatement = match serde_json::from_slice(&payload_bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                // Skip a malformed payload rather than failing the whole
-                // verification — other attestations may still be useful.
-                eprintln!(
-                    "argus: warning: failed to parse in-toto Statement in attestation `{}`: {e}",
-                    att.predicate_type
-                );
-                continue;
-            }
-        };
+        let stmt: InTotoStatement = serde_json::from_slice(&payload_bytes)
+            .with_context(|| format!("parse in-toto Statement in {}", att.predicate_type))?;
         for subj in stmt.subject {
             let sha512_hex = subj.digest.get("sha512").cloned();
             let builder_id = stmt
@@ -257,5 +247,28 @@ mod tests {
     fn rejects_malformed_attestations_json() {
         let err = parse_attestations(b"not json").unwrap_err();
         assert!(err.to_string().contains("parse npm attestations JSON"));
+    }
+
+    #[test]
+    fn rejects_malformed_intoto_statement_payload() -> Result<()> {
+        let payload_b64 = STANDARD.encode(br#"{"not":"a statement"}"#);
+        let attestations = serde_json::json!({
+            "attestations": [{
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "bundle": {
+                    "dsseEnvelope": { "payload": payload_b64 }
+                }
+            }]
+        })
+        .to_string();
+
+        let err = match parse_attestations(attestations.as_bytes()) {
+            Ok(summaries) => {
+                anyhow::bail!("malformed in-toto payload was accepted as {summaries:?}")
+            }
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("parse in-toto Statement"), "got: {err}");
+        Ok(())
     }
 }
