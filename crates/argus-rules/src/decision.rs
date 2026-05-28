@@ -12,7 +12,7 @@
 //!   land here. A human reviewer still has to opt in before install.
 
 use crate::PackageContext;
-use argus_core::{Decision, Finding};
+use argus_core::{Decision, Finding, Severity};
 use std::collections::BTreeSet;
 
 /// Rules that never push the decision toward block on their own.
@@ -46,16 +46,19 @@ pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
 /// semantics to [`derive`] — split off so callers that don't have a
 /// `PackageContext` can still recompute the decision.
 pub fn derive_from_findings(findings: &[Finding]) -> Decision {
-    let ids: BTreeSet<&str> = findings.iter().map(|f| f.rule_id.as_str()).collect();
-    if ids.is_empty() {
+    if findings.is_empty() {
         return Decision::Allow;
     }
 
-    // Strip pure-info rules; they do not influence the decision.
-    let decision_ids: BTreeSet<&str> = ids
+    // Strip pure-info findings; the same rule id at a higher severity must
+    // still influence the decision.
+    let decision_ids: BTreeSet<&str> = findings
         .iter()
-        .copied()
-        .filter(|id| !INFO_ONLY_RULES.contains(id))
+        .filter(|finding| {
+            finding.severity != Severity::Info
+                || !INFO_ONLY_RULES.contains(&finding.rule_id.as_str())
+        })
+        .map(|finding| finding.rule_id.as_str())
         .collect();
 
     if decision_ids.is_empty() {
@@ -116,6 +119,18 @@ mod tests {
             Finding::new("provenance-signature-unverified", Severity::Info, ""),
         ];
         assert_eq!(derive_from_findings(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn high_severity_info_only_rule_still_blocks() {
+        assert_eq!(
+            derive_from_findings(&[Finding::new(
+                "provenance-signature-unverified",
+                Severity::High,
+                ""
+            )]),
+            Decision::Block
+        );
     }
 
     #[test]
