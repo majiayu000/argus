@@ -277,7 +277,7 @@ fn cmd_fetch(
     format: Format,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
-    if verify_sigstore && sigstore_identity.is_empty() {
+    if cfg!(feature = "sigstore") && verify_sigstore && sigstore_identity.is_empty() {
         anyhow::bail!(
             "--verify-sigstore requires at least one --sigstore-identity regex (an empty allowlist silently rejects every signed bundle)"
         );
