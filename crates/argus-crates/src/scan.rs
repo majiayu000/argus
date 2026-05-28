@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
 use argus_fetch::extract_tarball;
 use argus_rules::{looks_binary, scan_text_file, TextFile};
-use std::path::Path;
+use serde::Deserialize;
+use std::path::{Component, Path};
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -38,10 +39,21 @@ pub fn scan_crate_archive(
 
 pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
-    let mut name: Option<String> = None;
-    let mut version: Option<String> = None;
-    let mut is_proc_macro = false;
-    let mut has_build_rs = false;
+    let manifest = read_top_level_manifest(pkg_dir)?;
+    let (name, version) = manifest
+        .as_ref()
+        .and_then(cargo_manifest_name_version)
+        .unwrap_or((None, None));
+    let is_proc_macro = manifest
+        .as_ref()
+        .map(cargo_manifest_is_proc_macro)
+        .unwrap_or(false);
+    let build_script_rel = manifest
+        .as_ref()
+        .map(cargo_manifest_build_script)
+        .transpose()?
+        .flatten();
+    let mut build_script_seen: Option<String> = None;
 
     for entry in walkdir::WalkDir::new(pkg_dir).follow_links(false) {
         let entry = entry?;
@@ -76,31 +88,14 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
             &mut findings,
         );
 
-        let base = std::path::Path::new(&rel)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if base == "Cargo.toml" && depth(&rel) == 0 {
-            // Top-level Cargo.toml is the manifest for this crate.
-            // `extract_tarball` strips the `<name>-<version>/` prefix and
-            // returns the inner dir, so files at the package root have
-            // depth 0 in `rel`.
-            if let Some((n, v)) = parse_cargo_toml_name_version(&content) {
-                name = name.or(Some(n));
-                version = version.or(Some(v));
-            }
-            if cargo_toml_is_proc_macro(&content) {
-                is_proc_macro = true;
-            }
-        } else if base == "build.rs" && depth(&rel) == 0 {
-            has_build_rs = true;
+        if build_script_rel.as_deref() == Some(rel.as_str()) {
+            build_script_seen = Some(rel.clone());
             scan_build_rs(&content, &rel, &mut findings);
             // build.rs is also a Rust source file — apply the
             // include_bytes! + XOR-loop detectors. The first version of
             // TrapDoor's payload sat in build.rs itself, the second
             // hid it in a sibling module, so we run the source-level
-            // checks against both `build.rs` and every other `.rs`.
+            // checks against both declared build scripts and every other `.rs`.
             scan_rust_source(&content, &rel, &mut findings);
         } else if rel.ends_with(".rs") {
             scan_rust_source(&content, &rel, &mut findings);
@@ -108,11 +103,11 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
     }
 
     // Structural meta-findings.
-    if has_build_rs {
+    if let Some(rel) = build_script_seen {
         findings.push(finding(
             "build-rs-execution",
             Severity::Info,
-            "crate ships a `build.rs` script — runs at consumer compile time",
+            format!("crate declares build script `{rel}` — runs at consumer compile time"),
         ));
     }
     if is_proc_macro {
@@ -128,6 +123,101 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
         name,
         version,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoManifest {
+    package: Option<CargoPackage>,
+    lib: Option<CargoLib>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackage {
+    name: Option<String>,
+    version: Option<String>,
+    build: Option<CargoBuildField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoLib {
+    #[serde(rename = "proc-macro")]
+    proc_macro: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CargoBuildField {
+    Bool(bool),
+    Path(String),
+}
+
+fn read_top_level_manifest(pkg_dir: &Path) -> Result<Option<CargoManifest>> {
+    let manifest_path = pkg_dir.join("Cargo.toml");
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("read {}", manifest_path.display()));
+        }
+    };
+    toml::from_str(&content).with_context(|| format!("parse {}", manifest_path.display()))
+}
+
+fn cargo_manifest_name_version(
+    manifest: &CargoManifest,
+) -> Option<(Option<String>, Option<String>)> {
+    let package = manifest.package.as_ref()?;
+    Some((package.name.clone(), package.version.clone()))
+}
+
+fn cargo_manifest_is_proc_macro(manifest: &CargoManifest) -> bool {
+    manifest
+        .lib
+        .as_ref()
+        .and_then(|lib| lib.proc_macro)
+        .unwrap_or(false)
+}
+
+fn cargo_manifest_build_script(manifest: &CargoManifest) -> Result<Option<String>> {
+    let Some(package) = manifest.package.as_ref() else {
+        return Ok(Some("build.rs".to_string()));
+    };
+    match package.build.as_ref() {
+        Some(CargoBuildField::Bool(false)) => Ok(None),
+        Some(CargoBuildField::Bool(true)) | None => Ok(Some("build.rs".to_string())),
+        Some(CargoBuildField::Path(path)) => normalize_manifest_relative_path(path).map(Some),
+    }
+}
+
+fn normalize_manifest_relative_path(raw: &str) -> Result<String> {
+    if raw.is_empty() {
+        anyhow::bail!("Cargo.toml package.build path is empty");
+    }
+    if raw.contains('\\') {
+        anyhow::bail!("Cargo.toml package.build path must use forward slashes");
+    }
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        anyhow::bail!("Cargo.toml package.build path must be relative");
+    }
+
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                anyhow::bail!("Cargo.toml package.build path must not contain `..`")
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("Cargo.toml package.build path must be relative")
+            }
+        }
+    }
+    if parts.is_empty() {
+        anyhow::bail!("Cargo.toml package.build path is empty");
+    }
+    Ok(parts.join("/"))
 }
 
 fn scan_build_rs(content: &str, rel: &str, findings: &mut Vec<Finding>) {
@@ -171,72 +261,28 @@ fn scan_rust_source(content: &str, rel: &str, findings: &mut Vec<Finding>) {
     }
 }
 
-fn depth(rel: &str) -> usize {
-    rel.matches('/').count()
-}
-
-fn parse_cargo_toml_name_version(s: &str) -> Option<(String, String)> {
-    let package_section = s.find("[package]")?;
-    let body = &s[package_section..];
-    let name = scrape_string_field(body, "name")?;
-    let version = scrape_string_field(body, "version")?;
-    Some((name, version))
-}
-
-fn cargo_toml_is_proc_macro(s: &str) -> bool {
-    let Some(lib_section) = s.find("[lib]") else {
-        return false;
-    };
-    // Stop the section at the next bracketed header.
-    let body = &s[lib_section..];
-    let body_end = body[5..].find('[').map(|i| 5 + i).unwrap_or(body.len());
-    let lib_body = &body[..body_end];
-    lib_body.lines().any(|line| {
-        let t = line.trim();
-        t.starts_with("proc-macro") && t.contains('=') && t.contains("true")
-    })
-}
-
-fn scrape_string_field(body: &str, field: &str) -> Option<String> {
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(field) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim();
-                if let Some(unquoted) = rest
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                {
-                    return Some(unquoted.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_cargo_basic() {
-        let toml = r#"
+    fn parse_cargo_basic() -> Result<()> {
+        let manifest_toml = r#"
 [package]
 name = "demo"
 version = "1.2.3"
 edition = "2021"
 "#;
-        let (n, v) = parse_cargo_toml_name_version(toml).unwrap();
-        assert_eq!(n, "demo");
-        assert_eq!(v, "1.2.3");
+        let manifest: CargoManifest = toml::from_str(manifest_toml)?;
+        let (n, v) = cargo_manifest_name_version(&manifest).context("package fields")?;
+        assert_eq!(n.as_deref(), Some("demo"));
+        assert_eq!(v.as_deref(), Some("1.2.3"));
+        Ok(())
     }
 
     #[test]
-    fn detect_proc_macro_lib() {
-        let toml = r#"
+    fn detect_proc_macro_lib() -> Result<()> {
+        let manifest_toml = r#"
 [package]
 name = "x"
 version = "1.0.0"
@@ -244,12 +290,14 @@ version = "1.0.0"
 [lib]
 proc-macro = true
 "#;
-        assert!(cargo_toml_is_proc_macro(toml));
+        let manifest: CargoManifest = toml::from_str(manifest_toml)?;
+        assert!(cargo_manifest_is_proc_macro(&manifest));
+        Ok(())
     }
 
     #[test]
-    fn benign_lib_section_is_not_proc_macro() {
-        let toml = r#"
+    fn benign_lib_section_is_not_proc_macro() -> Result<()> {
+        let manifest_toml = r#"
 [package]
 name = "x"
 version = "1.0.0"
@@ -257,15 +305,49 @@ version = "1.0.0"
 [lib]
 name = "x_inner"
 "#;
-        assert!(!cargo_toml_is_proc_macro(toml));
+        let manifest: CargoManifest = toml::from_str(manifest_toml)?;
+        assert!(!cargo_manifest_is_proc_macro(&manifest));
+        Ok(())
     }
 
     #[test]
-    fn depth_helper() {
-        // `rel` is computed AFTER stripping the extracted-root prefix, so
-        // the top-level Cargo.toml has depth 0.
-        assert_eq!(depth("Cargo.toml"), 0);
-        assert_eq!(depth("src/lib.rs"), 1);
-        assert_eq!(depth("src/util/mod.rs"), 2);
+    fn custom_build_script_path_is_parsed() -> Result<()> {
+        let manifest: CargoManifest = toml::from_str(
+            r#"
+[package]
+name = "x"
+version = "1.0.0"
+build = "build/main.rs"
+"#,
+        )?;
+        assert_eq!(
+            cargo_manifest_build_script(&manifest)?.as_deref(),
+            Some("build/main.rs")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_false_disables_build_script() -> Result<()> {
+        let manifest: CargoManifest = toml::from_str(
+            r#"
+[package]
+name = "x"
+version = "1.0.0"
+build = false
+"#,
+        )?;
+        assert_eq!(cargo_manifest_build_script(&manifest)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn custom_build_script_path_rejects_traversal() -> Result<()> {
+        let err = match normalize_manifest_relative_path("../build.rs") {
+            Ok(path) => anyhow::bail!("parent traversal was accepted as {path}"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains(".."), "got: {err}");
+        Ok(())
     }
 }

