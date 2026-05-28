@@ -170,12 +170,22 @@ Total: ~3 days of focused work. This is the **honest** estimate; the "tracer bul
 
 ---
 
-## 8. Open questions (resolve before implementation)
+## 8. Open questions (status after Day 1 + Day 2 research spike)
 
-1. **Trust-root snapshot**: do we vendor the Sigstore trust root TUF metadata into the repo, or rely on the `sigstore` crate's built-in default? Vendoring gives reproducible builds but adds rotation maintenance. **Recommendation**: use the crate default for M2; revisit if we hit a trust-root rotation incident.
-2. **Async vs sync**: `sigstore` crate is async-first. `argus-fetch` is currently sync. **Recommendation**: spawn a tokio current-thread runtime inside the verify call, isolating async to the verify boundary. Do not async-ify the rest of argus-fetch.
-3. **Caching of Rekor responses**: do we cache transparency-log lookups on disk? **Recommendation**: no caching in M2 — opt-in flag implies the user is OK paying the network cost per call. Caching is M3.
-4. **Existing `argus-fetch::provenance` API**: should `check_subject_digest`'s return type extend to carry signature-verification results, or should we add a sibling `verify_signature` function? **Recommendation**: sibling function, keep M1 surface untouched.
+### Resolved by Day 1 (PR #29, merged 2026-05-28) and the Day 2 spike
+
+- **Crate library choice**: switched from the official `sigstore` crate to the modular `sigstore-verify` + `sigstore-trust-root` + `sigstore-types` family (0.8.0, from the prefix-dev/wolfv sigstore-rust fork). The modular crates are **synchronous**, verification-only, and offline-capable with a pre-loaded `TrustedRoot`. This retires the async-isolation concern: no tokio runtime needs to be spawned inside argus-fetch.
+- **Bundle version compatibility** (highest pre-Day-2 risk): a compile-spike using the real `sigstore@2.3.1` npm attestations fixture confirmed that `sigstore_types::Bundle::from_json` parses the npm `mediaType=application/vnd.dev.sigstore.bundle+json;version=0.2` bundle without modification, even though the fork's README emphasises v0.3. v0.2 → v0.3 is additive enough that the parser accepts both.
+- **DSSE signature-verification primitive**: implemented in argus-verify Day 1 *without* the sigstore crate at all (pure RustCrypto). The Day 2 sigstore-verify integration covers the higher layers (Fulcio chain + Rekor + identity policy) and the existing DSSE primitive remains as a backstop / duplicate check.
+
+### Still open going into Day 2
+
+- **Trust-root snapshot**: vendor the Sigstore `trusted_root.json` snapshot in `crates/argus-verify/src/trust/trusted_root.json` vs. rely on `sigstore-trust-root`'s TUF refresh path. **Recommendation**: vendor a snapshot for M2 — gives reproducible builds, keeps argus-verify fully offline at runtime, and avoids pulling the reqwest/hyper TUF client into the default feature set. Root rotation becomes a manual checklist item (rare; documented in §10).
+- **`sigstore-verify` default features**: the crate enables `rustls` by default, which pulls reqwest + hyper-rustls + tokio (~50 transitive crates) — observed during the Day 2 spike. For offline verification we want `default-features = false` plus only what `verify()` needs. **Action**: confirm `default-features = false` builds and still verifies the real fixture during Day 2.
+- **DSSE attestation `artifact` parameter**: `sigstore_verify::verify(artifact, bundle, policy, root)` takes raw artifact bytes. For a DSSE attestation, the signature is over the in-toto payload, not the tarball. **Action**: confirm via a focused integration test whether the crate reads the envelope payload internally or expects the Statement bytes as `artifact`; fail loudly if neither convention works.
+- **`VerificationPolicy` regex vs literal**: docs show `.require_identity("...")` but do not state regex support. The design doc's allowlist (`https://github.com/actions/.+/.github/workflows/.+@refs/tags/.+`) needs regex. **Action**: confirm via integration test; if literal-only, layer a regex check on top of a permissive base policy.
+- **Caching of Rekor responses**: not needed for M2 — verification is offline and uses the bundle's embedded `tlogEntries` with the Rekor public key from `trusted_root.json`. No transparency-log refetch on the hot path. M3 may want an online "Rekor re-check" mode; out of scope here.
+- **Existing `argus-fetch::provenance` API**: should `check_subject_digest`'s return type extend to carry signature-verification results, or should we add a sibling `verify_signature` function? **Recommendation unchanged**: sibling function, keep M1 surface untouched.
 
 ---
 
