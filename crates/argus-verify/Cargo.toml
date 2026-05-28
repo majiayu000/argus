@@ -1,0 +1,23 @@
+[package]
+name = "argus-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sigstore signature verification for argus: DSSE envelope + (later) Fulcio chain + Rekor inclusion."
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+ecdsa = { workspace = true }
+x509-cert = { workspace = true }
+spki = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+rand_core = { workspace = true }
