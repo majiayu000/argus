@@ -18,7 +18,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
 use argus_core::{Finding, ScanReport, Severity};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod metadata;
 mod rules;
@@ -185,8 +185,15 @@ pub fn fetch_and_scan_pypi(
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut last_name: Option<String> = None;
     let mut last_version: Option<String> = None;
-    for art in &artifacts {
+    for (index, art) in artifacts.iter().enumerate() {
+        validate_artifact_filename(&art.filename)
+            .with_context(|| format!("invalid PyPI artifact filename {:?}", art.filename))?;
         validate_artifact_url(&art.url, &registry_host, PYPI_CDN_ALLOWLIST)?;
+        let artifact_kind = match art.packagetype.as_str() {
+            "sdist" => "sdist",
+            "bdist_wheel" => "wheel",
+            other => bail!("unsupported PyPI packagetype: {other}"),
+        };
         let bytes = transport
             .get(&art.url, opts.max_artifact_bytes)
             .with_context(|| format!("download artifact {}", art.url))?;
@@ -194,21 +201,23 @@ pub fn fetch_and_scan_pypi(
             format!("verify SHA-256 of {} ({} bytes)", art.filename, bytes.len())
         })?;
 
-        let art_dir = extract_root.path().join(&art.filename);
+        let art_dir = extract_root
+            .path()
+            .join(format!("artifact-{index}-{artifact_kind}"));
         std::fs::create_dir_all(&art_dir)
             .with_context(|| format!("mkdir {}", art_dir.display()))?;
-        let (findings, name, version_str) = match art.packagetype.as_str() {
+        let (findings, name, version_str) = match artifact_kind {
             "sdist" => {
                 let report = scan_sdist_dir(&bytes, &art_dir, opts.max_extracted_bytes)
                     .with_context(|| format!("scan sdist {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
-            "bdist_wheel" => {
+            "wheel" => {
                 let report = scan_wheel_zip(&bytes, &art_dir, opts.max_extracted_bytes)
                     .with_context(|| format!("scan wheel {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
-            other => bail!("unsupported PyPI packagetype: {other}"),
+            _ => unreachable!("artifact_kind is normalized above"),
         };
         all_findings.extend(findings);
         if name.is_some() {
@@ -232,6 +241,22 @@ pub fn fetch_and_scan_pypi(
         decision,
         findings: all_findings,
     })
+}
+
+fn validate_artifact_filename(filename: &str) -> Result<()> {
+    if filename.is_empty() {
+        bail!("empty filename");
+    }
+    if filename.contains('/') || filename.contains('\\') {
+        bail!("filename must not contain path separators");
+    }
+    if filename == "." || filename == ".." {
+        bail!("filename must not be `.` or `..`");
+    }
+    if Path::new(filename).is_absolute() {
+        bail!("absolute filename");
+    }
+    Ok(())
 }
 
 /// Build a Finding with the given rule_id/severity/detail and no location.
@@ -292,5 +317,21 @@ mod tests {
             PYPI_CDN_ALLOWLIST,
         )
         .is_err());
+    }
+
+    #[test]
+    fn validate_artifact_filename_rejects_paths() {
+        assert!(validate_artifact_filename("../evil.tar.gz").is_err());
+        assert!(validate_artifact_filename("/tmp/evil.tar.gz").is_err());
+        assert!(validate_artifact_filename("nested/evil.tar.gz").is_err());
+        assert!(validate_artifact_filename("nested\\evil.tar.gz").is_err());
+        assert!(validate_artifact_filename(".").is_err());
+        assert!(validate_artifact_filename("..").is_err());
+    }
+
+    #[test]
+    fn validate_artifact_filename_accepts_basename() {
+        assert!(validate_artifact_filename("demo-1.0.0.tar.gz").is_ok());
+        assert!(validate_artifact_filename("demo-1.0.0-py3-none-any.whl").is_ok());
     }
 }
