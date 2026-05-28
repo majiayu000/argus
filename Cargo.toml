@@ -25,6 +25,7 @@ regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
+toml = "0.8.23"
 
 argus-core = { path = "crates/argus-core" }
 argus-rules = { path = "crates/argus-rules" }
