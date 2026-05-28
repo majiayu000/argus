@@ -21,16 +21,28 @@
 //! the Sigstore public-good TUF target. argus-verify runs fully offline at
 //! runtime; root rotation is a manual checklist item (design doc §10).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, Context, Result};
 use regex::Regex;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_types::Bundle;
 use sigstore_verify::{verify as sigstore_verify_fn, VerificationPolicy};
 
 /// Sigstore public-good trust root, snapshotted from
-/// `https://raw.githubusercontent.com/sigstore/root-signing/main/targets/trusted_root.json`.
-/// Rotated by hand when Sigstore publishes a new root.
+/// `https://raw.githubusercontent.com/sigstore/root-signing/main/targets/trusted_root.json`
+/// (canonical TUF target: `https://tuf-repo-cdn.sigstore.dev/`).
+///
+/// Rotated by hand when Sigstore publishes a new root. The snapshot is
+/// pinned by [`TRUSTED_ROOT_SHA256`]; a unit test verifies the constant
+/// still matches the bytes that ship in the crate, so accidental drift
+/// (e.g. an LF/CRLF rewrite by a tool) trips a CI failure rather than
+/// silently broadening trust.
 const TRUSTED_ROOT_JSON: &str = include_str!("trust/trusted_root.json");
+
+/// SHA-256 of the captured `trusted_root.json`, pinned at the time of
+/// vendoring (2026-05-28). Verified by `vendored_trusted_root_matches_pinned_sha256`.
+#[cfg(test)]
+const TRUSTED_ROOT_SHA256: &str =
+    "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66";
 
 /// Operator-supplied OIDC identity policy.
 ///
@@ -78,6 +90,17 @@ pub fn verify_bundle_full(
     artifact: &[u8],
     allowlist: &IdentityAllowlist<'_>,
 ) -> Result<SigstoreVerdict> {
+    // An empty SAN allowlist would silently block every bundle as
+    // UntrustedIssuer with no error — almost certainly a caller mistake
+    // (forgot to populate the patterns vec). Fail fast so the
+    // misconfiguration is visible.
+    if allowlist.san_uri_patterns.is_empty() {
+        bail!(
+            "IdentityAllowlist.san_uri_patterns must contain at least one \
+             regex; an empty list silently rejects every signed bundle"
+        );
+    }
+
     let bundle =
         Bundle::from_json(bundle_json).context("parse Sigstore bundle JSON for full verify")?;
 
@@ -96,38 +119,37 @@ pub fn verify_bundle_full(
     let trusted_root = TrustedRoot::from_json(TRUSTED_ROOT_JSON)
         .context("load vendored Sigstore trusted_root.json")?;
 
-    // Pass the literal issuer to sigstore-verify; the SAN identity regex is
-    // applied by us after a successful crypto verdict (the crate only does
-    // literal identity equality).
-    //
-    // `skip_timestamp()`: npm-published v0.2 bundles use `kindVersion 0.0.2`
-    // (which sigstore-verify 0.8.0 treats as Rekor V2) BUT carry a
-    // non-zero `integratedTime` and zero `rfc3161Timestamps` — there is no
-    // standalone TSA timestamp to verify in the first place. Rekor's
-    // Signed Entry Timestamp (SET) still attests to `integratedTime`, and
-    // SET verification (plus the cert validity window check) remains on.
-    // See docs/design/sigstore-verification.md §10 for the honest gap.
-    let policy = VerificationPolicy::default()
-        .require_issuer(allowlist.issuer)
-        .skip_timestamp();
+    // Pass the literal issuer to sigstore-verify; the SAN identity regex
+    // is applied by us after a successful crypto verdict (the crate only
+    // does literal identity equality, verified at verify.rs:293).
+    let policy = VerificationPolicy::default().require_issuer(allowlist.issuer);
 
     match sigstore_verify_fn(artifact, &bundle, &policy, &trusted_root) {
-        Ok(result) => {
-            let identity = result
-                .identity
-                .ok_or_else(|| anyhow!("Sigstore verify returned no identity"))?;
-            let issuer = result
-                .issuer
-                .ok_or_else(|| anyhow!("Sigstore verify returned no issuer"))?;
-            if san_matches(&identity, allowlist.san_uri_patterns) {
-                Ok(SigstoreVerdict::Verified { identity, issuer })
-            } else {
-                Ok(SigstoreVerdict::UntrustedIssuer {
-                    actual_identity: identity,
-                    actual_issuer: issuer,
-                })
+        Ok(result) => match (result.identity, result.issuer) {
+            (Some(identity), Some(issuer)) => {
+                if san_matches(&identity, allowlist.san_uri_patterns) {
+                    Ok(SigstoreVerdict::Verified { identity, issuer })
+                } else {
+                    Ok(SigstoreVerdict::UntrustedIssuer {
+                        actual_identity: identity,
+                        actual_issuer: issuer,
+                    })
+                }
             }
-        }
+            // Crypto path returned Ok but the cert info is incomplete. A
+            // bundle that reaches here without an identity/issuer cannot be
+            // distinguished from forged material at this layer; treat it as
+            // SignatureInvalid rather than letting an Err leak through the
+            // structured verdict.
+            (id, iss) => Ok(SigstoreVerdict::SignatureInvalid {
+                reason: format!(
+                    "Sigstore verify returned Ok with incomplete cert info \
+                     (identity: {}, issuer: {})",
+                    if id.is_some() { "present" } else { "missing" },
+                    if iss.is_some() { "present" } else { "missing" }
+                ),
+            }),
+        },
         Err(e) => Ok(SigstoreVerdict::SignatureInvalid {
             reason: e.to_string(),
         }),
@@ -151,4 +173,32 @@ fn has_x509_chain(bundle: &Bundle) -> bool {
 
 fn san_matches(identity: &str, patterns: &[Regex]) -> bool {
     patterns.iter().any(|p| p.is_match(identity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn vendored_trusted_root_matches_pinned_sha256() {
+        // Drift-detector: if the bytes of `src/trust/trusted_root.json`
+        // change without bumping `TRUSTED_ROOT_SHA256`, this test fails.
+        // Catches LF/CRLF rewrites by tooling, accidental partial
+        // overwrites, and unannounced upstream root rotations.
+        let actual = hex_lower(&Sha256::digest(TRUSTED_ROOT_JSON.as_bytes()));
+        assert_eq!(
+            actual, TRUSTED_ROOT_SHA256,
+            "vendored trusted_root.json drift: update TRUSTED_ROOT_SHA256 \
+             if the change is intentional"
+        );
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
 }
