@@ -1,0 +1,77 @@
+name: False negative — malicious package not flagged
+description: A package you have evidence is malicious passed through argus
+  without being blocked. Help us close the rule gap.
+title: "false-negative: <package>"
+labels: ["false-negative", "rule-gap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide concrete attack evidence (e.g. a public advisory, the
+        malicious source, observed compromise). Suspicion alone is not
+        actionable — argus relies on specific behavioural signals.
+
+  - type: dropdown
+    id: ecosystem
+    attributes:
+      label: Ecosystem
+      options:
+        - npm
+        - PyPI (sdist)
+        - PyPI (wheel)
+        - crates.io
+        - lockfile
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: package
+    attributes:
+      label: Package
+      placeholder: "name@version (e.g. defi-threat-scanner@0.1.0)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command + full output
+      description: Paste the exact `argus` invocation and its full output.
+        The decision is presumably `allow` or `allow-with-approval`; show that.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: malicious_behaviour
+    attributes:
+      label: What the package actually does
+      description: Specific malicious behaviour with file paths and line
+        numbers (e.g. "setup.py:42 reads ~/.aws/credentials and exfiltrates
+        to attacker.example"). Link the source if archived.
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: External references
+      description: Advisories, write-ups, GitHub Security advisories, the
+        original Socket / Snyk / Phylum report, etc. Helps us cross-check
+        and credit prior work.
+
+  - type: textarea
+    id: suggested_rule
+    attributes:
+      label: Suggested rule (optional)
+      description: If you have a sketch of what argus should look for, write
+        it here. Otherwise we will design the rule.
+
+  - type: input
+    id: version
+    attributes:
+      label: argus version / commit
+      placeholder: "e.g. main @ a7c5726"
+    validations:
+      required: true
