@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in the argus CLI, library, or rules is broken or behaves
+  unexpectedly. Use the false-positive / false-negative forms for detection
+  feedback instead.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: One or two sentences. What did you run and what went wrong?
+      placeholder: "`argus fetch chalk` panicked at ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest sequence of commands that reproduces it. Paste
+        the actual command output (use a code block).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: argus version / commit
+      description: Output of `argus --version` or the git commit hash you
+        built from.
+      placeholder: "e.g. main @ a7c5726, or 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Rust version (`rustc --version`).
+      placeholder: "macOS 14.5 · rustc 1.85.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Logs, stack traces, screenshots, related issues. Optional.

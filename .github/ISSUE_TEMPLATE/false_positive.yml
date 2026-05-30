@@ -1,0 +1,72 @@
+name: False positive — legitimate package flagged
+description: argus produced a `block` or `allow-with-approval` decision on a
+  package you have reason to believe is legitimate. Help us tighten the rule.
+title: "false-positive: <package>"
+labels: ["false-positive", "rule-tuning"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: please confirm you have actually inspected the package
+        and have specific evidence that the flagged behaviour is benign. A
+        gut feeling that "this is a popular project" is not enough — argus is
+        intentionally conservative.
+
+  - type: dropdown
+    id: ecosystem
+    attributes:
+      label: Ecosystem
+      options:
+        - npm
+        - PyPI (sdist)
+        - PyPI (wheel)
+        - crates.io
+        - lockfile
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: package
+    attributes:
+      label: Package
+      placeholder: "name@version (e.g. chalk@5.3.0)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command + full output
+      description: Paste the exact `argus` invocation and its full output,
+        including every fired rule_id and the final decision.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: rules
+    attributes:
+      label: Which rule(s) do you think fired incorrectly?
+      description: Name the rule_id(s) from the output you believe are false
+        positives.
+      placeholder: "lifecycle-script, remote-download"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence the behaviour is benign
+      description: Link to source (specific file + line), upstream maintainer
+        statement, documented purpose, etc. Concrete evidence only.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: argus version / commit
+      placeholder: "e.g. main @ a7c5726"
+    validations:
+      required: true

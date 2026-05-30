@@ -3,9 +3,9 @@
 [![CI](https://github.com/majiayu000/argus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/majiayu000/argus/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> "100-eyed guardian." Static install-time scanner for npm / JavaScript supply-chain attacks.
+> "100-eyed guardian." Static install-time scanner for npm, PyPI, and crates.io supply-chain attacks, with opt-in Sigstore signature verification.
 
-`argus` is a Rust CLI that decides whether a package directory or npm lockfile is safe to install, before any lifecycle script runs. It implements the deterministic-rule layer of the design at `../docs/todo/safepm-install-guard-spec-2026-05-13.md` (Milestone 0).
+`argus` is a Rust CLI that decides whether a package (npm, PyPI sdist/wheel, or `.crate` archive) or an npm lockfile is safe to install, before any lifecycle script, `setup.py`, or `build.rs` ever runs. It implements the deterministic-rule layer plus optional cryptographic provenance verification — see the "Status" section below for the current capability snapshot.
 
 ## Decisions
 
@@ -105,4 +105,21 @@ local set anytime with `pre-commit run --all-files`.
 
 ## Status
 
-Milestone 0 only — no tarball fetch, no registry intelligence, no install-wrapper. See the SPEC for the milestone roadmap.
+**Pre-release.** Argus is not yet cut as a tagged release or published to any
+package registry. Build it from source against `main`; we treat `main` as the
+shipping branch and the [`CHANGELOG`](CHANGELOG.md) `[Unreleased]` section as
+the current ship-list.
+
+Capability snapshot (as of 2026-05-29):
+
+- **M0** — rule engine + regression corpus + CI ([#4](https://github.com/majiayu000/argus/pull/4), [#5](https://github.com/majiayu000/argus/pull/5)).
+- **M1** — npm tarball fetch + safe extraction + scan ([#6](https://github.com/majiayu000/argus/pull/6)), plus PyPI sdist/wheel ([#23](https://github.com/majiayu000/argus/pull/23)) and crates.io `.crate` + `build.rs` analysis ([#24](https://github.com/majiayu000/argus/pull/24)).
+- **M2** — Sigstore signature verification (DSSE + Fulcio chain + Rekor inclusion + OIDC identity allowlist), opt-in behind the `sigstore` Cargo feature. Closes [#14](https://github.com/majiayu000/argus/issues/14); honest threat-disclosure of what M2 still does NOT prevent lives in [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10.
+
+Long-tail ecosystem coverage (Maven / NuGet / Go modules / RubyGems / Packagist)
+is tracked under [#22](https://github.com/majiayu000/argus/issues/22); launch-readiness polish under [#42](https://github.com/majiayu000/argus/issues/42).
+
+Detection coverage is intentionally **not** claimed in headline numbers without
+benchmark evidence — see [`corpus/`](corpus/) for the regression set the
+project gates on and [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md)
+for the attack catalog argus is designed against.
