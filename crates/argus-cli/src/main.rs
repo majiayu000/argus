@@ -8,6 +8,10 @@
 //!   each case's `expectedDecision` + `rules`.
 
 use anyhow::{bail, Context, Result};
+use argus_composer::{
+    fetch_and_scan_composer, ComposerFetchOptions, ComposerRef,
+    HttpTransport as ComposerHttpTransport,
+};
 use argus_core::{Decision, ScanReport};
 use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
@@ -107,6 +111,19 @@ enum Cmd {
         pkg: String,
         /// crates.io registry base URL.
         #[arg(long, default_value = "https://crates.io")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a Composer package from Packagist, verify SHA-1, safe-extract, scan.
+    ComposerFetch {
+        /// Package spec: `vendor/package` or `vendor/package@version`.
+        pkg: String,
+        /// Packagist registry base URL.
+        #[arg(long, default_value = "https://repo.packagist.org")]
         registry: String,
         /// Persistent scratch parent. Omitted → private system temp dir.
         #[arg(long)]
@@ -215,6 +232,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
+        Cmd::ComposerFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_composer_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -241,6 +264,25 @@ fn cmd_crates_fetch(
     let transport = CratesHttpTransport::new();
     let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
         .with_context(|| format!("crates-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_composer_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        ComposerRef::parse(pkg).with_context(|| format!("parse Composer spec `{pkg}`"))?;
+    let opts = ComposerFetchOptions {
+        registry,
+        cache_dir,
+        ..ComposerFetchOptions::default()
+    };
+    let transport = ComposerHttpTransport::new();
+    let report = fetch_and_scan_composer(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("composer-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 
