@@ -31,6 +31,11 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // Maven: structural / honesty meta-findings
+    "maven-bytecode-not-inspected",
+    "maven-executable-jar",
+    "maven-weak-integrity-only",
+    "maven-no-pom",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the

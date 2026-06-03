@@ -13,6 +13,9 @@ use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
 };
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
+use argus_maven::{
+    fetch_and_scan_maven, HttpTransport as MavenHttpTransport, MavenFetchOptions, MavenRef,
+};
 use argus_pypi::{
     fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
     PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
@@ -107,6 +110,19 @@ enum Cmd {
         pkg: String,
         /// crates.io registry base URL.
         #[arg(long, default_value = "https://crates.io")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources.
+    MavenFetch {
+        /// Maven coordinate: `groupId:artifactId` or `groupId:artifactId:version`.
+        pkg: String,
+        /// Maven registry base URL.
+        #[arg(long, default_value = "https://repo1.maven.org/maven2")]
         registry: String,
         /// Persistent scratch parent. Omitted → private system temp dir.
         #[arg(long)]
@@ -215,6 +231,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
+        Cmd::MavenFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_maven_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -241,6 +263,25 @@ fn cmd_crates_fetch(
     let transport = CratesHttpTransport::new();
     let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
         .with_context(|| format!("crates-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_maven_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        MavenRef::parse(pkg).with_context(|| format!("parse Maven coordinate `{pkg}`"))?;
+    let opts = MavenFetchOptions {
+        registry,
+        cache_dir,
+        ..MavenFetchOptions::default()
+    };
+    let transport = MavenHttpTransport::new();
+    let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("maven-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 
