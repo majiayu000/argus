@@ -31,6 +31,9 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // RubyGems: structural meta-findings
+    "gem-native-build",
+    "gem-declared-executable",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
