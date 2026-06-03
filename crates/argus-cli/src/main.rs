@@ -13,6 +13,9 @@ use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
 };
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
+use argus_nuget::{
+    fetch_and_scan_nuget, HttpTransport as NugetHttpTransport, NugetFetchOptions, NugetRef,
+};
 use argus_pypi::{
     fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
     PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
@@ -107,6 +110,19 @@ enum Cmd {
         pkg: String,
         /// crates.io registry base URL.
         #[arg(long, default_value = "https://crates.io")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a package from NuGet, verify catalog SHA-512, safe-extract .nupkg, scan.
+    NugetFetch {
+        /// Package spec: `<id>` or `<id>@<version>`.
+        pkg: String,
+        /// NuGet registry base URL.
+        #[arg(long, default_value = "https://api.nuget.org")]
         registry: String,
         /// Persistent scratch parent. Omitted → private system temp dir.
         #[arg(long)]
@@ -215,6 +231,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
+        Cmd::NugetFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_nuget_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -241,6 +263,24 @@ fn cmd_crates_fetch(
     let transport = CratesHttpTransport::new();
     let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
         .with_context(|| format!("crates-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_nuget_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref = NugetRef::parse(pkg).with_context(|| format!("parse NuGet spec `{pkg}`"))?;
+    let opts = NugetFetchOptions {
+        registry,
+        cache_dir,
+        ..NugetFetchOptions::default()
+    };
+    let transport = NugetHttpTransport::new();
+    let report = fetch_and_scan_nuget(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("nuget-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

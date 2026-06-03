@@ -31,6 +31,10 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // NuGet: structural + integrity-disclosure meta-findings
+    "nuget-integrity-unverifiable",
+    "nuget-no-manifest",
+    "nuget-content-files",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
