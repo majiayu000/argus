@@ -31,6 +31,11 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // Go: structural meta-findings (import-time execution surface that is
+    // ubiquitous and legitimate on its own; only escalates when a
+    // dangerous call co-occurs in the same file).
+    "go-init-function",
+    "go-package-var-exec",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the

@@ -1,0 +1,25 @@
+[package]
+name = "argus-go"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Go module ecosystem support for argus: fetch module .zip from the GOPROXY protocol, verify the dirhash h1: checksum, scan init/exec/network trigger surfaces."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+subtle = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }
