@@ -24,6 +24,9 @@ use argus_pypi::{
     fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
     PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
 };
+use argus_rubygems::{
+    fetch_and_scan_gems, GemFetchOptions, GemRef, HttpTransport as GemsHttpTransport,
+};
 use argus_rules::{scan_lockfile, scan_package_dir};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -160,6 +163,19 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Fetch a gem from RubyGems, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources.
+    GemsFetch {
+        /// Gem spec: `<name>` or `<name>@<version>`.
+        pkg: String,
+        /// RubyGems registry base URL.
+        #[arg(long, default_value = "https://rubygems.org")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Regression-corpus operations.
     Corpus {
         #[command(subcommand)]
@@ -279,6 +295,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_maven_fetch(&pkg, registry, cache_dir, format),
+        Cmd::GemsFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_gems_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -361,6 +383,24 @@ fn cmd_maven_fetch(
     let transport = MavenHttpTransport::new();
     let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
         .with_context(|| format!("maven-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_gems_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref = GemRef::parse(pkg).with_context(|| format!("parse RubyGems spec `{pkg}`"))?;
+    let opts = GemFetchOptions {
+        registry,
+        cache_dir,
+        ..GemFetchOptions::default()
+    };
+    let transport = GemsHttpTransport::new();
+    let report = fetch_and_scan_gems(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("gems-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

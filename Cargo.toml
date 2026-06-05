@@ -5,6 +5,7 @@ members = [
     "crates/argus-rules",
     "crates/argus-fetch",
     "crates/argus-pypi",
+    "crates/argus-rubygems",
     "crates/argus-crates",
     "crates/argus-maven",
     "crates/argus-nuget",
@@ -34,6 +35,7 @@ argus-core = { path = "crates/argus-core" }
 argus-rules = { path = "crates/argus-rules" }
 argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }
+argus-rubygems = { path = "crates/argus-rubygems" }
 argus-crates = { path = "crates/argus-crates" }
 argus-maven = { path = "crates/argus-maven" }
 argus-nuget = { path = "crates/argus-nuget" }

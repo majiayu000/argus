@@ -1,0 +1,25 @@
+[package]
+name = "argus-rubygems"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RubyGems ecosystem support for argus: fetch .gem, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

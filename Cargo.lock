@@ -94,6 +94,7 @@ dependencies = [
  "argus-maven",
  "argus-nuget",
  "argus-pypi",
+ "argus-rubygems",
  "argus-rules",
  "clap",
  "serde",
@@ -234,6 +235,26 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "argus-rubygems"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "flate2",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

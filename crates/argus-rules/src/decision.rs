@@ -31,6 +31,9 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // RubyGems: structural meta-findings
+    "gem-native-build",
+    "gem-declared-executable",
     // Maven: structural / honesty meta-findings
     "maven-bytecode-not-inspected",
     "maven-executable-jar",
