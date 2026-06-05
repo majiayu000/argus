@@ -43,7 +43,11 @@ const INFO_ONLY_RULES: &[&str] = &[
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
 /// decision from Block to AllowWithApproval.
-const DOWNGRADE_SAFE_RULES: &[&str] = &["lifecycle-script", "known-native-build-pattern"];
+const DOWNGRADE_SAFE_RULES: &[&str] = &[
+    "lifecycle-script",
+    "known-native-build-pattern",
+    "composer-plugin-package",
+];
 
 pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
     derive_from_findings(findings)

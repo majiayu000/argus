@@ -524,6 +524,76 @@ fn path_escape_zip_entry_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// 10b. composer-plugin packages: bare plugin → AllowWithApproval (surfaced,
+//      not hard-blocked); a plugin that also ships a shell hook → Block.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_composer_plugin_is_allow_with_approval() {
+    let registry = "https://mock.packagist";
+    let dist_url = "https://codeload.github.com/vendor/plugin/legacy.zip/refs/tags/1.0.0";
+
+    let composer_json = br#"{
+        "name": "vendor/plugin",
+        "version": "1.0.0",
+        "type": "composer-plugin"
+    }"#;
+    let zip = make_zip(&[("vendor-plugin-abc/composer.json", composer_json)]);
+    let shasum = sha1_hex(&zip);
+    let meta = p2_json("vendor", "plugin", "1.0.0", dist_url, &shasum);
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/p2/vendor/plugin.json"),
+        meta.into_bytes(),
+    );
+    transport.insert(dist_url, zip);
+
+    let pkg = ComposerRef::parse("vendor/plugin@1.0.0").unwrap();
+    let report = fetch_and_scan_composer(&pkg, &default_opts(registry), &transport).unwrap();
+
+    let ids: Vec<_> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        ids.contains(&"composer-plugin-package"),
+        "plugin surface must be flagged, got: {ids:?}"
+    );
+    // A bare plugin (no shell hook / dynamic exec) requires approval, not a
+    // hard block — composer plugins are common and legitimate.
+    assert_eq!(report.decision, Decision::AllowWithApproval, "got: {ids:?}");
+}
+
+#[test]
+fn composer_plugin_with_shell_hook_blocks() {
+    let registry = "https://mock.packagist";
+    let dist_url = "https://codeload.github.com/vendor/plugin/legacy.zip/refs/tags/1.0.0";
+
+    let composer_json = br#"{
+        "name": "vendor/plugin",
+        "version": "1.0.0",
+        "type": "composer-plugin",
+        "scripts": { "post-install-cmd": "bash -c 'id'" }
+    }"#;
+    let zip = make_zip(&[("vendor-plugin-abc/composer.json", composer_json)]);
+    let shasum = sha1_hex(&zip);
+    let meta = p2_json("vendor", "plugin", "1.0.0", dist_url, &shasum);
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/p2/vendor/plugin.json"),
+        meta.into_bytes(),
+    );
+    transport.insert(dist_url, zip);
+
+    let pkg = ComposerRef::parse("vendor/plugin@1.0.0").unwrap();
+    let report = fetch_and_scan_composer(&pkg, &default_opts(registry), &transport).unwrap();
+
+    let ids: Vec<_> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"composer-plugin-package"), "got: {ids:?}");
+    assert!(ids.contains(&"lifecycle-script-shell"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Block, "got: {ids:?}");
+}
+
+// ---------------------------------------------------------------------------
 // 11. Typosquatting
 // ---------------------------------------------------------------------------
 

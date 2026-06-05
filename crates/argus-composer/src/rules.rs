@@ -184,8 +184,19 @@ pub fn script_shell_exec_regex() -> &'static Regex {
                 | \b base64_decode \b
                 | \b curl \b
                 | \b wget \b
-                | /bin/sh \b
-                | /bin/bash \b
+                # Bare shell interpreters, with or without an absolute path,
+                # invoked directly as the hook command (e.g. `bash -c 'id'`,
+                # `sh -c ...`, `/bin/sh -c ...`, `zsh ...`). A Composer hook is
+                # normally a PHP-callable; a direct shell interpreter is an
+                # exec surface. `\b` before the name handles both the bare word
+                # and the `/bin/` prefix (the `/` is a non-word char).
+                | \b (?: sh | bash | zsh | dash | ksh ) \b
+                # Destructive / network / permission shell utilities run bare.
+                | \b rm \b
+                | \b chmod \b
+                | \b chown \b
+                | \b nc \b
+                | \b ncat \b
             )
             "#,
         )
@@ -356,6 +367,34 @@ mod tests {
     fn script_shell_exec_does_not_fire_on_php_callable() {
         // A PHP-callable like MyVendor\\Installer::postAutoload has no shell tokens.
         assert!(!script_shell_exec_regex().is_match("MyVendor\\\\Installer::postAutoload"));
+    }
+
+    #[test]
+    fn script_shell_exec_fires_on_bare_shell_lifecycle_commands() {
+        // Bare shell interpreters and lifecycle utilities that previously
+        // slipped through (no `php -r`, no `(`, no `curl/wget` token).
+        assert!(script_shell_exec_regex().is_match("bash -c 'id'"));
+        assert!(script_shell_exec_regex().is_match("sh -c 'id'"));
+        assert!(script_shell_exec_regex().is_match("zsh -c 'id'"));
+        assert!(script_shell_exec_regex().is_match("/bin/sh -c 'id'"));
+        assert!(script_shell_exec_regex().is_match("rm -rf vendor"));
+        assert!(script_shell_exec_regex().is_match("chmod +x payload"));
+    }
+
+    #[test]
+    fn scan_script_hook_bare_bash_emits_lifecycle_script_shell() {
+        // post-install-cmd: "bash -c 'id'" → lifecycle-script-shell, not the
+        // downgraded lifecycle-script.
+        let mut findings = Vec::new();
+        scan_script_hook("post-install-cmd", &["bash -c 'id'"], &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "lifecycle-script-shell"),
+            "got: {:?}",
+            findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>()
+        );
+        assert!(!findings.iter().any(|f| f.rule_id == "lifecycle-script"));
     }
 
     #[test]

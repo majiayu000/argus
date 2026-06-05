@@ -154,6 +154,10 @@ pub fn resolve_version<'a>(
 pub struct ComposerManifest {
     pub name: Option<String>,
     pub version: Option<String>,
+    /// Package type. `composer-plugin` packages are auto-loaded and their
+    /// `activate()` / event handlers run during Composer commands.
+    #[serde(rename = "type")]
+    pub package_type: Option<String>,
     #[serde(default)]
     pub scripts: Option<BTreeMap<String, ScriptValue>>,
     pub autoload: Option<ComposerAutoload>,
