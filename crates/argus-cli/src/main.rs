@@ -13,6 +13,13 @@ use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
 };
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
+use argus_go::{fetch_and_scan_go, GoFetchOptions, GoModuleRef, HttpTransport as GoHttpTransport};
+use argus_maven::{
+    fetch_and_scan_maven, HttpTransport as MavenHttpTransport, MavenFetchOptions, MavenRef,
+};
+use argus_nuget::{
+    fetch_and_scan_nuget, HttpTransport as NugetHttpTransport, NugetFetchOptions, NugetRef,
+};
 use argus_pypi::{
     fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
     PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
@@ -110,6 +117,45 @@ enum Cmd {
         pkg: String,
         /// crates.io registry base URL.
         #[arg(long, default_value = "https://crates.io")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a Go module from a GOPROXY, verify the dirhash h1 checksum, safe-extract the zip, scan init/exec/network surfaces.
+    GoFetch {
+        /// Module spec: `<module-path>` or `<module-path>@<version>`.
+        pkg: String,
+        /// GOPROXY registry base URL.
+        #[arg(long, default_value = "https://proxy.golang.org")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a package from NuGet, verify catalog SHA-512, safe-extract .nupkg, scan.
+    NugetFetch {
+        /// Package spec: `<id>` or `<id>@<version>`.
+        pkg: String,
+        /// NuGet registry base URL.
+        #[arg(long, default_value = "https://api.nuget.org")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources.
+    MavenFetch {
+        /// Maven coordinate: `groupId:artifactId` or `groupId:artifactId:version`.
+        pkg: String,
+        /// Maven registry base URL.
+        #[arg(long, default_value = "https://repo1.maven.org/maven2")]
         registry: String,
         /// Persistent scratch parent. Omitted → private system temp dir.
         #[arg(long)]
@@ -231,6 +277,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
+        Cmd::GoFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_go_fetch(&pkg, registry, cache_dir, format),
+        Cmd::NugetFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_nuget_fetch(&pkg, registry, cache_dir, format),
+        Cmd::MavenFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_maven_fetch(&pkg, registry, cache_dir, format),
         Cmd::GemsFetch {
             pkg,
             registry,
@@ -263,6 +327,62 @@ fn cmd_crates_fetch(
     let transport = CratesHttpTransport::new();
     let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
         .with_context(|| format!("crates-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_go_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        GoModuleRef::parse(pkg).with_context(|| format!("parse Go module spec `{pkg}`"))?;
+    let opts = GoFetchOptions {
+        registry,
+        cache_dir,
+        ..GoFetchOptions::default()
+    };
+    let transport = GoHttpTransport::new();
+    let report = fetch_and_scan_go(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("go-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_nuget_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref = NugetRef::parse(pkg).with_context(|| format!("parse NuGet spec `{pkg}`"))?;
+    let opts = NugetFetchOptions {
+        registry,
+        cache_dir,
+        ..NugetFetchOptions::default()
+    };
+    let transport = NugetHttpTransport::new();
+    let report = fetch_and_scan_nuget(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("nuget-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_maven_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        MavenRef::parse(pkg).with_context(|| format!("parse Maven coordinate `{pkg}`"))?;
+    let opts = MavenFetchOptions {
+        registry,
+        cache_dir,
+        ..MavenFetchOptions::default()
+    };
+    let transport = MavenHttpTransport::new();
+    let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("maven-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

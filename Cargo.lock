@@ -90,6 +90,9 @@ dependencies = [
  "argus-core",
  "argus-crates",
  "argus-fetch",
+ "argus-go",
+ "argus-maven",
+ "argus-nuget",
  "argus-pypi",
  "argus-rubygems",
  "argus-rules",
@@ -151,6 +154,66 @@ dependencies = [
  "tempfile",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "argus-go"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "base64",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "argus-maven"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "hex",
+ "quick-xml",
+ "regex",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "argus-nuget"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "base64",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]
@@ -1289,6 +1352,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
