@@ -31,6 +31,10 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // NuGet: structural + integrity-disclosure meta-findings
+    "nuget-integrity-unverifiable",
+    "nuget-no-manifest",
+    "nuget-content-files",
     // Go: structural meta-findings (import-time execution surface that is
     // ubiquitous and legitimate on its own; only escalates when a
     // dangerous call co-occurs in the same file).

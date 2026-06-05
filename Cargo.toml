@@ -6,6 +6,7 @@ members = [
     "crates/argus-fetch",
     "crates/argus-pypi",
     "crates/argus-crates",
+    "crates/argus-nuget",
     "crates/argus-go",
     "crates/argus-cli",
     "crates/argus-test-support",
@@ -33,6 +34,7 @@ argus-rules = { path = "crates/argus-rules" }
 argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }
 argus-crates = { path = "crates/argus-crates" }
+argus-nuget = { path = "crates/argus-nuget" }
 argus-go = { path = "crates/argus-go" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
@@ -48,6 +50,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 hex = "0.4"
 tempfile = "3"
 subtle = "2"
+quick-xml = "0.38"
 
 # argus-verify (Sigstore) deps. DSSE signature verification (M2 Day 1) uses the
 # RustCrypto stack directly; the heavier `sigstore` crate (Fulcio chain + Rekor)
