@@ -1,0 +1,24 @@
+[package]
+name = "argus-maven"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Maven Central ecosystem support for argus: fetch .jar, verify checksums, scan pom.xml build plugins + embedded text resources."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }

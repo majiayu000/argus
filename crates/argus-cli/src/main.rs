@@ -14,6 +14,9 @@ use argus_crates::{
 };
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
 use argus_go::{fetch_and_scan_go, GoFetchOptions, GoModuleRef, HttpTransport as GoHttpTransport};
+use argus_maven::{
+    fetch_and_scan_maven, HttpTransport as MavenHttpTransport, MavenFetchOptions, MavenRef,
+};
 use argus_nuget::{
     fetch_and_scan_nuget, HttpTransport as NugetHttpTransport, NugetFetchOptions, NugetRef,
 };
@@ -144,6 +147,19 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources.
+    MavenFetch {
+        /// Maven coordinate: `groupId:artifactId` or `groupId:artifactId:version`.
+        pkg: String,
+        /// Maven registry base URL.
+        #[arg(long, default_value = "https://repo1.maven.org/maven2")]
+        registry: String,
+        /// Persistent scratch parent. Omitted → private system temp dir.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Regression-corpus operations.
     Corpus {
         #[command(subcommand)]
@@ -257,6 +273,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_nuget_fetch(&pkg, registry, cache_dir, format),
+        Cmd::MavenFetch {
+            pkg,
+            registry,
+            cache_dir,
+            format,
+        } => cmd_maven_fetch(&pkg, registry, cache_dir, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -320,6 +342,25 @@ fn cmd_nuget_fetch(
     let transport = NugetHttpTransport::new();
     let report = fetch_and_scan_nuget(&pkg_ref, &opts, &transport)
         .with_context(|| format!("nuget-fetch + scan {pkg}"))?;
+    emit_report(&report, format)
+}
+
+fn cmd_maven_fetch(
+    pkg: &str,
+    registry: String,
+    cache_dir: Option<PathBuf>,
+    format: Format,
+) -> Result<ExitCode> {
+    let pkg_ref =
+        MavenRef::parse(pkg).with_context(|| format!("parse Maven coordinate `{pkg}`"))?;
+    let opts = MavenFetchOptions {
+        registry,
+        cache_dir,
+        ..MavenFetchOptions::default()
+    };
+    let transport = MavenHttpTransport::new();
+    let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
+        .with_context(|| format!("maven-fetch + scan {pkg}"))?;
     emit_report(&report, format)
 }
 

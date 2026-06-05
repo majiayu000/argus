@@ -91,6 +91,7 @@ dependencies = [
  "argus-crates",
  "argus-fetch",
  "argus-go",
+ "argus-maven",
  "argus-nuget",
  "argus-pypi",
  "argus-rules",
@@ -169,6 +170,25 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "argus-maven"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "hex",
+ "quick-xml",
+ "regex",
+ "sha1",
+ "sha2",
  "tempfile",
  "walkdir",
  "zip",
