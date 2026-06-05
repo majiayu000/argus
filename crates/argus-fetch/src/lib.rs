@@ -21,7 +21,7 @@ pub use extract::extract_tarball;
 pub use integrity::{parse_ssri, verify_ssri};
 pub use packument::{resolve_version, Packument};
 pub use provenance::{check_subject_digest, parse_attestations, AttestationSummary, SubjectCheck};
-pub use transport::{HttpTransport, Transport};
+pub use transport::{is_not_found, HttpStatusError, HttpTransport, Transport};
 
 /// Cap for the packument JSON body. Real packuments are hundreds of KB; we
 /// leave headroom for very-popular packages without letting a hostile server
@@ -193,9 +193,13 @@ pub fn fetch_and_scan(
     //    later; defaulting closed is the right behaviour for an MVP.
     validate_artifact_url(&dist.tarball, &registry_host, &opts.tarball_host_allowlist)?;
 
-    // 4. Download tarball under a streaming cap.
+    // 4. Download tarball under a streaming cap. Re-validate every redirect
+    //    hop against the same host allowlist so a registry 3xx cannot bounce
+    //    the download to an unallowlisted host.
     let tarball_bytes = transport
-        .get(&dist.tarball, opts.max_tarball_bytes)
+        .get_redirect_checked(&dist.tarball, opts.max_tarball_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, &opts.tarball_host_allowlist)
+        })
         .with_context(|| format!("download tarball {}", dist.tarball))?;
 
     // 5. Verify integrity (strongest declared algorithm only).

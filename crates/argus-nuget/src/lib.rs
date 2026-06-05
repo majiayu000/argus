@@ -142,7 +142,9 @@ pub fn fetch_and_scan_nuget(
 
     // 4. Download the artifact bytes.
     let nupkg_bytes = transport
-        .get(&download_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&download_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, NUGET_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download .nupkg {download_url}"))?;
 
     // 5. Integrity (option A): follow registration → catalog → packageHash.

@@ -377,3 +377,67 @@ fn maven_embedded_build_script_flagged() {
     // Medium severity -> blocks.
     assert_eq!(report.decision, Decision::Block);
 }
+
+// ---------------------------------------------------------------------------
+// #54 — 404-vs-transient: a confirmed-absent (404) .sha256 or .pom may
+// downgrade, but a transient failure (5xx) must fail closed (U-29).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn maven_absent_pom_404_is_info_not_fatal() {
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", BENIGN_MANIFEST)]);
+    let (jar_url, _pom_url, sha256_url, _sha1_url) = urls("com/example", "demo", "1.0.0");
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert(&sha256_url, sha256_hex(&jar).into_bytes());
+    // pom NOT registered -> MockTransport returns a 404.
+
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let report = fetch_and_scan_maven(&pkg, &MavenFetchOptions::default(), &transport).unwrap();
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"maven-no-pom"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn maven_transient_pom_error_fails_closed() {
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", BENIGN_MANIFEST)]);
+    let (jar_url, pom_url, sha256_url, _sha1_url) = urls("com/example", "demo", "1.0.0");
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert(&sha256_url, sha256_hex(&jar).into_bytes()); // strong integrity OK
+    transport.insert_status(&pom_url, 503); // transient — NOT a 404
+
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_maven(&pkg, &MavenFetchOptions::default(), &transport).unwrap_err()
+    );
+    assert!(
+        err.contains("transient") || err.contains("pom"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn maven_transient_sha256_error_does_not_downgrade_to_sha1() {
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", BENIGN_MANIFEST)]);
+    let (jar_url, pom_url, sha256_url, sha1_url) = urls("com/example", "demo", "1.0.0");
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert_status(&sha256_url, 500); // transient — NOT a 404
+    transport.insert(&sha1_url, sha1_hex(&jar).into_bytes()); // a valid weak digest IS available
+    transport.insert(&pom_url, BENIGN_POM.to_vec());
+
+    // The transient .sha256 failure must hard-error rather than silently
+    // falling back to the (available) weak SHA-1 path.
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_maven(&pkg, &MavenFetchOptions::default(), &transport).unwrap_err()
+    );
+    assert!(
+        err.contains("transient") || err.contains("SHA-1") || err.contains("sha256"),
+        "got: {err}"
+    );
+}

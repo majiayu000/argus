@@ -179,7 +179,9 @@ pub fn fetch_and_scan_go(
 
     // 4. Download the module zip.
     let zip_bytes = transport
-        .get(&zip_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&zip_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, GO_PROXY_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download module zip {zip_url}"))?;
 
     // 5. Safe-extract into memory (path/symlink/size guards) and recompute

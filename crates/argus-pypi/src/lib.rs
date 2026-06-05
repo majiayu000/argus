@@ -195,7 +195,9 @@ pub fn fetch_and_scan_pypi(
             other => bail!("unsupported PyPI packagetype: {other}"),
         };
         let bytes = transport
-            .get(&art.url, opts.max_artifact_bytes)
+            .get_redirect_checked(&art.url, opts.max_artifact_bytes, &|u| {
+                validate_artifact_url(u, &registry_host, PYPI_CDN_ALLOWLIST)
+            })
             .with_context(|| format!("download artifact {}", art.url))?;
         verify_sha256_hex(&bytes, &art.digests.sha256).with_context(|| {
             format!("verify SHA-256 of {} ({} bytes)", art.filename, bytes.len())

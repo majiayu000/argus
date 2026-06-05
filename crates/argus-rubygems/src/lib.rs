@@ -139,7 +139,9 @@ pub fn fetch_and_scan_gems(
     // 3. Download + verify SHA-256. verify_sha256_hex hard-errors on empty
     //    hex (U-29: an absent digest is a failure, never a silent skip).
     let gem_bytes = transport
-        .get(&download_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&download_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, RUBYGEMS_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download .gem {download_url}"))?;
     verify_sha256_hex(&gem_bytes, &resolved.sha).with_context(|| {
         format!(
