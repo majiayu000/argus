@@ -35,6 +35,15 @@ const INFO_ONLY_RULES: &[&str] = &[
     "nuget-integrity-unverifiable",
     "nuget-no-manifest",
     "nuget-content-files",
+    // Go: structural meta-findings (import-time execution surface that is
+    // ubiquitous and legitimate on its own; only escalates when a
+    // dangerous call co-occurs in the same file).
+    "go-init-function",
+    "go-package-var-exec",
+    // Go: the GOPROXY served no usable .ziphash, so the module bytes could
+    // not be authenticated. Surfaced (not silently skipped) but not a verdict
+    // on its own — mirrors `missing-provenance`.
+    "go-integrity-unverified",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
