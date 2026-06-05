@@ -144,19 +144,18 @@ pub fn fetch_and_scan_go(
     validate_artifact_url(&ziphash_url, &registry_host, GO_PROXY_CDN_ALLOWLIST)
         .with_context(|| format!("validate ziphash URL {ziphash_url}"))?;
 
-    // 3. Fetch the proxy-advertised checksum FIRST. A missing/unreachable
-    //    `.ziphash` is a HARD ERROR (U-29): we never silently skip
-    //    integrity. (A private GOPROXY that does not implement `.ziphash`
-    //    fails closed here rather than allowing an unverified module.)
-    let ziphash_bytes = transport
-        .get(&ziphash_url, MAX_METADATA_BYTES)
-        .with_context(|| {
-            format!(
-                "fetch GOPROXY .ziphash {ziphash_url} — integrity checksum is mandatory; refusing to proceed without it"
-            )
-        })?;
-    let expected_h1 = dirhash::parse_ziphash(&ziphash_bytes)
-        .with_context(|| format!("parse .ziphash body from {ziphash_url}"))?;
+    // 3. Try to fetch the proxy-advertised checksum. The documented GOPROXY
+    //    protocol only requires list/latest/info/mod/zip; `.ziphash` is NOT a
+    //    mandated endpoint (Go authenticates the locally-computed hash via
+    //    go.sum / the checksum database). A compliant proxy may therefore
+    //    404 it. We must not abort the whole scan in that case — but we also
+    //    never silently skip integrity (U-29): an absent/unparseable checksum
+    //    becomes a visible `go-integrity-unverified` finding below. A
+    //    checksum that IS advertised but does NOT match still hard-fails.
+    let expected_h1: Option<String> = match transport.get(&ziphash_url, MAX_METADATA_BYTES) {
+        Ok(bytes) => dirhash::parse_ziphash(&bytes).ok(),
+        Err(_) => None,
+    };
 
     // 4. Download the module zip.
     let zip_bytes = transport
@@ -164,21 +163,40 @@ pub fn fetch_and_scan_go(
         .with_context(|| format!("download module zip {zip_url}"))?;
 
     // 5. Safe-extract into memory (path/symlink/size guards) and recompute
-    //    the dirhash over the exact bytes, then compare in constant time.
+    //    the dirhash over the exact bytes.
     let module = extract_module_zip(&zip_bytes, opts.max_extracted_bytes)
         .with_context(|| format!("safe-extract Go module zip {zip_url}"))?;
     let recomputed_h1 = dirhash::compute_h1(module.files());
-    dirhash::verify_h1(&recomputed_h1, &expected_h1).with_context(|| {
-        format!(
-            "verify module checksum for {}@{version} ({} files)",
-            pkg.module_path,
-            module.files().len()
-        )
-    })?;
 
     // 6. Scan the extracted sources.
     let mut scan_result = scan_extracted_module(&module);
     let mut all_findings: Vec<Finding> = std::mem::take(&mut scan_result.findings);
+
+    // 6b. Integrity verdict. A present checksum that mismatches is a hard
+    //     error (tamper). An absent/unparseable one is surfaced as an
+    //     Info finding (in INFO_ONLY_RULES) so a quirky/private proxy does
+    //     not break scanning while the unverified state stays visible.
+    match &expected_h1 {
+        Some(expected) => {
+            dirhash::verify_h1(&recomputed_h1, expected).with_context(|| {
+                format!(
+                    "verify module checksum for {}@{version} ({} files)",
+                    pkg.module_path,
+                    module.files().len()
+                )
+            })?;
+        }
+        None => {
+            all_findings.push(finding(
+                "go-integrity-unverified",
+                argus_core::Severity::Info,
+                format!(
+                    "GOPROXY served no usable .ziphash for {}@{version}; module bytes could not be authenticated against go.sum/the checksum database (recomputed {recomputed_h1})",
+                    pkg.module_path
+                ),
+            ));
+        }
+    }
 
     // 7. Name-based rules (typosquatting) on the module path.
     rules::push_name_findings(&pkg.module_path, &mut all_findings);

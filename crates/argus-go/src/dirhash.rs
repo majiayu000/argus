@@ -17,7 +17,9 @@
 //! <lowercase-hex(SHA-256(file-bytes))>  <module>@<version>/<path>\n
 //! ```
 //!
-//! with the lines sorted byte-wise by the full line. Therefore
+//! where the FILE NAMES are sorted first and the lines are emitted in that
+//! filename order (sorting the formatted lines instead would order them by
+//! the leading hash and diverge from Go). Therefore
 //! `argus_core::url::verify_sha256_hex(zip_bytes, ...)` CANNOT be applied
 //! to the downloaded zip and MUST NOT be used as if it could — doing so
 //! would fabricate an integrity result.
@@ -48,17 +50,24 @@ use subtle::ConstantTimeEq;
 /// module zip layout). The returned string carries the `h1:` prefix so it
 /// compares directly against the proxy `.ziphash` body.
 pub fn compute_h1(files: &[(String, Vec<u8>)]) -> String {
-    let mut lines: Vec<String> = Vec::with_capacity(files.len());
-    for (name, bytes) in files {
-        let hex = lower_hex(&Sha256::digest(bytes));
+    // dirhash.Hash1 sorts the FILE NAMES, then writes one
+    // `<lower-hex(sha256(content))>  <name>\n` line per file in that order.
+    // Sorting the *formatted lines* instead would order them by the leading
+    // hash digest, which differs from filename order for any multi-file
+    // module and yields a different h1 than Go (rejecting valid zips).
+    let mut entries: Vec<(&str, String)> = files
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), lower_hex(&Sha256::digest(bytes))))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut h = Sha256::new();
+    for (name, hex) in &entries {
         // Go's dirhash uses exactly two spaces between the hex digest and
         // the file name, terminated by a newline.
-        lines.push(format!("{hex}  {name}\n"));
+        h.update(format!("{hex}  {name}\n").as_bytes());
     }
-    lines.sort();
-    let manifest: String = lines.concat();
-    let digest = Sha256::digest(manifest.as_bytes());
-    format!("h1:{}", BASE64_STANDARD.encode(digest))
+    format!("h1:{}", BASE64_STANDARD.encode(h.finalize()))
 }
 
 /// Verify a recomputed `h1:` against the proxy-advertised `h1:` value in
@@ -112,11 +121,12 @@ fn lower_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Golden value computed offline with the dirhash.Hash1 algorithm
-    /// (sha256-per-file -> sorted manifest -> sha256 -> base64-std). The
-    /// reference value was produced independently of this code so the test
-    /// catches any drift in the manifest layout (two-space separator,
-    /// trailing newline, sort order, base64 alphabet).
+    /// Golden value computed by an INDEPENDENT oracle (a Python reimpl of
+    /// golang.org/x/mod/sumdb/dirhash.Hash1: sort filenames -> write
+    /// `<hex(sha256(content))>  <name>\n` per file -> sha256 -> base64-std),
+    /// not by this code, so it catches drift in the manifest layout
+    /// (two-space separator, trailing newline, filename sort order, base64
+    /// alphabet). In this case foo.go sorts before go.mod by filename.
     #[test]
     fn compute_h1_matches_golden() {
         let files = vec![
@@ -131,7 +141,31 @@ mod tests {
         ];
         assert_eq!(
             compute_h1(&files),
-            "h1:ejorFJdgFNvtlVdNEmNESr/Xmw+ybzfqv4UXM/5kqu4="
+            "h1:WsmPR4cuJiO0+eRnapJH6cu2pud2bSBidcFmZj0K2rU="
+        );
+    }
+
+    /// Regression guard for the filename-vs-hash sort order: this 3-file set
+    /// is constructed so that sorting by content hash produces a DIFFERENT
+    /// manifest order (hence a different digest) than sorting by filename.
+    /// Only the correct (filename-sorted) implementation yields this golden,
+    /// which was computed by the same independent oracle.
+    #[test]
+    fn compute_h1_sorts_by_filename_not_hash() {
+        let files = vec![
+            (
+                "m@v1.0.0/z.go".to_string(),
+                b"package m\nvar Z = 1\n".to_vec(),
+            ),
+            (
+                "m@v1.0.0/a.go".to_string(),
+                b"package m\nvar A = 2\n".to_vec(),
+            ),
+            ("m@v1.0.0/go.mod".to_string(), b"module m\n".to_vec()),
+        ];
+        assert_eq!(
+            compute_h1(&files),
+            "h1:spAGgsMxpsia/RBx7YiCLAkw9kVn5d1/oRBhyZIOo6A="
         );
     }
 

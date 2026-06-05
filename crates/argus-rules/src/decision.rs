@@ -36,6 +36,10 @@ const INFO_ONLY_RULES: &[&str] = &[
     // dangerous call co-occurs in the same file).
     "go-init-function",
     "go-package-var-exec",
+    // Go: the GOPROXY served no usable .ziphash, so the module bytes could
+    // not be authenticated. Surfaced (not silently skipped) but not a verdict
+    // on its own — mirrors `missing-provenance`.
+    "go-integrity-unverified",
 ];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the

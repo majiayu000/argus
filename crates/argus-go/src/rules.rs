@@ -64,13 +64,18 @@ pub fn init_func_regex() -> Regex {
 }
 
 /// Package-level `var` initializer that runs code at import, e.g.
-/// `var _ = something()` or `var x = exec.Command(...)`. Structural.
+/// `var _ = something()`, `var x = exec.Command(...)`, or a grouped
+/// `var ( ... )` block (whose body runs at import too). Structural.
 pub fn package_var_exec_regex() -> Regex {
-    // A top-level `var` (line start, not indented inside a func body — we
-    // approximate "top level" with line-anchoring) whose RHS contains a
-    // call `(`. This intentionally over-matches simple top-level `var x =
-    // 1`; the surrounding logic only treats it as informational.
-    Regex::new(r"(?m)^var\s+[\w(),\s]+=\s*[\w.]+\s*\(").unwrap()
+    // Two top-level forms (line-anchored to approximate "top level", so a
+    // func-local indented `var` block is not matched):
+    //   1. `var ( ...`  — a grouped var block opener; its initializers run at
+    //      import. We treat the opener as import context (the dangerous call
+    //      itself is detected separately over the whole file).
+    //   2. `var x = call(...)` — a single-line initializer with a call RHS.
+    // This intentionally over-matches (e.g. a `var (` block of constants);
+    // the surrounding logic only treats it as informational on its own.
+    Regex::new(r"(?m)^var\s*\(|^var\s+[\w(),\s]+=\s*[\w.]+\s*\(").unwrap()
 }
 
 /// os/exec / syscall execution.
@@ -138,6 +143,46 @@ pub fn c_system_regex() -> Regex {
     Regex::new(r"\b(?:system|popen)\s*\(").unwrap()
 }
 
+/// Resolve the import alias the file uses for `"os/exec"`, if any.
+///
+/// Returns `Some(".")` for a dot import (`import . "os/exec"`), `Some(alias)`
+/// for a named alias (`import e "os/exec"` or a grouped `e "os/exec"` line),
+/// and `None` when `os/exec` is not imported or is imported under its default
+/// name (the default `exec.` call form is handled by [`exec_regex`]). The
+/// alias group `[A-Za-z_]\w*|\.` deliberately cannot capture the bare
+/// `import` keyword of a default `import "os/exec"`.
+fn os_exec_alias(content: &str) -> Option<String> {
+    let re = Regex::new(r#"(?m)^\s*(?:import\s+)?([A-Za-z_]\w*|\.)\s+"os/exec"\s*$"#).unwrap();
+    re.captures(content).map(|c| c[1].to_string())
+}
+
+/// Detect an `os/exec` / `syscall` process-spawn call, including aliased and
+/// dot-import forms that the plain [`exec_regex`] (`exec.Command`) misses.
+///
+/// - `import e "os/exec"` then `e.Command(...)`
+/// - `import . "os/exec"` then bare `Command(...)`
+///
+/// The aliased check only fires when the file actually imports `os/exec`
+/// under that alias, so a benign local method named `Command` is not matched
+/// unless the package dot-imported `os/exec`.
+pub fn detect_exec_call(content: &str) -> bool {
+    if exec_regex().is_match(content) {
+        return true;
+    }
+    match os_exec_alias(content).as_deref() {
+        Some(".") => Regex::new(r"\bCommand(?:Context)?\s*\(")
+            .unwrap()
+            .is_match(content),
+        Some(alias) => Regex::new(&format!(
+            r"\b{}\.Command(?:Context)?\s*\(",
+            regex::escape(alias)
+        ))
+        .unwrap()
+        .is_match(content),
+        None => false,
+    }
+}
+
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Mirrors `argus_pypi::rules::push_name_findings`.
 pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
@@ -182,6 +227,30 @@ mod tests {
     fn package_var_exec_fires() {
         assert!(package_var_exec_regex().is_match("var _ = register()"));
         assert!(package_var_exec_regex().is_match("var x = compute(1, 2)"));
+    }
+
+    #[test]
+    fn package_var_exec_fires_on_block_form() {
+        // Grouped `var ( ... )` block opener (initializers run at import).
+        let block = "var (\n    _ = exec.Command(\"sh\")\n)\n";
+        assert!(package_var_exec_regex().is_match(block));
+        // A func-local (indented) var block is not treated as top level.
+        assert!(!package_var_exec_regex().is_match("func f() {\n\tvar (\n\t\tx = 1\n\t)\n}"));
+    }
+
+    #[test]
+    fn detect_exec_call_handles_default_alias_and_dot_imports() {
+        // Default form (exec.Command) — covered directly.
+        assert!(detect_exec_call("import \"os/exec\"\nexec.Command(\"sh\")"));
+        // Named alias: e.Command(...) with `import e "os/exec"`.
+        assert!(detect_exec_call("import e \"os/exec\"\ne.Command(\"sh\")"));
+        // Dot import: bare Command(...) with `import . "os/exec"`.
+        assert!(detect_exec_call("import . \"os/exec\"\nCommand(\"sh\")"));
+        // A bare Command(...) WITHOUT a dot-import of os/exec must NOT fire
+        // (avoids matching unrelated local methods named Command).
+        assert!(!detect_exec_call("foo.Command(\"x\")\n"));
+        // syscall forms still covered.
+        assert!(detect_exec_call("syscall.Exec(path, argv, env)"));
     }
 
     #[test]

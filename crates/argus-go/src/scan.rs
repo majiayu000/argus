@@ -167,7 +167,6 @@ pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
 
     let init_re = rules::init_func_regex();
     let var_re = rules::package_var_exec_regex();
-    let exec_re = rules::exec_regex();
     let net_re = rules::network_regex();
     let env_re = rules::env_read_regex();
     let decode_re = rules::decode_regex();
@@ -229,7 +228,7 @@ pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
             );
         }
 
-        let has_exec = exec_re.is_match(&content);
+        let has_exec = rules::detect_exec_call(&content);
         let has_net = net_re.is_match(&content);
         let has_env = env_re.is_match(&content);
         let has_decode = decode_re.is_match(&content);
