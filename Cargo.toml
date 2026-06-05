@@ -5,8 +5,12 @@ members = [
     "crates/argus-rules",
     "crates/argus-fetch",
     "crates/argus-pypi",
+    "crates/argus-rubygems",
     "crates/argus-crates",
     "crates/argus-composer",
+    "crates/argus-maven",
+    "crates/argus-nuget",
+    "crates/argus-go",
     "crates/argus-cli",
     "crates/argus-test-support",
     "crates/argus-verify",
@@ -32,8 +36,12 @@ argus-core = { path = "crates/argus-core" }
 argus-rules = { path = "crates/argus-rules" }
 argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }
+argus-rubygems = { path = "crates/argus-rubygems" }
 argus-crates = { path = "crates/argus-crates" }
 argus-composer = { path = "crates/argus-composer" }
+argus-maven = { path = "crates/argus-maven" }
+argus-nuget = { path = "crates/argus-nuget" }
+argus-go = { path = "crates/argus-go" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
 
@@ -46,6 +54,7 @@ base64 = "0.22"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.38"
 hex = "0.4"
 tempfile = "3"
 subtle = "2"

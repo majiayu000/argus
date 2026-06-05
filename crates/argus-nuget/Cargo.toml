@@ -1,0 +1,29 @@
+[package]
+name = "argus-nuget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NuGet ecosystem support for argus: fetch .nupkg, verify catalog SHA-512, scan install/build hooks + .nuspec."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+argus-fetch = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+base64 = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }
+zip = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
