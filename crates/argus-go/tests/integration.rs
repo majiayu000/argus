@@ -1,7 +1,7 @@
 //! End-to-end tests for `fetch_and_scan_go` via MockTransport.
 //!
-//! No network is touched: the mock serves the GOPROXY `@latest`, `.zip`,
-//! and `.ziphash` routes. The `.ziphash` value is the real dirhash `h1:`
+//! No network is touched: the mock serves the GOPROXY `@v/list`, `@latest`,
+//! `.zip`, and `.ziphash` routes. The `.ziphash` value is the real dirhash `h1:`
 //! recomputed over the same zip the test builds, so the integrity path is
 //! exercised honestly: a *mismatched* checksum hard-errors, while a *missing*
 //! `.ziphash` route (not a mandated GOPROXY endpoint) degrades to a visible
@@ -120,14 +120,6 @@ fn clean_library_allows() {
         report.findings.is_empty(),
         "expected no findings, got: {:?}",
         report.findings
-    );
-    eprintln!(
-        "FINDINGS: {:#?}",
-        report
-            .findings
-            .iter()
-            .map(|f| (f.rule_id.as_str(), f.severity))
-            .collect::<Vec<_>>()
     );
     assert_eq!(report.decision, Decision::Allow);
 }
@@ -395,6 +387,124 @@ fn typosquat_blocks() {
     let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
     assert!(rule_ids.contains(&"typosquatting"), "got: {rule_ids:?}");
     assert!(rule_ids.contains(&"low-reputation"), "got: {rule_ids:?}");
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn resolve_latest_via_v_list_when_no_at_latest() {
+    // A compliant private GOPROXY may serve @v/list + info/mod/zip but NOT
+    // @latest. When the user omits a version, resolution must read @v/list
+    // (unsorted, plain text) and pick the highest release — here v1.10.0,
+    // NOT the lexically-largest v1.9.0.
+    let module = "example.com/listmod";
+    let version = "v1.10.0";
+    let go_mod = b"module example.com/listmod\n\ngo 1.21\n";
+    let lib_go = b"package listmod\n\nfunc Add(a, b int) int { return a + b }\n";
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("lib.go", lib_go)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    // Unsorted version list; no @latest route registered.
+    transport.insert(
+        &format!("{REGISTRY}/{module}/@v/list"),
+        b"v1.2.0\nv1.10.0\nv1.9.0\n".to_vec(),
+    );
+    register(&transport, module, version, zip, Some(h1));
+
+    // Spec form WITHOUT a version (parse yields version: None).
+    let pkg = GoModuleRef::parse(module).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    assert_eq!(report.package_version.as_deref(), Some("v1.10.0"));
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn resolve_latest_via_at_latest_when_no_v_list() {
+    // The existing @latest path must keep working: when @v/list is absent
+    // (not registered), resolution falls back to the optional @latest JSON.
+    let module = "example.com/latestmod";
+    let version = "v2.0.0";
+    let go_mod = b"module example.com/latestmod\n\ngo 1.21\n";
+    let lib_go = b"package latestmod\n\nfunc Add(a, b int) int { return a + b }\n";
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("lib.go", lib_go)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    // No @v/list route; only @latest is available.
+    transport.insert(
+        &format!("{REGISTRY}/{module}/@latest"),
+        format!(r#"{{"Version":"{version}"}}"#).into_bytes(),
+    );
+    register(&transport, module, version, zip, Some(h1));
+
+    let pkg = GoModuleRef::parse(module).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    assert_eq!(report.package_version.as_deref(), Some(version));
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn init_holding_http_client_is_not_network_egress() {
+    // An init() that only constructs/holds an http.Client (no actual request)
+    // must NOT produce a Critical go-init-network finding. Previously the bare
+    // `http.Client` type matched the network regex and blocked benign code.
+    let module = "example.com/clientmod";
+    let version = "v1.0.0";
+    let go_mod = b"module example.com/clientmod\n\ngo 1.21\n";
+    let src = br#"
+package clientmod
+
+import "net/http"
+
+var c = &http.Client{}
+
+func init() {
+    _ = c
+}
+"#;
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("client.go", src)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    register(&transport, module, version, zip, Some(h1));
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(!ids.contains(&"go-init-network"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn init_with_real_http_get_still_blocks() {
+    // The complement to the http.Client false-positive test: a real
+    // http.Get(...) inside init() must still escalate to go-init-network.
+    let module = "example.com/getmod";
+    let version = "v1.0.0";
+    let go_mod = b"module example.com/getmod\n\ngo 1.21\n";
+    let src = br#"
+package getmod
+
+import "net/http"
+
+func init() {
+    http.Get("https://collect.example.invalid")
+}
+"#;
+    let files: &[(&str, &[u8])] = &[("go.mod", go_mod), ("get.go", src)];
+    let zip = make_module_zip(module, version, files);
+    let h1 = h1_for(module, version, files);
+
+    let transport = MockTransport::new();
+    register(&transport, module, version, zip, Some(h1));
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"go-init-network"), "got: {ids:?}");
     assert_eq!(report.decision, Decision::Block);
 }
 

@@ -125,13 +125,33 @@ pub fn fetch_and_scan_go(
             Some(v),
         )?,
         None => {
-            let latest_url = format!("{registry}/{esc_mod}/@latest");
-            let bytes = transport
-                .get(&latest_url, MAX_METADATA_BYTES)
-                .with_context(|| format!("fetch GOPROXY @latest {latest_url}"))?;
-            let latest: GoModInfo = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parse GOPROXY @latest {latest_url}"))?;
-            resolve_version(&latest, None)?
+            // Prefer `@v/list`: the GOPROXY protocol mandates list/info/mod/zip
+            // but NOT `@latest`, so a compliant private proxy may serve the
+            // version list while 404-ing `@latest`. `@v/list` is a plain-text,
+            // newline-separated, UNSORTED set of versions; we pick the highest
+            // release version ourselves. Only when the list is empty or
+            // unavailable do we fall back to the optional `@latest` endpoint.
+            let list_url = format!("{registry}/{esc_mod}/@v/list");
+            let from_list = transport
+                .get(&list_url, MAX_METADATA_BYTES)
+                .ok()
+                .and_then(|bytes| {
+                    let text = String::from_utf8_lossy(&bytes);
+                    pick_highest_version(&text)
+                });
+
+            match from_list {
+                Some(v) => v,
+                None => {
+                    let latest_url = format!("{registry}/{esc_mod}/@latest");
+                    let bytes = transport
+                        .get(&latest_url, MAX_METADATA_BYTES)
+                        .with_context(|| format!("fetch GOPROXY @latest {latest_url}"))?;
+                    let latest: GoModInfo = serde_json::from_slice(&bytes)
+                        .with_context(|| format!("parse GOPROXY @latest {latest_url}"))?;
+                    resolve_version(&latest, None)?
+                }
+            }
         }
     };
     let esc_ver = escape_module_path(&version);
@@ -221,6 +241,49 @@ pub(crate) fn finding(rule: &str, sev: argus_core::Severity, detail: impl Into<S
     Finding::new(rule, sev, detail)
 }
 
+/// Pick the highest release version from a GOPROXY `@v/list` body.
+///
+/// The list is newline-separated and UNSORTED. We compare with a minimal
+/// semver ordering: strip a leading `v`, split on `.`, compare numeric
+/// components left-to-right. Pseudo-versions (a `-0.YYYYMMDD…` timestamp
+/// suffix) and prereleases (any `-` suffix) are skipped so a stable release
+/// is always preferred. Returns `None` when the body contains no usable
+/// release version.
+fn pick_highest_version(list: &str) -> Option<String> {
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // Skip prereleases and pseudo-versions (anything with a `-` suffix,
+        // which covers `-0.YYYYMMDD-hash` pseudo-versions too).
+        .filter(|line| !line.trim_start_matches('v').contains('-'))
+        .max_by(|a, b| cmp_semver(a, b))
+        .map(str::to_string)
+}
+
+/// Compare two `vX.Y.Z` version strings by numeric components. A leading
+/// `v` is stripped; each `.`-separated component is parsed as a number
+/// (non-numeric components sort as 0). Shorter version strings are padded
+/// with implicit zeros, so `v1.2` < `v1.2.1`.
+fn cmp_semver(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('.')
+            .map(|c| c.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (pa, pb) = (parts(a), parts(b));
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let x = pa.get(i).copied().unwrap_or(0);
+        let y = pb.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +307,27 @@ mod tests {
         assert!(GoModuleRef::parse("").is_err());
         assert!(GoModuleRef::parse("github.com/x@").is_err());
         assert!(GoModuleRef::parse("@v1.0.0").is_err());
+    }
+
+    #[test]
+    fn pick_highest_version_unsorted() {
+        // Numeric (not lexical) ordering: v1.10.0 > v1.9.0 > v1.2.0.
+        let list = "v1.2.0\nv1.10.0\nv1.9.0\n";
+        assert_eq!(pick_highest_version(list).as_deref(), Some("v1.10.0"));
+    }
+
+    #[test]
+    fn pick_highest_version_skips_prerelease_and_pseudo() {
+        let list = "v1.2.0\nv1.3.0-rc1\nv0.0.0-20210101000000-abcdef123456\n";
+        // Prerelease (-rc1) and pseudo-version (-0.timestamp) are skipped.
+        assert_eq!(pick_highest_version(list).as_deref(), Some("v1.2.0"));
+    }
+
+    #[test]
+    fn pick_highest_version_empty_is_none() {
+        assert_eq!(pick_highest_version("\n  \n"), None);
+        // A list with only prereleases yields no usable release.
+        assert_eq!(pick_highest_version("v1.0.0-rc1\n"), None);
     }
 
     #[test]

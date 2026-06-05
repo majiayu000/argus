@@ -95,6 +95,13 @@ pub fn exec_regex() -> Regex {
 }
 
 /// Network egress.
+///
+/// Matches actual egress *calls* (`net.Dial`, `net.Dialer`, `http.Get`,
+/// `http.Post`, `http.NewRequest(WithContext)`). The bare `http.Client`
+/// type is intentionally NOT matched: merely declaring or holding an
+/// `http.Client` value/struct field performs no egress, so matching it
+/// produced false-positive Critical `go-init-network` findings on benign
+/// files (e.g. a `func init()` that only constructs an `http.Client`).
 pub fn network_regex() -> Regex {
     Regex::new(
         r#"(?x)
@@ -104,8 +111,7 @@ pub fn network_regex() -> Regex {
             net\.Dialer\b |
             http\.Get |
             http\.Post |
-            http\.NewRequest(?:WithContext)? |
-            http\.Client\b
+            http\.NewRequest(?:WithContext)?
         )
         "#,
     )
@@ -265,6 +271,16 @@ mod tests {
         assert!(network_regex().is_match(r#"net.Dial("tcp", addr)"#));
         assert!(network_regex().is_match(r#"http.Get("https://x")"#));
         assert!(network_regex().is_match("http.NewRequest(method, url, body)"));
+    }
+
+    #[test]
+    fn network_does_not_fire_on_bare_http_client_type() {
+        // Declaring/holding an `http.Client` value performs no egress, so the
+        // bare type must NOT match (it caused false-positive go-init-network).
+        assert!(!network_regex().is_match("var c = &http.Client{}"));
+        assert!(!network_regex().is_match("type T struct { c http.Client }"));
+        // A real egress call in the same text still fires.
+        assert!(network_regex().is_match("c := &http.Client{}\nhttp.Get(url)"));
     }
 
     #[test]
