@@ -150,7 +150,12 @@ pub fn scan_gem(
     //    plus extconf.rb / ext-tree build-time rules.
     let mut extconf_on_disk = false;
     // Compiled once, reused across the walk: the ENV-token-harvester pair.
+    // `env_cred_re` matches a single credential-shaped name
+    // (`ENV['AWS_SECRET_ACCESS_KEY']`); `env_bulk_re` matches a whole-env dump
+    // (`ENV.to_h`, `ENV.each`, ...) that sweeps up every variable. Either one,
+    // co-located with network egress, is an env-token harvester.
     let env_cred_re = rules::env_credential_read_regex();
+    let env_bulk_re = rules::env_bulk_read_regex();
     let net_egress_re = rules::extconf_remote_download_regex();
     for entry in walkdir::WalkDir::new(&pkg_dir).follow_links(false) {
         let entry = entry?;
@@ -186,11 +191,13 @@ pub fn scan_gem(
             &mut findings,
         );
 
-        // ENV-token harvester: a credential-shaped ENV read AND network
-        // egress in the same file (2022 RubyGems incident class). The shared
-        // credential-access rule only matches secret-file paths, so detect the
-        // Ruby env-read idiom here. File-level proximity, not data-flow.
-        if env_cred_re.is_match(&content) && net_egress_re.is_match(&content) {
+        // ENV-token harvester: a credential-shaped ENV read OR a bulk env dump
+        // (ENV.to_h/each/select/...) AND network egress in the same file (2022
+        // RubyGems incident class). The shared credential-access rule only
+        // matches secret-file paths, so detect the Ruby env-read idiom here.
+        // File-level proximity, not data-flow.
+        let env_harvest = env_cred_re.is_match(&content) || env_bulk_re.is_match(&content);
+        if env_harvest && net_egress_re.is_match(&content) {
             findings.push(finding(
                 "gem-env-token-exfil",
                 Severity::High,

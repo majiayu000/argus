@@ -32,7 +32,7 @@ mod scan;
 
 pub use argus_core::ArtifactScan;
 pub use argus_fetch::{HttpTransport, Transport};
-pub use metadata::{resolve_version, GemVersion};
+pub use metadata::{resolve_version, GemVersion, ResolvedVersion};
 pub use rules::POPULAR_RUBY_GEMS;
 pub use scan::{parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem};
 
@@ -117,11 +117,22 @@ pub fn fetch_and_scan_gems(
     let versions: Vec<GemVersion> = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse RubyGems version list {versions_url}"))?;
 
-    let (version, sha) = resolve_version(&versions, &pkg.name, pkg.version.as_deref())
+    let resolved = resolve_version(&versions, &pkg.name, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let version = resolved.number.clone();
 
-    // 2. Build + validate the download URL.
-    let download_url = format!("{registry}/downloads/{}-{version}.gem", pkg.name);
+    // 2. Build + validate the download URL. RubyGems names the artifact
+    //    `NAME-VERSION.gem` for the default pure-Ruby (`ruby`/empty) platform,
+    //    but `NAME-VERSION-PLATFORM.gem` for native/precompiled gems (e.g.
+    //    `nokogiri-1.16.0-x86_64-linux.gem`). The resolved entry's `sha`
+    //    belongs to that exact artifact, so the filename must include the
+    //    platform or the download 404s / fails SHA verification.
+    let gem_filename = if resolved.is_default_platform() {
+        format!("{}-{version}.gem", pkg.name)
+    } else {
+        format!("{}-{version}-{}.gem", pkg.name, resolved.platform)
+    };
+    let download_url = format!("{registry}/downloads/{gem_filename}");
     validate_artifact_url(&download_url, &registry_host, RUBYGEMS_CDN_ALLOWLIST)
         .with_context(|| format!("validate RubyGems download URL {download_url}"))?;
 
@@ -130,10 +141,9 @@ pub fn fetch_and_scan_gems(
     let gem_bytes = transport
         .get(&download_url, opts.max_artifact_bytes)
         .with_context(|| format!("download .gem {download_url}"))?;
-    verify_sha256_hex(&gem_bytes, &sha).with_context(|| {
+    verify_sha256_hex(&gem_bytes, &resolved.sha).with_context(|| {
         format!(
-            "verify SHA-256 of {}-{version}.gem ({} bytes)",
-            pkg.name,
+            "verify SHA-256 of {gem_filename} ({} bytes)",
             gem_bytes.len()
         )
     })?;

