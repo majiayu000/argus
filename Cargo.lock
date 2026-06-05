@@ -90,6 +90,7 @@ dependencies = [
  "argus-core",
  "argus-crates",
  "argus-fetch",
+ "argus-go",
  "argus-pypi",
  "argus-rules",
  "clap",
@@ -150,6 +151,26 @@ dependencies = [
  "tempfile",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "argus-go"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "base64",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]
