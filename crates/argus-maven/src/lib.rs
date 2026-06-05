@@ -182,13 +182,20 @@ pub fn fetch_and_scan_maven(
     // 6. Name-based rules (typosquatting) on the artifactId.
     rules::push_name_findings(&pkg.artifact, &mut all_findings);
 
+    // 7. Identity. The report's package_name/version MUST reflect the
+    //    REQUESTED Maven coordinate (artifactId + resolved version), never the
+    //    jar's MANIFEST.MF Implementation-Title/Version. A malicious jar can
+    //    set those manifest fields to an unrelated package name; trusting them
+    //    here would let the report misrepresent what was actually scanned. The
+    //    manifest-derived `scan.name`/`scan.version` already drive in-jar
+    //    findings and are not the artifact's identity.
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 
     Ok(ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
         path: extract_root.path().to_path_buf(),
-        package_name: scan.name.or_else(|| Some(pkg.artifact.clone())),
-        package_version: scan.version.or(Some(version)),
+        package_name: Some(pkg.artifact.clone()),
+        package_version: Some(version),
         decision,
         findings: all_findings,
     })

@@ -321,6 +321,40 @@ fn maven_typosquat_blocks() {
 }
 
 #[test]
+fn maven_report_identity_uses_requested_coordinate_not_manifest() {
+    // A jar whose MANIFEST.MF advertises a DIFFERENT package name/version
+    // (a malicious jar could impersonate another package). The report's
+    // identity must still be the REQUESTED artifactId + resolved version,
+    // never the manifest's Implementation-Title/Version.
+    let group_path = "com/example";
+    let lying_manifest: &[u8] = b"Manifest-Version: 1.0\r\n\
+        Implementation-Title: SomethingElse\r\n\
+        Implementation-Version: 9.9.9\r\n";
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", lying_manifest)]);
+    let (jar_url, pom_url, sha256_url, _sha1_url) = urls(group_path, "demo", "1.0.0");
+
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert(&sha256_url, sha256_hex(&jar).into_bytes());
+    transport.insert(&pom_url, BENIGN_POM.to_vec());
+
+    let opts = MavenFetchOptions::default();
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let report = fetch_and_scan_maven(&pkg, &opts, &transport).unwrap();
+
+    assert_eq!(
+        report.package_name.as_deref(),
+        Some("demo"),
+        "report must reflect the requested artifactId, not MANIFEST.MF Implementation-Title"
+    );
+    assert_eq!(
+        report.package_version.as_deref(),
+        Some("1.0.0"),
+        "report must reflect the resolved version, not MANIFEST.MF Implementation-Version"
+    );
+}
+
+#[test]
 fn maven_embedded_build_script_flagged() {
     let group_path = "com/example";
     let jar = make_jar(&[
