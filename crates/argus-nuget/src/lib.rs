@@ -242,7 +242,7 @@ fn resolve_catalog_hash(
     let reg: RegistrationLeaf = serde_json::from_slice(&reg_bytes)
         .with_context(|| format!("parse NuGet registration leaf {registration_url}"))?;
 
-    let catalog_url = reg.catalog_entry.id;
+    let catalog_url = reg.catalog_entry.catalog_url().to_string();
     // The catalog @id is registry-controlled; validate its host before fetch.
     validate_artifact_url(&catalog_url, registry_host, NUGET_CDN_ALLOWLIST)
         .with_context(|| format!("validate catalog entry URL {catalog_url}"))?;

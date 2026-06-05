@@ -115,9 +115,12 @@ pub fn msbuild_exec_task_regex() -> Regex {
 }
 
 /// MSBuild `<UsingTask ... AssemblyFile=...>` referencing a packaged DLL —
-/// build-time arbitrary code execution from a packaged assembly.
+/// build-time arbitrary code execution from a packaged assembly. XML permits
+/// either single or double quotes around the attribute value
+/// (`AssemblyFile="x.dll"` or `AssemblyFile='x.dll'`), so the detector
+/// requires a following quote of either kind.
 pub fn msbuild_inline_task_regex() -> Regex {
-    Regex::new(r#"(?ix)<\s*UsingTask\b[^>]*\bAssemblyFile\s*="#).unwrap()
+    Regex::new(r#"(?ix)<\s*UsingTask\b[^>]*\bAssemblyFile\s*=\s*["']"#).unwrap()
 }
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
@@ -192,6 +195,14 @@ mod tests {
     fn msbuild_inline_task_fires() {
         assert!(msbuild_inline_task_regex()
             .is_match(r#"<UsingTask TaskName="Evil" AssemblyFile="evil.dll"/>"#));
+    }
+
+    #[test]
+    fn msbuild_inline_task_fires_single_quoted_assemblyfile() {
+        // XML allows single quotes around attribute values; an attacker can
+        // use them to dodge a double-quote-only detector.
+        assert!(msbuild_inline_task_regex()
+            .is_match(r#"<UsingTask TaskName="Evil" AssemblyFile='x.dll' />"#));
     }
 
     #[test]

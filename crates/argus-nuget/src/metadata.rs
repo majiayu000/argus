@@ -29,19 +29,44 @@ pub struct FlatContainerIndex {
 }
 
 /// Registration leaf document. We only care about the embedded
-/// `catalogEntry`, which carries the catalog leaf `@id` URL.
+/// `catalogEntry`, which carries the catalog leaf URL.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistrationLeaf {
     #[serde(rename = "catalogEntry")]
     pub catalog_entry: CatalogEntryRef,
 }
 
-/// The `catalogEntry` field inside a registration leaf. Its `@id` points at
-/// the catalog leaf document (a separate fetch).
+/// The `catalogEntry` field inside a registration leaf, which resolves to the
+/// catalog leaf document (a separate fetch).
+///
+/// On real nuget.org registration leaves this field appears in BOTH shapes:
+/// - a bare string URL: `"catalogEntry": "https://.../leaf.json"`, and
+/// - an expanded object: `"catalogEntry": { "@id": "https://.../leaf.json" }`.
+///
+/// We accept either (untagged) and resolve both to the catalog URL via
+/// [`CatalogEntryRef::catalog_url`]. Requiring only the object shape would
+/// fail deserialization on common real data, silently disabling integrity
+/// verification (U-29).
 #[derive(Debug, Clone, Deserialize)]
-pub struct CatalogEntryRef {
-    #[serde(rename = "@id")]
-    pub id: String,
+#[serde(untagged)]
+pub enum CatalogEntryRef {
+    /// `"catalogEntry": "https://.../leaf.json"`
+    Url(String),
+    /// `"catalogEntry": { "@id": "https://.../leaf.json" }`
+    Object {
+        #[serde(rename = "@id")]
+        id: String,
+    },
+}
+
+impl CatalogEntryRef {
+    /// The catalog leaf URL, regardless of which shape was deserialized.
+    pub fn catalog_url(&self) -> &str {
+        match self {
+            CatalogEntryRef::Url(u) => u,
+            CatalogEntryRef::Object { id } => id,
+        }
+    }
 }
 
 /// Catalog leaf document. This is the ONLY place `packageHash` lives.
@@ -217,6 +242,27 @@ mod tests {
     fn normalize_lowercases_and_strips_build() {
         assert_eq!(normalize_version("1.0.0+BUILD.7"), "1.0.0");
         assert_eq!(normalize_version("2.0.0-Beta"), "2.0.0-beta");
+    }
+
+    #[test]
+    fn registration_leaf_accepts_object_catalog_entry() {
+        let json = r#"{"catalogEntry": {"@id": "https://api.nuget.org/v3/catalog0/x.json"}}"#;
+        let leaf: RegistrationLeaf = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            leaf.catalog_entry.catalog_url(),
+            "https://api.nuget.org/v3/catalog0/x.json"
+        );
+    }
+
+    #[test]
+    fn registration_leaf_accepts_bare_string_catalog_entry() {
+        // Real nuget.org leaves frequently inline catalogEntry as a URL string.
+        let json = r#"{"catalogEntry": "https://api.nuget.org/v3/catalog0/x.json"}"#;
+        let leaf: RegistrationLeaf = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            leaf.catalog_entry.catalog_url(),
+            "https://api.nuget.org/v3/catalog0/x.json"
+        );
     }
 
     #[test]
