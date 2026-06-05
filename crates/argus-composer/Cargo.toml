@@ -1,0 +1,25 @@
+[package]
+name = "argus-composer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Packagist/Composer ecosystem scanner for argus."
+
+[dependencies]
+argus-core   = { workspace = true }
+argus-rules  = { workspace = true }
+argus-fetch  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+regex        = { workspace = true }
+walkdir      = { workspace = true }
+tempfile     = { workspace = true }
+hex          = { workspace = true }
+zip          = { workspace = true }
+
+[dev-dependencies]
+argus-test-support = { workspace = true }
+sha1               = { workspace = true }
+zip                = { workspace = true }

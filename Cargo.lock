@@ -87,6 +87,7 @@ name = "argus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-composer",
  "argus-core",
  "argus-crates",
  "argus-fetch",
@@ -102,6 +103,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-composer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
 name = "argus-core"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +129,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "subtle",
 ]

@@ -31,6 +31,14 @@ const INFO_ONLY_RULES: &[&str] = &[
     "embedded-binary-blob",
     // PyPI: structural meta-findings
     "pypi-sdist-no-manifest",
+    // Composer: structural meta-findings
+    // autoload.files runs at autoloader-build time but is ubiquitous and
+    // legitimate; the High `lifecycle-script-shell` fires separately when
+    // the actual command string contains shell-exec tokens.
+    "autoload-files-execution",
+    // Parse errors in composer.json are informational (we still scan what
+    // we can).
+    "composer-manifest-parse-error",
     // RubyGems: structural meta-findings
     "gem-native-build",
     "gem-declared-executable",
@@ -56,7 +64,11 @@ const INFO_ONLY_RULES: &[&str] = &[
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
 /// decision from Block to AllowWithApproval.
-const DOWNGRADE_SAFE_RULES: &[&str] = &["lifecycle-script", "known-native-build-pattern"];
+const DOWNGRADE_SAFE_RULES: &[&str] = &[
+    "lifecycle-script",
+    "known-native-build-pattern",
+    "composer-plugin-package",
+];
 
 pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
     derive_from_findings(findings)

@@ -6,6 +6,7 @@
 //! mechanism is shared.
 
 use anyhow::{anyhow, bail, Context, Result};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -80,6 +81,32 @@ pub fn verify_sha256_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
     } else {
         Err(anyhow!(
             "SHA-256 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
+            bytes.len()
+        ))
+    }
+}
+
+/// Verify the SHA-1 digest of `bytes` matches `expected_hex` in constant time.
+///
+/// An empty `expected_hex` is treated as a hard error (U-29): callers cannot
+/// silently accept "no digest advertised". SHA-1 is collision-weak but
+/// provides second-preimage resistance adequate for corruption detection
+/// against a non-adversarial registry. This is documented in the Composer
+/// scanner crate docs.
+///
+/// The error message contains "SHA-1 mismatch" (integration tests assert this).
+pub fn verify_sha1_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
+    if expected_hex.is_empty() {
+        bail!("expected SHA-1 is empty — registry did not advertise an integrity digest");
+    }
+    let expected = hex::decode(expected_hex)
+        .with_context(|| format!("decode expected SHA-1 hex `{expected_hex}`"))?;
+    let actual = <Sha1 as Digest>::digest(bytes);
+    if bool::from(actual.as_slice().ct_eq(&expected)) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "SHA-1 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
             bytes.len()
         ))
     }
@@ -231,5 +258,35 @@ mod tests {
     #[test]
     fn verify_sha256_rejects_malformed_hex() {
         assert!(verify_sha256_hex(b"x", "not-hex").is_err());
+    }
+
+    #[test]
+    fn verify_sha1_matches() {
+        let b = b"hello";
+        let h = hex::encode(<Sha1 as Digest>::digest(b));
+        verify_sha1_hex(b, &h).unwrap();
+    }
+
+    #[test]
+    fn verify_sha1_rejects_mismatch() {
+        let b = b"hello";
+        let h = hex::encode(<Sha1 as Digest>::digest(b));
+        let mut tampered = b.to_vec();
+        tampered.push(b'!');
+        let err = verify_sha1_hex(&tampered, &h).unwrap_err();
+        assert!(
+            err.to_string().contains("SHA-1 mismatch"),
+            "expected 'SHA-1 mismatch', got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_sha1_rejects_empty_digest() {
+        assert!(verify_sha1_hex(b"x", "").is_err());
+    }
+
+    #[test]
+    fn verify_sha1_rejects_malformed_hex() {
+        assert!(verify_sha1_hex(b"x", "not-hex").is_err());
     }
 }
