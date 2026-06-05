@@ -7,6 +7,8 @@ members = [
     "crates/argus-pypi",
     "crates/argus-crates",
     "crates/argus-maven",
+    "crates/argus-nuget",
+    "crates/argus-go",
     "crates/argus-cli",
     "crates/argus-test-support",
     "crates/argus-verify",
@@ -34,6 +36,8 @@ argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }
 argus-crates = { path = "crates/argus-crates" }
 argus-maven = { path = "crates/argus-maven" }
+argus-nuget = { path = "crates/argus-nuget" }
+argus-go = { path = "crates/argus-go" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
 

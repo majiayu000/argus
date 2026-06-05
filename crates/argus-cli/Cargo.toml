@@ -24,6 +24,8 @@ argus-fetch = { workspace = true }
 argus-pypi = { workspace = true }
 argus-crates = { workspace = true }
 argus-maven = { workspace = true }
+argus-nuget = { workspace = true }
+argus-go = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

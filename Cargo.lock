@@ -90,7 +90,9 @@ dependencies = [
  "argus-core",
  "argus-crates",
  "argus-fetch",
+ "argus-go",
  "argus-maven",
+ "argus-nuget",
  "argus-pypi",
  "argus-rules",
  "clap",
@@ -154,6 +156,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-go"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "base64",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
 name = "argus-maven"
 version = "0.1.0"
 dependencies = [
@@ -167,6 +189,27 @@ dependencies = [
  "regex",
  "sha1",
  "sha2",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "argus-nuget"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-fetch",
+ "argus-rules",
+ "argus-test-support",
+ "base64",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
  "tempfile",
  "walkdir",
  "zip",
