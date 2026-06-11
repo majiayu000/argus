@@ -34,7 +34,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
-pub use argus_fetch::{HttpTransport, Transport};
+pub use argus_fetch::{is_not_found, HttpTransport, Transport};
 pub use metadata::{escape_module_path, parse_go_mod_module, resolve_version, GoModInfo};
 pub use rules::POPULAR_GO_MODULES;
 pub use scan::{extract_module_zip, scan_extracted_module, ExtractedModule};
@@ -172,10 +172,20 @@ pub fn fetch_and_scan_go(
     //    never silently skip integrity (U-29): an absent/unparseable checksum
     //    becomes a visible `go-integrity-unverified` finding below. A
     //    checksum that IS advertised but does NOT match still hard-fails.
-    let expected_h1: Option<String> = match transport.get(&ziphash_url, MAX_METADATA_BYTES) {
-        Ok(bytes) => dirhash::parse_ziphash(&bytes).ok(),
-        Err(_) => None,
-    };
+    let expected_h1: Option<String> =
+        match transport.get_redirect_checked(&ziphash_url, MAX_METADATA_BYTES, &|u| {
+            validate_artifact_url(u, &registry_host, GO_PROXY_CDN_ALLOWLIST)
+        }) {
+            Ok(bytes) => dirhash::parse_ziphash(&bytes).ok(),
+            Err(e) if is_not_found(&e) => None,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "fetch GOPROXY ziphash {ziphash_url} (transient failure — refusing to skip integrity check)"
+                    )
+                })
+            }
+        };
 
     // 4. Download the module zip.
     let zip_bytes = transport

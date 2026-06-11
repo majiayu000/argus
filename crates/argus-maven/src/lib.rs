@@ -101,7 +101,9 @@ pub fn fetch_and_scan_maven(
             );
             validate_artifact_url(&metadata_url, &registry_host, MAVEN_CDN_ALLOWLIST)?;
             let bytes = transport
-                .get(&metadata_url, MAX_METADATA_BYTES)
+                .get_redirect_checked(&metadata_url, MAX_METADATA_BYTES, &|u| {
+                    validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
+                })
                 .with_context(|| format!("fetch maven-metadata {metadata_url}"))?;
             let xml = String::from_utf8_lossy(&bytes);
             resolve_version(&xml, None)
@@ -162,7 +164,9 @@ pub fn fetch_and_scan_maven(
     //    propagate. We treat a missing pom as "no plugin findings" — the
     //    jar's own surfaces still drove the scan.
     validate_artifact_url(&pom_url, &registry_host, MAVEN_CDN_ALLOWLIST)?;
-    match transport.get(&pom_url, opts.max_artifact_bytes) {
+    match transport.get_redirect_checked(&pom_url, opts.max_artifact_bytes, &|u| {
+        validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
+    }) {
         Ok(pom_bytes) => {
             let pom_xml = String::from_utf8_lossy(&pom_bytes);
             let plugins =
@@ -230,7 +234,9 @@ fn verify_jar_integrity(
     // Checksum files are tiny; cap at 4 KiB (hex digest + optional filename).
     const CHECKSUM_CAP: u64 = 4 * 1024;
 
-    match transport.get(sha256_url, CHECKSUM_CAP) {
+    match transport.get_redirect_checked(sha256_url, CHECKSUM_CAP, &|u| {
+        validate_artifact_url(u, registry_host, MAVEN_CDN_ALLOWLIST)
+    }) {
         Ok(sha256_body) => {
             let expected = first_hex_token(&String::from_utf8_lossy(&sha256_body));
             verify_sha256_hex(jar_bytes, &expected)
@@ -253,12 +259,16 @@ fn verify_jar_integrity(
     // Degraded path: .sha256 confirmed absent (404). Try .sha1 for corruption
     // detection only.
     validate_artifact_url(sha1_url, registry_host, MAVEN_CDN_ALLOWLIST)?;
-    let sha1_body = transport.get(sha1_url, CHECKSUM_CAP).map_err(|e| {
-        anyhow::anyhow!(
-            "neither .sha256 nor .sha1 checksum available for jar (no strong or weak \
-             integrity digest); refusing to claim a verified download: {e}"
-        )
-    })?;
+    let sha1_body = transport
+        .get_redirect_checked(sha1_url, CHECKSUM_CAP, &|u| {
+            validate_artifact_url(u, registry_host, MAVEN_CDN_ALLOWLIST)
+        })
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "neither .sha256 nor .sha1 checksum available for jar (no strong or weak \
+                 integrity digest); refusing to claim a verified download: {e}"
+            )
+        })?;
     let expected_sha1 = first_hex_token(&String::from_utf8_lossy(&sha1_body));
     verify_sha1_hex(jar_bytes, &expected_sha1).context("verify SHA-1 of jar")?;
 

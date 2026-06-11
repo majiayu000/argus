@@ -114,7 +114,9 @@ pub fn fetch_and_scan_composer(
 
     // --- 3. Download ZIP ---
     let zip_bytes = transport
-        .get(dist_url, opts.max_artifact_bytes)
+        .get_redirect_checked(dist_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, COMPOSER_DIST_ALLOWLIST)
+        })
         .with_context(|| format!("download Composer zip {dist_url}"))?;
 
     // --- 4. Integrity check ---

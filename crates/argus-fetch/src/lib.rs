@@ -295,7 +295,9 @@ fn check_provenance(
         )];
     }
 
-    let bytes = match transport.get(&att_ref.url, MAX_PACKUMENT_BYTES) {
+    let bytes = match transport.get_redirect_checked(&att_ref.url, MAX_PACKUMENT_BYTES, &|u| {
+        validate_artifact_url(u, registry_host, allowlist)
+    }) {
         Ok(b) => b,
         Err(e) => {
             return vec![Finding::new(

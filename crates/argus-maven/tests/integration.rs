@@ -441,3 +441,51 @@ fn maven_transient_sha256_error_does_not_downgrade_to_sha1() {
         "got: {err}"
     );
 }
+
+#[test]
+fn maven_pom_redirect_to_external_404_is_not_treated_as_absent_pom() {
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", BENIGN_MANIFEST)]);
+    let (jar_url, pom_url, sha256_url, _sha1_url) = urls("com/example", "demo", "1.0.0");
+    let evil_pom = "https://evil.example.invalid/demo.pom";
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert(&sha256_url, sha256_hex(&jar).into_bytes());
+    transport.insert_redirect(&pom_url, evil_pom);
+    transport.insert_status(evil_pom, 404);
+
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_maven(&pkg, &MavenFetchOptions::default(), &transport).unwrap_err()
+    );
+    assert!(err.contains("allowlist"), "got: {err}");
+    assert_eq!(
+        transport.request_count(evil_pom),
+        0,
+        "disallowed POM redirect target must not be requested or classified as a 404"
+    );
+}
+
+#[test]
+fn maven_sha256_redirect_to_external_404_does_not_downgrade_to_sha1() {
+    let jar = make_jar(&[("META-INF/MANIFEST.MF", BENIGN_MANIFEST)]);
+    let (jar_url, _pom_url, sha256_url, sha1_url) = urls("com/example", "demo", "1.0.0");
+    let evil_sha256 = "https://evil.example.invalid/demo.jar.sha256";
+    let transport = MockTransport::new();
+    transport.insert(&jar_url, jar.clone());
+    transport.insert_redirect(&sha256_url, evil_sha256);
+    transport.insert_status(evil_sha256, 404);
+    transport.insert(&sha1_url, sha1_hex(&jar).into_bytes());
+
+    let pkg = MavenRef::parse("com.example:demo:1.0.0").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_maven(&pkg, &MavenFetchOptions::default(), &transport).unwrap_err()
+    );
+    assert!(err.contains("allowlist"), "got: {err}");
+    assert_eq!(
+        transport.request_count(evil_sha256),
+        0,
+        "disallowed checksum redirect target must not be requested or classified as a 404"
+    );
+}
