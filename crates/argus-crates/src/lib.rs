@@ -129,7 +129,9 @@ pub fn fetch_and_scan_crate(
     validate_artifact_url(&download_url, &registry_host, CRATES_CDN_ALLOWLIST)?;
 
     let crate_bytes = transport
-        .get(&download_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&download_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, CRATES_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download .crate {download_url}"))?;
     verify_sha256_hex(&crate_bytes, &ver_meta.checksum).with_context(|| {
         format!(

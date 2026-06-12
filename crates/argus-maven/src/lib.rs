@@ -39,6 +39,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
+use argus_fetch::is_not_found;
 pub use argus_fetch::{HttpTransport, Transport};
 pub use metadata::{
     parse_maven_metadata, parse_pom_plugins, resolve_version, MavenMetadata, MavenRef, PomPlugins,
@@ -100,7 +101,9 @@ pub fn fetch_and_scan_maven(
             );
             validate_artifact_url(&metadata_url, &registry_host, MAVEN_CDN_ALLOWLIST)?;
             let bytes = transport
-                .get(&metadata_url, MAX_METADATA_BYTES)
+                .get_redirect_checked(&metadata_url, MAX_METADATA_BYTES, &|u| {
+                    validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
+                })
                 .with_context(|| format!("fetch maven-metadata {metadata_url}"))?;
             let xml = String::from_utf8_lossy(&bytes);
             resolve_version(&xml, None)
@@ -120,7 +123,9 @@ pub fn fetch_and_scan_maven(
     // 2. Download the jar (validate the URL first).
     validate_artifact_url(&jar_url, &registry_host, MAVEN_CDN_ALLOWLIST)?;
     let jar_bytes = transport
-        .get(&jar_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&jar_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download jar {jar_url}"))?;
 
     // 3. Integrity. Prefer SHA-256; fall back to SHA-1 with a visible finding.
@@ -159,23 +164,33 @@ pub fn fetch_and_scan_maven(
     //    propagate. We treat a missing pom as "no plugin findings" — the
     //    jar's own surfaces still drove the scan.
     validate_artifact_url(&pom_url, &registry_host, MAVEN_CDN_ALLOWLIST)?;
-    match transport.get(&pom_url, opts.max_artifact_bytes) {
+    match transport.get_redirect_checked(&pom_url, opts.max_artifact_bytes, &|u| {
+        validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
+    }) {
         Ok(pom_bytes) => {
             let pom_xml = String::from_utf8_lossy(&pom_bytes);
             let plugins =
                 parse_pom_plugins(&pom_xml).with_context(|| format!("parse pom {pom_url}"))?;
             push_pom_plugin_findings(&plugins, &mut all_findings);
         }
-        Err(e) => {
-            // A standalone pom is conventionally always present on Maven
-            // Central; its absence is unusual but not itself dangerous. We
-            // surface it as an Info finding rather than silently dropping it
-            // (U-29 visibility) — the integrity gate already ran on the jar.
+        Err(e) if is_not_found(&e) => {
+            // A *confirmed absent* (404) standalone pom is unusual but not
+            // dangerous — surface it as Info (U-29 visibility); the integrity
+            // gate already ran on the jar.
             all_findings.push(finding(
                 "maven-no-pom",
                 Severity::Info,
-                format!("standalone pom.xml not retrievable ({pom_url}): {e}"),
+                format!("standalone pom.xml absent (404) at {pom_url}"),
             ));
+        }
+        Err(e) => {
+            // A transient failure (timeout / 5xx / TLS) is NOT proof the pom is
+            // absent. Skipping the plugin scan here would let a package whose
+            // pom declares exec-maven-plugin/antrun/Groovy slip through, so we
+            // fail closed rather than downgrade (U-29).
+            return Err(e).with_context(|| {
+                format!("fetch standalone pom {pom_url} (transient failure — refusing to skip plugin scan)")
+            });
         }
     }
 
@@ -219,21 +234,41 @@ fn verify_jar_integrity(
     // Checksum files are tiny; cap at 4 KiB (hex digest + optional filename).
     const CHECKSUM_CAP: u64 = 4 * 1024;
 
-    if let Ok(sha256_body) = transport.get(sha256_url, CHECKSUM_CAP) {
-        let expected = first_hex_token(&String::from_utf8_lossy(&sha256_body));
-        verify_sha256_hex(jar_bytes, &expected)
-            .with_context(|| "verify SHA-256 of jar".to_string())?;
-        return Ok(());
+    match transport.get_redirect_checked(sha256_url, CHECKSUM_CAP, &|u| {
+        validate_artifact_url(u, registry_host, MAVEN_CDN_ALLOWLIST)
+    }) {
+        Ok(sha256_body) => {
+            let expected = first_hex_token(&String::from_utf8_lossy(&sha256_body));
+            verify_sha256_hex(jar_bytes, &expected)
+                .with_context(|| "verify SHA-256 of jar".to_string())?;
+            return Ok(());
+        }
+        // A *transient* failure fetching the strong checksum must NOT silently
+        // drop us onto the weak SHA-1 path — that would degrade strong
+        // integrity on a timeout/5xx. Fail closed (U-29). Only a confirmed 404
+        // (the .sha256 genuinely does not exist for this artifact) falls
+        // through to the documented degraded path below.
+        Err(e) if !is_not_found(&e) => {
+            return Err(e).with_context(|| {
+                format!("fetch {sha256_url} (transient — refusing to downgrade to weak SHA-1)")
+            });
+        }
+        Err(_) => {}
     }
 
-    // Degraded path: no .sha256. Try .sha1 for corruption detection only.
+    // Degraded path: .sha256 confirmed absent (404). Try .sha1 for corruption
+    // detection only.
     validate_artifact_url(sha1_url, registry_host, MAVEN_CDN_ALLOWLIST)?;
-    let sha1_body = transport.get(sha1_url, CHECKSUM_CAP).map_err(|e| {
-        anyhow::anyhow!(
-            "neither .sha256 nor .sha1 checksum available for jar (no strong or weak \
-             integrity digest); refusing to claim a verified download: {e}"
-        )
-    })?;
+    let sha1_body = transport
+        .get_redirect_checked(sha1_url, CHECKSUM_CAP, &|u| {
+            validate_artifact_url(u, registry_host, MAVEN_CDN_ALLOWLIST)
+        })
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "neither .sha256 nor .sha1 checksum available for jar (no strong or weak \
+                 integrity digest); refusing to claim a verified download: {e}"
+            )
+        })?;
     let expected_sha1 = first_hex_token(&String::from_utf8_lossy(&sha1_body));
     verify_sha1_hex(jar_bytes, &expected_sha1).context("verify SHA-1 of jar")?;
 

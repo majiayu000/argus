@@ -142,7 +142,9 @@ pub fn fetch_and_scan_nuget(
 
     // 4. Download the artifact bytes.
     let nupkg_bytes = transport
-        .get(&download_url, opts.max_artifact_bytes)
+        .get_redirect_checked(&download_url, opts.max_artifact_bytes, &|u| {
+            validate_artifact_url(u, &registry_host, NUGET_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("download .nupkg {download_url}"))?;
 
     // 5. Integrity (option A): follow registration → catalog → packageHash.
@@ -236,8 +238,12 @@ fn resolve_catalog_hash(
 ) -> Result<Option<(String, String)>> {
     let registration_url =
         format!("{registry}/v3/registration5-gz-semver2/{lower_id}/{lower_version}.json");
+    validate_artifact_url(&registration_url, registry_host, NUGET_CDN_ALLOWLIST)
+        .with_context(|| format!("validate registration leaf URL {registration_url}"))?;
     let reg_bytes = transport
-        .get(&registration_url, MAX_METADATA_BYTES)
+        .get_redirect_checked(&registration_url, MAX_METADATA_BYTES, &|u| {
+            validate_artifact_url(u, registry_host, NUGET_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("fetch NuGet registration leaf {registration_url}"))?;
     let reg: RegistrationLeaf = serde_json::from_slice(&reg_bytes)
         .with_context(|| format!("parse NuGet registration leaf {registration_url}"))?;
@@ -248,7 +254,9 @@ fn resolve_catalog_hash(
         .with_context(|| format!("validate catalog entry URL {catalog_url}"))?;
 
     let catalog_bytes = transport
-        .get(&catalog_url, MAX_METADATA_BYTES)
+        .get_redirect_checked(&catalog_url, MAX_METADATA_BYTES, &|u| {
+            validate_artifact_url(u, registry_host, NUGET_CDN_ALLOWLIST)
+        })
         .with_context(|| format!("fetch NuGet catalog leaf {catalog_url}"))?;
     let catalog: CatalogLeaf = serde_json::from_slice(&catalog_bytes)
         .with_context(|| format!("parse NuGet catalog leaf {catalog_url}"))?;

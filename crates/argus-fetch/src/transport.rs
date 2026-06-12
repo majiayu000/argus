@@ -14,6 +14,54 @@ const MAX_REDIRECTS: usize = 3;
 /// failure mode the security review called out.
 pub trait Transport {
     fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>>;
+
+    /// Like [`get`](Transport::get), but every HTTP redirect hop's target URL
+    /// must satisfy `allow` (return `Ok`) before it is followed; otherwise the
+    /// fetch aborts before the redirect target is requested. Use this for
+    /// artifact downloads so a 3xx from an allowed registry host cannot
+    /// silently redirect the download to an unallowlisted host (an
+    /// SSRF-adjacent allowlist bypass).
+    ///
+    /// The default implementation ignores `allow` and delegates to `get`,
+    /// because in-memory transports (tests) do not follow redirects.
+    fn get_redirect_checked(
+        &self,
+        url: &str,
+        max_bytes: u64,
+        allow: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let _ = allow;
+        self.get(url, max_bytes)
+    }
+}
+
+/// A non-success HTTP status surfaced through the otherwise-opaque
+/// `anyhow::Error` that [`Transport::get`] returns. Callers downcast to it
+/// (via [`is_not_found`]) so they can distinguish a *confirmed* absent resource
+/// (404 Not Found or 410 Gone) — where a downgrade may be legitimate (e.g. a
+/// Maven artifact that genuinely ships no `.sha256`) — from a transient failure
+/// (timeout / 5xx / TLS), which must fail closed (U-29) rather than silently
+/// weaken integrity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpStatusError {
+    pub status: u16,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP status {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// True iff `err` carries a [`HttpStatusError`] with status 404 or 410 — i.e.
+/// the resource was confirmed absent, not merely unreachable. Any other error
+/// (transient network, 5xx, parse, cap) returns false and must be treated as a
+/// hard failure by integrity-sensitive callers.
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpStatusError>()
+        .is_some_and(|e| matches!(e.status, 404 | 410))
 }
 
 /// Default ureq-backed transport used by the CLI.
@@ -43,6 +91,17 @@ impl Default for HttpTransport {
 
 impl Transport for HttpTransport {
     fn get(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        // Plain get: no per-hop host policy (scheme-downgrade is still
+        // enforced). Artifact downloads should use `get_redirect_checked`.
+        self.get_redirect_checked(url, max_bytes, &|_| Ok(()))
+    }
+
+    fn get_redirect_checked(
+        &self,
+        url: &str,
+        max_bytes: u64,
+        allow: &dyn Fn(&str) -> Result<()>,
+    ) -> Result<Vec<u8>> {
         let mut current_url = url.to_string();
 
         for redirect_count in 0..=MAX_REDIRECTS {
@@ -56,6 +115,12 @@ impl Transport for HttpTransport {
                 })?;
                 let next_url = resolve_redirect_url(&current_url, location)?;
                 check_no_scheme_downgrade(&current_url, &next_url)?;
+                // Re-validate the redirect target against the caller's host
+                // policy BEFORE requesting it, so an allowed host cannot bounce
+                // the download to an unallowlisted one.
+                allow(&next_url).with_context(|| {
+                    format!("redirect target {next_url} rejected by host allowlist (from {current_url})")
+                })?;
                 current_url = next_url;
                 continue;
             }
@@ -83,11 +148,23 @@ impl HttpTransport {
         // that points at the actual artifact. The npm and PyPI metadata
         // endpoints both return JSON regardless of Accept, so this is
         // pure upside.
-        self.agent
+        match self
+            .agent
             .get(url)
             .set("User-Agent", &self.user_agent)
             .call()
-            .with_context(|| format!("HTTP GET {url}"))
+        {
+            Ok(resp) => Ok(resp),
+            // A 4xx/5xx (ureq surfaces these as `Status`, while 3xx are returned
+            // as `Ok` because the agent is built with `redirects(0)`). Attach a
+            // typed `HttpStatusError` so integrity-sensitive callers can tell a
+            // confirmed 404 from a transient failure.
+            Err(ureq::Error::Status(code, _resp)) => {
+                Err(anyhow::Error::new(HttpStatusError { status: code })
+                    .context(format!("HTTP GET {url} returned status {code}")))
+            }
+            Err(e) => Err(anyhow::Error::new(e).context(format!("HTTP GET {url}"))),
+        }
     }
 }
 
@@ -246,6 +323,22 @@ mod tests {
     }
 
     #[test]
+    fn is_not_found_accepts_not_found_and_gone_only() {
+        assert!(is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 404
+        })));
+        assert!(is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 410
+        })));
+        assert!(!is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 403
+        })));
+        assert!(!is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 500
+        })));
+    }
+
+    #[test]
     fn http_redirect_is_followed_manually() -> Result<()> {
         let (target_url, target_hits, target_handle) = spawn_response_server(
             "http",
@@ -265,6 +358,44 @@ mod tests {
         assert_eq!(body, b"ok");
         assert_eq!(redirect_hits.load(Ordering::SeqCst), 1);
         assert_eq!(target_hits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn redirect_to_disallowed_host_is_rejected_before_target_request() -> Result<()> {
+        let (target_url, target_hits, target_handle) = spawn_response_server(
+            "http",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string(),
+        )?;
+        let (redirect_url, redirect_hits, redirect_handle) = spawn_response_server(
+            "http",
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        )?;
+
+        // Allow policy that rejects everything except the original redirect
+        // host — i.e. the redirect target is NOT allowlisted.
+        let err = match HttpTransport::new().get_redirect_checked(&redirect_url, 16, &|u: &str| {
+            if u.starts_with(&redirect_url) {
+                Ok(())
+            } else {
+                bail!("host not in allowlist: {u}")
+            }
+        }) {
+            Ok(b) => bail!("expected allowlist rejection, got body {:?}", b),
+            Err(e) => format!("{e:#}"),
+        };
+
+        join_server(redirect_handle)?;
+        join_server(target_handle)?;
+        assert!(err.contains("allowlist"), "got: {err}");
+        assert_eq!(redirect_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            0,
+            "disallowed redirect target must NOT be requested"
+        );
         Ok(())
     }
 

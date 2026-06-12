@@ -176,23 +176,19 @@ pub fn parse_pom_plugins(xml: &str) -> Result<PomPlugins> {
             Ok(Event::End(_)) => {
                 path.pop();
             }
-            Ok(Event::Text(e)) => {
-                if is_direct_plugin_artifact_id(&path) {
-                    let text = e
-                        .xml_content()
-                        .context("decode pom.xml text")?
-                        .trim()
-                        .to_string();
-                    classify_plugin_artifact_id(&text, &mut plugins);
-                }
+            Ok(Event::Text(e)) if is_direct_plugin_artifact_id(&path) => {
+                let text = e
+                    .xml_content()
+                    .context("decode pom.xml text")?
+                    .trim()
+                    .to_string();
+                classify_plugin_artifact_id(&text, &mut plugins);
             }
             // CDATA-wrapped text (e.g. `<![CDATA[exec-maven-plugin]]>`) resolves
             // identically to plain text in Maven, so handle it the same way.
-            Ok(Event::CData(e)) => {
-                if is_direct_plugin_artifact_id(&path) {
-                    let text = String::from_utf8_lossy(e.as_ref()).trim().to_string();
-                    classify_plugin_artifact_id(&text, &mut plugins);
-                }
+            Ok(Event::CData(e)) if is_direct_plugin_artifact_id(&path) => {
+                let text = String::from_utf8_lossy(e.as_ref()).trim().to_string();
+                classify_plugin_artifact_id(&text, &mut plugins);
             }
             Ok(Event::Eof) => break,
             Err(e) => bail!("parse pom.xml: {e}"),

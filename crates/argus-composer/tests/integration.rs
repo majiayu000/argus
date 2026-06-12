@@ -482,6 +482,35 @@ fn host_allowlist_rejects_http_dist_url() {
     );
 }
 
+#[test]
+fn dist_redirect_to_external_host_is_rejected_before_target_request() {
+    let registry = "https://mock.packagist";
+    let dist_url = "https://codeload.github.com/vendor/pkg/legacy.zip/refs/tags/1.0.0";
+    let evil_url = "https://evil.example.invalid/vendor-pkg.zip";
+
+    let composer_json = br#"{"name": "vendor/pkg", "version": "1.0.0"}"#;
+    let zip = make_zip(&[("composer.json", composer_json)]);
+    let shasum = sha1_hex(&zip);
+    let meta = p2_json("vendor", "pkg", "1.0.0", dist_url, &shasum);
+
+    let transport = MockTransport::new();
+    transport.insert(&format!("{registry}/p2/vendor/pkg.json"), meta.into_bytes());
+    transport.insert_redirect(dist_url, evil_url);
+    transport.insert(evil_url, zip);
+
+    let pkg = ComposerRef::parse("vendor/pkg@1.0.0").unwrap();
+    let err = format!(
+        "{:#}",
+        fetch_and_scan_composer(&pkg, &default_opts(registry), &transport).unwrap_err()
+    );
+    assert!(err.contains("allowlist"), "got: {err}");
+    assert_eq!(
+        transport.request_count(evil_url),
+        0,
+        "disallowed redirect target must not be requested"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 10. Path-escape safety: ZIP with `../../etc/passwd` entry → Err
 // ---------------------------------------------------------------------------
