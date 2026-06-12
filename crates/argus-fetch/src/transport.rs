@@ -37,10 +37,11 @@ pub trait Transport {
 
 /// A non-success HTTP status surfaced through the otherwise-opaque
 /// `anyhow::Error` that [`Transport::get`] returns. Callers downcast to it
-/// (via [`is_not_found`]) so they can distinguish a *confirmed* 404 — where a
-/// downgrade may be legitimate (e.g. a Maven artifact that genuinely ships no
-/// `.sha256`) — from a transient failure (timeout / 5xx / TLS), which must
-/// fail closed (U-29) rather than silently weaken integrity.
+/// (via [`is_not_found`]) so they can distinguish a *confirmed* absent resource
+/// (404 Not Found or 410 Gone) — where a downgrade may be legitimate (e.g. a
+/// Maven artifact that genuinely ships no `.sha256`) — from a transient failure
+/// (timeout / 5xx / TLS), which must fail closed (U-29) rather than silently
+/// weaken integrity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpStatusError {
     pub status: u16,
@@ -54,13 +55,13 @@ impl std::fmt::Display for HttpStatusError {
 
 impl std::error::Error for HttpStatusError {}
 
-/// True iff `err` carries a [`HttpStatusError`] with status 404 — i.e. the
-/// resource was confirmed absent, not merely unreachable. Any other error
-/// (transient network, 5xx, parse, cap) returns false and must be treated as
-/// a hard failure by integrity-sensitive callers.
+/// True iff `err` carries a [`HttpStatusError`] with status 404 or 410 — i.e.
+/// the resource was confirmed absent, not merely unreachable. Any other error
+/// (transient network, 5xx, parse, cap) returns false and must be treated as a
+/// hard failure by integrity-sensitive callers.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
     err.downcast_ref::<HttpStatusError>()
-        .is_some_and(|e| e.status == 404)
+        .is_some_and(|e| matches!(e.status, 404 | 410))
 }
 
 /// Default ureq-backed transport used by the CLI.
@@ -319,6 +320,22 @@ mod tests {
         fn socket(&self) -> Option<&TcpStream> {
             self.0.socket()
         }
+    }
+
+    #[test]
+    fn is_not_found_accepts_not_found_and_gone_only() {
+        assert!(is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 404
+        })));
+        assert!(is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 410
+        })));
+        assert!(!is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 403
+        })));
+        assert!(!is_not_found(&anyhow::Error::new(HttpStatusError {
+            status: 500
+        })));
     }
 
     #[test]

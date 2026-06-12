@@ -231,6 +231,31 @@ fn ziphash_endpoint_missing_is_unverified_not_fatal() {
 }
 
 #[test]
+fn ziphash_endpoint_gone_is_unverified_not_fatal() -> anyhow::Result<()> {
+    let module = "example.com/gonemod";
+    let version = "v1.0.0";
+    let files: &[(&str, &[u8])] = &[
+        ("go.mod", b"module example.com/gonemod\n\ngo 1.21\n"),
+        ("x.go", b"package gonemod\nfunc X() {}\n"),
+    ];
+    let zip = make_module_zip(module, version, files);
+
+    let transport = MockTransport::new();
+    register(&transport, module, version, zip, None);
+    transport.insert_status(&format!("{REGISTRY}/{module}/@v/{version}.ziphash"), 410);
+
+    let pkg = GoModuleRef::parse(&format!("{module}@{version}"))?;
+    let report = fetch_and_scan_go(&pkg, &opts(), &transport)?;
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+    assert!(
+        rule_ids.contains(&"go-integrity-unverified"),
+        "got: {rule_ids:?}"
+    );
+    assert_eq!(report.decision, Decision::Allow);
+    Ok(())
+}
+
+#[test]
 fn ziphash_redirect_to_external_404_is_not_treated_as_missing() {
     let module = "example.com/redirecthash";
     let version = "v1.0.0";
