@@ -49,6 +49,7 @@ items below into a versioned section.
 
 ### Changed
 
+- Updated the CI checkout action to the current major version.
 - Hoisted shared `host_of` / `validate_artifact_url` / `verify_sha256_hex` /
   `ArtifactScan` / `MockTransport` helpers into `argus-core` and a new
   `argus-test-support` dev crate; removes ~315 duplicated lines and
