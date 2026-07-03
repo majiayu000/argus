@@ -35,7 +35,14 @@ fn agt01_benign_skill_allows() {
 fn agt03_curl_sh_hook_blocks() {
     let (decision, rules) = scan("agt03-curl-sh-hook");
     assert_eq!(decision, Decision::Block);
-    assert_eq!(rules, vec!["AGT-03-remote-exec"]);
+    assert_eq!(
+        rules,
+        vec![
+            "AGT-03-remote-exec",
+            "remote-download",
+            "shell-pipe-execution"
+        ]
+    );
 }
 
 #[test]
