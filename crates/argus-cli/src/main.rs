@@ -253,6 +253,8 @@ enum Format {
 
 #[derive(Debug, Deserialize)]
 struct CorpusIndex {
+    #[serde(default)]
+    surface: Option<String>,
     cases: Vec<CorpusCase>,
 }
 
@@ -629,76 +631,83 @@ fn severity_tag(f: &argus_core::Finding) -> &'static str {
 }
 
 fn cmd_corpus_test(corpus_root: &Path) -> Result<ExitCode> {
-    let index_path = corpus_root.join("index.json");
-    let raw = std::fs::read_to_string(&index_path)
-        .with_context(|| format!("read corpus index {}", index_path.display()))?;
-    let index: CorpusIndex = serde_json::from_str(&raw)
-        .with_context(|| format!("parse corpus index {}", index_path.display()))?;
-
     let mut passed = 0usize;
+    let mut total = 0usize;
     let mut failed: Vec<String> = Vec::new();
 
-    for case in &index.cases {
-        let case_path = corpus_root.join(&case.path);
-        let report = match case.kind.as_str() {
-            "fixture" => scan_package_dir(&case_path),
-            "lockfile" => scan_lockfile(&case_path),
-            other => {
-                failed.push(format!("{} — unknown kind `{}`", case.id, other));
-                continue;
+    for index_path in corpus_index_paths(corpus_root)? {
+        let raw = std::fs::read_to_string(&index_path)
+            .with_context(|| format!("read corpus index {}", index_path.display()))?;
+        let index: CorpusIndex = serde_json::from_str(&raw)
+            .with_context(|| format!("parse corpus index {}", index_path.display()))?;
+        let index_root = index_path
+            .parent()
+            .with_context(|| format!("resolve corpus index parent {}", index_path.display()))?;
+        println!("index: {}", index_path.display());
+
+        for case in &index.cases {
+            total += 1;
+            let case_path = index_root.join(&case.path);
+            let report = match (case.kind.as_str(), index.surface.as_deref()) {
+                ("fixture", Some("agent-skill")) => scan_agent_surface(&case_path),
+                ("fixture", _) => scan_package_dir(&case_path),
+                ("lockfile", _) => scan_lockfile(&case_path),
+                (other, _) => {
+                    failed.push(format!("{} — unknown kind `{}`", case.id, other));
+                    continue;
+                }
+            };
+            let report = match report {
+                Ok(r) => r,
+                Err(e) => {
+                    failed.push(format!("{} — scan error: {e:#}", case.id));
+                    continue;
+                }
+            };
+
+            let actual_decision = report.decision.as_str().to_string();
+            let actual_rules = corpus_rule_ids(&report, index.surface.as_deref());
+            let expected_rules: BTreeSet<String> = case.rules.iter().cloned().collect();
+
+            let mut deltas: Vec<String> = Vec::new();
+            if actual_decision != case.expected_decision {
+                deltas.push(format!(
+                    "decision expected `{}` got `{actual_decision}`",
+                    case.expected_decision
+                ));
             }
-        };
-        let report = match report {
-            Ok(r) => r,
-            Err(e) => {
-                failed.push(format!("{} — scan error: {e:#}", case.id));
-                continue;
+            let missing: Vec<&String> = expected_rules.difference(&actual_rules).collect();
+            let extra: Vec<&String> = actual_rules.difference(&expected_rules).collect();
+            if !missing.is_empty() {
+                deltas.push(format!("missing rules: {missing:?}"));
             }
-        };
+            if !extra.is_empty() {
+                deltas.push(format!("extra rules: {extra:?}"));
+            }
 
-        let actual_decision = report.decision.as_str().to_string();
-        let actual_rules: BTreeSet<String> = report.rule_ids().into_iter().collect();
-        let expected_rules: BTreeSet<String> = case.rules.iter().cloned().collect();
-
-        let mut deltas: Vec<String> = Vec::new();
-        if actual_decision != case.expected_decision {
-            deltas.push(format!(
-                "decision expected `{}` got `{actual_decision}`",
-                case.expected_decision
-            ));
-        }
-        let missing: Vec<&String> = expected_rules.difference(&actual_rules).collect();
-        let extra: Vec<&String> = actual_rules.difference(&expected_rules).collect();
-        if !missing.is_empty() {
-            deltas.push(format!("missing rules: {missing:?}"));
-        }
-        if !extra.is_empty() {
-            deltas.push(format!("extra rules: {extra:?}"));
-        }
-
-        if deltas.is_empty() {
-            passed += 1;
-            println!(
-                "  PASS  {:<32}  {}  [{}]",
-                case.id,
-                actual_decision,
-                join_sorted(&actual_rules)
-            );
-        } else {
-            failed.push(format!("{} — {}", case.id, deltas.join("; ")));
-            println!(
-                "  FAIL  {:<32}  {}  [{}]",
-                case.id,
-                actual_decision,
-                join_sorted(&actual_rules)
-            );
-            for d in &deltas {
-                println!("        > {d}");
+            if deltas.is_empty() {
+                passed += 1;
+                println!(
+                    "  PASS  {:<32}  {}  [{}]",
+                    case.id,
+                    actual_decision,
+                    join_sorted(&actual_rules)
+                );
+            } else {
+                failed.push(format!("{} — {}", case.id, deltas.join("; ")));
+                println!(
+                    "  FAIL  {:<32}  {}  [{}]",
+                    case.id,
+                    actual_decision,
+                    join_sorted(&actual_rules)
+                );
+                for d in &deltas {
+                    println!("        > {d}");
+                }
             }
         }
     }
 
-    let total = index.cases.len();
     println!();
     println!("argus corpus test: {passed}/{total} passed");
     if !failed.is_empty() {
@@ -709,6 +718,73 @@ fn cmd_corpus_test(corpus_root: &Path) -> Result<ExitCode> {
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::from(0))
+}
+
+fn corpus_index_paths(corpus_root: &Path) -> Result<Vec<PathBuf>> {
+    let root_index = corpus_root.join("index.json");
+    let mut paths = Vec::new();
+    if root_index.exists() {
+        paths.push(root_index);
+    }
+    for entry in std::fs::read_dir(corpus_root)
+        .with_context(|| format!("read corpus directory {}", corpus_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let nested = entry.path().join("index.json");
+        if nested.exists() {
+            paths.push(nested);
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
+        bail!(
+            "no corpus index found under {} (expected index.json)",
+            corpus_root.display()
+        );
+    }
+    Ok(paths)
+}
+
+fn corpus_rule_ids(report: &ScanReport, surface: Option<&str>) -> BTreeSet<String> {
+    if surface != Some("agent-skill") {
+        return report.rule_ids().into_iter().collect();
+    }
+
+    let mut rules = BTreeSet::new();
+    for finding in &report.findings {
+        match finding.rule_id.as_str() {
+            "AGT-01-injection-language" => {
+                if is_concealment_pattern(&finding.detail) {
+                    rules.insert("concealment".to_string());
+                } else {
+                    rules.insert("injection-override".to_string());
+                }
+            }
+            "AGT-03-secret-exfil" => {
+                rules.insert("credential-access".to_string());
+                rules.insert("network-exfiltration".to_string());
+            }
+            "AGT-03-remote-exec" => {
+                rules.insert("remote-download".to_string());
+                rules.insert("shell-pipe-execution".to_string());
+            }
+            id if !id.starts_with("AGT-") => {
+                rules.insert(id.to_string());
+            }
+            _ => {}
+        }
+    }
+    rules
+}
+
+fn is_concealment_pattern(detail: &str) -> bool {
+    detail.contains("do\\s+not")
+        || detail.contains("hide")
+        || detail.contains("静默执行")
+        || detail.contains("不要提及")
 }
 
 fn join_sorted(set: &BTreeSet<String>) -> String {
