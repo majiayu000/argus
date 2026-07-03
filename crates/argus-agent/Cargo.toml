@@ -1,0 +1,15 @@
+[package]
+name = "argus-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Static scanner for agent supply-chain surfaces: MCP configs, skills, hooks, instruction files."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-rules = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+anyhow = { workspace = true }
+walkdir = { workspace = true }

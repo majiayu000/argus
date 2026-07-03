@@ -8,6 +8,7 @@
 //!   each case's `expectedDecision` + `rules`.
 
 use anyhow::{bail, Context, Result};
+use argus_agent::scan_agent_surface;
 use argus_composer::{
     fetch_and_scan_composer, ComposerFetchOptions, ComposerRef,
     HttpTransport as ComposerHttpTransport,
@@ -56,6 +57,11 @@ enum Cmd {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+    },
+    /// Agent supply-chain surface commands (MCP configs, skills, hooks, AGENTS.md).
+    Agent {
+        #[command(subcommand)]
+        op: AgentOp,
     },
     /// Fetch a package from an npm registry, verify integrity, extract, and scan.
     Fetch {
@@ -218,6 +224,18 @@ impl From<PypiFormat> for PypiPreferredFormat {
 }
 
 #[derive(Subcommand, Debug)]
+enum AgentOp {
+    /// Statically scan one or more paths as agent surfaces.
+    Scan {
+        /// Directories or files: `.claude` trees, skill dirs, `.mcp.json`, AGENTS.md.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum CorpusOp {
     /// Run every case in the corpus and verify expected decision and rules.
     Test {
@@ -324,6 +342,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             format,
         } => cmd_composer_fetch(&pkg, registry, cache_dir, format),
+        Cmd::Agent {
+            op: AgentOp::Scan { paths, format },
+        } => cmd_agent_scan(&paths, format),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -333,6 +354,49 @@ fn run(cli: Cli) -> Result<ExitCode> {
 fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
     let report = scan_path(path)?;
     emit_report(&report, format)
+}
+
+/// Scan each path as an agent surface. The exit code is the worst decision
+/// across all paths (block > allow-with-approval > allow), so a CI gate over
+/// several directories fails if any one of them is bad.
+fn cmd_agent_scan(paths: &[PathBuf], format: Format) -> Result<ExitCode> {
+    let mut reports = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !path.exists() {
+            bail!("path does not exist: {}", path.display());
+        }
+        let report =
+            scan_agent_surface(path).with_context(|| format!("agent scan {}", path.display()))?;
+        reports.push(report);
+    }
+    match format {
+        Format::Json => {
+            if reports.len() == 1 {
+                println!("{}", serde_json::to_string_pretty(&reports[0])?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&reports)?);
+            }
+        }
+        Format::Text => {
+            for report in &reports {
+                print_report_text(report);
+            }
+        }
+    }
+    let worst = reports
+        .iter()
+        .map(|r| match r.decision {
+            Decision::Allow => 0u8,
+            Decision::AllowWithApproval => 2,
+            Decision::Block => 1,
+        })
+        .max_by_key(|c| match c {
+            1 => 2, // block outranks approval
+            2 => 1,
+            _ => 0,
+        })
+        .unwrap_or(0);
+    Ok(ExitCode::from(worst))
 }
 
 fn cmd_crates_fetch(

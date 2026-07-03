@@ -19,6 +19,7 @@ sigstore = ["argus-fetch/sigstore"]
 
 [dependencies]
 argus-core = { workspace = true }
+argus-agent = { workspace = true }
 argus-rules = { workspace = true }
 argus-fetch = { workspace = true }
 argus-pypi = { workspace = true }

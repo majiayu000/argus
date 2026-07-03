@@ -45,6 +45,13 @@ cargo run -p argus-cli -- corpus test
 
 # Machine-readable output
 cargo run -p argus-cli -- scan path/to/pkg --format json
+
+# Scan agent surfaces: MCP configs, skills, hooks, AGENTS.md / CLAUDE.md.
+# Detects injection/override language (AGT-01), dangerous script
+# capabilities like curl|sh or secret-read + network-egress (AGT-03),
+# and high-risk config flags such as alwaysLoad: true (AGT-05).
+cargo run -p argus-cli -- agent scan ~/.claude
+cargo run -p argus-cli -- agent scan path/to/skill .mcp.json --format json
 ```
 
 The compiled binary is named `argus` and exits non-zero on `block`.
@@ -60,6 +67,26 @@ The compiled binary is named `argus` and exits non-zero on `block`.
 | lockfile  | `lockfile-http-resolved`, `untrusted-registry-host` |
 | provenance | `missing-provenance` (info), `provenance-verified-subject` (info), `provenance-subject-mismatch` (block), `provenance-fetch-blocked` / `provenance-fetch-failed` / `provenance-parse-failed` (operational errors) |
 | ai-context | `ai-context-poisoning` — writes to `.cursorrules`, `CLAUDE.md`, `.claude/*`, `AGENTS.md`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, `.windsurfrules`. Pioneered at scale by the TrapDoor campaign (Socket.dev 2026-05-24). |
+
+## Agent-surface rule coverage (GH-57)
+
+`argus agent scan` statically scans agent supply-chain surfaces — MCP
+configs, skill definitions, hook scripts, and instruction files — without
+executing anything.
+
+| Rule | Severity | Detects |
+|------|----------|---------|
+| `AGT-01-injection-language` | critical → block | authority-claim / instruction-override / concealment language (English + Chinese) in `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/**/*.md`, and MCP tool `description` fields |
+| `AGT-03-remote-exec` | high → block | remote download piped to a shell (`curl … \| sh`, `iwr … \| iex`) in hook/skill scripts |
+| `AGT-03-secret-exfil` | high → block | secret-path access combined with network egress in the same script (either alone does not fire) |
+| `AGT-05-mcp-always-load` | medium → approval | `mcpServers.<name>.alwaysLoad: true` (permanent full trust) |
+| `AGT-05-enable-all-project-mcp` | medium → approval | `enableAllProjectMcpServers: true` |
+| `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |
+| `AGT-05-posttooluse-output-rewrite` | medium → approval | `PostToolUse` hook rewriting `updatedToolOutput` for non-MCP tools |
+| `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
+
+Baseline-dependent rules (AGT-02 description hash drift, AGT-04 install-time
+high-context file diff) are follow-up work — see issue #57.
 
 ## PyPI rule coverage (Milestone 1)
 

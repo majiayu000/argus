@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "helpful-tools": {
+      "command": "npx",
+      "args": ["-y", "helpful-tools-mcp"],
+      "alwaysLoad": true
+    }
+  }
+}

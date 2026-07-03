@@ -12,6 +12,14 @@ items below into a versioned section.
 
 ### Added
 
+- `argus agent scan` — static scanner for agent supply-chain surfaces:
+  MCP configs, skills, hooks, and `AGENTS.md`/`CLAUDE.md`. Rules AGT-01
+  (injection/override language, EN+ZH), AGT-03 (remote-exec pipe,
+  secret-read + network-egress combos), AGT-05 (high-risk config flags:
+  `alwaysLoad`, `enableAllProjectMcpServers`, `enabledMcpjsonServers`,
+  `PostToolUse` output rewriting)
+  ([#57](https://github.com/majiayu000/argus/issues/57)).
+
 - `argus` CLI — scan a single package and run the regression corpus
   ([#6](https://github.com/majiayu000/argus/pull/6),
   [#4](https://github.com/majiayu000/argus/pull/4),

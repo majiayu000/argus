@@ -83,10 +83,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-rules",
+ "regex",
+ "serde_json",
+ "walkdir",
+]
+
+[[package]]
 name = "argus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-agent",
  "argus-composer",
  "argus-core",
  "argus-crates",

@@ -11,6 +11,7 @@ members = [
     "crates/argus-maven",
     "crates/argus-nuget",
     "crates/argus-go",
+    "crates/argus-agent",
     "crates/argus-cli",
     "crates/argus-test-support",
     "crates/argus-verify",
@@ -33,6 +34,7 @@ walkdir = "2"
 toml = "0.8.23"
 
 argus-core = { path = "crates/argus-core" }
+argus-agent = { path = "crates/argus-agent" }
 argus-rules = { path = "crates/argus-rules" }
 argus-fetch = { path = "crates/argus-fetch" }
 argus-pypi = { path = "crates/argus-pypi" }

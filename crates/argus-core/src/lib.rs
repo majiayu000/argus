@@ -81,6 +81,8 @@ impl Finding {
 pub enum ArtifactKind {
     PackageDir,
     Lockfile,
+    /// Agent-facing surface: MCP configs, skills, hooks, instruction files.
+    AgentSurface,
 }
 
 /// Final report after running all rules.
