@@ -77,8 +77,12 @@ executing anything.
 | Rule | Severity | Detects |
 |------|----------|---------|
 | `AGT-01-injection-language` | critical → block | authority-claim / instruction-override / concealment language (English + Chinese) in `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/**/*.md`, and MCP tool `description` fields |
+| `capability-manifest` | medium → approval | declarative capability entries in JSON (`capability`, `evidence`, optional `resolved_host`) for network egress, unresolved hosts, sensitive reads, agent config writes, exec/eval, obfuscation, and persistence |
 | `AGT-03-remote-exec` | high → block | remote download piped to a shell (`curl … \| sh`, `iwr … \| iex`) in hook/skill scripts |
-| `AGT-03-secret-exfil` | high → block | secret-path access combined with network egress in the same script (either alone does not fire) |
+| `AGT-03-secret-exfil` | high → block | high-sensitivity credential access combined with network egress in the same script |
+| `capability-misfit` | high → block | declared skill intent does not justify high-risk capability combinations such as credential exfiltration or agent config/hook writes |
+| `agent-config-write` / `hook-persistence` | high → block | script writes `.claude/settings*.json` or hook paths, or persists auto-approving hooks |
+| `credential-access` / `network-exfiltration` | high → block | manifest-backed evidence for credential reads and off-box network exfiltration |
 | `AGT-05-mcp-always-load` | medium → approval | `mcpServers.<name>.alwaysLoad: true` (permanent full trust) |
 | `AGT-05-enable-all-project-mcp` | medium → approval | `enableAllProjectMcpServers: true` |
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |

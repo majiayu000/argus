@@ -53,10 +53,19 @@ put a number on the false-positive rate that motivated this work.
   (official installers). Shipping a trust badge on this layer would be
   actively misleading.
 
-## Next step
+## Current implementation status
 
-1. Land the 6 fixtures; wire `argus corpus test` to assert their decisions
-   (especially the two negatives).
-2. Hand-label the worklist → get precision/recall for the lexical layer.
-3. Build the capability-manifest output (state capabilities, don't verdict) and
-   the intent/capability-misfit rule that the block fixtures depend on.
+`argus corpus test --corpus corpus/agent` asserts all 6 synthetic fixtures,
+including both negatives. `argus agent scan --format json` now emits manifest
+fields on capability-backed findings:
+
+```json
+{
+  "capability": "net_egress",
+  "evidence": ["scripts/fetch.sh:8"],
+  "resolved_host": "api.weather.example.invalid"
+}
+```
+
+The remaining external step is hand-labeling `labeling-worklist.jsonl`; without
+labels, precision/recall cannot be measured honestly.
