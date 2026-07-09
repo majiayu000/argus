@@ -2,7 +2,7 @@
 
 | # | Task | Owner | Depends | Done-when / Verify | Status |
 | --- | --- | --- | --- | --- | --- |
-| SP64-T1 | `baseline.rs`：`DescEntry` 抽取（MCP `description` 字段 + `SKILL.md` frontmatter `name`/`description`），稳定 key | agent crate | GH-59/#63 合并 | 单测：给定 fixture .mcp.json / SKILL.md 断言 key 集与 hash 确定 | todo |
+| SP64-T1 | `baseline.rs`：`DescEntry` 抽取（MCP `description` 字段 + `SKILL.md` frontmatter `name`/`description`），稳定 key；在 `crates/argus-agent/Cargo.toml` 显式加 `sha2 = { workspace = true }`（sha2 已在 workspace，但当前不在 argus-agent 依赖中） | agent crate | GH-59/#63 合并 | 单测：给定 fixture .mcp.json / SKILL.md 断言 key 集与 hash 确定；`cargo tree -p argus-agent \| grep sha2` 有输出 | todo |
 | SP64-T2 | `baseline.rs`：基线文件 JSON `load`/`save`（BTreeMap 有序、确定性、坏文件→Err） | agent crate | T1 | 单测：save→load 往返一致；损坏文件 `Err` 不 panic | todo |
 | SP64-T3 | `lib.rs`：`BaselineMode{None,Check,Update}` + `scan_agent_surface_with_baseline`；`scan_agent_surface` 变薄封装 | agent crate | T1,T2 | 既有调用点/测试不回归；`cargo test -p argus-agent` | todo |
 | SP64-T4 | Update 分支：抽取当前 description 写基线、跑其余规则、不产 AGT-02；排除基线文件自身 | agent crate | T3 | 集成测试 baseline-create：写出基线、条目数正确、findings 无 AGT-02 | todo |
