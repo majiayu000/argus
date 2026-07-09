@@ -12,6 +12,7 @@ use anyhow::Result;
 use argus_core::{ArtifactKind, Finding, ScanReport};
 use std::path::Path;
 
+mod baseline;
 mod capability;
 mod config;
 mod decision;
@@ -27,17 +28,70 @@ pub struct SurfaceFile {
     pub kind: SurfaceKind,
 }
 
+/// How a scan interacts with an AGT-02 description-drift baseline.
+///
+/// - `None` — GH-57 behavior: AGT-02 is inert (no baseline = no drift check).
+/// - `Check` — compare current descriptions against the approved baseline
+///   and emit AGT-02 findings on drift.
+/// - `Update` — (re)write the baseline from the current surface and mark it
+///   approved; no AGT-02 drift comparison runs (this defines the trust base).
+pub enum BaselineMode<'a> {
+    None,
+    Check(&'a Path),
+    Update(&'a Path),
+}
+
 /// Maximum size we attempt to read as text (matches argus-rules).
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Top-level entry: scan a directory (or single file) as an agent surface.
+///
+/// Thin wrapper over [`scan_agent_surface_with_baseline`] with no baseline —
+/// identical to GH-57 behavior.
 pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
-    let files = collect_surface_files(path)?;
+    scan_agent_surface_with_baseline(path, BaselineMode::None)
+}
+
+/// Scan an agent surface, optionally checking or updating an AGT-02 baseline.
+///
+/// Injection / capability / config rules always run. In `Update` mode the
+/// baseline file is (re)written and drift comparison is skipped. In `Check`
+/// mode an unreadable/unparseable baseline yields an info finding and the
+/// other rules still run (no panic, no silent "no drift").
+pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Result<ScanReport> {
+    // Exclude the baseline file itself from the scanned tree so it is never
+    // self-hashed (product edge case: baseline may live inside the tree).
+    let exclude = match mode {
+        BaselineMode::Check(p) | BaselineMode::Update(p) => {
+            Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        }
+        BaselineMode::None => None,
+    };
+    let files = collect_surface_files(path, exclude.as_deref())?;
 
     let mut findings: Vec<Finding> = Vec::new();
     injection::run(&files, &mut findings);
     capability::run(&files, &mut findings);
     config::run(path, &files, &mut findings);
+
+    match mode {
+        BaselineMode::None => {}
+        BaselineMode::Update(target) => {
+            let snapshot = baseline::Baseline::from_entries(baseline::extract_entries(&files));
+            baseline::save(target, &snapshot)?;
+        }
+        BaselineMode::Check(source) => match baseline::load(source) {
+            Ok(approved) => baseline::check_drift(&approved, &files, &mut findings),
+            Err(e) => findings.push(
+                Finding::new(
+                    baseline::RULE_BASELINE_UNREADABLE,
+                    argus_core::Severity::Info,
+                    format!("baseline unreadable/unparseable: {e:#}"),
+                )
+                .at(source.display().to_string()),
+            ),
+        },
+    }
 
     let decision = decision::derive(&findings);
 
@@ -51,15 +105,17 @@ pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
     })
 }
 
-fn collect_surface_files(root: &Path) -> Result<Vec<SurfaceFile>> {
+fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<SurfaceFile>> {
     let mut raw: Vec<(String, String)> = Vec::new();
     if root.is_file() {
-        if let Some(content) = read_text(root) {
-            let rel = root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            raw.push((rel, content));
+        if !is_excluded(root, exclude) {
+            if let Some(content) = read_text(root) {
+                let rel = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                raw.push((rel, content));
+            }
         }
     } else {
         // Vendored dependency trees drown the signal (a real ~/.claude scan
@@ -81,6 +137,9 @@ fn collect_surface_files(root: &Path) -> Result<Vec<SurfaceFile>> {
                 continue;
             }
             let abs = entry.path();
+            if is_excluded(abs, exclude) {
+                continue; // never self-hash the baseline file
+            }
             match entry.metadata() {
                 Ok(m) if m.len() > TEXT_MAX_BYTES => continue,
                 Err(_) => continue,
@@ -111,6 +170,19 @@ fn collect_surface_files(root: &Path) -> Result<Vec<SurfaceFile>> {
             classify(&rel, &skill_dirs).map(|kind| SurfaceFile { rel, content, kind })
         })
         .collect())
+}
+
+/// True when `candidate` resolves to the same file as the excluded baseline
+/// path (compared by canonical absolute path so an in-tree baseline is not
+/// self-hashed).
+fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
+    let Some(exclude) = exclude else {
+        return false;
+    };
+    match std::fs::canonicalize(candidate) {
+        Ok(abs) => abs == *exclude,
+        Err(_) => candidate == exclude,
+    }
 }
 
 fn read_text(path: &Path) -> Option<String> {

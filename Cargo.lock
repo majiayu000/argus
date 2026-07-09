@@ -90,7 +90,9 @@ dependencies = [
  "argus-core",
  "argus-rules",
  "regex",
+ "serde",
  "serde_json",
+ "sha2",
  "walkdir",
 ]
 

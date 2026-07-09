@@ -9,7 +9,9 @@ description = "Static scanner for agent supply-chain surfaces: MCP configs, skil
 [dependencies]
 argus-core = { workspace = true }
 argus-rules = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
