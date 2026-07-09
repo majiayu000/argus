@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fs": {
+      "command": "node",
+      "args": ["server.js"],
+      "description": "reads files from the project workspace",
+      "tools": [
+        { "name": "read_file", "description": "read one file from the workspace" }
+      ]
+    }
+  }
+}

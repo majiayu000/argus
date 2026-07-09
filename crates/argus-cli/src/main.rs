@@ -7,6 +7,8 @@
 //! - `argus corpus test ...` — run the regression corpus and diff against
 //!   each case's `expectedDecision` + `rules`.
 
+mod agent;
+
 use anyhow::{bail, Context, Result};
 use argus_agent::scan_agent_surface;
 use argus_composer::{
@@ -232,6 +234,15 @@ enum AgentOp {
         paths: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        /// AGT-02 Check mode: compare descriptions against this approved
+        /// baseline file and flag drift. Mutually exclusive with
+        /// `--update-baseline`.
+        #[arg(long, value_name = "FILE", conflicts_with = "update_baseline")]
+        baseline: Option<PathBuf>,
+        /// AGT-02 Update mode: (re)write this baseline from the current
+        /// surface and mark it approved (a trust action; no drift finding).
+        #[arg(long, value_name = "FILE")]
+        update_baseline: Option<PathBuf>,
     },
 }
 
@@ -345,8 +356,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
         } => cmd_composer_fetch(&pkg, registry, cache_dir, format),
         Cmd::Agent {
-            op: AgentOp::Scan { paths, format },
-        } => cmd_agent_scan(&paths, format),
+            op:
+                AgentOp::Scan {
+                    paths,
+                    format,
+                    baseline,
+                    update_baseline,
+                },
+        } => agent::cmd_agent_scan(
+            &paths,
+            format,
+            baseline.as_deref(),
+            update_baseline.as_deref(),
+        ),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
         } => cmd_corpus_test(&corpus),
@@ -356,49 +378,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
 fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
     let report = scan_path(path)?;
     emit_report(&report, format)
-}
-
-/// Scan each path as an agent surface. The exit code is the worst decision
-/// across all paths (block > allow-with-approval > allow), so a CI gate over
-/// several directories fails if any one of them is bad.
-fn cmd_agent_scan(paths: &[PathBuf], format: Format) -> Result<ExitCode> {
-    let mut reports = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !path.exists() {
-            bail!("path does not exist: {}", path.display());
-        }
-        let report =
-            scan_agent_surface(path).with_context(|| format!("agent scan {}", path.display()))?;
-        reports.push(report);
-    }
-    match format {
-        Format::Json => {
-            if reports.len() == 1 {
-                println!("{}", serde_json::to_string_pretty(&reports[0])?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&reports)?);
-            }
-        }
-        Format::Text => {
-            for report in &reports {
-                print_report_text(report);
-            }
-        }
-    }
-    let worst = reports
-        .iter()
-        .map(|r| match r.decision {
-            Decision::Allow => 0u8,
-            Decision::AllowWithApproval => 2,
-            Decision::Block => 1,
-        })
-        .max_by_key(|c| match c {
-            1 => 2, // block outranks approval
-            2 => 1,
-            _ => 0,
-        })
-        .unwrap_or(0);
-    Ok(ExitCode::from(worst))
 }
 
 fn cmd_crates_fetch(
@@ -596,7 +575,7 @@ fn scan_path(path: &Path) -> Result<ScanReport> {
     }
 }
 
-fn print_report_text(report: &ScanReport) {
+pub(crate) fn print_report_text(report: &ScanReport) {
     println!(
         "decision: {}  package: {}",
         report.decision.as_str(),

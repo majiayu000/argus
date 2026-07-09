@@ -88,9 +88,54 @@ executing anything.
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |
 | `AGT-05-posttooluse-output-rewrite` | medium → approval | `PostToolUse` hook rewriting `updatedToolOutput` for non-MCP tools |
 | `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
+| `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
+| `AGT-02-baseline-entry-missing` | info | a baselined description is no longer present on the scanned surface |
+| `AGT-02-baseline-unreadable` | info | `--baseline` file could not be read/parsed (scan continues; not treated as "no drift") |
 
-Baseline-dependent rules (AGT-02 description hash drift, AGT-04 install-time
-high-context file diff) are follow-up work — see issue #57.
+AGT-04 (install-time high-context file diff) remains follow-up work — see issue #57.
+
+## AGT-02 description-drift baseline (GH-64)
+
+AGT-01/03/05 catch malicious agent surfaces at first sight, but they cannot
+catch a **rug-pull**: an MCP tool/server `description` or `SKILL.md`
+frontmatter that a human already approved and that is later silently mutated.
+AGT-02 closes that gap with an explicit, file-based baseline.
+
+```bash
+# 1. Approve the current descriptions — writes the baseline file.
+cargo run -p argus-cli -- agent scan --update-baseline agt02.baseline.json ~/.claude
+#    → prints "baseline written: N entries" to stderr, exits 0.
+
+# 2. Later scans compare against the approved baseline.
+cargo run -p argus-cli -- agent scan --baseline agt02.baseline.json ~/.claude
+#    → any drifted description emits an AGT-02 finding (medium → allow-with-approval).
+```
+
+What is baselined: every MCP `mcpServers.<name>.description` and
+`tools[].description` field, plus `SKILL.md` frontmatter `name` / `description`.
+Each entry is keyed by `"<relative-path>#<locator>"` and stored as a SHA-256
+hex hash of the description's UTF-8 bytes. Findings show only the first 12 hex
+chars of the old/new hashes — never the description plaintext, which may itself
+carry injection language. `--baseline` and `--update-baseline` are mutually
+exclusive.
+
+Behavior: a changed hash → AGT-02 `medium` (re-approval, not a hard block —
+legitimate edits and rug-pulls are lexically indistinguishable; if the new text
+also trips AGT-01, the existing critical → block derivation still escalates). A
+baselined entry that disappeared → `info`. A brand-new description not in the
+baseline → no AGT-02 finding (AGT-01/03/05 cover first-time surface). With no
+`--baseline`/`--update-baseline`, AGT-02 is inert and behavior is identical to
+GH-57 (no baseline = no drift check, stated explicitly rather than faked).
+
+### Trust boundary
+
+`--update-baseline` **is the approval action**: whoever runs it declares the
+current descriptions trusted. argus does not custody that trust — it only
+records and compares hashes. Treat the baseline file as a security artifact:
+commit it to your own version control and review its diffs, exactly as you
+would review the descriptions themselves. AGT-02 answers only "did an approved
+description change?"; whether the new content is *malicious* is still AGT-01's
+(lexical) and GH-59's (intent-misfit) job.
 
 ## PyPI rule coverage (Milestone 1)
 
