@@ -57,6 +57,15 @@ pub struct Finding {
     /// Path the finding was sourced from (relative to artifact root).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// Declarative capability manifest entry for agent-surface scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    /// Machine-readable evidence locations, usually `file:line`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Vec<String>>,
+    /// Statically resolved network host for `net_egress` capabilities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_host: Option<String>,
 }
 
 impl Finding {
@@ -66,11 +75,28 @@ impl Finding {
             severity,
             detail: detail.into(),
             location: None,
+            capability: None,
+            evidence: None,
+            resolved_host: None,
         }
     }
 
     pub fn at(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
+        self
+    }
+
+    pub fn with_capability(
+        mut self,
+        capability: impl Into<String>,
+        evidence: Vec<String>,
+        resolved_host: Option<String>,
+    ) -> Self {
+        self.capability = Some(capability.into());
+        if !evidence.is_empty() {
+            self.evidence = Some(evidence);
+        }
+        self.resolved_host = resolved_host;
         self
     }
 }
