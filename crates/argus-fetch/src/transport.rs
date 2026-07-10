@@ -108,7 +108,7 @@ impl Transport for HttpTransport {
             let resp = self.get_once(&current_url)?;
             if is_redirect_status(resp.status()) {
                 if redirect_count == MAX_REDIRECTS {
-                    bail!("too many HTTP redirects while fetching {url}");
+                    bail!("too many HTTP redirects while fetching {current_url} (origin: {url})");
                 }
                 let location = resp.header("Location").ok_or_else(|| {
                     anyhow!("redirect response from {current_url} missing Location header")
@@ -128,7 +128,7 @@ impl Transport for HttpTransport {
             return read_capped_body(resp, max_bytes, &current_url);
         }
 
-        bail!("too many HTTP redirects while fetching {url}")
+        bail!("too many HTTP redirects while fetching {current_url} (origin: {url})")
     }
 }
 
@@ -358,6 +358,44 @@ mod tests {
         assert_eq!(body, b"ok");
         assert_eq!(redirect_hits.load(Ordering::SeqCst), 1);
         assert_eq!(target_hits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn redirect_limit_error_includes_current_and_origin_urls() -> Result<()> {
+        let redirect_response = |location: &str| {
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+        };
+        let (limit_url, limit_hits, limit_handle) = spawn_response_server(
+            "http",
+            "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        )?;
+        let (second_hop_url, second_hop_hits, second_hop_handle) =
+            spawn_response_server("http", redirect_response(&limit_url))?;
+        let (first_hop_url, first_hop_hits, first_hop_handle) =
+            spawn_response_server("http", redirect_response(&second_hop_url))?;
+        let (origin_url, origin_hits, origin_handle) =
+            spawn_response_server("http", redirect_response(&first_hop_url))?;
+
+        let err = match HttpTransport::new().get(&origin_url, 16) {
+            Ok(body) => bail!("expected redirect limit error, got body {:?}", body),
+            Err(err) => err.to_string(),
+        };
+
+        join_server(origin_handle)?;
+        join_server(first_hop_handle)?;
+        join_server(second_hop_handle)?;
+        join_server(limit_handle)?;
+        assert_eq!(
+            err,
+            format!("too many HTTP redirects while fetching {limit_url} (origin: {origin_url})")
+        );
+        assert_eq!(origin_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(first_hop_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hop_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(limit_hits.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
