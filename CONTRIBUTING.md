@@ -21,8 +21,10 @@ opening a new one.
   ecosystem, package and version, complete output, relevant file paths and
   lines, and any public advisories or analyses. Suspicion alone is not enough.
 
-Do not commit real malicious archives. Prefer a minimal synthetic reproducer;
-all hosts in committed corpus fixtures must use `.example.invalid`.
+Do not commit real malicious archives. Prefer a minimal synthetic reproducer.
+Hosts in the main package corpus and synthetic hosts used by network-capable
+fixture code must use `.example.invalid`. A pure-text benign regression fixture
+may quote a verifiable official host only when it cannot execute or request it.
 
 For a vulnerability in argus itself or one of its dependencies, do not open a
 public issue. Submit a
@@ -79,8 +81,10 @@ in the applicable corpus. For the main corpus:
    `corpus/lockfiles/`.
 2. Add the case to the applicable `index.json` with its ID, path, package name,
    expected decision, and expected rule IDs.
-3. Use only `.example.invalid` hosts and ensure the fixture cannot download,
-   execute, or exfiltrate anything.
+3. Use `.example.invalid` for every main-corpus host and for any synthetic host
+   that network-capable fixture code can request. A pure-text benign regression
+   fixture may quote a verifiable official host only when it cannot execute or
+   request it. No fixture may download, execute, or exfiltrate anything in tests.
 4. Cover the intended detection and, when relevant, the benign behavior that
    must not become a false positive.
 5. Run the corpus command above. Agent-surface fixtures belong under
