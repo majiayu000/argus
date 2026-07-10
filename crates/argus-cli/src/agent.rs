@@ -113,7 +113,10 @@ mod tests {
     // The multi-path guard must fire before any filesystem access, so
     // non-existent paths still trigger it deterministically.
     fn two_paths() -> Vec<PathBuf> {
-        vec![PathBuf::from("/nonexistent/a"), PathBuf::from("/nonexistent/b")]
+        vec![
+            PathBuf::from("/nonexistent/a"),
+            PathBuf::from("/nonexistent/b"),
+        ]
     }
 
     #[test]
