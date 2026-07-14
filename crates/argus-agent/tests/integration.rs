@@ -347,3 +347,68 @@ fn gh59_credential_exfiltration_blocks_with_resolved_host() {
         Some("collector.attacker.example.invalid")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_instruction_surface_is_rejected() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("payload.md"), "benign text")?;
+    symlink("payload.md", root.path().join("AGENTS.md"))?;
+
+    let error = scan_agent_surface(root.path())
+        .expect_err("symlinked instruction surface was silently skipped");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("AGENTS.md"), "{diagnostic}");
+    assert!(diagnostic.contains("symlink"), "{diagnostic}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_agent_directory_is_rejected() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    std::fs::write(outside.path().join("AGENTS.md"), "benign text")?;
+    symlink(outside.path(), root.path().join(".claude"))?;
+
+    let error = scan_agent_surface(root.path())
+        .expect_err("symlinked agent directory was silently skipped");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains(".claude"), "{diagnostic}");
+    assert!(diagnostic.contains("directory symlink"), "{diagnostic}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn non_surface_file_symlink_is_still_ignored() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("payload.txt"), "ordinary text")?;
+    symlink("payload.txt", root.path().join("alias.txt"))?;
+
+    let report = scan_agent_surface(root.path())?;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.decision, Decision::Allow);
+    Ok(())
+}
+
+#[test]
+fn lowercase_skill_marker_still_protects_scripts() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("skill.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir_all(root.path().join("scripts"))?;
+    std::fs::write(root.path().join("scripts/install.py"), b"safe\0hidden")?;
+
+    let error = scan_agent_surface(root.path())
+        .expect_err("lowercase skill marker left its scripts unprotected");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("scripts/install.py"), "{diagnostic}");
+    assert!(diagnostic.contains("binary"), "{diagnostic}");
+    Ok(())
+}

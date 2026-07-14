@@ -5,11 +5,13 @@
 //! dangerous capability combinations, and high-risk configuration flags.
 //!
 //! Like `argus-rules`, every rule is a pure function over collected file
-//! contents: nothing from the scanned tree is ever executed. An unreadable
-//! scan root is a hard error; unreadable nested entries are skipped per-file.
+//! contents: nothing from the scanned tree is ever executed. Traversal errors
+//! and unreadable protected surfaces are hard errors so incomplete scans never
+//! produce a clean decision.
 
 use anyhow::{bail, Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport};
+use std::io::Read;
 use std::path::Path;
 
 mod baseline;
@@ -43,6 +45,19 @@ pub enum BaselineMode<'a> {
 
 /// Maximum size we attempt to read as text (matches argus-rules).
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
+
+struct Candidate {
+    rel: String,
+    state: CandidateState,
+}
+
+enum CandidateState {
+    Bytes(Vec<u8>),
+    Oversized(u64),
+    MetadataError(String),
+    ReadError(String),
+    Symlink,
+}
 
 /// Top-level entry: scan a directory (or single file) as an agent surface.
 ///
@@ -108,9 +123,7 @@ pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Resu
 fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<SurfaceFile>> {
     let root_metadata = std::fs::metadata(root)
         .with_context(|| format!("inspect agent scan root {}", root.display()))?;
-    let mut raw: Vec<(String, String)> = Vec::new();
-    let mut seen_paths: Vec<String> = Vec::new();
-    let mut oversized: Vec<(String, u64)> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
 
     if root_metadata.is_file() {
         if !is_excluded(root, exclude) {
@@ -118,12 +131,7 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            seen_paths.push(rel.clone());
-            if root_metadata.len() > TEXT_MAX_BYTES {
-                oversized.push((rel, root_metadata.len()));
-            } else if let Some(content) = read_text(root)? {
-                raw.push((rel, content));
-            }
+            candidates.push(collect_candidate(root, rel, root_metadata.len()));
         }
     } else if root_metadata.is_dir() {
         // Opening the root separately distinguishes a completely unreadable
@@ -142,15 +150,10 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
                 name != "node_modules" && name != ".git"
             });
         for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(error) if error.depth() == 0 => {
-                    return Err(error)
-                        .with_context(|| format!("walk agent scan root {}", root.display()));
-                }
-                Err(_) => continue, // unreadable nested entry: keep scanning
-            };
-            if !entry.file_type().is_file() {
+            let entry =
+                entry.with_context(|| format!("walk agent scan root {}", root.display()))?;
+            let file_type = entry.file_type();
+            if !file_type.is_file() && !file_type.is_symlink() {
                 continue;
             }
             let abs = entry.path();
@@ -162,20 +165,27 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
                 .unwrap_or(abs)
                 .to_string_lossy()
                 .replace('\\', "/");
-            seen_paths.push(rel.clone());
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if metadata.len() > TEXT_MAX_BYTES {
-                oversized.push((rel, metadata.len()));
+            if file_type.is_symlink() {
+                if std::fs::metadata(abs).is_ok_and(|metadata| metadata.is_dir()) {
+                    bail!(
+                        "agent scan tree contains directory symlink `{rel}`; \
+                         refusing incomplete scan"
+                    );
+                }
+                candidates.push(Candidate {
+                    rel,
+                    state: CandidateState::Symlink,
+                });
                 continue;
             }
-            let content = match read_text(abs) {
-                Ok(Some(content)) => content,
-                Ok(None) | Err(_) => continue,
+            let candidate = match entry.metadata() {
+                Ok(metadata) => collect_candidate(abs, rel, metadata.len()),
+                Err(error) => Candidate {
+                    rel,
+                    state: CandidateState::MetadataError(error.to_string()),
+                },
             };
-            raw.push((rel, content));
+            candidates.push(candidate);
         }
     } else {
         bail!(
@@ -184,28 +194,71 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
         );
     }
 
+    classify_candidates(candidates)
+}
+
+fn collect_candidate(path: &Path, rel: String, metadata_len: u64) -> Candidate {
+    let state = if metadata_len > TEXT_MAX_BYTES {
+        CandidateState::Oversized(metadata_len)
+    } else {
+        match read_limited(path) {
+            Ok(state) => state,
+            Err(error) => CandidateState::ReadError(format!("{error:#}")),
+        }
+    };
+    Candidate { rel, state }
+}
+
+fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
     // Directories that contain a SKILL.md: scripts underneath are skill scripts.
-    let skill_dirs: Vec<String> = seen_paths
+    let skill_dirs: Vec<String> = candidates
         .iter()
-        .filter(|rel| rel.as_str() == "SKILL.md" || rel.ends_with("/SKILL.md"))
-        .map(|rel| rel.trim_end_matches("SKILL.md").to_string())
+        .filter_map(|candidate| {
+            let file_name = candidate.rel.rsplit('/').next().unwrap_or(&candidate.rel);
+            file_name.eq_ignore_ascii_case("SKILL.md").then(|| {
+                candidate
+                    .rel
+                    .strip_suffix(file_name)
+                    .unwrap_or("")
+                    .to_string()
+            })
+        })
         .collect();
 
-    for (rel, size) in oversized {
-        if classify(&rel, &skill_dirs).is_some() {
-            bail!(
-                "protected agent surface `{rel}` is {size} bytes, exceeds scan limit \
+    let mut files = Vec::new();
+    for Candidate { rel, state } in candidates {
+        let Some(kind) = classify(&rel, &skill_dirs) else {
+            continue;
+        };
+        let bytes = match state {
+            CandidateState::Bytes(bytes) => bytes,
+            CandidateState::Oversized(size) => bail!(
+                "protected agent surface `{rel}` is at least {size} bytes, exceeds scan limit \
                  {TEXT_MAX_BYTES}; refusing incomplete scan"
-            );
+            ),
+            CandidateState::MetadataError(error) => {
+                bail!("inspect protected agent surface `{rel}`: {error}; refusing incomplete scan")
+            }
+            CandidateState::ReadError(error) => {
+                bail!("read protected agent surface `{rel}`: {error}; refusing incomplete scan")
+            }
+            CandidateState::Symlink => {
+                bail!("protected agent surface `{rel}` is a symlink; refusing incomplete scan")
+            }
+        };
+        if argus_rules::looks_binary(&bytes) {
+            bail!("protected agent surface `{rel}` appears binary; refusing incomplete scan");
         }
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(error) => bail!(
+                "protected agent surface `{rel}` is not valid UTF-8: {error}; \
+                 refusing incomplete scan"
+            ),
+        };
+        files.push(SurfaceFile { rel, content, kind });
     }
-
-    Ok(raw
-        .into_iter()
-        .filter_map(|(rel, content)| {
-            classify(&rel, &skill_dirs).map(|kind| SurfaceFile { rel, content, kind })
-        })
-        .collect())
+    Ok(files)
 }
 
 /// True when `candidate` resolves to the same file as the excluded baseline
@@ -221,13 +274,17 @@ fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
     }
 }
 
-fn read_text(path: &Path) -> Result<Option<String>> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("read agent surface {}", path.display()))?;
-    if argus_rules::looks_binary(&bytes) {
-        return Ok(None);
+fn read_limited(path: &Path) -> Result<CandidateState> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open agent surface {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(TEXT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read agent surface {}", path.display()))?;
+    if bytes.len() as u64 > TEXT_MAX_BYTES {
+        return Ok(CandidateState::Oversized(bytes.len() as u64));
     }
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(CandidateState::Bytes(bytes))
 }
 
 #[cfg(test)]
@@ -336,6 +393,103 @@ mod tests {
         let report = scan_agent_surface(&root)?;
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(report.decision, argus_core::Decision::Allow);
+        Ok(())
+    }
+
+    #[test]
+    fn binary_instruction_surface_returns_error() -> Result<()> {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("nested"))?;
+        std::fs::write(root.join("nested/AGENTS.md"), b"trusted\0hidden")?;
+
+        let error =
+            scan_agent_surface(&root).expect_err("binary instruction surface was silently skipped");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("nested/AGENTS.md"), "{diagnostic}");
+        assert!(diagnostic.contains("binary"), "{diagnostic}");
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_utf8_mcp_surface_returns_error() -> Result<()> {
+        let root = tempdir();
+        std::fs::write(root.join(".mcp.json"), [0xff, b'{', b'}'])?;
+
+        let error =
+            scan_agent_surface(&root).expect_err("invalid UTF-8 MCP surface was lossily decoded");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains(".mcp.json"), "{diagnostic}");
+        assert!(diagnostic.contains("UTF-8"), "{diagnostic}");
+        Ok(())
+    }
+
+    #[test]
+    fn binary_skill_script_returns_error_after_skill_discovery() -> Result<()> {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("scripts"))?;
+        std::fs::write(root.join("scripts/install.py"), b"safe\0hidden")?;
+        std::fs::write(root.join("SKILL.md"), "---\nname: demo\n---\n")?;
+
+        let error =
+            scan_agent_surface(&root).expect_err("binary skill script was silently skipped");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("scripts/install.py"), "{diagnostic}");
+        assert!(diagnostic.contains("binary"), "{diagnostic}");
+        Ok(())
+    }
+
+    #[test]
+    fn non_surface_binary_and_invalid_utf8_are_still_ignored() -> Result<()> {
+        let root = tempdir();
+        std::fs::write(root.join("asset.bin"), b"opaque\0bytes")?;
+        std::fs::write(root.join("notes.dat"), [0xff, 0xfe])?;
+
+        let report = scan_agent_surface(&root)?;
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.decision, argus_core::Decision::Allow);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_nested_protected_file_returns_error() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir();
+        let surface = root.join("AGENTS.md");
+        std::fs::write(&surface, "trusted instructions")?;
+        let original = std::fs::metadata(&surface)?.permissions();
+        let mut denied = original.clone();
+        denied.set_mode(0o000);
+        std::fs::set_permissions(&surface, denied)?;
+
+        let result = scan_agent_surface(&root);
+        std::fs::set_permissions(&surface, original)?;
+
+        let error = result.expect_err("unreadable protected file was silently skipped");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("AGENTS.md"), "{diagnostic}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_nested_directory_returns_error() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir();
+        let nested = root.join("private");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::write(nested.join("AGENTS.md"), "trusted instructions")?;
+        let original = std::fs::metadata(&nested)?.permissions();
+        let mut denied = original.clone();
+        denied.set_mode(0o000);
+        std::fs::set_permissions(&nested, denied)?;
+
+        let result = scan_agent_surface(&root);
+        std::fs::set_permissions(&nested, original)?;
+
+        result.expect_err("unreadable nested directory was silently skipped");
         Ok(())
     }
 

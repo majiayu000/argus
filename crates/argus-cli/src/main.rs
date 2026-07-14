@@ -8,6 +8,7 @@
 //!   each case's `expectedDecision` + `rules`.
 
 mod agent;
+mod corpus_path;
 
 use anyhow::{bail, Context, Result};
 use argus_agent::scan_agent_surface;
@@ -626,20 +627,23 @@ fn cmd_corpus_test(corpus_root: &Path) -> Result<ExitCode> {
 
         for case in &index.cases {
             total += 1;
-            let case_path = index_root.join(&case.path);
-            if !matches!(case.kind.as_str(), "fixture" | "lockfile") {
-                failed.push(format!("{} — unknown kind `{}`", case.id, case.kind));
-                continue;
-            }
-            if let Err(error) = std::fs::metadata(&case_path) {
-                failed.push(format!(
-                    "{} — case path unavailable at {}: {error}",
-                    case.id,
-                    case_path.display()
-                ));
-                continue;
-            }
-            let report = if case.kind == "fixture" {
+            let kind = match case.kind.as_str() {
+                "fixture" => corpus_path::CaseKind::Fixture,
+                "lockfile" => corpus_path::CaseKind::Lockfile,
+                unknown => {
+                    failed.push(format!("{} — unknown kind `{unknown}`", case.id));
+                    continue;
+                }
+            };
+            let case_path =
+                match corpus_path::resolve_case_path(index_root, Path::new(&case.path), kind) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        failed.push(format!("{} — {error:#}", case.id));
+                        continue;
+                    }
+                };
+            let report = if matches!(kind, corpus_path::CaseKind::Fixture) {
                 if index.surface.as_deref() == Some("agent-skill") {
                     scan_agent_surface(&case_path)
                 } else {
