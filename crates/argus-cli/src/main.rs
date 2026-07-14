@@ -627,14 +627,26 @@ fn cmd_corpus_test(corpus_root: &Path) -> Result<ExitCode> {
         for case in &index.cases {
             total += 1;
             let case_path = index_root.join(&case.path);
-            let report = match (case.kind.as_str(), index.surface.as_deref()) {
-                ("fixture", Some("agent-skill")) => scan_agent_surface(&case_path),
-                ("fixture", _) => scan_package_dir(&case_path),
-                ("lockfile", _) => scan_lockfile(&case_path),
-                (other, _) => {
-                    failed.push(format!("{} — unknown kind `{}`", case.id, other));
-                    continue;
+            if !matches!(case.kind.as_str(), "fixture" | "lockfile") {
+                failed.push(format!("{} — unknown kind `{}`", case.id, case.kind));
+                continue;
+            }
+            if let Err(error) = std::fs::metadata(&case_path) {
+                failed.push(format!(
+                    "{} — case path unavailable at {}: {error}",
+                    case.id,
+                    case_path.display()
+                ));
+                continue;
+            }
+            let report = if case.kind == "fixture" {
+                if index.surface.as_deref() == Some("agent-skill") {
+                    scan_agent_surface(&case_path)
+                } else {
+                    scan_package_dir(&case_path)
                 }
+            } else {
+                scan_lockfile(&case_path)
             };
             let report = match report {
                 Ok(r) => r,
