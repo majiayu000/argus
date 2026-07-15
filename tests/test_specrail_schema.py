@@ -133,6 +133,24 @@ def test_validate_instance_skips_object_constraints_for_allowed_null() -> None:
     )
 
 
+def test_validate_instance_skips_string_constraints_for_allowed_null() -> None:
+    validate_instance(
+        {"type": ["string", "null"], "minLength": 1, "pattern": "^GH-[0-9]+$"},
+        None,
+    )
+
+
+def test_validate_instance_skips_array_constraints_for_allowed_null() -> None:
+    validate_instance(
+        {
+            "type": ["array", "null"],
+            "minItems": 1,
+            "items": {"type": "string"},
+        },
+        None,
+    )
+
+
 @pytest.mark.parametrize("threshold", [True, -1, 1.5, "2"])
 def test_validate_instance_rejects_invalid_min_properties_keyword(
     threshold: object,

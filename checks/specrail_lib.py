@@ -253,13 +253,13 @@ def validate_instance(schema: dict[str, Any], data: Any, path: str = "$") -> Non
         if data not in enum:
             raise SpecRailError(f"{path}: value {data!r} is not in enum")
 
-    if "minLength" in schema:
+    if "minLength" in schema and data is not None:
         if not isinstance(data, str):
             raise SpecRailError(f"{path}: minLength requires a string instance")
         if len(data) < int(schema["minLength"]):
             raise SpecRailError(f"{path}: string is shorter than minLength")
 
-    if "pattern" in schema:
+    if "pattern" in schema and data is not None:
         if not isinstance(data, str):
             raise SpecRailError(f"{path}: pattern requires a string instance")
         pattern = schema["pattern"]
@@ -272,7 +272,7 @@ def validate_instance(schema: dict[str, Any], data: Any, path: str = "$") -> Non
         if matched is None:
             raise SpecRailError(f"{path}: string does not match pattern")
 
-    if "minItems" in schema:
+    if "minItems" in schema and data is not None:
         if not isinstance(data, list):
             raise SpecRailError(f"{path}: minItems requires an array instance")
         if len(data) < int(schema["minItems"]):
@@ -348,7 +348,7 @@ def validate_instance(schema: dict[str, Any], data: Any, path: str = "$") -> Non
         elif additional is not True:
             raise SpecRailError(f"{path}: additionalProperties must be boolean or object")
 
-    if "items" in schema:
+    if "items" in schema and data is not None:
         if not isinstance(data, list):
             raise SpecRailError(f"{path}: items requires an array instance")
         item_schema = schema["items"]
