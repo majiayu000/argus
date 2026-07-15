@@ -295,19 +295,19 @@ def validate_instance(schema: dict[str, Any], data: Any, path: str = "$") -> Non
                 f"{path}: object has fewer properties than minProperties"
             )
 
-    if "minimum" in schema:
+    if "minimum" in schema and data is not None:
         if not _json_type_matches(data, "number"):
             raise SpecRailError(f"{path}: minimum requires a number instance")
         if data < schema["minimum"]:
             raise SpecRailError(f"{path}: value is below minimum")
 
-    if "exclusiveMinimum" in schema:
+    if "exclusiveMinimum" in schema and data is not None:
         if not _json_type_matches(data, "number"):
             raise SpecRailError(f"{path}: exclusiveMinimum requires a number instance")
         if data <= schema["exclusiveMinimum"]:
             raise SpecRailError(f"{path}: value is not above exclusiveMinimum")
 
-    if "exclusiveMaximum" in schema:
+    if "exclusiveMaximum" in schema and data is not None:
         if not _json_type_matches(data, "number"):
             raise SpecRailError(f"{path}: exclusiveMaximum requires a number instance")
         if data >= schema["exclusiveMaximum"]:

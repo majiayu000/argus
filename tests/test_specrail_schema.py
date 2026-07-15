@@ -112,6 +112,12 @@ def test_validate_instance_supports_min_properties_for_approved_spec_revisions()
     validate_instance({"type": "object", "minProperties": 0}, {})
 
 
+def test_validate_instance_skips_numeric_constraints_for_allowed_null() -> None:
+    validate_instance({"type": ["integer", "null"], "minimum": 1}, None)
+    validate_instance({"type": ["number", "null"], "exclusiveMinimum": 0}, None)
+    validate_instance({"type": ["number", "null"], "exclusiveMaximum": 1}, None)
+
+
 @pytest.mark.parametrize("threshold", [True, -1, 1.5, "2"])
 def test_validate_instance_rejects_invalid_min_properties_keyword(
     threshold: object,

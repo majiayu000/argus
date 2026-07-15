@@ -154,7 +154,9 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
     state_from_cli = args.state is not None
     state_from_evidence = not state_from_cli and evidence_state is not None
     state_source = str(evidence.get("state_source") or "none")
-    state_trusted = state_source == "label" and evidence.get("state_trusted") is True
+    state_metadata_trusted = (
+        state_source == "label" and evidence.get("state_trusted") is True
+    )
 
     reasons: list[str] = []
     satisfied: list[str] = []
@@ -193,6 +195,7 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     current_state, state_evidence = infer_state(config, explicit_state, labels)
+    state_trusted = state_metadata_trusted and evidence_state == current_state
     if state_from_evidence and current_state == evidence_state:
         state_evidence = [f"state provided by evidence: {current_state} ({state_source})"]
     satisfied.extend(state_evidence)
@@ -234,15 +237,20 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
     if (
         route in READINESS_GATED_ROUTES
         and "readiness_label" in human_gates
-        and state_from_evidence
         and current_state in allowed_from
         and not state_trusted
     ):
         missing.append("trusted_state")
-        reasons.append(
-            f"state {current_state} came from untrusted {state_source} evidence; "
-            "maintainer readiness label required"
-        )
+        if state_from_evidence:
+            reasons.append(
+                f"state {current_state} came from untrusted {state_source} evidence; "
+                "maintainer readiness label required"
+            )
+        else:
+            reasons.append(
+                f"state {current_state} was provided without trusted issue evidence; "
+                "maintainer readiness label required"
+            )
 
     provided_artifacts = dict(evidence.get("artifacts", {})) if isinstance(evidence.get("artifacts"), dict) else {}
     for raw_artifact in args.artifact or []:

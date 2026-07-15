@@ -77,10 +77,10 @@
     },
     {
       "path": "checks/github_pr_evidence.py",
-      "sha256": "46fd19635fceb89ad81588d7db43395b9a360b5b3da2926e42fcfa82847e989b",
+      "sha256": "03e05a6a0b90724fe56005a85ba9af9f9a90178062e108c7b60a0df1bf3fb4c4",
       "source_path": "checks/github_pr_evidence.py",
       "source_sha256": "0db583bc37535b99954221fcae714e8efb9e41f5b7c6ae695a457514118b20c2",
-      "adaptation": "bind independent review artifacts to the exact PR and current head; fail closed on stale or missing evidence"
+      "adaptation": "bind independent review artifacts and final review-thread evidence to the exact PR head; fail closed on stale or missing evidence"
     },
     {
       "path": "checks/github_pr_snapshot.py",
@@ -97,6 +97,13 @@
       "adaptation": "split review artifact and authorization helpers to preserve the 800-line hard limit"
     },
     {
+      "path": "checks/github_review_threads.py",
+      "sha256": "6e38d313188eddb8593f8b286b4ab14966a9f4067bb0e098b3d190aa011ef78d",
+      "source_path": null,
+      "source_sha256": null,
+      "adaptation": "paginate GitHub review-thread evidence to exhaustion and bind every page to one PR head without exceeding the 800-line hard limit"
+    },
+    {
       "path": "checks/pack_asset_validation.py",
       "sha256": "63bb6844543876e091e86c6f0da2932f5cd51a14b2f803d8435839d175a0f7a3",
       "source_path": "checks/pack_asset_validation.py",
@@ -105,7 +112,7 @@
     },
     {
       "path": "checks/pr_gate.py",
-      "sha256": "409e946549c95334e8a06eb329409f4fbb55687f2f881e82d4d7443847eb94d6",
+      "sha256": "236bf8e7521ab743865284f4318582693f5fe6a6b0072cfb3f9519df1c3c570e",
       "source_path": "checks/pr_gate.py",
       "source_sha256": "dcea0b7023da4e1665f3abe6cba1eab2123e8d92eab80dbbe7e9efcdf4733475",
       "adaptation": "bind independent review artifacts to the exact PR and current head; fail closed on stale or missing evidence"
@@ -119,10 +126,10 @@
     },
     {
       "path": "checks/route_gate.py",
-      "sha256": "3e9ed8bd50386add6421ad96daabd7d4a75bc30b937b54dfef77069787309ba3",
+      "sha256": "34873ebac1f7294d61986d6c143122ea7c9f88f08d5c8a73ff5bec17ce645d77",
       "source_path": "checks/route_gate.py",
       "source_sha256": "3e9ed8bd50386add6421ad96daabd7d4a75bc30b937b54dfef77069787309ba3",
-      "adaptation": null
+      "adaptation": "require trusted readiness-label evidence for the exact routed state instead of accepting CLI state as human-gate proof"
     },
     {
       "path": "checks/runtime_gate_rules.py",
@@ -147,10 +154,10 @@
     },
     {
       "path": "checks/specrail_lib.py",
-      "sha256": "d7a124d226299fcae38c3caebdd5f8d297ad2998a3300fe08a770317bcedb685",
+      "sha256": "234ad7d5b799e0b9267f8e02025534e45b01c7533ff9db6bfacc1bbb96169664",
       "source_path": "checks/specrail_lib.py",
       "source_sha256": "d7a124d226299fcae38c3caebdd5f8d297ad2998a3300fe08a770317bcedb685",
-      "adaptation": null
+      "adaptation": "preserve JSON Schema nullable numeric values when applying numeric constraints"
     },
     {
       "path": "checks/verify_specrail_adoption.py",
@@ -210,7 +217,7 @@
     },
     {
       "path": "examples/fixtures/pr-clean-authorized.json",
-      "sha256": "5ee5ca8c573f28cb89fde32504cdf76b235558a357e052dad1ed53103691e2b7",
+      "sha256": "f83c2a12b1598067da4952e7b206e34056dbd45bde95690880e3cb9ee7b2ff27",
       "source_path": "examples/fixtures/pr-clean-authorized.json",
       "source_sha256": "0a7b8e7734d828af1ae94273adad2474cbdf6b4737559f9c718f794c69930b17",
       "adaptation": "add deterministic current-head review attestation fields to gate fixtures"
@@ -770,7 +777,7 @@
     },
     {
       "path": "specrail-source.json",
-      "sha256": "7a2863a3de6ea5ad44892b92e478dd94e68159bfa7f2f91ff532d9ba8e42679f",
+      "sha256": "f362ce2ebf6d194056d5bcce9bb78a0433c04b3b21abceda2ce1e1c260e03b5c",
       "source_path": null,
       "source_sha256": null,
       "adaptation": "Argus provenance, deterministic adoption verification, and consumer smoke coverage"
@@ -889,10 +896,10 @@
     },
     {
       "path": "tests/test_configured_spec_path_review_regressions.py",
-      "sha256": "1b7a43fd6970eba79e263f1908f8545aa640547ae3dd4e5e10c7e1338a7b6140",
+      "sha256": "cd429e59b04e9bb66535a09768881a4ca63a65cecdd143ceac3d374f0d1720b0",
       "source_path": "tests/test_configured_spec_path_review_regressions.py",
       "source_sha256": "02247a9d74761663ddd53ad024f9cc1b53b17577054e9c5b4a0b1fc4320c5b6e",
-      "adaptation": "make upstream maintainer tests consumer-portable without weakening assertions"
+      "adaptation": "make upstream maintainer tests consumer-portable and require trusted readiness evidence"
     },
     {
       "path": "tests/test_duplicate_work_gate.py",
@@ -917,17 +924,24 @@
     },
     {
       "path": "tests/test_github_issue_evidence.py",
-      "sha256": "7bf061a51277efc8fa8926e8461cf5e8ffd97397fc1a9319f6c1f87dc31c1617",
+      "sha256": "8cbb993c1d0cccdda1896f94245082bcecbe18915bdd9e373fd7134813a040be",
       "source_path": "tests/test_github_issue_evidence.py",
       "source_sha256": "1f6e6713887d99fc981c88377aad57e95978a288ce505e7d2b05fd1cecdf7b90",
-      "adaptation": "make upstream maintainer tests consumer-portable without weakening assertions"
+      "adaptation": "make upstream maintainer tests consumer-portable and reject CLI override of untrusted readiness evidence"
     },
     {
       "path": "tests/test_github_pr_evidence.py",
-      "sha256": "c8e57230bd6ced165a555fc06cab841ebc0a04b3659636a5860fa998c1e22916",
+      "sha256": "471ee63848f77091db3d583a2170db2b793ddf7cb5ad786aece06f74c03d0ece",
       "source_path": "tests/test_github_pr_evidence.py",
       "source_sha256": "949140fe17a56589394eab23abf7802cebccadb68029724cf3178b0a62df15de",
-      "adaptation": "cover mandatory review artifact validation and stale-head negative paths"
+      "adaptation": "cover mandatory review artifacts, stale heads, and final-snapshot review-thread ordering"
+    },
+    {
+      "path": "tests/test_github_review_threads.py",
+      "sha256": "8ed915d0ce5761f5e2ae4d37a6fbd3c4bd4f60a51a2a259239140b79109ecf18",
+      "source_path": null,
+      "source_sha256": null,
+      "adaptation": "cover complete review-thread pagination, PR-head binding, and fail-closed cursor handling"
     },
     {
       "path": "tests/test_install_codex_skills.py",
@@ -945,7 +959,7 @@
     },
     {
       "path": "tests/test_pr_gate.py",
-      "sha256": "40cb63040193d85c87714035096ba088a40cafa022e187796aa20b150f7095f1",
+      "sha256": "c2dbfeb78e0636281d0386252d1e19aea97f612d73697232f2d9d8b3337babe7",
       "source_path": "tests/test_pr_gate.py",
       "source_sha256": "1080019b16b16e33a7e5f9a1b6b65c080081062d45dca6a03e46e424b028ebb1",
       "adaptation": "cover mandatory review artifact validation and stale-head negative paths"
@@ -959,10 +973,10 @@
     },
     {
       "path": "tests/test_route_gate.py",
-      "sha256": "3ee6b12e6329f022853dee38a90fd9f31abefeed3a2e3abffae03f8562adaef0",
+      "sha256": "eb350aed18ee44eef281b4a14117e030ec369fd5400edb517fe6ca711cbc0e6a",
       "source_path": "tests/test_route_gate.py",
       "source_sha256": "3ee6b12e6329f022853dee38a90fd9f31abefeed3a2e3abffae03f8562adaef0",
-      "adaptation": null
+      "adaptation": "cover exact-state trusted readiness-label evidence and reject CLI state as human-gate proof"
     },
     {
       "path": "tests/test_runtime_ledger_gate.py",
@@ -973,17 +987,17 @@
     },
     {
       "path": "tests/test_specrail_adoption.py",
-      "sha256": "23e11c4472450c3da1ef754c2e4e4bea7f09149df577084c0f4be3ffadc07a15",
+      "sha256": "451e725ddfd221a2f336ede6df3d30a71ce8daa91a576ad9f8525cc49000ccdd",
       "source_path": null,
       "source_sha256": null,
       "adaptation": "Argus provenance, deterministic adoption verification, and consumer smoke coverage"
     },
     {
       "path": "tests/test_specrail_schema.py",
-      "sha256": "bc7e4e44eb468a2bf234a0195f08359b8c855fdf60b6e2503046494098be380d",
+      "sha256": "e69149e830d00197536183b880a75d4b3c042de4e120e5a3df1ddce3c5290df9",
       "source_path": "tests/test_specrail_schema.py",
       "source_sha256": "bc7e4e44eb468a2bf234a0195f08359b8c855fdf60b6e2503046494098be380d",
-      "adaptation": null
+      "adaptation": "cover numeric constraints on nullable schema values"
     },
     {
       "path": "tests/test_specrail_yaml.py",
@@ -1001,10 +1015,10 @@
     },
     {
       "path": "workflow.yaml",
-      "sha256": "51225b6a1f285e7851c38128a46c644a5aeacd1c9086771eb2b858e26a632a53",
+      "sha256": "e8957058c89d9e35403259bafacdf9ec12ff156dd38f26e3968e3b5d0c2953e8",
       "source_path": "workflow.yaml",
       "source_sha256": "51225b6a1f285e7851c38128a46c644a5aeacd1c9086771eb2b858e26a632a53",
-      "adaptation": null
+      "adaptation": "require the existing Argus Rust CI and workflow-check contexts"
     }
   ]
 }
