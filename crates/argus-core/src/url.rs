@@ -104,6 +104,13 @@ fn normalize_host_pattern(raw: &str) -> Result<String> {
     }
 }
 
+fn normalize_registry_host(raw: &str) -> Result<String> {
+    if raw.starts_with('.') {
+        bail!("registry host must be exact, not a suffix pattern: `{raw}`");
+    }
+    normalize_host_pattern(raw)
+}
+
 /// Validate an artifact download URL against a registry host and an
 /// allowlist of additional acceptable hosts (typically CDN hosts).
 ///
@@ -125,7 +132,7 @@ pub fn validate_artifact_url<S: AsRef<str>>(
         bail!("refusing non-HTTPS artifact URL `{url}`");
     }
     let host = canonical_authority(&parsed, url)?;
-    let registry_host = normalize_host_pattern(registry_host)
+    let registry_host = normalize_registry_host(registry_host)
         .with_context(|| format!("invalid registry host `{registry_host}`"))?;
     let allowed = allowed
         .iter()
@@ -330,6 +337,16 @@ mod tests {
         assert!(
             matches!(&result, Err(error) if format!("{error:#}").contains("invalid registry host")),
             "malformed registry host was not rejected as configuration"
+        );
+
+        let result = validate_artifact_url(
+            "https://cdn.example/package.tar.gz",
+            ".registry.example",
+            &["cdn.example"],
+        );
+        assert!(
+            matches!(&result, Err(error) if format!("{error:#}").contains("invalid registry host")),
+            "registry suffix pattern was accepted and masked by a valid allowlist entry"
         );
 
         for (url, registry_host, allowed) in [
