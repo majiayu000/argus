@@ -136,7 +136,14 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            candidates.push(collect_candidate(root, rel, root_metadata.len()));
+            let candidate = collect_candidate(root, rel, root_metadata.len());
+            if let CandidateState::ReadError(error) = &candidate.state {
+                bail!(
+                    "read agent scan root {}: {error}; refusing incomplete scan",
+                    root.display()
+                );
+            }
+            candidates.push(candidate);
         }
     } else if root_metadata.is_dir() {
         // Opening the root separately distinguishes a completely unreadable
@@ -401,6 +408,36 @@ mod tests {
         assert!(
             result.is_err(),
             "unreadable root produced a clean scan report"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_root_returns_error() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir();
+        let root = dir.join("notes.txt");
+        std::fs::write(&root, "ordinary text")?;
+        let original = std::fs::metadata(&root)?.permissions();
+        let mut denied = original.clone();
+        denied.set_mode(0o000);
+        std::fs::set_permissions(&root, denied)?;
+
+        // UID 0 and some filesystems can still read a mode-000 file. In those
+        // environments this fixture cannot establish its prerequisite.
+        if std::fs::read(&root).is_ok() {
+            std::fs::set_permissions(&root, original)?;
+            return Ok(());
+        }
+
+        let result = scan_agent_surface(&root);
+        std::fs::set_permissions(&root, original)?;
+
+        assert!(
+            result.is_err(),
+            "unreadable file root produced a clean scan report"
         );
         Ok(())
     }

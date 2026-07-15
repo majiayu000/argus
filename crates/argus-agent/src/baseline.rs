@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
-use tempfile::Builder;
+use tempfile::{Builder, NamedTempFile};
 
 /// Drift of an approved description → medium (allow-with-approval).
 pub const RULE_DRIFT: &str = "AGT-02";
@@ -81,16 +81,15 @@ pub fn save(path: &Path, baseline: &Baseline) -> Result<()> {
         .prefix(".argus-baseline-")
         .tempfile_in(parent)
         .with_context(|| format!("create temporary baseline next to {}", path.display()))?;
-    temporary
-        .write_all(text.as_bytes())
-        .with_context(|| format!("write temporary baseline for {}", path.display()))?;
-    temporary
-        .flush()
-        .with_context(|| format!("flush temporary baseline for {}", path.display()))?;
-    temporary
-        .as_file()
-        .sync_all()
-        .with_context(|| format!("sync temporary baseline for {}", path.display()))?;
+    if let Err(error) = temporary.write_all(text.as_bytes()) {
+        return close_after_io_error(temporary, "write", path, error);
+    }
+    if let Err(error) = temporary.flush() {
+        return close_after_io_error(temporary, "flush", path, error);
+    }
+    if let Err(error) = temporary.as_file().sync_all() {
+        return close_after_io_error(temporary, "sync", path, error);
+    }
     match temporary.persist(path) {
         Ok(_) => Ok(()),
         Err(error) => {
@@ -110,6 +109,24 @@ pub fn save(path: &Path, baseline: &Baseline) -> Result<()> {
                 ),
             }
         }
+    }
+}
+
+fn close_after_io_error(
+    temporary: NamedTempFile,
+    operation: &str,
+    destination: &Path,
+    operation_error: std::io::Error,
+) -> Result<()> {
+    let temporary_path = temporary.path().to_path_buf();
+    match temporary.close() {
+        Ok(()) => Err(operation_error)
+            .with_context(|| format!("{operation} temporary baseline for {}", destination.display())),
+        Err(cleanup_error) => bail!(
+            "{operation} temporary baseline for {}: {operation_error}; cleanup temporary baseline {}: {cleanup_error}",
+            destination.display(),
+            temporary_path.display()
+        ),
     }
 }
 
@@ -461,6 +478,40 @@ mod tests {
             leftovers.is_empty(),
             "temporary files leaked: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn io_failure_closes_temporary_file_and_preserves_operation_error() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "argus-baseline-io-failure-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let destination = dir.join("baseline.json");
+        let temporary = Builder::new()
+            .prefix(".argus-baseline-")
+            .tempfile_in(&dir)?;
+        let temporary_path = temporary.path().to_path_buf();
+
+        let result = close_after_io_error(
+            temporary,
+            "write",
+            &destination,
+            std::io::Error::other("synthetic write failure"),
+        );
+        let error = match result {
+            Ok(()) => bail!("synthetic write failure was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("synthetic write failure"));
+        assert!(!temporary_path.exists(), "temporary file was not removed");
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[test]
