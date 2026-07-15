@@ -77,9 +77,7 @@ pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Resu
     // Exclude the baseline file itself from the scanned tree so it is never
     // self-hashed (product edge case: baseline may live inside the tree).
     let exclude = match mode {
-        BaselineMode::Check(p) | BaselineMode::Update(p) => {
-            Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        }
+        BaselineMode::Check(p) | BaselineMode::Update(p) => Some(path_identity(p)),
         BaselineMode::None => None,
     };
     let files = collect_surface_files(path, exclude.as_deref())?;
@@ -121,8 +119,14 @@ pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Resu
 }
 
 fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<SurfaceFile>> {
-    let root_metadata = std::fs::metadata(root)
+    let root_metadata = std::fs::symlink_metadata(root)
         .with_context(|| format!("inspect agent scan root {}", root.display()))?;
+    if root_metadata.file_type().is_symlink() {
+        bail!(
+            "agent scan root `{}` is a symlink; refusing incomplete scan",
+            root.display()
+        );
+    }
     let mut candidates: Vec<Candidate> = Vec::new();
 
     if root_metadata.is_file() {
@@ -261,17 +265,37 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
     Ok(files)
 }
 
-/// True when `candidate` resolves to the same file as the excluded baseline
-/// path (compared by canonical absolute path so an in-tree baseline is not
-/// self-hashed).
+/// True only for the declared baseline path itself. A different symlink alias
+/// that resolves to the same target must still be classified so protected
+/// surfaces cannot bypass completeness checks by pointing at the baseline.
 fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
     let Some(exclude) = exclude else {
         return false;
     };
-    match std::fs::canonicalize(candidate) {
-        Ok(abs) => abs == *exclude,
-        Err(_) => candidate == exclude,
+    if path_identity(candidate) == exclude {
+        return true;
     }
+    if std::fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return false;
+    }
+    match std::fs::canonicalize(candidate) {
+        Ok(abs) => std::fs::canonicalize(exclude).is_ok_and(|excluded| abs == excluded),
+        Err(_) => false,
+    }
+}
+
+fn path_identity(path: &Path) -> std::path::PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::canonicalize(parent)
+        .map(|parent| parent.join(file_name))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn read_limited(path: &Path) -> Result<CandidateState> {

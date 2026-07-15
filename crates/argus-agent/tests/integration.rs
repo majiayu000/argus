@@ -367,6 +367,43 @@ fn symlinked_instruction_surface_is_rejected() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn direct_symlinked_instruction_root_is_rejected() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("payload.md");
+    let surface = root.path().join("AGENTS.md");
+    std::fs::write(&target, "benign text")?;
+    symlink(&target, &surface)?;
+
+    let error =
+        scan_agent_surface(&surface).expect_err("direct symlinked instruction root was followed");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("AGENTS.md"), "{diagnostic}");
+    assert!(diagnostic.contains("symlink"), "{diagnostic}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn baseline_alias_does_not_exempt_protected_symlink() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    let baseline = root.path().join("baseline.json");
+    scan_agent_surface_with_baseline(root.path(), BaselineMode::Update(&baseline))?;
+    symlink("baseline.json", root.path().join("AGENTS.md"))?;
+
+    let error = scan_agent_surface_with_baseline(root.path(), BaselineMode::Check(&baseline))
+        .expect_err("protected symlink alias to baseline was excluded");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("AGENTS.md"), "{diagnostic}");
+    assert!(diagnostic.contains("symlink"), "{diagnostic}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn symlinked_agent_directory_is_rejected() -> anyhow::Result<()> {
     use std::os::unix::fs::symlink;
 
