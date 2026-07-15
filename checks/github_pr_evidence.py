@@ -621,7 +621,12 @@ def collect_evidence(
         assert_same_pr_file_snapshot(file_snapshot_before, file_snapshot_after)
 
     pr_payload_after = collect_pr_view(github_repo, pr_number)
+    base_sha_after = _require_string(pr_payload_after, "baseRefOid")
     head_sha_after = _require_string(pr_payload_after, "headRefOid")
+    if base_sha_before != base_sha_after:
+        raise EvidenceError(
+            "PR base changed while collecting gate evidence; rerun PR evidence collection"
+        )
     if head_sha_before != head_sha_after:
         raise EvidenceError(
             "PR head changed while collecting gate evidence; rerun PR evidence collection"

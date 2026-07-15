@@ -128,6 +128,7 @@ def test_argus_adoption_source_is_pinned() -> None:
             "required tech spec templates to declare complete planned-change manifests",
             "limited adoption ownership to explicitly copied SpecRail test files",
             "bound oversized PR review evidence to an exact local base/head diff fallback",
+            "bound review evidence to stable base and head snapshots",
             "normalized copied template whitespace",
         ],
     }

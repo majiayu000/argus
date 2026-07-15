@@ -393,12 +393,21 @@ def test_cli_collects_verified_partial_issue_with_fake_gh(
     assert "gh command failed" in failed.stderr
 
 
-def test_collect_evidence_rejects_head_change_during_gate_query(
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("baseRefOid", "PR base changed"),
+        ("headRefOid", "PR head changed"),
+    ],
+)
+def test_collect_evidence_rejects_ref_change_during_gate_query(
     monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    message: str,
 ) -> None:
     first = pr_payload()
     second = dict(first)
-    second["headRefOid"] = "ffffffffffffffffffffffffffffffffffffffff"
+    second[field] = "ffffffffffffffffffffffffffffffffffffffff"
     calls = {"pr_view": 0}
 
     def fake_collect_pr_view(_repo: str, _pr: int) -> dict[str, object]:
@@ -408,7 +417,7 @@ def test_collect_evidence_rejects_head_change_during_gate_query(
     monkeypatch.setattr("github_pr_evidence.collect_pr_view", fake_collect_pr_view)
     monkeypatch.setattr("github_pr_evidence.collect_review_threads", lambda _owner, _name, _pr: threads_payload())
 
-    with pytest.raises(EvidenceError, match="PR head changed"):
+    with pytest.raises(EvidenceError, match=message):
         collect_evidence("majiayu000/specrail", 10, None)
 
 
