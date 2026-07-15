@@ -70,11 +70,13 @@ def _validate_tech_manifest(text: str, label: str, errors: list[str]) -> None:
         errors.append(f"{label}: planned-changes manifest fields are incomplete")
         return
     if (
-        manifest.get("version") != 1
+        type(manifest.get("version")) is not int
+        or manifest.get("version") != 1
+        or type(manifest.get("issue")) is not int
         or manifest.get("issue") != 0
         or manifest.get("complete") is not False
-        or not isinstance(manifest.get("paths"), list)
-        or not isinstance(manifest.get("spec_refs"), list)
+        or manifest.get("paths") != []
+        or manifest.get("spec_refs") != []
     ):
         errors.append(f"{label}: planned-changes manifest placeholder is invalid")
 

@@ -4,6 +4,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "checks"))
@@ -112,6 +114,33 @@ def test_template_validation_requires_planned_changes_manifest_in_both_locales(
     assert (
         "templates/zh-CN/tech_spec.md: expected exactly one specrail-planned-changes block"
         in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        '{"version":true,"issue":0,"complete":false,"paths":[],"spec_refs":[]}',
+        '{"version":1,"issue":false,"complete":false,"paths":[],"spec_refs":[]}',
+        '{"version":1,"issue":0,"complete":false,"paths":["checks/x.py"],"spec_refs":[]}',
+        '{"version":1,"issue":0,"complete":false,"paths":[],"spec_refs":["specs/GH1/tech.md"]}',
+    ],
+)
+def test_template_validation_rejects_invalid_manifest_placeholders(
+    tmp_path: Path,
+    manifest: str,
+) -> None:
+    repo = tmp_path / "repo"
+    copy_pack_assets(repo)
+    template = repo / "templates" / "tech_spec.md"
+    valid = '{"version":1,"issue":0,"complete":false,"paths":[],"spec_refs":[]}'
+    template.write_text(
+        template.read_text(encoding="utf-8").replace(valid, manifest),
+        encoding="utf-8",
+    )
+
+    assert "templates/tech_spec.md: planned-changes manifest placeholder is invalid" in (
+        validate_template_parity(repo)
     )
 
 
