@@ -8,10 +8,10 @@
 //!   each case's `expectedDecision` + `rules`.
 
 mod agent;
+mod corpus;
 mod corpus_path;
 
 use anyhow::{bail, Context, Result};
-use argus_agent::scan_agent_surface;
 use argus_composer::{
     fetch_and_scan_composer, ComposerFetchOptions, ComposerRef,
     HttpTransport as ComposerHttpTransport,
@@ -37,8 +37,6 @@ use argus_rubygems::{
 };
 use argus_rules::{scan_lockfile, scan_package_dir};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -244,6 +242,12 @@ enum AgentOp {
         /// surface and mark it approved (a trust action; no drift finding).
         #[arg(long, value_name = "FILE")]
         update_baseline: Option<PathBuf>,
+        /// Enable the optional external semantic judge. Off by default.
+        #[arg(long, requires = "llm_judge_command")]
+        llm_judge: bool,
+        /// Executable implementing the versioned LLM judge stdin/stdout JSON protocol.
+        #[arg(long, value_name = "FILE", requires = "llm_judge")]
+        llm_judge_command: Option<PathBuf>,
     },
 }
 
@@ -255,29 +259,20 @@ enum CorpusOp {
         #[arg(long, default_value = "corpus")]
         corpus: PathBuf,
     },
+    /// Compute explicitly scoped metrics for a frozen corpus evaluation contract.
+    Eval {
+        /// Path to the corpus directory containing an evaluation-enabled index.
+        #[arg(long, default_value = "corpus/agent")]
+        corpus: PathBuf,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum Format {
     Text,
     Json,
-}
-
-#[derive(Debug, Deserialize)]
-struct CorpusIndex {
-    #[serde(default)]
-    surface: Option<String>,
-    cases: Vec<CorpusCase>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CorpusCase {
-    id: String,
-    kind: String, // "fixture" or "lockfile"
-    path: String,
-    #[serde(rename = "expectedDecision")]
-    expected_decision: String,
-    rules: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -363,16 +358,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     format,
                     baseline,
                     update_baseline,
+                    llm_judge,
+                    llm_judge_command,
                 },
         } => agent::cmd_agent_scan(
             &paths,
             format,
             baseline.as_deref(),
             update_baseline.as_deref(),
+            llm_judge,
+            llm_judge_command.as_deref(),
         ),
         Cmd::Corpus {
             op: CorpusOp::Test { corpus },
-        } => cmd_corpus_test(&corpus),
+        } => corpus::cmd_test(&corpus),
+        Cmd::Corpus {
+            op: CorpusOp::Eval { corpus, format },
+        } => corpus::cmd_eval(&corpus, format),
     }
 }
 
@@ -608,180 +610,4 @@ fn severity_tag(f: &argus_core::Finding) -> &'static str {
         argus_core::Severity::Low => "LOW ",
         argus_core::Severity::Info => "INFO",
     }
-}
-
-fn cmd_corpus_test(corpus_root: &Path) -> Result<ExitCode> {
-    let mut passed = 0usize;
-    let mut total = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-
-    for index_path in corpus_index_paths(corpus_root)? {
-        let raw = std::fs::read_to_string(&index_path)
-            .with_context(|| format!("read corpus index {}", index_path.display()))?;
-        let index: CorpusIndex = serde_json::from_str(&raw)
-            .with_context(|| format!("parse corpus index {}", index_path.display()))?;
-        let index_root = index_path
-            .parent()
-            .with_context(|| format!("resolve corpus index parent {}", index_path.display()))?;
-        println!("index: {}", index_path.display());
-
-        for case in &index.cases {
-            total += 1;
-            let kind = match case.kind.as_str() {
-                "fixture" => corpus_path::CaseKind::Fixture,
-                "lockfile" => corpus_path::CaseKind::Lockfile,
-                unknown => {
-                    failed.push(format!("{} — unknown kind `{unknown}`", case.id));
-                    continue;
-                }
-            };
-            let case_path =
-                match corpus_path::resolve_case_path(index_root, Path::new(&case.path), kind) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        failed.push(format!("{} — {error:#}", case.id));
-                        continue;
-                    }
-                };
-            let report = if matches!(kind, corpus_path::CaseKind::Fixture) {
-                if index.surface.as_deref() == Some("agent-skill") {
-                    scan_agent_surface(&case_path)
-                } else {
-                    scan_package_dir(&case_path)
-                }
-            } else {
-                scan_lockfile(&case_path)
-            };
-            let report = match report {
-                Ok(r) => r,
-                Err(e) => {
-                    failed.push(format!("{} — scan error: {e:#}", case.id));
-                    continue;
-                }
-            };
-
-            let actual_decision = report.decision.as_str().to_string();
-            let actual_rules = corpus_rule_ids(&report, index.surface.as_deref());
-            let expected_rules: BTreeSet<String> = case.rules.iter().cloned().collect();
-
-            let mut deltas: Vec<String> = Vec::new();
-            if actual_decision != case.expected_decision {
-                deltas.push(format!(
-                    "decision expected `{}` got `{actual_decision}`",
-                    case.expected_decision
-                ));
-            }
-            let missing: Vec<&String> = expected_rules.difference(&actual_rules).collect();
-            let extra: Vec<&String> = actual_rules.difference(&expected_rules).collect();
-            if !missing.is_empty() {
-                deltas.push(format!("missing rules: {missing:?}"));
-            }
-            if !extra.is_empty() {
-                deltas.push(format!("extra rules: {extra:?}"));
-            }
-
-            if deltas.is_empty() {
-                passed += 1;
-                println!(
-                    "  PASS  {:<32}  {}  [{}]",
-                    case.id,
-                    actual_decision,
-                    join_sorted(&actual_rules)
-                );
-            } else {
-                failed.push(format!("{} — {}", case.id, deltas.join("; ")));
-                println!(
-                    "  FAIL  {:<32}  {}  [{}]",
-                    case.id,
-                    actual_decision,
-                    join_sorted(&actual_rules)
-                );
-                for d in &deltas {
-                    println!("        > {d}");
-                }
-            }
-        }
-    }
-
-    println!();
-    println!("argus corpus test: {passed}/{total} passed");
-    if !failed.is_empty() {
-        println!("failures:");
-        for f in &failed {
-            println!("  - {f}");
-        }
-        return Ok(ExitCode::from(1));
-    }
-    Ok(ExitCode::from(0))
-}
-
-fn corpus_index_paths(corpus_root: &Path) -> Result<Vec<PathBuf>> {
-    let root_index = corpus_root.join("index.json");
-    let mut paths = Vec::new();
-    if root_index.exists() {
-        paths.push(root_index);
-    }
-    for entry in std::fs::read_dir(corpus_root)
-        .with_context(|| format!("read corpus directory {}", corpus_root.display()))?
-    {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let nested = entry.path().join("index.json");
-        if nested.exists() {
-            paths.push(nested);
-        }
-    }
-    paths.sort();
-    if paths.is_empty() {
-        bail!(
-            "no corpus index found under {} (expected index.json)",
-            corpus_root.display()
-        );
-    }
-    Ok(paths)
-}
-
-fn corpus_rule_ids(report: &ScanReport, surface: Option<&str>) -> BTreeSet<String> {
-    if surface != Some("agent-skill") {
-        return report.rule_ids().into_iter().collect();
-    }
-
-    let mut rules = BTreeSet::new();
-    for finding in &report.findings {
-        match finding.rule_id.as_str() {
-            "AGT-01-injection-language" => {
-                if is_concealment_pattern(&finding.detail) {
-                    rules.insert("concealment".to_string());
-                } else {
-                    rules.insert("injection-override".to_string());
-                }
-            }
-            "AGT-03-secret-exfil" => {
-                rules.insert("credential-access".to_string());
-                rules.insert("network-exfiltration".to_string());
-            }
-            "AGT-03-remote-exec" => {
-                rules.insert("remote-download".to_string());
-                rules.insert("shell-pipe-execution".to_string());
-            }
-            id if !id.starts_with("AGT-") => {
-                rules.insert(id.to_string());
-            }
-            _ => {}
-        }
-    }
-    rules
-}
-
-fn is_concealment_pattern(detail: &str) -> bool {
-    detail.contains("do\\s+not")
-        || detail.contains("hide")
-        || detail.contains("静默执行")
-        || detail.contains("不要提及")
-}
-
-fn join_sorted(set: &BTreeSet<String>) -> String {
-    set.iter().cloned().collect::<Vec<_>>().join(",")
 }

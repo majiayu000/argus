@@ -19,8 +19,10 @@ mod capability;
 mod config;
 mod decision;
 mod injection;
+mod judge;
 mod surface;
 
+pub use judge::{LlmJudge, LlmJudgeRequest, LlmJudgeResponse};
 pub use surface::{classify, SurfaceKind};
 
 /// One text file collected from the scanned tree, with its surface class.
@@ -65,7 +67,7 @@ enum CandidateState {
 /// Thin wrapper over [`scan_agent_surface_with_baseline`] with no baseline —
 /// identical to GH-57 behavior.
 pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
-    scan_agent_surface_with_baseline(path, BaselineMode::None)
+    scan_agent_surface_inner(path, BaselineMode::None, None)
 }
 
 /// Scan an agent surface, optionally checking or updating an AGT-02 baseline.
@@ -75,6 +77,25 @@ pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
 /// mode an unreadable/unparseable baseline yields an info finding and the
 /// other rules still run (no panic, no silent "no drift").
 pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Result<ScanReport> {
+    scan_agent_surface_inner(path, mode, None)
+}
+
+/// Scan an agent surface and run an explicitly supplied semantic judge after
+/// the deterministic rules. The judge may add a finding but cannot remove or
+/// downgrade deterministic findings.
+pub fn scan_agent_surface_with_judge(
+    path: &Path,
+    mode: BaselineMode,
+    judge: &dyn LlmJudge,
+) -> Result<ScanReport> {
+    scan_agent_surface_inner(path, mode, Some(judge))
+}
+
+fn scan_agent_surface_inner(
+    path: &Path,
+    mode: BaselineMode,
+    judge: Option<&dyn LlmJudge>,
+) -> Result<ScanReport> {
     // Exclude the baseline file itself from the scanned tree so it is never
     // self-hashed (product edge case: baseline may live inside the tree).
     let exclude = match mode {
@@ -107,16 +128,23 @@ pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Resu
         },
     }
 
-    let decision = decision::derive(&findings);
-
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: ArtifactKind::AgentSurface,
         path: path.to_path_buf(),
         package_name: None,
         package_version: None,
-        decision,
+        decision: decision::derive(&findings),
         findings,
-    })
+    };
+
+    if let Some(judge) = judge {
+        let request = LlmJudgeRequest::from_scan(&files, &report)?;
+        let response = judge.judge(&request).context("run external LLM judge")?;
+        report.findings.push(response.into_finding()?);
+        report.decision = decision::derive(&report.findings);
+    }
+
+    Ok(report)
 }
 
 fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<SurfaceFile>> {

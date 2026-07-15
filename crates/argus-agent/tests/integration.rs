@@ -2,9 +2,13 @@
 //! Each rule has at least one malicious and one benign fixture; assertions
 //! cover both the derived decision and the exact rule-id set.
 
-use argus_agent::{scan_agent_surface, scan_agent_surface_with_baseline, BaselineMode};
+use argus_agent::{
+    scan_agent_surface, scan_agent_surface_with_baseline, scan_agent_surface_with_judge,
+    BaselineMode, LlmJudge, LlmJudgeRequest, LlmJudgeResponse,
+};
 use argus_core::{Decision, Severity};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -345,6 +349,90 @@ fn gh59_credential_exfiltration_blocks_with_resolved_host() {
     assert_eq!(
         egress.resolved_host.as_deref(),
         Some("collector.attacker.example.invalid")
+    );
+}
+
+struct RecordingJudge {
+    decision: Decision,
+    request: Mutex<Option<LlmJudgeRequest>>,
+}
+
+impl RecordingJudge {
+    fn new(decision: Decision) -> Self {
+        Self {
+            decision,
+            request: Mutex::new(None),
+        }
+    }
+}
+
+impl LlmJudge for RecordingJudge {
+    fn judge(&self, request: &LlmJudgeRequest) -> anyhow::Result<LlmJudgeResponse> {
+        *self.request.lock().expect("judge request mutex") = Some(request.clone());
+        Ok(LlmJudgeResponse::new(self.decision, "semantic review"))
+    }
+}
+
+#[test]
+fn gh59_llm_judge_can_escalate_a_benign_core_result() {
+    let judge = RecordingJudge::new(Decision::Block);
+    let report = scan_agent_surface_with_judge(
+        &corpus_agent_fixture("skill-benign-installer"),
+        BaselineMode::None,
+        &judge,
+    )
+    .expect("scan with judge");
+
+    assert_eq!(report.decision, Decision::Block);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "llm-intent-judge"
+                && finding.severity == Severity::High)
+    );
+    let request = judge
+        .request
+        .lock()
+        .expect("judge request mutex")
+        .clone()
+        .expect("captured request");
+    assert_eq!(request.schema_version, 1);
+    assert_eq!(request.deterministic_report.decision, Decision::Allow);
+    assert!(request
+        .instruction_files
+        .iter()
+        .any(|file| file.path == "SKILL.md" && file.content.contains("python-project-init")));
+}
+
+#[test]
+fn gh59_llm_judge_cannot_downgrade_a_deterministic_block() {
+    let judge = RecordingJudge::new(Decision::Allow);
+    let report = scan_agent_surface_with_judge(
+        &corpus_agent_fixture("skill-cred-exfil"),
+        BaselineMode::None,
+        &judge,
+    )
+    .expect("scan with judge");
+
+    assert_eq!(report.decision, Decision::Block);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "llm-intent-judge"
+                && finding.severity == Severity::Info)
+    );
+}
+
+#[test]
+fn gh59_default_scan_is_deterministic_without_a_judge() {
+    let fixture = corpus_agent_fixture("skill-benign-net-tool");
+    let first = scan_agent_surface(&fixture).expect("first deterministic scan");
+    let second = scan_agent_surface(&fixture).expect("second deterministic scan");
+    assert_eq!(
+        serde_json::to_vec(&first).expect("serialize first scan"),
+        serde_json::to_vec(&second).expect("serialize second scan")
     );
 }
 
