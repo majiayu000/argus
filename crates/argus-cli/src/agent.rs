@@ -150,10 +150,13 @@ enum ProcessEvent {
 impl LlmJudge for CommandLlmJudge {
     fn judge(&self, request: &LlmJudgeRequest) -> Result<LlmJudgeResponse> {
         let input = serde_json::to_vec(request).context("serialize external LLM judge request")?;
-        let mut child = Command::new(&self.command)
+        let mut command = Command::new(&self.command);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_process_tree(&mut command)?;
+        let mut child = command
             .spawn()
             .with_context(|| format!("start LLM judge command {}", self.command.display()))?;
         let stdin = child.stdin.take().context("capture LLM judge stdin")?;
@@ -241,7 +244,10 @@ impl LlmJudge for CommandLlmJudge {
                 }
             }
 
-            if status.is_none() {
+            // Keep an exited child unreaped until all I/O has completed. Its
+            // zombie retains the PID/process-group identity, so an overflow
+            // or timeout cannot accidentally target a reused PID.
+            if status.is_none() && stdin_done && stdout_bytes.is_some() && stderr_bytes.is_some() {
                 status = child.try_wait().context("poll LLM judge command")?;
             }
         }
@@ -289,21 +295,78 @@ fn read_limited(
     }
 }
 
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn configure_process_tree(_command: &mut Command) -> Result<()> {
+    bail!("external LLM judge process-tree isolation is currently supported only on Unix")
+}
+
+#[cfg(unix)]
+fn terminate_and_reap(child: &mut Child) -> Result<()> {
+    let process_group = i32::try_from(child.id()).context("LLM judge process ID exceeds i32")?;
+    // SAFETY: the child was launched as the leader of a fresh process group,
+    // so the negative PID targets only the judge and its descendants.
+    let result = unsafe { kill_process_group(-process_group, SIGKILL) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(ESRCH) => {}
+            // macOS can return EPERM while the leader is concurrently exiting.
+            // Terminate it through the owned Child handle, then retry the group
+            // before accepting that no signalable descendants remain.
+            Some(EPERM) => {
+                match child.kill() {
+                    Ok(()) => {}
+                    Err(_kill_error)
+                        if child
+                            .try_wait()
+                            .context("poll LLM judge after direct kill failure")?
+                            .is_some() => {}
+                    Err(kill_error) => return Err(kill_error).context("kill LLM judge command"),
+                }
+                let retry = unsafe { kill_process_group(-process_group, SIGKILL) };
+                if retry == -1 {
+                    let retry_error = std::io::Error::last_os_error();
+                    if !matches!(retry_error.raw_os_error(), Some(ESRCH | EPERM)) {
+                        return Err(retry_error).context("retry LLM judge process-group kill");
+                    }
+                }
+            }
+            _ => return Err(error).context("kill LLM judge process group"),
+        }
+    }
+    child.wait().context("reap LLM judge command")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+#[cfg(unix)]
+const ESRCH: i32 = 3;
+#[cfg(unix)]
+const EPERM: i32 = 1;
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn kill_process_group(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(not(unix))]
 fn terminate_and_reap(child: &mut Child) -> Result<()> {
     if child
         .try_wait()
         .context("poll LLM judge before termination")?
         .is_none()
     {
-        match child.kill() {
-            Ok(()) => {}
-            Err(_error)
-                if child
-                    .try_wait()
-                    .context("poll LLM judge after kill failure")?
-                    .is_some() => {}
-            Err(error) => return Err(error).context("kill LLM judge command"),
-        }
+        child.kill().context("kill LLM judge command")?;
     }
     child.wait().context("reap LLM judge command")?;
     Ok(())
@@ -527,10 +590,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn command_judge_times_out_and_is_reaped() {
-        let (_dir, path) = judge_script("cat >/dev/null; sleep 1");
+        let (_dir, path) = judge_script("cat >/dev/null; sleep 5 & wait");
         let judge = CommandLlmJudge::with_limits(&path, Duration::from_millis(20), 1024);
+        let started = Instant::now();
         let error = judge.judge(&empty_request()).unwrap_err();
         assert!(error.to_string().contains("timeout"), "{error:#}");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "judge timeout cleanup exceeded its wall-clock bound: {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
