@@ -35,5 +35,6 @@
       "state": "COMMENTED"
     }
   ],
-  "state": "OPEN"
+  "state": "OPEN",
+  "review_artifact": null
 }

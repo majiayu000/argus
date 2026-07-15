@@ -24,5 +24,8 @@
     "status": "matched",
     "spec": "specs/GH17/tech.md",
     "details": "The artifact matches the review JSON gate scope."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

@@ -14,5 +14,8 @@
     "status": "matched",
     "spec": "specs/GH17/tech.md",
     "details": "The artifact shape is aligned, but the inline location is invalid."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

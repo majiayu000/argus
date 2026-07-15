@@ -38,19 +38,22 @@ GitHub review 状态，却无法在仓库内重放 `pr_gate` 与 runtime ledger 
    或 branch。
 5. B-005 `pr_gate.py` 必须离线评估 evidence；当前 head、linked work、CI、
    review source、review threads、merge state 或授权证据缺失/陈旧时不得返回
-   `allowed`。
+   `allowed`；`independent_lane` 必须携带绑定当前 PR/head 的已验证 review
+   artifact，不能只信任调用方传入的字符串。
 6. B-006 `runtime_ledger_gate.py` 必须验证 queue checkpoint 的 tranche budget、
    spec coverage、PR gate evidence、reviewer lane 失败与 self-review 授权；声明
    merge-ready/merged 但证据不完整时必须阻断。
 7. B-007 仓库必须新增独立 workflow-check CI，且不得删除、替换或弱化现有
    Rust `ci` workflow。
-8. B-008 采用来源必须记录为固定 SpecRail commit；重复采用同一版本必须
-   幂等，后续更新必须能通过 git diff 审计来源变化。
+8. B-008 采用来源必须记录为固定 SpecRail commit，并用 source/target SHA-256
+   manifest 覆盖全部 managed files；重复采用同一版本必须幂等，后续更新必须
+   能通过 manifest 与 git diff 审计来源变化。
 
 ## 验收标准
 
 - [ ] `python3 checks/check_workflow.py --repo .` 成功。
 - [ ] `python3 checks/check_workflow.py --repo . --all-specs` 成功。
+- [ ] `python3 checks/verify_specrail_adoption.py --repo .` 成功。
 - [ ] `python3 -m pytest -q` 成功。
 - [ ] 当前 Argus PR 可以生成 JSON evidence 并运行 `checks/pr_gate.py`。
 - [ ] runtime checkpoint 可以运行 `checks/runtime_ledger_gate.py`。

@@ -12,14 +12,14 @@ Use this skill before saying a PR is merge-ready.
 1. Collect current PR evidence. Prefer the read-only adapter when available:
 
 ```sh
-python3 checks/github_pr_evidence.py --github-repo <owner/repo> --pr <pr-number> --review-source independent_lane --json > <evidence.json>
+python3 checks/github_pr_evidence.py --github-repo <owner/repo> --pr <pr-number> --review-source independent_lane --review-artifact artifacts/review/pr-<pr-number>.json --json > <evidence.json>
 ```
 
 For a partial slice with a standalone `Refs #<issue-number>` directive, pass
 the expected issue explicitly:
 
 ```sh
-python3 checks/github_pr_evidence.py --github-repo <owner/repo> --pr <pr-number> --issue <issue-number> --review-source independent_lane --json > <evidence.json>
+python3 checks/github_pr_evidence.py --github-repo <owner/repo> --pr <pr-number> --issue <issue-number> --review-source independent_lane --review-artifact artifacts/review/pr-<pr-number>.json --json > <evidence.json>
 ```
 
 The expected issue must exist in the same repository and remain open. Other
@@ -58,6 +58,8 @@ Required evidence:
 - `review_source`: `independent_lane` for a real reviewer/merge-reviewer lane,
   or `self_review` when a lane failure was reported and self-review was
   explicitly authorized.
+- `review_artifact`: a validated advisory review bound to the same PR and
+  current head SHA; `independent_lane` without this attestation is blocked.
 - `lane_failures`: an array, empty when no reviewer lane failed.
 - `merge_dispatched_at` and `merge_head_sha` when auditing a merge record after
   dispatch.

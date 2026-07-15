@@ -42,6 +42,7 @@ SUGGESTION_FENCE_RE = re.compile(
 SUGGESTION_OPEN_RE = re.compile(r"(?:^|\n)```suggestion[^\n]*\n")
 SUMMARY_HEADING_RE = re.compile(r"^## Summary\s*$", re.MULTILINE)
 VERDICT_HEADING_RE = re.compile(r"^## Verdict\s*$", re.MULTILINE)
+HEAD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -166,7 +167,8 @@ def _validate_top_level(review: dict[str, Any]) -> tuple[list[str], list[str], l
         "comments",
         "spec_alignment",
         "pr",
-        "head_sha",
+        "reviewed_head_sha",
+        "source",
         "review_round",
         "review_mode",
         "base_head_sha",
@@ -211,6 +213,30 @@ def _validate_top_level(review: dict[str, Any]) -> tuple[list[str], list[str], l
 
     if "spec_alignment" in review:
         _validate_spec_alignment(review["spec_alignment"], satisfied, reasons)
+
+    pr = review.get("pr")
+    if _positive_int(pr) and not isinstance(pr, bool):
+        satisfied.append(f"review PR: {pr}")
+    elif "pr" in review:
+        reasons.append("pr must be a positive integer")
+    else:
+        missing.append("pr")
+
+    reviewed_head_sha = review.get("reviewed_head_sha")
+    if isinstance(reviewed_head_sha, str) and HEAD_SHA_RE.fullmatch(reviewed_head_sha):
+        satisfied.append(f"reviewed head SHA: {reviewed_head_sha}")
+    elif "reviewed_head_sha" in review:
+        reasons.append("reviewed_head_sha must be a 40-character lowercase SHA")
+    else:
+        missing.append("reviewed_head_sha")
+
+    source = review.get("source")
+    if source == "independent_lane":
+        satisfied.append("review source: independent_lane")
+    elif "source" in review:
+        reasons.append("source must be independent_lane")
+    else:
+        missing.append("source")
 
     _validate_review_round(review, satisfied, reasons)
 
@@ -524,7 +550,13 @@ def _find_forbidden_language(review: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def evaluate_review_gate(review: dict[str, Any], diff_text: str) -> dict[str, Any]:
+def evaluate_review_gate(
+    review: dict[str, Any],
+    diff_text: str,
+    *,
+    expected_pr: int | None = None,
+    expected_head_sha: str | None = None,
+) -> dict[str, Any]:
     """Validate a review artifact and return a stable gate result."""
 
     reasons: list[str] = []
@@ -536,6 +568,16 @@ def evaluate_review_gate(review: dict[str, Any], diff_text: str) -> dict[str, An
     missing.extend(top_missing)
     reasons.extend(top_reasons)
     reasons.extend(_find_forbidden_language(review))
+
+    if expected_pr is not None and review.get("pr") != expected_pr:
+        reasons.append(
+            f"review artifact PR mismatch: expected {expected_pr}, got {review.get('pr')!r}"
+        )
+    if expected_head_sha is not None and review.get("reviewed_head_sha") != expected_head_sha:
+        reasons.append(
+            "review artifact head mismatch: expected "
+            f"{expected_head_sha}, got {review.get('reviewed_head_sha')!r}"
+        )
 
     try:
         diff_index = parse_unified_diff(diff_text)

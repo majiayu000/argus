@@ -16,6 +16,7 @@
     "reviews",
     "review_threads",
     "review_source",
+    "review_artifact",
     "lane_failures"
   ],
   "additionalProperties": false,
@@ -331,6 +332,20 @@
     "review_source": {
       "enum": ["independent_lane", "self_review"],
       "description": "Source of the merge review. Only independent_lane satisfies the independent-review requirement."
+    },
+    "review_artifact": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "pr": {"type": "integer", "minimum": 1},
+        "reviewed_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source": {"const": "independent_lane"},
+        "verdict": {"const": "APPROVE"},
+        "gate_decision": {"const": "allowed"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "checked_at": {"type": "string", "minLength": 1}
+      }
     },
     "human_authorization": {
       "type": "object",

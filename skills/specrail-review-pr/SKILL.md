@@ -50,8 +50,9 @@ Record `review_round` and `review_mode` in the review result JSON:
 
 `resumed` and `diff_only` rounds require `review_round >= 2` and a
 `prior_findings[]` checklist where every prior finding carries a status
-(`resolved` | `unresolved` | `obsolete`). Record `pr` and `head_sha` as the
-grouping key so rounds for the same PR can be ordered.
+(`resolved` | `unresolved` | `obsolete`). Record `pr`, `reviewed_head_sha`, and
+`source: independent_lane` as the grouping key so rounds for the same PR can be
+ordered and bound to the exact reviewed head.
 
 ## Thread Resolution Ownership
 

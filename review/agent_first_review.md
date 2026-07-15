@@ -38,6 +38,9 @@ Inline comments must reference real diff `path`, `line`, and `side` values.
 Severity must be `critical`, `important`, `suggestion`, or `nit`.
 
 Top-level `body` must include `## Summary` and `## Verdict` headings. A
+review artifact must also record `pr`, the exact 40-character
+`reviewed_head_sha`, and `source: independent_lane`; stale-head artifacts do
+not satisfy the PR gate. A
 multi-line inline comment may add `start_line` and `start_side`, but those fields
 must appear together and every line in the inclusive range must exist in the
 diff. Suggested changes may use a non-empty `suggestion` field, a non-empty

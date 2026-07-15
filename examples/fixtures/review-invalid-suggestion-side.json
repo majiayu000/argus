@@ -15,5 +15,8 @@
     "status": "matched",
     "spec": "specs/GH23/tech.md",
     "details": "The suggestion field is intentionally attached to the wrong side."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

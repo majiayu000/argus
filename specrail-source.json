@@ -6,7 +6,10 @@
   "consumer_adaptations": [
     "preserved Argus-owned files and existing Rust CI",
     "migrated existing Argus task packets to stable checklist IDs",
-    "replaced upstream maintainer tests with Argus adoption smoke tests",
+    "retained Argus adoption smoke tests alongside consumer-portable upstream maintainer tests",
+    "bound independent review artifacts to the current PR head",
+    "recorded external pilot evidence with explicit source repositories",
+    "added a deterministic file-hash adoption manifest",
     "targeted workflow-check at Argus packets",
     "normalized copied template whitespace"
   ]

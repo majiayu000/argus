@@ -22,9 +22,7 @@ CHECK_PASS_CONCLUSIONS = {"SUCCESS"}
 CLEAN_MERGE_STATES = {"CLEAN"}
 ACTIVE_CHANGE_REQUESTS = {"CHANGES_REQUESTED"}
 ALLOWED_RESOLVER_ROLES = {"reviewer_lane", "human"}
-INDEPENDENT_REVIEW_SOURCES = {"independent_lane"}
 MERGE_PATHS = {"gh_pr_merge", "api_fallback", "merged_by_other"}
-KNOWN_REVIEW_SOURCES = {"independent_lane", "self_review"}
 BLOCKED_RESOLVER_ROLES = {"implementer", "orchestrator", "coordinator", "unknown"}
 REVIEW_SOURCES = {"independent_lane", "self_review"}
 LANE_FAILURE_KINDS = {"usage_limit", "crash", "zero_output", "closed", "other"}
@@ -162,27 +160,6 @@ def _thread_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[
         reasons.append("unresolved review threads: " + ", ".join(unresolved))
     else:
         satisfied.append("no unresolved active review threads")
-    return satisfied, missing, reasons
-
-
-def _review_source_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
-    satisfied: list[str] = []
-    missing: list[str] = []
-    reasons: list[str] = []
-
-    review_source = evidence.get("review_source")
-    if not _non_empty_string(review_source):
-        missing.append("review_source")
-    elif review_source in INDEPENDENT_REVIEW_SOURCES:
-        satisfied.append(f"review_source: {review_source}")
-    elif review_source in KNOWN_REVIEW_SOURCES:
-        reasons.append(
-            "review_source self_review does not satisfy the independent-review requirement"
-        )
-    else:
-        allowed = ", ".join(sorted(KNOWN_REVIEW_SOURCES))
-        reasons.append(f"review_source must be one of: {allowed}")
-
     return satisfied, missing, reasons
 
 
@@ -362,6 +339,83 @@ def _review_source_items(evidence: dict[str, Any]) -> tuple[list[str], list[str]
     return satisfied, missing, reasons
 
 
+def _review_artifact_items(
+    evidence: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    satisfied: list[str] = []
+    missing: list[str] = []
+    reasons: list[str] = []
+    source = evidence.get("review_source")
+    artifact = evidence.get("review_artifact")
+
+    if source == "self_review":
+        if artifact is not None:
+            reasons.append("self_review evidence must not include review_artifact")
+        else:
+            satisfied.append("self_review has no forged independent review artifact")
+        return satisfied, missing, reasons
+
+    if not isinstance(artifact, dict):
+        missing.append("review_artifact")
+        reasons.append("independent_lane requires a verified review_artifact")
+        return satisfied, missing, reasons
+
+    required = {
+        "pr",
+        "reviewed_head_sha",
+        "source",
+        "verdict",
+        "gate_decision",
+        "sha256",
+        "diff_sha256",
+        "checked_at",
+    }
+    unknown = sorted(set(artifact) - required)
+    if unknown:
+        reasons.append("review_artifact has unknown fields: " + ", ".join(unknown))
+    for key in sorted(required - set(artifact)):
+        missing.append(f"review_artifact.{key}")
+
+    expected_pr = evidence.get("pr")
+    if artifact.get("pr") != expected_pr:
+        reasons.append("review_artifact.pr does not match evidence.pr")
+    expected_head = evidence.get("head_sha")
+    if artifact.get("reviewed_head_sha") != expected_head:
+        reasons.append("review_artifact.reviewed_head_sha does not match head_sha")
+    if artifact.get("reviewed_head_sha") != evidence.get("gate_query_head_sha"):
+        reasons.append(
+            "review_artifact.reviewed_head_sha does not match gate_query_head_sha"
+        )
+    if artifact.get("source") != source or source != "independent_lane":
+        reasons.append("review_artifact.source must match independent_lane")
+    if artifact.get("verdict") != "APPROVE":
+        reasons.append("review_artifact.verdict must be APPROVE")
+    if artifact.get("gate_decision") != "allowed":
+        reasons.append("review_artifact.gate_decision must be allowed")
+
+    for key in ["sha256", "diff_sha256"]:
+        value = artifact.get(key)
+        if not (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        ):
+            reasons.append(f"review_artifact.{key} must be a lowercase SHA-256")
+
+    checked_at = artifact.get("checked_at")
+    if not isinstance(checked_at, str) or _parse_timestamp(checked_at, "checked_at") is None:
+        reasons.append("review_artifact.checked_at must be timezone-aware ISO-8601")
+    if checked_at != evidence.get("gate_query_completed_at"):
+        reasons.append("review_artifact.checked_at must match gate_query_completed_at")
+
+    if not reasons and not missing:
+        satisfied.append(
+            "review artifact verified for current PR/head: "
+            f"{artifact.get('reviewed_head_sha')}"
+        )
+    return satisfied, missing, reasons
+
+
 def _lane_failure_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     satisfied: list[str] = []
     missing: list[str] = []
@@ -512,7 +566,6 @@ def evaluate_pr_gate(
         _check_items,
         _review_items,
         _thread_items,
-        _review_source_items,
         _issue_reference_items,
         _merge_record_items,
     ]:
@@ -521,7 +574,7 @@ def evaluate_pr_gate(
         missing.extend(checker_missing)
         reasons.extend(checker_reasons)
 
-    for checker in [_review_source_items, _lane_failure_items]:
+    for checker in [_review_source_items, _review_artifact_items, _lane_failure_items]:
         checker_satisfied, checker_missing, checker_reasons = checker(evidence)
         satisfied.extend(checker_satisfied)
         missing.extend(checker_missing)
@@ -598,6 +651,7 @@ def evaluate_pr_gate(
         "issue_reference": evidence.get("issue_reference"),
         "head_sha": evidence.get("head_sha"),
         "review_source": evidence.get("review_source"),
+        "review_artifact": evidence.get("review_artifact"),
         "gate_query_completed_at": evidence.get("gate_query_completed_at"),
         "gate_query_head_sha": evidence.get("gate_query_head_sha"),
         "enforcement_sensitive": bool(

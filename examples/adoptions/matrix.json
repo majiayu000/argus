@@ -22,15 +22,18 @@
           "path": "examples/rclean-smoke.md"
         },
         {
-          "kind": "specrail_artifact",
+          "kind": "external_artifact",
+          "repo": "majiayu000/specrail",
           "path": "specs/GH5/product.md"
         },
         {
-          "kind": "specrail_artifact",
+          "kind": "external_artifact",
+          "repo": "majiayu000/specrail",
           "path": "specs/GH5/tech.md"
         },
         {
-          "kind": "specrail_artifact",
+          "kind": "external_artifact",
+          "repo": "majiayu000/specrail",
           "path": "specs/GH5/tasks.md"
         }
       ],
@@ -52,11 +55,13 @@
       "status": "active",
       "evidence": [
         {
-          "kind": "specrail_artifact",
+          "kind": "external_artifact",
+          "repo": "majiayu000/specrail",
           "path": "specs/GH7/product.md"
         },
         {
-          "kind": "specrail_artifact",
+          "kind": "external_artifact",
+          "repo": "majiayu000/specrail",
           "path": "specs/GH7/tech.md"
         },
         {

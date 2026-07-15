@@ -14,5 +14,8 @@
     "status": "matched",
     "spec": "specs/GH23/tech.md",
     "details": "The fenced suggestion block is intentionally empty."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

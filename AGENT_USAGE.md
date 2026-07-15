@@ -140,6 +140,7 @@ python3 checks/github_pr_evidence.py \
   --github-repo OWNER/REPO \
   --pr <pr-number> \
   --review-source independent_lane \
+  --review-artifact artifacts/review/pr-<pr-number>.json \
   --json > pr-evidence.json
 python3 checks/pr_gate.py --repo . --evidence <evidence.json> --json
 ```
@@ -153,6 +154,7 @@ python3 checks/github_pr_evidence.py \
   --pr <pr-number> \
   --issue <issue-number> \
   --review-source independent_lane \
+  --review-artifact artifacts/review/pr-<pr-number>.json \
   --json > pr-evidence.json
 ```
 
@@ -198,7 +200,8 @@ python3 checks/review_json_gate.py --repo . --review artifacts/review/pr-<pr-num
 
 The review gate validates advisory review JSON and inline diff locations. It
 does not approve, merge, or publish GitHub reviews. Review artifact bodies must
-include `## Summary` and `## Verdict`; inline comments may use paired
+include `## Summary` and `## Verdict`, plus `pr`, `reviewed_head_sha`, and
+`source: independent_lane`; inline comments may use paired
 `start_line` / `start_side` ranges, and suggestions must be non-empty RIGHT-side
 comments.
 

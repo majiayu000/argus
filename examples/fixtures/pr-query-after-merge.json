@@ -32,5 +32,15 @@
   "reviews": [],
   "state": "OPEN",
   "review_source": "independent_lane",
-  "lane_failures": []
+  "lane_failures": [],
+  "review_artifact": {
+    "pr": 718,
+    "reviewed_head_sha": "e36d97517d8d0b27faca1abe5e5c63f9f88684d9",
+    "source": "independent_lane",
+    "verdict": "APPROVE",
+    "gate_decision": "allowed",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "diff_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "checked_at": "2026-07-04T00:00:10Z"
+  }
 }

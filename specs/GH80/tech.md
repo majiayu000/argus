@@ -38,10 +38,10 @@ GitHub snapshot/reference/sensitive helpers，`pr_gate.py` 依赖 workflow polic
 | B-002 | 复制清单与 git diff | `git diff --name-status origin/main...HEAD`；确认 Argus 原文件未被修改 |
 | B-003 | `checks/check_workflow.py`、现有 `specs/GH*/` | `python3 checks/check_workflow.py --repo . --all-specs` |
 | B-004 | `checks/github_pr_evidence.py` 及 helpers | 对 PR #75 生成 evidence；前后比较远端 PR head/state 未变化 |
-| B-005 | `checks/pr_gate.py`、`workflow.yaml` | 用当前 PR evidence 运行 `python3 checks/pr_gate.py --repo . --evidence <file> --json` |
+| B-005 | `checks/github_review_evidence.py`、`checks/github_pr_evidence.py`、`checks/pr_gate.py` | 当前-head review artifact 可通过；missing/stale artifact 必须 blocked |
 | B-006 | `checks/runtime_ledger_gate.py`、runtime schema/rules | 对 `.git/codex/implx/current.json` 的兼容副本运行 gate；缺证据负例必须 blocked |
 | B-007 | `.github/workflows/workflow-check.yml` | `git diff` 保留 `.github/workflows/ci.yml`；GitHub Actions 两个 workflow 均可见 |
-| B-008 | `specrail-source.json` 来源记录、consumer adaptations 与单次复制结果 | 比较源/目标 pack，差异仅限记录的 adaptations；`git diff --check` |
+| B-008 | `specrail-source.json`、`specrail-manifest.json`、`checks/verify_specrail_adoption.py` | source checkout 与 143 个 managed target files 的 hash 全匹配；`git diff --check` |
 
 ## 数据流
 
@@ -69,7 +69,7 @@ GitHub snapshot/reference/sensitive helpers，`pr_gate.py` 依赖 workflow polic
 
 ## 测试计划
 
-- [ ] Unit tests：`python3 -m pytest -q`。
+- [ ] Unit tests：运行 consumer-portable 上游完整测试与 Argus adoption tests，`python3 -m pytest -q`。
 - [ ] Integration tests：`check_workflow.py` 基础与 `--all-specs`。
 - [ ] Gate smoke：为 PR #75 采集 evidence 并运行 `pr_gate.py`；验证 runtime ledger。
 - [ ] Product regression：`cargo check --workspace --all-targets` 和

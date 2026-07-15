@@ -4,6 +4,9 @@
   "title": "Review Result",
   "type": "object",
   "required": [
+    "pr",
+    "reviewed_head_sha",
+    "source",
     "verdict",
     "body",
     "comments"
@@ -32,12 +35,14 @@
       "minimum": 1,
       "description": "Grouping key: PR number this review round belongs to."
     },
-    "head_sha": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Grouping key: PR head SHA reviewed in this round."
+    "reviewed_head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Grouping key: exact PR head SHA reviewed in this round."
+    },
+    "source": {
+      "const": "independent_lane",
+      "description": "Review must come from an independent reviewer lane."
     },
     "review_round": {
       "type": "integer",

@@ -16,5 +16,8 @@
     "status": "matched",
     "spec": "specs/GH23/tech.md",
     "details": "The artifact shape is aligned, but the range location is invalid."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

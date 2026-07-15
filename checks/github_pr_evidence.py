@@ -27,6 +27,15 @@ from github_pr_snapshot import (
     derive_spec_refs,
     enforcement_declaration,
 )
+from github_review_evidence import (
+    REVIEW_SOURCES,
+    build_human_authorization,
+    build_review_attestation,
+    build_self_review_authorization,
+    collect_pr_diff,
+    load_lane_failures,
+    load_review_artifact,
+)
 from sensitive_enforcement import (
     approved_spec_source_commits,
     build_approved_spec_evidence,
@@ -70,8 +79,6 @@ query SpecRailReviewThreads($owner: String!, $name: String!, $number: Int!) {
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 STATUS_CONTEXT_STATES = {"SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED"}
-REVIEW_SOURCES = {"independent_lane", "self_review"}
-LANE_FAILURE_KINDS = {"usage_limit", "crash", "zero_output", "closed", "other"}
 
 
 def parse_github_repo(raw: str) -> tuple[str, str]:
@@ -399,85 +406,6 @@ def normalize_review_threads(
     return normalized
 
 
-def build_human_authorization(
-    actor: str | None,
-    source: str | None,
-    summary: str | None,
-) -> dict[str, str] | None:
-    provided = [value for value in [actor, source, summary] if value is not None and value.strip()]
-    if not provided:
-        return None
-    if not actor or not actor.strip() or not source or not source.strip():
-        raise EvidenceError(
-            "--authorization-actor and --authorization-source must be provided together"
-        )
-    authorization = {
-        "actor": actor.strip(),
-        "source": source.strip(),
-    }
-    if summary and summary.strip():
-        authorization["summary"] = summary.strip()
-    return authorization
-
-
-def build_self_review_authorization(
-    actor: str | None,
-    source: str | None,
-    scope: str | None,
-    summary: str | None,
-) -> dict[str, str] | None:
-    provided = [
-        value
-        for value in [actor, source, scope, summary]
-        if value is not None and value.strip()
-    ]
-    if not provided:
-        return None
-    if not actor or not actor.strip() or not source or not source.strip() or not scope or not scope.strip():
-        raise EvidenceError(
-            "--self-review-authorization-actor, --self-review-authorization-source, "
-            "and --self-review-authorization-scope must be provided together"
-        )
-    authorization = {
-        "actor": actor.strip(),
-        "source": source.strip(),
-        "scope": scope.strip(),
-    }
-    if summary and summary.strip():
-        authorization["summary"] = summary.strip()
-    return authorization
-
-
-def _normalize_lane_failure(item: Any, index: int) -> dict[str, str]:
-    if not isinstance(item, dict):
-        raise EvidenceError(f"lane_failures item #{index} must be an object")
-    normalized: dict[str, str] = {}
-    for key in ["lane_id", "failure_kind", "observed_marker"]:
-        value = item.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise EvidenceError(f"lane_failures[{index}].{key} must be a non-empty string")
-        normalized[key] = value.strip()
-    if normalized["failure_kind"] not in LANE_FAILURE_KINDS:
-        raise EvidenceError(
-            f"lane_failures[{index}].failure_kind is unsupported: {normalized['failure_kind']}"
-        )
-    detail = item.get("detail")
-    if isinstance(detail, str) and detail.strip():
-        normalized["detail"] = detail.strip()
-    return normalized
-
-
-def load_lane_failures(path: str | None) -> list[dict[str, str]]:
-    if path is None:
-        return []
-    payload = _read_json_file(path, "lane failures")
-    if isinstance(payload, dict):
-        payload = payload.get("lane_failures")
-    if not isinstance(payload, list):
-        raise EvidenceError("lane failures file must contain a list or lane_failures list")
-    return [_normalize_lane_failure(item, index) for index, item in enumerate(payload, start=1)]
-
-
 def build_evidence(
     pr_payload: dict[str, Any],
     threads_payload: dict[str, Any],
@@ -495,8 +423,14 @@ def build_evidence(
     repository: str | None = None,
     approval_metadata: dict[str, Any] | None = None,
     pr_snapshot: dict[str, Any] | None = None,
+    review_artifact: dict[str, Any] | None = None,
+    review_artifact_sha256: str | None = None,
+    review_diff: str | None = None,
 ) -> dict[str, Any]:
     head_sha = _require_string(pr_payload, "headRefOid")
+    completed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
     linked_issue, issue_reference = normalize_issue_reference(
         pr_payload,
         expected_issue,
@@ -507,10 +441,7 @@ def build_evidence(
         "state": _require_string(pr_payload, "state").upper(),
         "is_draft": _require_bool(pr_payload, "isDraft"),
         "head_sha": head_sha,
-        "gate_query_completed_at": datetime.now(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z"),
+        "gate_query_completed_at": completed_at,
         "gate_query_head_sha": head_sha,
         "merge_state": _require_string(pr_payload, "mergeStateStatus").upper(),
         "linked_issue": linked_issue,
@@ -587,6 +518,28 @@ def build_evidence(
         if source not in REVIEW_SOURCES:
             raise EvidenceError(f"review_source must be one of {sorted(REVIEW_SOURCES)}")
         evidence["review_source"] = source
+        if source == "independent_lane":
+            if not isinstance(review_artifact, dict):
+                raise EvidenceError("independent_lane requires --review-artifact")
+            if not isinstance(review_artifact_sha256, str) or len(review_artifact_sha256) != 64:
+                raise EvidenceError("review artifact SHA-256 is missing or invalid")
+            if not isinstance(review_diff, str):
+                raise EvidenceError("independent_lane requires a live PR diff")
+            evidence["review_artifact"] = build_review_attestation(
+                review_artifact,
+                review_artifact_sha256,
+                review_diff,
+                pr_number=evidence["pr"],
+                head_sha=head_sha,
+                review_source=source,
+                checked_at=completed_at,
+            )
+        elif review_artifact is not None:
+            raise EvidenceError("self_review cannot use an independent review artifact")
+        else:
+            evidence["review_artifact"] = None
+    elif review_artifact is not None:
+        raise EvidenceError("--review-artifact requires --review-source independent_lane")
     if authorization is not None:
         evidence["human_authorization"] = authorization
     if self_review_authorization is not None:
@@ -615,6 +568,7 @@ def collect_evidence(
     expected_issue: int | None = None,
     repo: Path | None = None,
     config: PackConfig | None = None,
+    review_artifact_path: str | None = None,
 ) -> dict[str, Any]:
     if expected_issue is not None and (
         not isinstance(expected_issue, int)
@@ -633,6 +587,20 @@ def collect_evidence(
         if file_snapshot_before["head_sha"] != head_sha_before:
             raise EvidenceError("PR view and file snapshot head SHA disagree")
     threads_payload = collect_review_threads(owner, name, pr_number)
+    review_artifact = None
+    review_artifact_sha256 = None
+    review_diff = None
+    if review_source == "independent_lane":
+        if not review_artifact_path:
+            raise EvidenceError("independent_lane requires --review-artifact")
+        review_artifact, review_artifact_sha256 = load_review_artifact(
+            review_artifact_path
+        )
+        review_diff = collect_pr_diff(github_repo, pr_number)
+    elif review_artifact_path:
+        raise EvidenceError(
+            "--review-artifact requires --review-source independent_lane"
+        )
 
     issue_payload = None
     closing_issue_numbers = list(relation_snapshot_before[1])
@@ -711,6 +679,9 @@ def collect_evidence(
         github_repo,
         approval_metadata,
         file_snapshot_after,
+        review_artifact,
+        review_artifact_sha256,
+        review_diff,
     )
 
 
@@ -733,6 +704,10 @@ def main() -> int:
         "--review-source",
         choices=sorted(REVIEW_SOURCES),
         help="Review source for the PR gate evidence",
+    )
+    parser.add_argument(
+        "--review-artifact",
+        help="Independent review JSON bound to the current PR and head SHA",
     )
     parser.add_argument(
         "--lane-failures-json",
@@ -779,6 +754,7 @@ def main() -> int:
             args.issue,
             repo,
             load_pack(repo),
+            args.review_artifact,
         )
     except (EvidenceError, SpecRailError) as exc:
         print(f"error: {exc}", file=sys.stderr)

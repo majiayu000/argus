@@ -14,5 +14,8 @@
     "status": "matched",
     "spec": "specs/GH17/tech.md",
     "details": "Only the severity value is invalid."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

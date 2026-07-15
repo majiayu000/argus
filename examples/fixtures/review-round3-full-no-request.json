@@ -26,7 +26,8 @@
     "details": "The artifact matches the review JSON gate scope."
   },
   "pr": 489,
-  "head_sha": "aaaa000000000000000000000000000000000001",
   "review_round": 3,
-  "review_mode": "full"
+  "review_mode": "full",
+  "reviewed_head_sha": "aaaa000000000000000000000000000000000001",
+  "source": "independent_lane"
 }

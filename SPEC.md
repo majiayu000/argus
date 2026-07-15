@@ -101,7 +101,8 @@ The first validator is intentionally deterministic:
 - optional GitHub issue evidence can be collected read-only with
   `checks/github_issue_evidence.py`
 - optional advisory review artifacts can be checked against a diff with
-  `checks/review_json_gate.py`
+  `checks/review_json_gate.py` and bound to the current PR head by
+  `checks/github_pr_evidence.py`
 - repo-distributed skills can be pinned with `skills-lock.json`
 
 LLM-based triage and review should be added only after the deterministic checks

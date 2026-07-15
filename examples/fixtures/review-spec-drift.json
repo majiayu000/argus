@@ -14,5 +14,8 @@
     "status": "drift",
     "spec": "specs/GH17/tech.md",
     "details": "The diff implements behavior that is not covered by the current spec packet."
-  }
+  },
+  "pr": 17,
+  "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": "independent_lane"
 }

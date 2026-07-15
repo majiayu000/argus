@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,59 @@ def test_argus_workflow_pack_and_all_spec_packets_validate() -> None:
     assert "SpecRail check passed" in result.stdout
 
 
+def test_argus_adoption_manifest_verifies() -> None:
+    result = run_check("checks/verify_specrail_adoption.py", "--repo", ".", "--json")
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert json.loads(result.stdout)["decision"] == "allowed"
+
+
+def test_adoption_manifest_detects_target_drift(tmp_path: Path) -> None:
+    metadata = {
+        "repository": "https://github.com/majiayu000/specrail.git",
+        "commit": SOURCE_COMMIT,
+    }
+    metadata_path = tmp_path / "specrail-source.json"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    asset_path = tmp_path / "AGENT_USAGE.md"
+    asset_path.write_text("pinned\n", encoding="utf-8")
+
+    def entry(path: Path, adaptation: str) -> dict[str, object]:
+        return {
+            "path": path.relative_to(tmp_path).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "source_path": None,
+            "source_sha256": None,
+            "adaptation": adaptation,
+        }
+
+    manifest = {
+        "manifest_version": 1,
+        "source": {"commit": SOURCE_COMMIT},
+        "files": [
+            entry(asset_path, "test asset"),
+            entry(metadata_path, "test metadata"),
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    asset_path.write_text("drifted\n", encoding="utf-8")
+
+    result = run_check(
+        "checks/verify_specrail_adoption.py",
+        "--repo",
+        str(tmp_path),
+        "--manifest",
+        manifest_path.name,
+        "--json",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "blocked"
+    assert any("target hash mismatch" in error for error in payload["errors"])
+
+
 def test_argus_adoption_source_is_pinned() -> None:
     source = json.loads((ROOT / "specrail-source.json").read_text(encoding="utf-8"))
 
@@ -38,7 +92,10 @@ def test_argus_adoption_source_is_pinned() -> None:
         "consumer_adaptations": [
             "preserved Argus-owned files and existing Rust CI",
             "migrated existing Argus task packets to stable checklist IDs",
-            "replaced upstream maintainer tests with Argus adoption smoke tests",
+            "retained Argus adoption smoke tests alongside consumer-portable upstream maintainer tests",
+            "bound independent review artifacts to the current PR head",
+            "recorded external pilot evidence with explicit source repositories",
+            "added a deterministic file-hash adoption manifest",
             "targeted workflow-check at Argus packets",
             "normalized copied template whitespace",
         ],

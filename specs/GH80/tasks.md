@@ -14,7 +14,7 @@ GH-80
 - [x] `SP80-T1` 固定 source commit 并审计路径冲突。Covers: B-002, B-008。Owner: coordinator。Dependencies: none。Done when: 来源 SHA 与保留清单写入 spec，冲突已逐项决策。Verify: source `rev-parse HEAD` 与文件列表交集检查。
 - [x] `SP80-T2` 复制完整 workflow pack 与依赖闭包。Covers: B-001, B-002, B-008。Owner: coordinator。Dependencies: SP80-T1。Done when: pack 文件进入 GH80 branch、consumer adaptations 已记录且 Argus 原文件未修改。Verify: `git diff --name-status origin/main...HEAD` 与 `git diff --check`。
 - [x] `SP80-T3` 接入独立 workflow-check CI。Covers: B-007。Owner: coordinator。Dependencies: SP80-T2。Done when: Rust CI 与 workflow check 同时存在。Verify: 检查两个 workflow 文件。
-- [x] `SP80-T4` 运行 pack、schema、template、skills-lock 与全部 packet 验证。Covers: B-001, B-003。Owner: verification_owner。Dependencies: SP80-T2。Done when: pack check、`--all-specs` 与 pytest 零退出。Verify: `check_workflow.py`、`--all-specs`、pytest。
+- [x] `SP80-T4` 运行 pack、schema、template、skills-lock、adoption manifest 与全部 packet 验证。Covers: B-001, B-003, B-008。Owner: verification_owner。Dependencies: SP80-T2。Done when: pack check、manifest、`--all-specs` 与完整 pytest 零退出。Verify: `check_workflow.py`、`verify_specrail_adoption.py`、`--all-specs`、pytest。
 - [ ] `SP80-T5` 对当前 PR 与 runtime checkpoint 做 gate smoke。Covers: B-004, B-005, B-006。Owner: verification_owner。Dependencies: SP80-T4。Done when: evidence 与 gates 产生可解释 decision，缺失证据不被允许。Verify: `github_pr_evidence.py`、`pr_gate.py`、`runtime_ledger_gate.py`。
 - [ ] `SP80-T6` 运行 Rust 回归并完成独立 reviewer/merge gate。Covers: B-002, B-007。Owner: verification_owner + reviewer。Dependencies: SP80-T3, SP80-T5。Done when: Rust 检查、CI、threads 与 PR gate 都绑定当前 head。Verify: cargo check/test 与 GitHub CI/GraphQL/pr_gate。
 
