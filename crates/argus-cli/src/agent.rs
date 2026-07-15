@@ -523,12 +523,16 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("judge tempdir");
         let path = dir.path().join("judge.sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write judge script");
-        let mut permissions = std::fs::metadata(&path)
+        let draft = dir.path().join("judge.sh.tmp");
+        std::fs::write(&draft, format!("#!/bin/sh\n{body}\n")).expect("write judge script");
+        let mut permissions = std::fs::metadata(&draft)
             .expect("judge metadata")
             .permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&path, permissions).expect("set judge permissions");
+        std::fs::set_permissions(&draft, permissions).expect("set judge permissions");
+        // Publish only after the writer has closed, so Linux never observes an
+        // executable inode that is still open for writing (ETXTBSY).
+        std::fs::rename(&draft, &path).expect("publish judge script");
         (dir, path)
     }
 
