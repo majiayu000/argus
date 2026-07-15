@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 
 SPEC_SCHEMA_FILES = frozenset(
@@ -40,6 +41,10 @@ STABLE_TEMPLATE_TOKENS = ("GH-", "ready_to_spec", "ready_to_implement")
 REQUIRED_TEMPLATE_TOKENS = {
     "tech_spec.md": ("specrail-planned-changes",),
 }
+PLANNED_CHANGES_BLOCK_RE = re.compile(
+    r"<!--\s*specrail-planned-changes\s*\n(.*?)\n\s*-->", re.DOTALL
+)
+PLANNED_CHANGES_FIELDS = {"version", "issue", "complete", "paths", "spec_refs"}
 
 
 def _read_asset_text(path: Path, repo: Path, errors: list[str]) -> str | None:
@@ -49,6 +54,29 @@ def _read_asset_text(path: Path, repo: Path, errors: list[str]) -> str | None:
         relative_path = path.relative_to(repo)
         errors.append(f"{relative_path}: cannot read SpecRail asset: {exc}")
         return None
+
+
+def _validate_tech_manifest(text: str, label: str, errors: list[str]) -> None:
+    matches = PLANNED_CHANGES_BLOCK_RE.findall(text)
+    if len(matches) != 1:
+        errors.append(f"{label}: expected exactly one specrail-planned-changes block")
+        return
+    try:
+        manifest = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        errors.append(f"{label}: planned-changes manifest is invalid JSON: {exc.msg}")
+        return
+    if not isinstance(manifest, dict) or set(manifest) != PLANNED_CHANGES_FIELDS:
+        errors.append(f"{label}: planned-changes manifest fields are incomplete")
+        return
+    if (
+        manifest.get("version") != 1
+        or manifest.get("issue") != 0
+        or manifest.get("complete") is not False
+        or not isinstance(manifest.get("paths"), list)
+        or not isinstance(manifest.get("spec_refs"), list)
+    ):
+        errors.append(f"{label}: planned-changes manifest placeholder is invalid")
 
 
 def validate_template_parity(repo: Path) -> list[str]:
@@ -75,6 +103,13 @@ def validate_template_parity(repo: Path) -> list[str]:
                 errors.append(f"templates/{name}: missing required token {token}")
             if token not in localized_text:
                 errors.append(f"templates/zh-CN/{name}: missing required token {token}")
+        if name == "tech_spec.md":
+            _validate_tech_manifest(base_text, f"templates/{name}", errors)
+            _validate_tech_manifest(
+                localized_text,
+                f"templates/zh-CN/{name}",
+                errors,
+            )
         for token in STABLE_TEMPLATE_TOKENS:
             if token in base_text and token not in localized_text:
                 errors.append(f"templates/zh-CN/{name}: missing stable token {token}")

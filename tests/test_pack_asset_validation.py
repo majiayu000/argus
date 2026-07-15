@@ -89,22 +89,28 @@ def test_template_validation_requires_planned_changes_manifest_in_both_locales(
     copy_pack_assets(repo)
     base = repo / "templates" / "tech_spec.md"
     localized = repo / "templates" / "zh-CN" / "tech_spec.md"
+    block = (
+        "<!-- specrail-planned-changes\n"
+        '{"version":1,"issue":0,"complete":false,"paths":[],"spec_refs":[]}\n'
+        "-->"
+    )
     base.write_text(
-        base.read_text(encoding="utf-8").replace("specrail-planned-changes", "planned"),
+        base.read_text(encoding="utf-8").replace(block, ""),
         encoding="utf-8",
     )
     localized.write_text(
-        localized.read_text(encoding="utf-8").replace(
-            "specrail-planned-changes", "planned"
-        ),
+        localized.read_text(encoding="utf-8").replace(block, ""),
         encoding="utf-8",
     )
 
     errors = validate_template_parity(repo)
 
-    assert "templates/tech_spec.md: missing required token specrail-planned-changes" in errors
     assert (
-        "templates/zh-CN/tech_spec.md: missing required token specrail-planned-changes"
+        "templates/tech_spec.md: expected exactly one specrail-planned-changes block"
+        in errors
+    )
+    assert (
+        "templates/zh-CN/tech_spec.md: expected exactly one specrail-planned-changes block"
         in errors
     )
 
