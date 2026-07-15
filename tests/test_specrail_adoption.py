@@ -126,6 +126,7 @@ def test_argus_adoption_source_is_pinned() -> None:
             "rejected APPROVE review artifacts that retain blocking comments",
             "required tech spec templates to declare complete planned-change manifests",
             "limited adoption ownership to explicitly copied SpecRail test files",
+            "bound oversized PR review evidence to an exact local base/head diff fallback",
             "normalized copied template whitespace",
         ],
     }

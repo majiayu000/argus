@@ -121,7 +121,46 @@ def load_lane_failures(path: str | None) -> list[dict[str, str]]:
     ]
 
 
-def collect_pr_diff(github_repo: str, pr_number: int) -> str:
+def _collect_local_pr_diff(repo: Path, base_sha: str, head_sha: str) -> str:
+    for label, sha in [("base", base_sha), ("head", head_sha)]:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "not found"
+            raise EvidenceError(f"local PR diff {label} commit is unavailable: {detail}")
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            "--full-index",
+            f"{base_sha}...{head_sha}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        raise EvidenceError(f"local exact-SHA PR diff failed: {detail}")
+    return completed.stdout
+
+
+def collect_pr_diff(
+    github_repo: str,
+    pr_number: int,
+    *,
+    repo: Path | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> str:
     command = [
         "gh",
         "pr",
@@ -142,6 +181,16 @@ def collect_pr_diff(github_repo: str, pr_number: int) -> str:
         raise EvidenceError("gh executable was not found in PATH") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        too_large = "too_large" in detail or (
+            "HTTP 406" in detail and "maximum number of lines" in detail
+        )
+        if too_large:
+            if repo is None or not base_sha or not head_sha:
+                raise EvidenceError(
+                    "gh pr diff exceeded GitHub's size limit and exact local base/head "
+                    "evidence is unavailable"
+                )
+            return _collect_local_pr_diff(repo, base_sha, head_sha)
         raise EvidenceError(f"gh pr diff failed: {detail}")
     return completed.stdout
 

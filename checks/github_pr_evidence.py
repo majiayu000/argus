@@ -51,7 +51,7 @@ from specrail_lib import PackConfig, SpecRailError, load_pack, resolve_path
 
 
 PR_VIEW_FIELDS = [
-    "number", "state", "isDraft", "headRefOid", "mergeStateStatus", "body",
+    "number", "state", "isDraft", "baseRefOid", "headRefOid", "mergeStateStatus", "body",
     "closingIssuesReferences", "statusCheckRollup", "reviews",
 ]
 
@@ -560,7 +560,13 @@ def collect_evidence(
         review_artifact, review_artifact_sha256 = load_review_artifact(
             review_artifact_path
         )
-        review_diff = collect_pr_diff(github_repo, pr_number)
+        review_diff = collect_pr_diff(
+            github_repo,
+            pr_number,
+            repo=repo,
+            base_sha=_require_string(pr_payload_before, "baseRefOid"),
+            head_sha=head_sha_before,
+        )
     elif review_artifact_path:
         raise EvidenceError(
             "--review-artifact requires --review-source independent_lane"

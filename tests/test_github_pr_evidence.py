@@ -32,7 +32,7 @@ from github_pr_snapshot import (  # noqa: E402
     collect_pr_file_snapshot,
     derive_spec_refs,
 )
-from github_review_evidence import build_review_attestation  # noqa: E402
+from github_review_evidence import build_review_attestation, collect_pr_diff  # noqa: E402
 from pr_gate import evaluate_pr_gate  # noqa: E402
 from sensitive_enforcement import classify_sensitive_changes  # noqa: E402
 from specrail_lib import PackConfig, load_pack  # noqa: E402
@@ -43,6 +43,7 @@ def pr_payload() -> dict[str, object]:
         "number": 10,
         "state": "OPEN",
         "isDraft": False,
+        "baseRefOid": "b" * 40,
         "headRefOid": "e36d97517d8d0b27faca1abe5e5c63f9f88684d9",
         "mergeStateStatus": "CLEAN",
         "body": "Closes #9",
@@ -144,6 +145,58 @@ def test_review_attestation_rejects_approve_with_blocking_comment() -> None:
             head_sha=str(review["reviewed_head_sha"]),
             review_source="independent_lane",
             checked_at="2026-07-15T00:00:00Z",
+        )
+
+
+def test_collect_pr_diff_falls_back_to_exact_local_shas_on_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = "b" * 40
+    head = "a" * 40
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "gh":
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="HTTP 406: diff exceeded the maximum number of lines (20000) too_large",
+            )
+        if "cat-file" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="exact local diff\n", stderr="")
+
+    monkeypatch.setattr("github_review_evidence.subprocess.run", fake_run)
+
+    assert collect_pr_diff(
+        "example/repo",
+        81,
+        repo=tmp_path,
+        base_sha=base,
+        head_sha=head,
+    ) == "exact local diff\n"
+    assert calls[-1][-1] == f"{base}...{head}"
+
+
+def test_collect_pr_diff_does_not_fallback_for_other_github_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="HTTP 500")
+
+    monkeypatch.setattr("github_review_evidence.subprocess.run", fake_run)
+
+    with pytest.raises(EvidenceError, match="gh pr diff failed: HTTP 500"):
+        collect_pr_diff(
+            "example/repo",
+            81,
+            repo=tmp_path,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
         )
 
 
