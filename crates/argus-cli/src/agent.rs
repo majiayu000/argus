@@ -232,6 +232,8 @@ impl LlmJudge for CommandLlmJudge {
                     }
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected)
+                    if stdin_done && stdout_bytes.is_some() && stderr_bytes.is_some() => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     terminate_and_reap(&mut child)?;
                     join_process_threads(threads)?;
@@ -492,6 +494,17 @@ mod tests {
         let judge = CommandLlmJudge::with_limits(&path, Duration::from_secs(1), 1024);
         let response = judge.judge(&empty_request()).expect("judge response");
         assert_eq!(response.decision, Decision::AllowWithApproval);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_judge_allows_io_to_finish_before_process_exit() {
+        let (_dir, path) = judge_script(
+            "cat >/dev/null; printf '%s' '{\"schema_version\":1,\"decision\":\"allow\",\"rationale\":\"done\"}'; exec 1>&- 2>&-; sleep 0.05",
+        );
+        let judge = CommandLlmJudge::with_limits(&path, Duration::from_secs(1), 1024);
+        let response = judge.judge(&empty_request()).expect("judge response");
+        assert_eq!(response.decision, Decision::Allow);
     }
 
     #[cfg(unix)]
