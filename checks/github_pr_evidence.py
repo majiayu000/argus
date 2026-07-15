@@ -543,6 +543,7 @@ def collect_evidence(
         raise EvidenceError("expected issue must be a positive integer")
     owner, name = parse_github_repo(github_repo)
     pr_payload_before = collect_pr_view(github_repo, pr_number)
+    base_sha_before = _require_string(pr_payload_before, "baseRefOid")
     head_sha_before = _require_string(pr_payload_before, "headRefOid")
     relation_snapshot_before = relation_snapshot(pr_payload_before)
     file_snapshot_before = None
@@ -564,7 +565,7 @@ def collect_evidence(
             github_repo,
             pr_number,
             repo=repo,
-            base_sha=_require_string(pr_payload_before, "baseRefOid"),
+            base_sha=base_sha_before,
             head_sha=head_sha_before,
         )
     elif review_artifact_path:
