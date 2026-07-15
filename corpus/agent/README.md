@@ -43,6 +43,11 @@ Fill `label` with `TP` / `FP` / `needs-context`. The high-priority scripts and
 override/concealment batches are the useful eval set; the fp-samples exist to
 put a number on the false-positive rate that motivated this work.
 
+This file is hit-only and currently has no labels or stored detector misses.
+It therefore cannot supply a false-negative denominator, so recall must not be
+claimed from it even after TP/FP labeling. It remains a future human precision
+worklist until a pinned source snapshot and labeled negatives are added.
+
 ## Census headline (why this exists)
 
 - **99.9%** of skills are pure text (SKILL.md only) — the attack surface is the
@@ -67,5 +72,15 @@ fields on capability-backed findings:
 }
 ```
 
-The remaining external step is hand-labeling `labeling-worklist.jsonl`; without
-labels, precision/recall cannot be measured honestly.
+`index.json` also carries a frozen evaluation contract for these six
+maintainer-merged fixtures. Recompute it with:
+
+```bash
+argus corpus eval --corpus corpus/agent --format json
+```
+
+The result is explicitly a **synthetic fixture metric**, not a real-world
+quality claim. At the implementation head it reports 4 TP, 0 FP, 0 FN, 2 TN,
+precision 1.0, and recall 1.0. Hand-labeling `labeling-worklist.jsonl` remains
+an external follow-up for real-hit precision; honest real-world recall also
+requires a frozen corpus containing detector misses.

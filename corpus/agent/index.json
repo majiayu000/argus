@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
   "surface": "agent-skill",
+  "evaluation": {
+    "schemaVersion": 1,
+    "datasetType": "synthetic-fixtures",
+    "labelSource": "maintainer-merged expectedDecision values from GH-58 PR #60",
+    "positiveDecision": "block",
+    "frozen": true
+  },
   "cases": [
     {
       "id": "skill-config-backdoor",
