@@ -281,6 +281,13 @@ mod tests {
         denied.set_mode(0o000);
         std::fs::set_permissions(&root, denied)?;
 
+        // UID 0 and some filesystems can still list a mode-000 directory. In
+        // those environments this fixture cannot establish its prerequisite.
+        if std::fs::read_dir(&root).is_ok() {
+            std::fs::set_permissions(&root, original)?;
+            return Ok(());
+        }
+
         let result = scan_agent_surface(&root);
         std::fs::set_permissions(&root, original)?;
 
