@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/majiayu000/specrail.git",
+  "commit": "f3251fe27e13a61c73304dbe001b1d9091c948e2",
+  "adoption_mode": "copied_pack",
+  "adopted_at": "2026-07-15",
+  "consumer_adaptations": [
+    "preserved Argus-owned files and existing Rust CI",
+    "migrated existing Argus task packets to stable checklist IDs",
+    "replaced upstream maintainer tests with Argus adoption smoke tests",
+    "targeted workflow-check at Argus packets",
+    "normalized copied template whitespace"
+  ]
+}

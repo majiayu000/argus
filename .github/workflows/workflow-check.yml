@@ -1,0 +1,38 @@
+name: workflow-check
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Initialize trusted default branch ref
+        run: git remote set-head origin --auto
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install test dependencies
+        run: python3 -m pip install pytest
+      - name: Check workflow pack and spec packets
+        run: python3 checks/check_workflow.py --repo . --all-specs
+      - name: Run Argus adoption smoke tests
+        run: python3 -m pytest -q
+      - name: Check whitespace
+        shell: bash
+        run: |
+          if [[ -n "${{ github.base_ref }}" ]]; then
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          else
+            git diff --check "HEAD^...HEAD"
+          fi

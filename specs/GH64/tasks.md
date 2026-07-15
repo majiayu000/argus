@@ -1,15 +1,13 @@
 # Tasks — GH-64 AGT-02 description 哈希漂移基线
 
-| # | Task | Owner | Depends | Done-when / Verify | Status |
-| --- | --- | --- | --- | --- | --- |
-| SP64-T1 | `baseline.rs`：`DescEntry` 抽取（MCP `description` 字段 + `SKILL.md` frontmatter `name`/`description`），稳定 key；在 `crates/argus-agent/Cargo.toml` 显式加 `sha2 = { workspace = true }`（sha2 已在 workspace，但当前不在 argus-agent 依赖中） | agent crate | GH-59/#63 合并 | 单测：给定 fixture .mcp.json / SKILL.md 断言 key 集与 hash 确定；`cargo tree -p argus-agent \| grep sha2` 有输出 | todo |
-| SP64-T2 | `baseline.rs`：基线文件 JSON `load`/`save`（BTreeMap 有序、确定性、坏文件→Err） | agent crate | T1 | 单测：save→load 往返一致；损坏文件 `Err` 不 panic | todo |
-| SP64-T3 | `lib.rs`：`BaselineMode{None,Check,Update}` + `scan_agent_surface_with_baseline`；`scan_agent_surface` 变薄封装 | agent crate | T1,T2 | 既有调用点/测试不回归；`cargo test -p argus-agent` | todo |
-| SP64-T4 | Update 分支：抽取当前 description 写基线、跑其余规则、不产 AGT-02；排除基线文件自身 | agent crate | T3 | 集成测试 baseline-create：写出基线、条目数正确、findings 无 AGT-02 | todo |
-| SP64-T5 | Check 分支：漂移→AGT-02 medium（old/new 哈希前缀进 evidence）；缺失→info；新条目不产 | agent crate | T3 | 集成测试 drift + unchanged + missing 三路径断言 | todo |
-| SP64-T6 | CLI `--baseline` / `--update-baseline`（互斥），退出码语义（medium 不改非零） | cli crate | T3-T5 | `cargo run -p argus-cli -- agent scan --update-baseline ... ` 手测 + 单测 clap 解析 | todo |
-| SP64-T7 | README：基线工作流 + 信任边界段落（更新即批准、基线应纳入用户审计） | docs | T4-T6 | README 含 AGT-02 用法与信任边界说明 | todo |
-| SP64-T8 | fixtures：`agt02-baseline-mcp`（含基线文件 + 漂移版）、`agt02-baseline-skill` | test | T1 | 集成测试引用；良性未变 fixture 断言无 AGT-02 | todo |
+- [ ] `SP64-T1` 抽取稳定 description entries 并接入 sha2。Owner: agent crate。Done when: MCP/SKILL fixture 的 key 与 hash 确定。Verify: focused unit tests 与 `cargo tree -p argus-agent | grep sha2`。
+- [ ] `SP64-T2` 实现确定性 baseline JSON load/save。Owner: agent crate。Done when: BTreeMap 往返一致且坏文件返回 Err。Verify: baseline round-trip/error tests。
+- [ ] `SP64-T3` 接入 BaselineMode 与扫描入口。Owner: agent crate。Done when: None/Check/Update 调用点稳定且既有扫描不回归。Verify: `cargo test -p argus-agent`。
+- [ ] `SP64-T4` 实现 Update 分支。Owner: agent crate。Done when: 写入当前 snapshot、排除 baseline 本身且不产 AGT-02。Verify: baseline-create integration test。
+- [ ] `SP64-T5` 实现 Check 分支。Owner: agent crate。Done when: drift 为 medium、missing 为 info、new entry 不误报。Verify: drift/unchanged/missing integration tests。
+- [ ] `SP64-T6` 增加 CLI baseline flags。Owner: CLI crate。Done when: `--baseline` 与 `--update-baseline` 互斥且退出码兼容。Verify: clap tests 与手动 CLI scan。
+- [ ] `SP64-T7` 记录 baseline 工作流与信任边界。Owner: docs。Done when: README 明确 update 即批准且 baseline 由用户审计。Verify: README 内容检查。
+- [ ] `SP64-T8` 增加 MCP/SKILL baseline fixtures。Owner: agent tests。Done when: 良性未变 fixture 无 AGT-02 且漂移 fixture 有断言。Verify: integration tests。
 
 ## Spec Packet
 
@@ -28,10 +26,9 @@
 
 ## Verification
 
-- [ ] `cargo test` 全 workspace 通过（含 baseline-create / unchanged / drift）
-- [ ] `cargo clippy --all-targets` 无告警
-- [ ] 手测 `argus agent scan --update-baseline b.json ~/.claude` 后改一个
-      description 再 `--baseline b.json` 扫描 → 出 AGT-02
+- workspace tests 覆盖 baseline-create、unchanged 与 drift。
+- clippy all-targets 无告警。
+- 手测 update baseline 后修改 description，再 check baseline 产生 AGT-02。
 
 ## Handoff Notes
 

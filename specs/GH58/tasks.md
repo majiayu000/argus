@@ -1,13 +1,11 @@
 # Tasks — GH-58 agent-skill 回归语料 + 标注 worklist
 
-| # | Task | Verify | Status |
-| --- | --- | --- | --- |
-| 1 | 新增 `corpus/agent/fixtures/` 6 个合成 fixture（3 block / 1 注入 / 2 负例） | 目录结构存在，host 全 `.example.invalid` | done |
-| 2 | 新增 `corpus/agent/index.json`（schemaVersion:1, surface:agent-skill, 6 cases） | `python3 -c 'json.load'` 通过 | done |
-| 3 | 提交 `corpus/agent/labeling-worklist.jsonl`（849 条真实命中带上下文） | 行数 = 849 | done |
-| 4 | 提交 `corpus/agent/census.md`（普查方法学 + 数字） | 文档可复现 | done |
-| 5 | `corpus test` runner 发现 `corpus/agent/index.json` | `cargo run -p argus-cli -- corpus test` 全绿 | todo（maintainer 侧接线） |
-| 6 | CI 断言两负例非 block | `corpus test` 中 benign-* 判决 = allow / allow-with-approval | todo |
+- [x] `SP58-T1` 新增六个合成 agent fixtures。Owner: corpus。Done when: 3 block、1 injection、2 negative fixture 均存在且 host 为 `.example.invalid`。Verify: 检查 `corpus/agent/fixtures/` 与 host。
+- [x] `SP58-T2` 新增 agent corpus index。Owner: corpus。Done when: `schemaVersion: 1`、`surface: agent-skill` 且包含六个 case。Verify: Python JSON load。
+- [x] `SP58-T3` 提交 849 行真实命中标注 worklist。Owner: corpus。Done when: JSONL 行数为 849 且保留上下文与空 label。Verify: `wc -l corpus/agent/labeling-worklist.jsonl`。
+- [x] `SP58-T4` 提交 census 方法与结果。Owner: docs。Done when: 数据来源、方法和数字可审计。Verify: 人工阅读 `corpus/agent/census.md`。
+- [ ] `SP58-T5` 让 corpus runner 发现 agent index。Owner: CLI crate。Done when: runner 同时执行 npm 与 agent corpus。Verify: `cargo run -p argus-cli -- corpus test --corpus corpus`。
+- [ ] `SP58-T6` CI 断言两个负例非 block。Owner: CI/verification。Done when: benign installer 为 allow、benign net tool 为 allow-with-approval。Verify: corpus test 输出。
 
 ## Spec Packet
 
@@ -22,9 +20,9 @@ Task 1-4 为纯文件新增，本 PR 已完成。Task 5-6 需改 `argus corpus` 
 
 ## Verification
 
-- [x] `json.load(corpus/agent/index.json)` 通过
-- [x] `grep -rn` 确认所有 host 为 `.example.invalid`
-- [ ] `argus corpus test` 端到端（依赖 Task 5 接线）
+- JSON load 已验证 `corpus/agent/index.json`。
+- host 检查确认全部使用 `.example.invalid`。
+- 端到端 corpus test 依赖 SP58-T5。
 
 ## Handoff Notes
 

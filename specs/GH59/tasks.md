@@ -1,16 +1,14 @@
 # Tasks — GH-59 能力清单 + 意图-能力错配检测
 
-| # | Task | Verify | Status |
-| --- | --- | --- | --- |
-| 1 | 词法层降级为粗筛（AGT-01/03/05 输出候选信号而非终判） | 现有单测不回归 | todo |
-| 2 | L2 能力提取：shell（tree-sitter-bash） | 单测正负例 | todo |
-| 3 | L2 能力提取：python + js/ts | 单测正负例 | todo |
-| 4 | host 静态解析 + `unresolved_host` 信号 | 单测：字面/拼接 | todo |
-| 5 | manifest JSON schema 接入 `--format json` | schema 校验 + 快照测试 | todo |
-| 6 | L3 意图粗类分类（frontmatter/description → 类别） | 单测 | todo |
-| 7 | L3 意图-能力错配规则 + 三档判决 | `corpus test` 过 GH-58 6 fixture | todo |
-| 8 | 在 GH-58 worklist（人工标注后）算 precision/recall | 数字写进 PR | todo |
-| 9 | 可选 `--llm-judge` 增强层（默认关，核心确定性） | 关闭态输出确定 | todo |
+- [ ] `SP59-T1` 将词法层降级为候选粗筛。Owner: agent lexical rules。Done when: AGT-01/03/05 不再单独承担最终恶意判定且现有单测不回归。Verify: `cargo test -p argus-agent`。
+- [ ] `SP59-T2` 提取 shell 脚本能力。Owner: agent capability。Done when: shell 正负例产生稳定 manifest。Verify: capability focused tests。
+- [ ] `SP59-T3` 提取 Python 与 JS/TS 脚本能力。Owner: agent capability。Done when: 各语言正负例产生稳定 manifest。Verify: capability focused tests。
+- [ ] `SP59-T4` 解析静态 host 并输出 unresolved signal。Owner: agent capability。Done when: 字面 host 与无法解析的拼接均有测试。Verify: host-resolution tests。
+- [ ] `SP59-T5` 将 manifest 字段接入 JSON 输出。Owner: core + CLI。Done when: JSON 含 capability/evidence/resolved_host。Verify: schema 与 snapshot tests。
+- [ ] `SP59-T6` 从 frontmatter/description 提取意图粗类。Owner: agent intent。Done when: 意图分类单测通过。Verify: intent focused tests。
+- [ ] `SP59-T7` 实现意图-能力错配三档判决。Owner: agent decision。Done when: GH58 六个 fixture 全部符合 expected decision。Verify: `cargo run -p argus-cli -- corpus test --corpus corpus`。
+- [ ] `SP59-T8` 在冻结且人工标注的评估集上计算指标。Owner: evaluation。Done when: 评估契约明确且 PR 报告可识别的 precision/recall 数字。Verify: 复验评估输入、标签、预测与计算结果。
+- [ ] `SP59-T9` 增加可选 `--llm-judge`。Owner: CLI + agent judge。Done when: 默认关闭且确定性核心不依赖网络/LLM。Verify: 关闭态重复扫描输出一致。
 
 ## Spec Packet
 
@@ -27,9 +25,9 @@
 
 ## Verification
 
-- [ ] `corpus test` 过 GH-58 全部 6 fixture，两负例保持非 block
-- [ ] precision/recall 在标注 worklist 上有具体数字
-- [ ] `--llm-judge` 关闭时确定性可复现
+- corpus test 必须覆盖 GH58 六个 fixture，两负例保持非 block。
+- 评估指标必须有冻结输入、标签与预测证据。
+- `--llm-judge` 关闭时输出必须确定性可复现。
 
 ## Handoff Notes
 
