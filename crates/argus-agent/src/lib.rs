@@ -308,6 +308,9 @@ fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
     if path_identity(candidate) == exclude {
         return true;
     }
+    if std::fs::symlink_metadata(exclude).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
     if std::fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         return false;
