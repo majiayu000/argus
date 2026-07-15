@@ -9,23 +9,109 @@ use anyhow::{anyhow, bail, Context, Result};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::{Position, Url};
 
 /// Extract the lowercased host from an `http(s)` URL.
 ///
-/// Returns the host between the scheme and the first `/`, or the entire
-/// authority section if there is no path. Errors if the URL has no
-/// `http(s)` scheme or has an empty host.
+/// Preserves an explicit port (for example, `localhost:4873`) so existing
+/// private-registry comparisons remain origin-specific. Userinfo, query, and
+/// fragment text are never treated as part of the host.
 pub fn host_of(url: &str) -> Result<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow!("URL has no http(s) scheme: {url}"))?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let host = rest[..end].to_ascii_lowercase();
-    if host.is_empty() {
-        bail!("URL has empty host: {url}");
+    let parsed = parse_http_url(url)?;
+    canonical_authority(&parsed, url)
+}
+
+fn parse_http_url(raw: &str) -> Result<Url> {
+    if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        bail!("URL scheme must use canonical lowercase http(s): {raw}");
+    }
+    let parsed = Url::parse(raw).with_context(|| format!("parse URL `{raw}`"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("URL has no http(s) scheme: {raw}");
+    }
+    if raw_authority(raw, parsed.scheme().len())?.is_empty() || parsed.host_str().is_none() {
+        bail!("URL has empty host: {raw}");
+    }
+    Ok(parsed)
+}
+
+fn raw_authority(raw: &str, scheme_len: usize) -> Result<&str> {
+    let rest = raw
+        .get(scheme_len..)
+        .and_then(|rest| rest.strip_prefix("://"))
+        .ok_or_else(|| anyhow!("URL has no http(s) authority: {raw}"))?;
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    Ok(&rest[..end])
+}
+
+fn canonical_authority(parsed: &Url, raw: &str) -> Result<String> {
+    let raw_authority = raw_authority(raw, parsed.scheme().len())?;
+    let mut host = parsed[Position::BeforeHost..Position::AfterHost].to_ascii_lowercase();
+    if let Some(port) = explicit_port(raw_authority) {
+        host.push(':');
+        host.push_str(port);
     }
     Ok(host)
+}
+
+fn explicit_port(authority: &str) -> Option<&str> {
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    if let Some(ipv6) = host_port.strip_prefix('[') {
+        let (_, suffix) = ipv6.split_once(']')?;
+        return suffix.strip_prefix(':').filter(|port| !port.is_empty());
+    }
+    host_port
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .filter(|port| !port.is_empty())
+}
+
+fn normalize_host_pattern(raw: &str) -> Result<String> {
+    if raw.is_empty() {
+        bail!("host pattern is empty");
+    }
+    if raw.chars().any(char::is_whitespace) {
+        bail!("host pattern contains whitespace: `{raw}`");
+    }
+
+    let is_suffix = raw.starts_with('.');
+    if is_suffix && raw.len() == 1 {
+        bail!("host suffix pattern cannot be `.`");
+    }
+
+    let authority = if is_suffix {
+        format!("allowlist-probe{raw}")
+    } else {
+        raw.to_owned()
+    };
+    if authority.contains('@') || authority.ends_with(':') {
+        bail!("host pattern must contain only a host and optional port: `{raw}`");
+    }
+
+    let probe = format!("https://{authority}/");
+    let parsed = parse_http_url(&probe)?;
+    if raw_authority(&probe, parsed.scheme().len())? != authority {
+        bail!("host pattern must not contain a path, query, or fragment: `{raw}`");
+    }
+
+    let normalized = canonical_authority(&parsed, &probe)?;
+    if is_suffix {
+        normalized
+            .strip_prefix("allowlist-probe")
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("invalid host suffix pattern: `{raw}`"))
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn normalize_registry_host(raw: &str) -> Result<String> {
+    if raw.starts_with('.') {
+        bail!("registry host must be exact, not a suffix pattern: `{raw}`");
+    }
+    normalize_host_pattern(raw)
 }
 
 /// Validate an artifact download URL against a registry host and an
@@ -44,17 +130,28 @@ pub fn validate_artifact_url<S: AsRef<str>>(
     registry_host: &str,
     allowed: &[S],
 ) -> Result<()> {
-    if !url.starts_with("https://") {
+    let parsed = parse_http_url(url)?;
+    if parsed.scheme() != "https" {
         bail!("refusing non-HTTPS artifact URL `{url}`");
     }
-    let host = host_of(url)?;
+    let host = canonical_authority(&parsed, url)?;
+    let registry_host = normalize_registry_host(registry_host)
+        .with_context(|| format!("invalid registry host `{registry_host}`"))?;
+    let allowed = allowed
+        .iter()
+        .map(|entry| {
+            let raw_entry = entry.as_ref();
+            normalize_host_pattern(raw_entry)
+                .with_context(|| format!("invalid artifact host allowlist entry `{raw_entry}`"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     if host == registry_host {
         return Ok(());
     }
-    for entry in allowed {
-        let entry = entry.as_ref().to_ascii_lowercase();
+    for entry in &allowed {
+        let entry = entry.as_str();
         if entry.starts_with('.') {
-            if host.ends_with(&entry) {
+            if host.ends_with(entry) {
                 return Ok(());
             }
         } else if host == entry {
@@ -134,9 +231,25 @@ mod tests {
     }
 
     #[test]
+    fn host_of_preserves_explicit_ports() -> Result<()> {
+        assert_eq!(host_of("https://example.com:443/x")?, "example.com:443");
+        assert_eq!(host_of("http://example.com:80/x")?, "example.com:80");
+        assert_eq!(host_of("https://[::1]:8443/x")?, "[::1]:8443");
+        Ok(())
+    }
+
+    #[test]
     fn host_of_rejects_missing_scheme() {
         assert!(host_of("ftp://x.example/").is_err());
         assert!(host_of("x.example/").is_err());
+        assert!(host_of("https:/x.example/").is_err());
+        assert!(host_of("https:x.example/").is_err());
+    }
+
+    #[test]
+    fn host_of_rejects_noncanonical_scheme_case() {
+        assert!(host_of("HTTPS://registry.example/").is_err());
+        assert!(host_of("HtTp://registry.example/").is_err());
     }
 
     #[test]
@@ -195,6 +308,77 @@ mod tests {
     }
 
     #[test]
+    fn validate_normalizes_idna_allowlist_entries() -> Result<()> {
+        validate_artifact_url(
+            "https://files.bücher.example/pkg.tar.gz",
+            "registry.example.invalid",
+            &[".bücher.example"],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_malformed_host_patterns() {
+        for entry in [
+            "cdn.example/path",
+            "cdn.example?tenant=x",
+            "cdn.example#fragment",
+            r"cdn.example\ignored",
+            "user@cdn.example",
+            "cdn.example:",
+        ] {
+            let result = validate_artifact_url(
+                "https://cdn.example/package.tar.gz",
+                "registry.example.invalid",
+                &[entry],
+            );
+            assert!(
+                matches!(&result, Err(error) if format!("{error:#}").contains("invalid artifact host allowlist entry")),
+                "malformed allowlist entry was not rejected as configuration: {entry}"
+            );
+        }
+
+        let result = validate_artifact_url::<&str>(
+            "https://registry.example/package.tar.gz",
+            "registry.example/path",
+            &[],
+        );
+        assert!(
+            matches!(&result, Err(error) if format!("{error:#}").contains("invalid registry host")),
+            "malformed registry host was not rejected as configuration"
+        );
+
+        let result = validate_artifact_url(
+            "https://cdn.example/package.tar.gz",
+            ".registry.example",
+            &["cdn.example"],
+        );
+        assert!(
+            matches!(&result, Err(error) if format!("{error:#}").contains("invalid registry host")),
+            "registry suffix pattern was accepted and masked by a valid allowlist entry"
+        );
+
+        for (url, registry_host, allowed) in [
+            (
+                "https://registry.example/package.tar.gz",
+                "registry.example",
+                &["bad/path"][..],
+            ),
+            (
+                "https://cdn.example/package.tar.gz",
+                "registry.example",
+                &["cdn.example", "bad/path"][..],
+            ),
+        ] {
+            let result = validate_artifact_url(url, registry_host, allowed);
+            assert!(
+                matches!(&result, Err(error) if format!("{error:#}").contains("invalid artifact host allowlist entry")),
+                "successful host match skipped malformed allowlist configuration"
+            );
+        }
+    }
+
+    #[test]
     fn validate_suffix_does_not_match_bare_domain() {
         assert!(validate_artifact_url(
             "https://pythonhosted.org/x.tar.gz",
@@ -212,6 +396,21 @@ mod tests {
             &[".pythonhosted.org"],
         )
         .is_err());
+    }
+
+    #[test]
+    fn validate_suffix_uses_only_the_parsed_host() {
+        for url in [
+            "https://evil.example?.pythonhosted.org/payload",
+            "https://evil.example#.pythonhosted.org",
+            r"https://evil.example\.pythonhosted.org/payload",
+            "https://files.pythonhosted.org@evil.example/.pythonhosted.org",
+        ] {
+            assert!(
+                validate_artifact_url(url, "pypi.org", &[".pythonhosted.org"]).is_err(),
+                "allowlist suffix outside the parsed host was accepted: {url}"
+            );
+        }
     }
 
     #[test]
