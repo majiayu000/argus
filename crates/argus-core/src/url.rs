@@ -22,6 +22,9 @@ pub fn host_of(url: &str) -> Result<String> {
 }
 
 fn parse_http_url(raw: &str) -> Result<Url> {
+    if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        bail!("URL scheme must use canonical lowercase http(s): {raw}");
+    }
     let parsed = Url::parse(raw).with_context(|| format!("parse URL `{raw}`"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         bail!("URL has no http(s) scheme: {raw}");
@@ -241,6 +244,12 @@ mod tests {
         assert!(host_of("x.example/").is_err());
         assert!(host_of("https:/x.example/").is_err());
         assert!(host_of("https:x.example/").is_err());
+    }
+
+    #[test]
+    fn host_of_rejects_noncanonical_scheme_case() {
+        assert!(host_of("HTTPS://registry.example/").is_err());
+        assert!(host_of("HtTp://registry.example/").is_err());
     }
 
     #[test]
