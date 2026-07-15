@@ -37,6 +37,9 @@ STABLE_TEMPLATE_FILES = frozenset(
     {"issue_feature.md", "product_spec.md", "pull_request.md", "tech_spec.md"}
 )
 STABLE_TEMPLATE_TOKENS = ("GH-", "ready_to_spec", "ready_to_implement")
+REQUIRED_TEMPLATE_TOKENS = {
+    "tech_spec.md": ("specrail-planned-changes",),
+}
 
 
 def _read_asset_text(path: Path, repo: Path, errors: list[str]) -> str | None:
@@ -67,6 +70,11 @@ def validate_template_parity(repo: Path) -> list[str]:
         localized_text = _read_asset_text(localized_path, repo, errors)
         if base_text is None or localized_text is None:
             continue
+        for token in REQUIRED_TEMPLATE_TOKENS.get(name, ()):
+            if token not in base_text:
+                errors.append(f"templates/{name}: missing required token {token}")
+            if token not in localized_text:
+                errors.append(f"templates/zh-CN/{name}: missing required token {token}")
         for token in STABLE_TEMPLATE_TOKENS:
             if token in base_text and token not in localized_text:
                 errors.append(f"templates/zh-CN/{name}: missing stable token {token}")

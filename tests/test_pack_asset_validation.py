@@ -82,6 +82,33 @@ def test_template_validation_reports_owned_base_and_stable_token_errors(
     assert "templates/zh-CN/product_spec.md: missing stable token GH-" in errors
 
 
+def test_template_validation_requires_planned_changes_manifest_in_both_locales(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    copy_pack_assets(repo)
+    base = repo / "templates" / "tech_spec.md"
+    localized = repo / "templates" / "zh-CN" / "tech_spec.md"
+    base.write_text(
+        base.read_text(encoding="utf-8").replace("specrail-planned-changes", "planned"),
+        encoding="utf-8",
+    )
+    localized.write_text(
+        localized.read_text(encoding="utf-8").replace(
+            "specrail-planned-changes", "planned"
+        ),
+        encoding="utf-8",
+    )
+
+    errors = validate_template_parity(repo)
+
+    assert "templates/tech_spec.md: missing required token specrail-planned-changes" in errors
+    assert (
+        "templates/zh-CN/tech_spec.md: missing required token specrail-planned-changes"
+        in errors
+    )
+
+
 def test_template_validation_reports_asset_read_errors(
     tmp_path: Path,
     monkeypatch,

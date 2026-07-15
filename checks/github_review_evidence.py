@@ -186,6 +186,16 @@ def build_review_attestation(
         raise EvidenceError(
             "review artifact verdict must be APPROVE for PR gate evidence"
         )
+    blocking_comments = [
+        comment
+        for comment in review.get("comments", [])
+        if isinstance(comment, dict)
+        and comment.get("severity") in {"critical", "important"}
+    ]
+    if blocking_comments:
+        raise EvidenceError(
+            "APPROVE review artifact must not contain critical or important comments"
+        )
     if review.get("source") != review_source:
         raise EvidenceError("review artifact source does not match review_source")
     return {

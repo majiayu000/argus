@@ -32,6 +32,7 @@ from github_pr_snapshot import (  # noqa: E402
     collect_pr_file_snapshot,
     derive_spec_refs,
 )
+from github_review_evidence import build_review_attestation  # noqa: E402
 from pr_gate import evaluate_pr_gate  # noqa: E402
 from sensitive_enforcement import classify_sensitive_changes  # noqa: E402
 from specrail_lib import PackConfig, load_pack  # noqa: E402
@@ -110,6 +111,40 @@ def approved_review(payload: dict[str, object] | None = None) -> dict[str, objec
         "body": "## Summary\nIndependent advisory review passed.\n\n## Verdict\nAPPROVE",
         "comments": [],
     }
+
+
+def test_review_attestation_rejects_approve_with_blocking_comment() -> None:
+    review = approved_review()
+    review["comments"] = [
+        {
+            "path": "checks/example.py",
+            "line": 1,
+            "side": "RIGHT",
+            "severity": "important",
+            "body": "This finding must be fixed before merge.",
+        }
+    ]
+    diff_text = (
+        "diff --git a/checks/example.py b/checks/example.py\n"
+        "--- /dev/null\n"
+        "+++ b/checks/example.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+value = 1\n"
+    )
+
+    with pytest.raises(
+        EvidenceError,
+        match="must not contain critical or important comments",
+    ):
+        build_review_attestation(
+            review,
+            "a" * 64,
+            diff_text,
+            pr_number=int(review["pr"]),
+            head_sha=str(review["reviewed_head_sha"]),
+            review_source="independent_lane",
+            checked_at="2026-07-15T00:00:00Z",
+        )
 
 
 def independent_review_kwargs(

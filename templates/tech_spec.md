@@ -21,6 +21,16 @@ never guess. Unverifiable references are dropped or marked "to locate".
 
 Explain the planned implementation.
 
+## Planned Changes Manifest
+
+Replace the issue number, paths, and spec references below with the complete
+approved change set. Keep exactly one `specrail-planned-changes` block and set
+`complete` to `true` only after every planned path is listed.
+
+<!-- specrail-planned-changes
+{"version":1,"issue":0,"complete":false,"paths":[],"spec_refs":[]}
+-->
+
 ## Product-to-Test Mapping
 
 Enumerate every `B-xxx` from `product.md` — no orphan invariants. Verification

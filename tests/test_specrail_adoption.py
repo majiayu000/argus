@@ -108,6 +108,8 @@ def test_argus_adoption_source_is_pinned() -> None:
             "deferred resolved-thread attribution to the PR gate",
             "documented trusted issue evidence for implementation routing",
             "bound final review-thread evidence to the gated PR head",
+            "rejected APPROVE review artifacts that retain blocking comments",
+            "required tech spec templates to declare complete planned-change manifests",
             "normalized copied template whitespace",
         ],
     }
