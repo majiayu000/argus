@@ -57,6 +57,7 @@ enum CandidateState {
     MetadataError(String),
     ReadError(String),
     Symlink,
+    SymlinkTargetError(String),
 }
 
 /// Top-level entry: scan a directory (or single file) as an agent surface.
@@ -170,16 +171,17 @@ fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<Surf
                 .to_string_lossy()
                 .replace('\\', "/");
             if file_type.is_symlink() {
-                if std::fs::metadata(abs).is_ok_and(|metadata| metadata.is_dir()) {
-                    bail!(
-                        "agent scan tree contains directory symlink `{rel}`; \
-                         refusing incomplete scan"
-                    );
-                }
-                candidates.push(Candidate {
-                    rel,
-                    state: CandidateState::Symlink,
-                });
+                let state = match std::fs::metadata(abs) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        bail!(
+                            "agent scan tree contains directory symlink `{rel}`; \
+                             refusing incomplete scan"
+                        );
+                    }
+                    Ok(_) => CandidateState::Symlink,
+                    Err(error) => CandidateState::SymlinkTargetError(error.to_string()),
+                };
+                candidates.push(Candidate { rel, state });
                 continue;
             }
             let candidate = match entry.metadata() {
@@ -231,7 +233,20 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
 
     let mut files = Vec::new();
     for Candidate { rel, state } in candidates {
-        let Some(kind) = classify(&rel, &skill_dirs) else {
+        let kind = classify(&rel, &skill_dirs);
+        if kind.is_none()
+            && matches!(&state, CandidateState::SymlinkTargetError(_))
+            && is_protected_tree_path(&rel, &skill_dirs)
+        {
+            let CandidateState::SymlinkTargetError(error) = state else {
+                unreachable!();
+            };
+            bail!(
+                "inspect protected agent tree symlink `{rel}` target: {error}; \
+                 refusing incomplete scan"
+            );
+        }
+        let Some(kind) = kind else {
             continue;
         };
         let bytes = match state {
@@ -249,6 +264,10 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
             CandidateState::Symlink => {
                 bail!("protected agent surface `{rel}` is a symlink; refusing incomplete scan")
             }
+            CandidateState::SymlinkTargetError(error) => bail!(
+                "inspect protected agent surface symlink `{rel}` target: {error}; \
+                 refusing incomplete scan"
+            ),
         };
         if argus_rules::looks_binary(&bytes) {
             bail!("protected agent surface `{rel}` appears binary; refusing incomplete scan");
@@ -263,6 +282,13 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
         files.push(SurfaceFile { rel, content, kind });
     }
     Ok(files)
+}
+
+fn is_protected_tree_path(rel: &str, skill_dirs: &[String]) -> bool {
+    rel.split('/').any(|segment| segment == ".claude")
+        || rel == "hooks"
+        || rel.starts_with("hooks/")
+        || skill_dirs.iter().any(|dir| rel.starts_with(dir))
 }
 
 /// True only for the declared baseline path itself. A different symlink alias

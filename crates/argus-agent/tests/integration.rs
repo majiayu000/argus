@@ -422,12 +422,42 @@ fn symlinked_agent_directory_is_rejected() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn uninspectable_agent_directory_symlink_is_rejected() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    symlink("missing-agent-directory", root.path().join(".claude"))?;
+
+    let error = scan_agent_surface(root.path())
+        .expect_err("uninspectable agent directory symlink was silently skipped");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains(".claude"), "{diagnostic}");
+    assert!(diagnostic.contains("symlink"), "{diagnostic}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn non_surface_file_symlink_is_still_ignored() -> anyhow::Result<()> {
     use std::os::unix::fs::symlink;
 
     let root = tempfile::tempdir()?;
     std::fs::write(root.path().join("payload.txt"), "ordinary text")?;
     symlink("payload.txt", root.path().join("alias.txt"))?;
+
+    let report = scan_agent_surface(root.path())?;
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.decision, Decision::Allow);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn non_surface_dangling_symlink_is_still_ignored() -> anyhow::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir()?;
+    symlink("missing-ordinary-file", root.path().join("alias.txt"))?;
 
     let report = scan_agent_surface(root.path())?;
     assert!(report.findings.is_empty(), "{:?}", report.findings);
