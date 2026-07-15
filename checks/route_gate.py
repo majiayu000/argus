@@ -155,7 +155,9 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
     state_from_cli = args.state is not None
     state_from_evidence = not state_from_cli and evidence_state is not None
     state_source = str(evidence.get("state_source") or "none")
-    state_trusted = state_source == "label" and evidence.get("state_trusted") is True
+    state_metadata_trusted = (
+        state_source == "label" and evidence.get("state_trusted") is True
+    )
 
     reasons: list[str] = []
     satisfied: list[str] = []
@@ -195,6 +197,7 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     current_state, state_evidence = infer_state(config, explicit_state, labels)
+    state_trusted = state_metadata_trusted and evidence_state == current_state
     if state_from_evidence and current_state == evidence_state:
         state_evidence = [f"state provided by evidence: {current_state} ({state_source})"]
     satisfied.extend(state_evidence)

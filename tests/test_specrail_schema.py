@@ -12,6 +12,7 @@ CHECKS = ROOT / "checks"
 sys.path.insert(0, str(CHECKS))
 
 from runtime_ledger_gate import evaluate_checkpoint  # noqa: E402
+from pr_gate import evaluate_pr_gate  # noqa: E402
 from specrail_lib import SpecRailError, validate_instance  # noqa: E402
 
 
@@ -112,6 +113,26 @@ def test_validate_instance_supports_min_properties_for_approved_spec_revisions()
     validate_instance({"type": "object", "minProperties": 0}, {})
 
 
+def test_validate_instance_skips_numeric_constraints_for_allowed_null() -> None:
+    validate_instance({"type": ["integer", "null"], "minimum": 1}, None)
+    validate_instance({"type": ["number", "null"], "exclusiveMinimum": 0}, None)
+    validate_instance({"type": ["number", "null"], "exclusiveMaximum": 1}, None)
+
+
+def test_validate_instance_skips_object_constraints_for_allowed_null() -> None:
+    validate_instance(
+        {
+            "type": ["object", "null"],
+            "required": ["scope", "conversation_marker"],
+            "properties": {
+                "scope": {"type": "string", "minLength": 1},
+                "conversation_marker": {"type": "string", "minLength": 1},
+            },
+        },
+        None,
+    )
+
+
 @pytest.mark.parametrize("threshold", [True, -1, 1.5, "2"])
 def test_validate_instance_rejects_invalid_min_properties_keyword(
     threshold: object,
@@ -181,12 +202,26 @@ def test_pr_gate_fixture_instances_validate_against_schema() -> None:
         validate_instance(schema, json.loads(fixture.read_text(encoding="utf-8")))
 
 
-def test_pr_gate_schema_rejects_missing_thread_resolver_fixture() -> None:
+def test_pr_gate_schema_defers_resolver_requirements_to_pr_gate() -> None:
     schema = pr_review_gate_schema()
     fixture = ROOT / "examples" / "fixtures" / "pr-missing-thread-resolver.json"
+    evidence = json.loads(fixture.read_text(encoding="utf-8"))
 
-    with pytest.raises(SpecRailError, match="resolved_by"):
-        validate_instance(schema, json.loads(fixture.read_text(encoding="utf-8")))
+    validate_instance(schema, evidence)
+    result = evaluate_pr_gate(evidence)
+    assert result["decision"] == "blocked"
+    assert "review_threads[1].resolved_by" in result["missing"]
+    assert "review_threads[1].resolver_role" in result["missing"]
+
+    unresolved = json.loads(
+        (ROOT / "examples" / "fixtures" / "pr-unresolved-thread.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    unresolved["review_threads"][0].pop("resolved_by")
+    unresolved["review_threads"][0].pop("resolver_role")
+    validate_instance(schema, unresolved)
+    assert evaluate_pr_gate(unresolved)["decision"] == "blocked"
 
 
 def test_pr_gate_schema_accepts_structured_partial_issue_reference() -> None:

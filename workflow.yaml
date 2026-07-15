@@ -62,6 +62,9 @@ required_human_gates:
 # registries preserve compatibility; a configured registry makes trusted path
 # evidence mandatory for implement and PR gates.
 enforcement:
+  required_checks:
+    - fmt + clippy + test + corpus
+    - workflow-check
   sensitive_registry:
     paths: []
     specs: []

@@ -156,7 +156,7 @@ def test_route_gate_ignores_unrelated_broken_packet(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     copy_pack(repo)
     replace_unrelated_packet_with_loop(repo)
-    evidence_path = repo / "issue-evidence.json"
+    evidence_path = tmp_path / "trusted-ready-to-spec.json"
     evidence_path.write_text(
         json.dumps(
             {
@@ -175,8 +175,6 @@ def test_route_gate_ignores_unrelated_broken_packet(tmp_path: Path) -> None:
         "write_spec",
         "--issue",
         "999",
-        "--state",
-        "ready_to_spec",
         "--evidence",
         str(evidence_path),
     )

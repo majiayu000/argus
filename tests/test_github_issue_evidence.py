@@ -528,6 +528,7 @@ def test_route_gate_explicit_state_cannot_override_body_hint_evidence(
     assert payload["decision"] == "needs_human"
     assert payload["current_state"] == "ready_to_implement"
     assert "trusted_state" in payload["missing"]
+    assert any("readiness label" in reason for reason in payload["reasons"])
 
 
 def test_route_gate_blocks_closed_issue_evidence(tmp_path: Path) -> None:

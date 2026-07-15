@@ -26,8 +26,9 @@ route to `skills/specrail-implement/SKILL.md` instead.
 6. Collect duplicate-work evidence before opening an implementation lane:
 
 ```sh
+python3 checks/github_issue_evidence.py --repo . --github-repo <owner/repo> --issue <issue-number> --json > issue-evidence.json
 python3 checks/github_duplicate_evidence.py --github-repo <owner/repo> --issue <issue-number> --json > duplicate-work-evidence.json
-python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --state ready_to_implement --duplicate-evidence duplicate-work-evidence.json --json
+python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --evidence issue-evidence.json --duplicate-evidence duplicate-work-evidence.json --json
 ```
 
 If duplicate evidence is missing, the implementation route needs human input.

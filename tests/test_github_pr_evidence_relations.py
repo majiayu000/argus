@@ -373,7 +373,7 @@ def test_collect_evidence_queries_partial_issue_inside_pr_snapshots(
         expected_issue=671,
     )
 
-    assert calls == ["pr", "threads", "issue", "pr"]
+    assert calls == ["pr", "issue", "pr", "threads"]
     assert evidence["linked_issue"] == 671
     assert evidence["issue_reference"]["closing_issue_numbers"] == [806]
 
@@ -420,3 +420,34 @@ def test_collect_evidence_rejects_relation_change_during_gate_query(
 
     with pytest.raises(EvidenceError, match="relation changed"):
         collect_evidence("majiayu000/specrail", 10, None)
+
+
+def test_collect_evidence_collects_threads_after_final_pr_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = pr_payload()
+    calls = {"pr": 0, "threads": 0}
+
+    def fake_collect_pr_view(_repo: str, _pr: int) -> dict[str, object]:
+        calls["pr"] += 1
+        return payload
+
+    def fake_collect_threads(
+        _owner: str, _name: str, _pr: int
+    ) -> dict[str, object]:
+        calls["threads"] += 1
+        assert calls["pr"] == 2
+        current = threads_payload()
+        thread = current["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]
+        thread["isResolved"] = False
+        return current
+
+    monkeypatch.setattr("github_pr_evidence.collect_pr_view", fake_collect_pr_view)
+    monkeypatch.setattr(
+        "github_pr_evidence.collect_review_threads", fake_collect_threads
+    )
+
+    evidence = collect_evidence("majiayu000/specrail", 10, None)
+
+    assert calls == {"pr": 2, "threads": 1}
+    assert evidence["review_threads"][0]["is_resolved"] is False

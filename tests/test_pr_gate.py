@@ -467,6 +467,23 @@ def test_pr_gate_blocks_pending_ci() -> None:
     assert any("workflow-check is not completed" in reason for reason in result["reasons"])
 
 
+def test_pr_gate_blocks_missing_configured_required_checks() -> None:
+    evidence = clean_evidence()
+    evidence["checks"] = [
+        {
+            "name": "unrelated-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }
+    ]
+
+    result = evaluate_pr_gate(evidence, repo=ROOT, config=load_pack(ROOT))
+
+    assert result["decision"] == "blocked"
+    assert any("fmt + clippy + test + corpus" in reason for reason in result["reasons"])
+    assert any("workflow-check" in reason for reason in result["reasons"])
+
+
 def test_pr_gate_blocks_unresolved_thread() -> None:
     evidence = fixture("pr-unresolved-thread.json")
 

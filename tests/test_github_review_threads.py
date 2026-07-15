@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "checks"))
 
 from github_evidence_common import EvidenceError  # noqa: E402
-from github_review_threads import collect_review_threads  # noqa: E402
+from github_review_threads import collect_review_thread_pages  # noqa: E402
 
 
 HEAD = "e36d97517d8d0b27faca1abe5e5c63f9f88684d9"
@@ -73,7 +73,7 @@ def test_collect_review_threads_paginates_past_first_100() -> None:
         calls.append(args)
         return next(responses)
 
-    payload = collect_review_threads("example", "repo", 10, fake_run)
+    payload = collect_review_thread_pages("example", "repo", 10, fake_run)
     connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
 
     assert len(connection["nodes"]) == 101
@@ -96,7 +96,7 @@ def test_collect_review_threads_fails_closed_on_incomplete_pagination(
     payload["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"] = page_info
 
     with pytest.raises(EvidenceError):
-        collect_review_threads("example", "repo", 10, lambda _args: payload)
+        collect_review_thread_pages("example", "repo", 10, lambda _args: payload)
 
 
 def test_collect_review_threads_rejects_head_drift_between_pages() -> None:
@@ -108,7 +108,9 @@ def test_collect_review_threads_rejects_head_drift_between_pages() -> None:
     )
 
     with pytest.raises(EvidenceError, match="drifted during pagination"):
-        collect_review_threads("example", "repo", 10, lambda _args: next(responses))
+        collect_review_thread_pages(
+            "example", "repo", 10, lambda _args: next(responses)
+        )
 
 
 def test_collect_review_threads_rejects_duplicate_ids_across_pages() -> None:
@@ -120,4 +122,13 @@ def test_collect_review_threads_rejects_duplicate_ids_across_pages() -> None:
     )
 
     with pytest.raises(EvidenceError, match="duplicate thread id"):
-        collect_review_threads("example", "repo", 10, lambda _args: next(responses))
+        collect_review_thread_pages(
+            "example", "repo", 10, lambda _args: next(responses)
+        )
+
+
+def test_collect_review_threads_rejects_repeated_cursor() -> None:
+    payload = page([], has_next=True, end_cursor="same-cursor")
+
+    with pytest.raises(EvidenceError, match="cursor is invalid"):
+        collect_review_thread_pages("example", "repo", 10, lambda _args: payload)

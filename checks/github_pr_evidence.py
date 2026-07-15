@@ -36,7 +36,11 @@ from github_review_evidence import (
     load_lane_failures,
     load_review_artifact,
 )
-from github_review_threads import REVIEW_THREADS_QUERY, collect_review_threads as collect_all_review_threads
+from github_review_threads import (
+    REVIEW_THREADS_QUERY,
+    collect_review_thread_pages,
+    review_thread_head_sha,
+)
 from sensitive_enforcement import (
     approved_spec_source_commits,
     build_approved_spec_evidence,
@@ -137,7 +141,7 @@ def collect_issue_view(github_repo: str, issue_number: int) -> dict[str, Any]:
 
 
 def collect_review_threads(owner: str, name: str, pr_number: int) -> dict[str, Any]:
-    return collect_all_review_threads(owner, name, pr_number, run_gh_json)
+    return collect_review_thread_pages(owner, name, pr_number, run_gh_json)
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
@@ -547,7 +551,6 @@ def collect_evidence(
             owner, name, pr_number, run_gh_json, run_gh_json)
         if file_snapshot_before["head_sha"] != head_sha_before:
             raise EvidenceError("PR view and file snapshot head SHA disagree")
-    threads_payload = collect_review_threads(owner, name, pr_number)
     review_artifact = None
     review_artifact_sha256 = None
     review_diff = None
@@ -621,6 +624,11 @@ def collect_evidence(
     if relation_snapshot_before != relation_snapshot_after:
         raise EvidenceError(
             "PR issue relation changed while collecting gate evidence; rerun PR evidence collection"
+        )
+    threads_payload = collect_review_threads(owner, name, pr_number)
+    if review_thread_head_sha(threads_payload) != head_sha_after:
+        raise EvidenceError(
+            "PR head changed while collecting review thread evidence; rerun PR evidence collection"
         )
 
     return build_evidence(

@@ -460,6 +460,22 @@ def write_duplicate_evidence(
     return path
 
 
+def write_trusted_state_evidence(tmp_path: Path, state: str) -> Path:
+    path = tmp_path / f"{state}-issue-evidence.json"
+    path.write_text(
+        json.dumps(
+            {
+                "github_state": "OPEN",
+                "state": state,
+                "state_source": "label",
+                "state_trusted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_route_gate_requires_trusted_state_for_readiness_gated_routes(
     tmp_path: Path,
 ) -> None:
@@ -547,6 +563,39 @@ def test_route_gate_allows_trusted_readiness_label_evidence(tmp_path: Path) -> N
 
     assert result.returncode == 0
     assert payload["decision"] == "allowed"
+
+
+def test_route_gate_rejects_cli_state_for_readiness_human_gate() -> None:
+    result, payload = run_route_gate(
+        "--route", "write_spec", "--issue", "999", "--state", "ready_to_spec"
+    )
+
+    assert result.returncode == 0
+    assert payload["decision"] == "needs_human"
+    assert "trusted_state" in payload["missing"]
+    assert any("readiness label" in reason for reason in payload["reasons"])
+
+
+def test_route_gate_rejects_cli_state_mismatched_with_trusted_evidence(
+    tmp_path: Path,
+) -> None:
+    evidence_path = write_trusted_state_evidence(tmp_path, "ready_to_implement")
+
+    result, payload = run_route_gate(
+        "--route",
+        "write_spec",
+        "--issue",
+        "999",
+        "--state",
+        "ready_to_spec",
+        "--evidence",
+        str(evidence_path),
+    )
+
+    assert result.returncode == 0
+    assert payload["decision"] == "needs_human"
+    assert "trusted_state" in payload["missing"]
+    assert any("readiness label" in reason for reason in payload["reasons"])
 
 
 def test_route_gate_uses_configured_spec_packet_in_verification_command(

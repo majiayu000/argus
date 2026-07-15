@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Evaluate deterministic PR merge-readiness evidence.
+"""Evaluate deterministic PR merge-readiness evidence offline.
 
-The gate is intentionally offline. GitHub or threads adapters may collect the
-evidence JSON, but this script only evaluates it and never writes remote state.
-"""
+Collected JSON is read-only; the gate never writes remote state."""
 
 from __future__ import annotations
 
@@ -67,7 +65,32 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _check_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+def _required_check_names(config: PackConfig | None) -> list[str]:
+    if config is None:
+        return []
+    enforcement = config.workflow.get("enforcement", {})
+    if not isinstance(enforcement, dict):
+        raise SpecRailError("workflow.yaml enforcement must be a mapping")
+    configured = enforcement.get("required_checks", [])
+    if not isinstance(configured, list):
+        raise SpecRailError("workflow.yaml enforcement.required_checks must be a list")
+
+    required: list[str] = []
+    for index, value in enumerate(configured, start=1):
+        if not isinstance(value, str) or not value.strip():
+            raise SpecRailError(
+                f"workflow.yaml enforcement.required_checks[{index}] must be a non-empty string"
+            )
+        name = value.strip()
+        if name in required:
+            raise SpecRailError(f"duplicate required check name: {name}")
+        required.append(name)
+    return required
+
+
+def _check_items(
+    evidence: dict[str, Any], required_checks: list[str] | None = None
+) -> tuple[list[str], list[str], list[str]]:
     satisfied: list[str] = []
     missing: list[str] = []
     reasons: list[str] = []
@@ -78,11 +101,13 @@ def _check_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[s
         reasons.append("CI/check evidence is missing")
         return satisfied, missing, reasons
 
+    observed_names: set[str] = set()
     for index, item in enumerate(checks, start=1):
         if not isinstance(item, dict):
             reasons.append(f"check #{index} is not an object")
             continue
         name = str(item.get("name") or f"check #{index}")
+        observed_names.add(name)
         status = str(item.get("status") or "").upper()
         conclusion = str(item.get("conclusion") or "").upper()
         if status != "COMPLETED":
@@ -92,6 +117,11 @@ def _check_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[s
             reasons.append(f"{name} did not pass: {conclusion or 'missing conclusion'}")
             continue
         satisfied.append(f"check passed: {name}")
+
+    for required in required_checks or []:
+        if required not in observed_names:
+            missing.append(f"checks.{required}")
+            reasons.append(f"required check is missing: {required}")
     return satisfied, missing, reasons
 
 
@@ -542,6 +572,9 @@ def evaluate_pr_gate(
     sensitive_classification: dict[str, Any] | None = None
     sensitive_reasons: list[str] = []
 
+    if config is None and repo is not None:
+        config = load_pack(resolve_path(repo, label="repository"))
+
     if _positive_int(evidence.get("pr")):
         satisfied.append(f"pr: {evidence['pr']}")
     else:
@@ -580,8 +613,14 @@ def evaluate_pr_gate(
     else:
         missing.append("merge_state")
 
+    check_satisfied, check_missing, check_reasons = _check_items(
+        evidence, _required_check_names(config)
+    )
+    satisfied.extend(check_satisfied)
+    missing.extend(check_missing)
+    reasons.extend(check_reasons)
+
     for checker in [
-        _check_items,
         _review_items,
         _thread_items,
         _issue_reference_items,
@@ -621,8 +660,6 @@ def evaluate_pr_gate(
             "approved_spec",
         ]
     )
-    if config is None and repo is not None:
-        config = load_pack(resolve_path(repo, label="repository"))
     if config is not None:
         registry = sensitive_registry(config)
         has_sensitive_evidence = has_sensitive_evidence or bool(

@@ -2,7 +2,12 @@
   "checks": [
     {
       "conclusion": "SUCCESS",
-      "name": "Compile-check all features",
+      "name": "fmt + clippy + test + corpus",
+      "status": "COMPLETED"
+    },
+    {
+      "conclusion": "SUCCESS",
+      "name": "workflow-check",
       "status": "COMPLETED"
     }
   ],

@@ -100,6 +100,14 @@ def test_argus_adoption_source_is_pinned() -> None:
             "recorded external pilot evidence with explicit source repositories",
             "added a deterministic file-hash adoption manifest",
             "targeted workflow-check at Argus packets",
+            "paginated GitHub review-thread evidence to exhaustion",
+            "required Argus Rust and workflow-check CI contexts",
+            "required trusted label evidence for readiness-gated routes",
+            "kept nullable numeric schema instances valid",
+            "kept nullable object schema instances valid",
+            "deferred resolved-thread attribution to the PR gate",
+            "documented trusted issue evidence for implementation routing",
+            "bound final review-thread evidence to the gated PR head",
             "normalized copied template whitespace",
         ],
     }
@@ -120,6 +128,19 @@ def test_pr_gate_fails_closed_without_evidence(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert json.loads(result.stdout)["decision"] == "blocked"
+
+
+def test_queue_skill_collects_trusted_issue_evidence_for_implement_route() -> None:
+    for relative in [
+        "AGENT_USAGE.md",
+        "skills/specrail-implement-queue/SKILL.md",
+        "skills/specrail-implement/SKILL.md",
+        "skills/specrail-plan-tasks/SKILL.md",
+    ]:
+        instructions = (ROOT / relative).read_text(encoding="utf-8")
+        assert "checks/github_issue_evidence.py" in instructions, relative
+        assert "--evidence issue-evidence.json" in instructions, relative
+        assert "--route implement --issue <issue-number> --state" not in instructions
 
 
 def test_runtime_ledger_fails_closed_without_checkpoint(tmp_path: Path) -> None:
