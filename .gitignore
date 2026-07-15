@@ -1,3 +1,4 @@
 target/
+.audit/
 *.swp
 .DS_Store
