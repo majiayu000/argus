@@ -1,0 +1,40 @@
+name: workflow-check
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - name: Initialize trusted default branch ref
+        run: git remote set-head origin --auto
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13.5"
+      - name: Install test dependencies
+        run: python3 -m pip install pytest==8.4.1
+      - name: Check workflow pack and spec packets
+        run: python3 checks/check_workflow.py --repo . --all-specs
+      - name: Verify pinned SpecRail adoption manifest
+        run: python3 checks/verify_specrail_adoption.py --repo .
+      - name: Run SpecRail and Argus adoption tests
+        run: python3 -m pytest -q
+      - name: Check whitespace
+        shell: bash
+        run: |
+          if [[ -n "${{ github.base_ref }}" ]]; then
+            git diff --check "origin/${{ github.base_ref }}...HEAD"
+          else
+            git diff --check "HEAD^...HEAD"
+          fi
