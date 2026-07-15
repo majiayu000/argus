@@ -15,6 +15,9 @@
     "required Argus Rust and workflow-check CI contexts",
     "required trusted label evidence for readiness-gated routes",
     "kept nullable numeric schema instances valid",
+    "kept nullable object schema instances valid",
+    "deferred resolved-thread attribution to the PR gate",
+    "documented trusted issue evidence for implementation routing",
     "bound final review-thread evidence to the gated PR head",
     "normalized copied template whitespace"
   ]

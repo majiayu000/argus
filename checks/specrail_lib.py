@@ -314,14 +314,15 @@ def validate_instance(schema: dict[str, Any], data: Any, path: str = "$") -> Non
             raise SpecRailError(f"{path}: value is not below exclusiveMaximum")
 
     if "required" in schema:
-        if not isinstance(data, dict):
-            raise SpecRailError(f"{path}: required fields need an object instance")
         required = schema["required"]
         if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
             raise SpecRailError(f"{path}: required must be a list of strings")
-        for key in required:
-            if key not in data:
-                raise SpecRailError(f"{_data_path(path, key)}: missing required field")
+        if data is not None:
+            if not isinstance(data, dict):
+                raise SpecRailError(f"{path}: required fields need an object instance")
+            for key in required:
+                if key not in data:
+                    raise SpecRailError(f"{_data_path(path, key)}: missing required field")
 
     properties = schema.get("properties", {})
     if properties is not None and not isinstance(properties, dict):

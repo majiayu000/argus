@@ -282,7 +282,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["is_resolved", "is_outdated", "resolved_by", "resolver_role"],
+        "required": ["is_resolved", "is_outdated"],
         "additionalProperties": true,
         "properties": {
           "id": {

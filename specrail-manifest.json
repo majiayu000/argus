@@ -14,10 +14,10 @@
     },
     {
       "path": "AGENT_USAGE.md",
-      "sha256": "912fed835972c1cdc0558c45eacd70ad05901c40b5eafad2cbf1070bd938c1db",
+      "sha256": "8e0f19d15b38d2ae9d6451d04637cfab78088828b10404d86e89f2adf4560945",
       "source_path": "AGENT_USAGE.md",
       "source_sha256": "17aadece33b39bbfdb230b42717bba63088df857b29aad0ccf7e1a26286ecb6e",
-      "adaptation": "document mandatory independent review artifact and current-head binding"
+      "adaptation": "document mandatory independent review and trusted issue evidence for implementation routing"
     },
     {
       "path": "SPEC.md",
@@ -154,10 +154,10 @@
     },
     {
       "path": "checks/specrail_lib.py",
-      "sha256": "234ad7d5b799e0b9267f8e02025534e45b01c7533ff9db6bfacc1bbb96169664",
+      "sha256": "344c1eb5271f46eec9691998fde4318d883629ef4c7965b62b1dcfa3fbf3ceda",
       "source_path": "checks/specrail_lib.py",
       "source_sha256": "d7a124d226299fcae38c3caebdd5f8d297ad2998a3300fe08a770317bcedb685",
-      "adaptation": "preserve JSON Schema nullable numeric values when applying numeric constraints"
+      "adaptation": "preserve JSON Schema nullable numeric and object values when applying type-specific constraints"
     },
     {
       "path": "checks/verify_specrail_adoption.py",
@@ -630,10 +630,10 @@
     },
     {
       "path": "schemas/pr_review_gate.schema.json",
-      "sha256": "9b6751643c66e6d45259913a5a4cdd630b1bd49c3ed4d046ad94fb783db4bc57",
+      "sha256": "c23a5f76ed94a1b1ae6c796270b90202e541639c4d741b5dcadf6ba032d990ff",
       "source_path": "schemas/pr_review_gate.schema.json",
       "source_sha256": "735230584dff5bc1141e5a12f21aaf25d48b45b3f012817ad83842b10d914af7",
-      "adaptation": "bind independent review artifacts to the exact PR and current head; fail closed on stale or missing evidence"
+      "adaptation": "bind independent review artifacts to the exact PR and current head while deferring resolved-thread attribution to the PR gate"
     },
     {
       "path": "schemas/review_result.schema.json",
@@ -672,10 +672,10 @@
     },
     {
       "path": "skills-lock.json",
-      "sha256": "e6afb817d448d285803de3f1adc356660e3dddcac055ec2ad867b00279af3d34",
+      "sha256": "0cd6627efd77018e7dc4da314a67e455a4a4d05e91aff7c9f0f83039dc795f7c",
       "source_path": "skills-lock.json",
       "source_sha256": "4d08354812b52a7ca309320fe6c5e4ff32f6cbd95afa466d2a79a694a9c13853",
-      "adaptation": "refresh hashes for consumer-adapted specrail-pr-gate and specrail-review-pr skills"
+      "adaptation": "refresh hashes for consumer-adapted review, PR-gate, planning, and implementation skills"
     },
     {
       "path": "skills/implx/SKILL.md",
@@ -700,17 +700,17 @@
     },
     {
       "path": "skills/specrail-implement-queue/SKILL.md",
-      "sha256": "1a7ea602f8822d35d00c69a262c8ba4d42fa9c1fe78e9c4ebe76e13e358fdd78",
+      "sha256": "c2639da262ef14262f9ffa612c913415387a7ddd0d0bf77ac52cae3552b827ea",
       "source_path": "skills/specrail-implement-queue/SKILL.md",
       "source_sha256": "1a7ea602f8822d35d00c69a262c8ba4d42fa9c1fe78e9c4ebe76e13e358fdd78",
-      "adaptation": null
+      "adaptation": "collect trusted issue label evidence before implementation routing"
     },
     {
       "path": "skills/specrail-implement/SKILL.md",
-      "sha256": "b28e94156e56a3e496743705ce5ea31d255a9e493d3f0501ab1bf0c43a27a981",
+      "sha256": "24b427a7048fad7af1291a066d33dc108c57aed83162130ec384a46593106eb5",
       "source_path": "skills/specrail-implement/SKILL.md",
       "source_sha256": "b28e94156e56a3e496743705ce5ea31d255a9e493d3f0501ab1bf0c43a27a981",
-      "adaptation": null
+      "adaptation": "collect trusted issue and duplicate-work evidence before implementation routing"
     },
     {
       "path": "skills/specrail-install/SKILL.md",
@@ -721,10 +721,10 @@
     },
     {
       "path": "skills/specrail-plan-tasks/SKILL.md",
-      "sha256": "ae76ce467fde7f4939a0a94980a8344d307b6a2787e59008d42c3d8d7a49e0f9",
+      "sha256": "d5583e6de50a6b71b2c3db348ea337db9043dafb442a637bef65c4e2b7a2430c",
       "source_path": "skills/specrail-plan-tasks/SKILL.md",
       "source_sha256": "ae76ce467fde7f4939a0a94980a8344d307b6a2787e59008d42c3d8d7a49e0f9",
-      "adaptation": null
+      "adaptation": "collect trusted issue and duplicate-work evidence before implementation routing"
     },
     {
       "path": "skills/specrail-pr-gate/SKILL.md",
@@ -777,7 +777,7 @@
     },
     {
       "path": "specrail-source.json",
-      "sha256": "f362ce2ebf6d194056d5bcce9bb78a0433c04b3b21abceda2ce1e1c260e03b5c",
+      "sha256": "420924acb78c8f5030c4d0b844ea511bc74ddfede4679258febc355a3bf55ea7",
       "source_path": null,
       "source_sha256": null,
       "adaptation": "Argus provenance, deterministic adoption verification, and consumer smoke coverage"
@@ -987,17 +987,17 @@
     },
     {
       "path": "tests/test_specrail_adoption.py",
-      "sha256": "451e725ddfd221a2f336ede6df3d30a71ce8daa91a576ad9f8525cc49000ccdd",
+      "sha256": "56beaedde233d5f78ebd6b91adc9dab3dd026a2ac8bf1cc788ba61288b94ec1c",
       "source_path": null,
       "source_sha256": null,
       "adaptation": "Argus provenance, deterministic adoption verification, and consumer smoke coverage"
     },
     {
       "path": "tests/test_specrail_schema.py",
-      "sha256": "e69149e830d00197536183b880a75d4b3c042de4e120e5a3df1ddce3c5290df9",
+      "sha256": "12bfdfe3f30c5bbb066d70aaf76fb79fd6a21dc3ace77748c90e451ed39f8439",
       "source_path": "tests/test_specrail_schema.py",
       "source_sha256": "bc7e4e44eb468a2bf234a0195f08359b8c855fdf60b6e2503046494098be380d",
-      "adaptation": "cover numeric constraints on nullable schema values"
+      "adaptation": "cover nullable schema constraints and defer review-thread resolver checks to the PR gate"
     },
     {
       "path": "tests/test_specrail_yaml.py",

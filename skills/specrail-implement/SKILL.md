@@ -13,7 +13,9 @@ Use this skill for the `implement` route.
 2. Run the implementation route gate when available:
 
 ```sh
-python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --state ready_to_implement --json
+python3 checks/github_issue_evidence.py --repo . --github-repo <owner/repo> --issue <issue-number> --json > issue-evidence.json
+python3 checks/github_duplicate_evidence.py --github-repo <owner/repo> --issue <issue-number> --json > duplicate-work-evidence.json
+python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --evidence issue-evidence.json --duplicate-evidence duplicate-work-evidence.json --json
 ```
 
 3. If the gate returns `needs_human` or `blocked`, stop and report the missing

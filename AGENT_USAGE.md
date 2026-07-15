@@ -112,7 +112,7 @@ python3 checks/github_issue_evidence.py --repo . --github-repo OWNER/REPO --issu
 python3 checks/github_duplicate_evidence.py --github-repo OWNER/REPO --issue <issue-number> --json > duplicate-work-evidence.json
 python3 checks/route_gate.py --repo . --route write_spec --issue <issue-number> --evidence issue-evidence.json --json
 python3 checks/route_gate.py --repo . --route write_spec --issue <issue-number> --state ready_to_spec --json
-python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --state ready_to_implement --duplicate-evidence duplicate-work-evidence.json --json
+python3 checks/route_gate.py --repo . --route implement --issue <issue-number> --evidence issue-evidence.json --duplicate-evidence duplicate-work-evidence.json --json
 ```
 
 The duplicate-work adapter is read-only. It collects open PR and remote branch
