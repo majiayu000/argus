@@ -24,6 +24,7 @@
     "bound final review-thread evidence to the gated PR head",
     "rejected APPROVE review artifacts that retain blocking comments",
     "required tech spec templates to declare complete planned-change manifests",
+    "limited adoption ownership to explicitly copied SpecRail test files",
     "normalized copied template whitespace"
   ]
 }

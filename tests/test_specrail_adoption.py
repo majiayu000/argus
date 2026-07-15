@@ -9,6 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_COMMIT = "f3251fe27e13a61c73304dbe001b1d9091c948e2"
+sys.path.insert(0, str(ROOT / "checks"))
+
+from verify_specrail_adoption import managed_paths  # noqa: E402
 
 
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
@@ -81,6 +84,18 @@ def test_adoption_manifest_detects_target_drift(tmp_path: Path) -> None:
     assert any("target hash mismatch" in error for error in payload["errors"])
 
 
+def test_adoption_manifest_ignores_consumer_owned_tests(tmp_path: Path) -> None:
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    (test_root / "integration.rs").write_text("// consumer test\n", encoding="utf-8")
+    (test_root / "test_pr_gate.py").write_text("# managed test\n", encoding="utf-8")
+
+    paths = managed_paths(tmp_path)
+
+    assert "tests/integration.rs" not in paths
+    assert "tests/test_pr_gate.py" in paths
+
+
 def test_argus_adoption_source_is_pinned() -> None:
     source = json.loads((ROOT / "specrail-source.json").read_text(encoding="utf-8"))
 
@@ -110,6 +125,7 @@ def test_argus_adoption_source_is_pinned() -> None:
             "bound final review-thread evidence to the gated PR head",
             "rejected APPROVE review artifacts that retain blocking comments",
             "required tech spec templates to declare complete planned-change manifests",
+            "limited adoption ownership to explicitly copied SpecRail test files",
             "normalized copied template whitespace",
         ],
     }

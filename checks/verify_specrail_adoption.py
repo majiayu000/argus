@@ -23,7 +23,6 @@ MANAGED_DIRECTORIES = (
     "schemas",
     "skills",
     "templates",
-    "tests",
     "tools",
 )
 MANAGED_FILES = (
@@ -37,6 +36,28 @@ MANAGED_FILES = (
     "specrail-source.json",
     "states.yaml",
     "workflow.yaml",
+)
+MANAGED_TEST_FILES = (
+    "tests/test_check_workflow.py",
+    "tests/test_configured_spec_path_review_regressions.py",
+    "tests/test_duplicate_work_gate.py",
+    "tests/test_evaluate.py",
+    "tests/test_github_duplicate_evidence.py",
+    "tests/test_github_issue_evidence.py",
+    "tests/test_github_pr_evidence.py",
+    "tests/test_github_pr_evidence_relations.py",
+    "tests/test_github_review_threads.py",
+    "tests/test_install_codex_skills.py",
+    "tests/test_pack_asset_validation.py",
+    "tests/test_pr_gate.py",
+    "tests/test_review_json_gate.py",
+    "tests/test_route_gate.py",
+    "tests/test_route_gate_paths.py",
+    "tests/test_runtime_ledger_gate.py",
+    "tests/test_runtime_ledger_gate_queue.py",
+    "tests/test_specrail_adoption.py",
+    "tests/test_specrail_schema.py",
+    "tests/test_specrail_yaml.py",
 )
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
@@ -85,6 +106,7 @@ def safe_repo_path(root: Path, raw_path: object, label: str) -> Path:
 
 def managed_paths(repo: Path) -> set[str]:
     paths = {path for path in MANAGED_FILES if (repo / path).is_file()}
+    paths.update(path for path in MANAGED_TEST_FILES if (repo / path).is_file())
     for directory_name in MANAGED_DIRECTORIES:
         directory = repo / directory_name
         if not directory.exists():
