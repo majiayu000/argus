@@ -12,13 +12,15 @@
 //! description plaintext (which may itself carry injection language).
 
 use crate::{SurfaceFile, SurfaceKind};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
+use tempfile::{Builder, NamedTempFile};
 
 /// Drift of an approved description → medium (allow-with-approval).
 pub const RULE_DRIFT: &str = "AGT-02";
@@ -63,14 +65,69 @@ pub fn load(path: &Path) -> Result<Baseline> {
     Ok(baseline)
 }
 
-/// Write a baseline deterministically (sorted keys via `BTreeMap`, trailing
-/// newline).
+/// Write a baseline deterministically, then atomically replace the target path
+/// on filesystems that support same-directory atomic rename. Replacement
+/// creates a new inode and intentionally does not preserve hard-link, symlink,
+/// permission, ACL, or extended-attribute identity from an existing target.
 pub fn save(path: &Path, baseline: &Baseline) -> Result<()> {
     let mut text = serde_json::to_string_pretty(baseline)
         .with_context(|| format!("serialize baseline {}", path.display()))?;
     text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("write baseline {}", path.display()))?;
-    Ok(())
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = Builder::new()
+        .prefix(".argus-baseline-")
+        .tempfile_in(parent)
+        .with_context(|| format!("create temporary baseline next to {}", path.display()))?;
+    if let Err(error) = temporary.write_all(text.as_bytes()) {
+        return close_after_io_error(temporary, "write", path, error);
+    }
+    if let Err(error) = temporary.flush() {
+        return close_after_io_error(temporary, "flush", path, error);
+    }
+    if let Err(error) = temporary.as_file().sync_all() {
+        return close_after_io_error(temporary, "sync", path, error);
+    }
+    match temporary.persist(path) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let tempfile::PersistError {
+                error: persist_error,
+                file,
+            } = error;
+            let temporary_path = file.path().to_path_buf();
+            match file.close() {
+                Ok(()) => Err(persist_error)
+                    .with_context(|| format!("replace baseline {}", path.display())),
+                Err(cleanup_error) => bail!(
+                    "replace baseline {}: {persist_error}; cleanup temporary baseline {}: \
+                     {cleanup_error}",
+                    path.display(),
+                    temporary_path.display()
+                ),
+            }
+        }
+    }
+}
+
+fn close_after_io_error(
+    temporary: NamedTempFile,
+    operation: &str,
+    destination: &Path,
+    operation_error: std::io::Error,
+) -> Result<()> {
+    let temporary_path = temporary.path().to_path_buf();
+    match temporary.close() {
+        Ok(()) => Err(operation_error)
+            .with_context(|| format!("{operation} temporary baseline for {}", destination.display())),
+        Err(cleanup_error) => bail!(
+            "{operation} temporary baseline for {}: {operation_error}; cleanup temporary baseline {}: {cleanup_error}",
+            destination.display(),
+            temporary_path.display()
+        ),
+    }
 }
 
 /// Extract every description-class entry from the collected surface files.
@@ -354,6 +411,107 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.find("\"a#y\"").unwrap() < text.find("\"b#x\"").unwrap());
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn save_replaces_target_instead_of_rewriting_shared_inode() {
+        let dir = std::env::temp_dir().join(format!(
+            "argus-baseline-atomic-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("baseline.json");
+        let previous_link = dir.join("previous.json");
+        let previous = Baseline::from_entries(vec![DescEntry {
+            key: "old#description".into(),
+            hash: "old-hash".into(),
+        }]);
+        let replacement = Baseline::from_entries(vec![DescEntry {
+            key: "new#description".into(),
+            hash: "new-hash".into(),
+        }]);
+
+        save(&path, &previous).unwrap();
+        std::fs::hard_link(&path, &previous_link).unwrap();
+        save(&path, &replacement).unwrap();
+
+        assert!(load(&path).unwrap().entries.contains_key("new#description"));
+        assert!(
+            load(&previous_link)
+                .unwrap()
+                .entries
+                .contains_key("old#description"),
+            "save rewrote the existing inode instead of replacing it"
+        );
+    }
+
+    #[test]
+    fn persist_failure_preserves_destination_and_cleans_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "argus-baseline-failure-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("baseline.json");
+        std::fs::create_dir_all(&destination).unwrap();
+        let sentinel = destination.join("sentinel");
+        std::fs::write(&sentinel, "unchanged").unwrap();
+        let baseline = Baseline::from_entries(Vec::new());
+
+        assert!(save(&destination, &baseline).is_err());
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "unchanged");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".argus-baseline-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files leaked: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn io_failure_closes_temporary_file_and_preserves_operation_error() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "argus-baseline-io-failure-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let destination = dir.join("baseline.json");
+        let temporary = Builder::new()
+            .prefix(".argus-baseline-")
+            .tempfile_in(&dir)?;
+        let temporary_path = temporary.path().to_path_buf();
+
+        let result = close_after_io_error(
+            temporary,
+            "write",
+            &destination,
+            std::io::Error::other("synthetic write failure"),
+        );
+        let error = match result {
+            Ok(()) => bail!("synthetic write failure was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("synthetic write failure"));
+        assert!(!temporary_path.exists(), "temporary file was not removed");
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[test]
