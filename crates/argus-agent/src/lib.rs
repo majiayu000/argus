@@ -340,6 +340,21 @@ mod tests {
     }
 
     #[test]
+    fn oversized_nested_non_agent_hook_is_still_ignored() -> Result<()> {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("src/hooks"))?;
+        std::fs::write(
+            root.join("src/hooks/use_data.ts"),
+            vec![b'a'; (TEXT_MAX_BYTES + 1) as usize],
+        )?;
+
+        let report = scan_agent_surface(&root)?;
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.decision, argus_core::Decision::Allow);
+        Ok(())
+    }
+
+    #[test]
     fn readable_empty_directory_still_allows() -> Result<()> {
         let root = tempdir();
         let report = scan_agent_surface(&root)?;
