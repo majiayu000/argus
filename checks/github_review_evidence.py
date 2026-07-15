@@ -181,8 +181,8 @@ def collect_pr_diff(
         raise EvidenceError("gh executable was not found in PATH") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
-        too_large = "too_large" in detail or (
-            "HTTP 406" in detail and "maximum number of lines" in detail
+        too_large = "HTTP 406" in detail and (
+            "too_large" in detail or "maximum number of lines" in detail
         )
         if too_large:
             if repo is None or not base_sha or not head_sha:

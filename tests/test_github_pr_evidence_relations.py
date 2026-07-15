@@ -21,6 +21,7 @@ from github_pr_evidence import (  # noqa: E402
     collect_issue_view,
     normalize_issue_reference,
 )
+from github_review_evidence import collect_pr_diff  # noqa: E402
 from pr_gate import evaluate_pr_gate  # noqa: E402
 from test_github_pr_evidence import (  # noqa: E402
     approved_review,
@@ -29,6 +30,98 @@ from test_github_pr_evidence import (  # noqa: E402
     pr_payload,
     threads_payload,
 )
+
+
+def test_collect_pr_diff_falls_back_to_exact_local_shas_on_size_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = "b" * 40
+    head = "a" * 40
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "gh":
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="HTTP 406: diff exceeded the maximum number of lines (20000) too_large",
+            )
+        if "cat-file" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="exact local diff\n", stderr="")
+
+    monkeypatch.setattr("github_review_evidence.subprocess.run", fake_run)
+
+    assert collect_pr_diff(
+        "example/repo",
+        81,
+        repo=tmp_path,
+        base_sha=base,
+        head_sha=head,
+    ) == "exact local diff\n"
+    assert calls[-1][-1] == f"{base}...{head}"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "HTTP 500",
+        "HTTP 500: upstream returned too_large",
+        "Get https://api.github.com/pulls/81: EOF",
+    ],
+)
+def test_collect_pr_diff_does_not_fallback_for_other_github_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    detail: str,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr=detail)
+
+    monkeypatch.setattr("github_review_evidence.subprocess.run", fake_run)
+
+    with pytest.raises(EvidenceError, match="gh pr diff failed"):
+        collect_pr_diff(
+            "example/repo",
+            81,
+            repo=tmp_path,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
+        )
+    assert len(calls) == 1
+
+
+def test_collect_pr_diff_blocks_when_fallback_commit_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "gh":
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="HTTP 406: PullRequest.diff too_large"
+            )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing")
+
+    monkeypatch.setattr("github_review_evidence.subprocess.run", fake_run)
+
+    with pytest.raises(EvidenceError, match="base commit is unavailable"):
+        collect_pr_diff(
+            "example/repo",
+            81,
+            repo=tmp_path,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
+        )
+    assert len(calls) == 2
 
 @pytest.mark.parametrize(
     "closing_references",
