@@ -72,6 +72,27 @@ fn agt02_baseline_create_writes_entries_without_drift() {
 }
 
 #[test]
+fn agt02_baseline_update_rejects_oversized_surface() -> anyhow::Result<()> {
+    let baseline = temp_baseline("oversized-output");
+    let surface_marker = temp_baseline("oversized-surface");
+    let surface = surface_marker
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("temporary surface has no parent"))?;
+    std::fs::write(surface.join("AGENTS.md"), vec![b'a'; 1024 * 1024 + 1])?;
+
+    let result = scan_agent_surface_with_baseline(surface, BaselineMode::Update(&baseline));
+    assert!(
+        result.is_err(),
+        "baseline update accepted an incomplete scan"
+    );
+    assert!(
+        !baseline.exists(),
+        "incomplete scan wrote a trusted baseline snapshot"
+    );
+    Ok(())
+}
+
+#[test]
 fn agt02_unchanged_surface_has_no_drift() {
     let baseline = temp_baseline("unchanged");
     let dir = fixture("agt02-baseline-mcp");
