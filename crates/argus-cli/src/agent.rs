@@ -236,7 +236,11 @@ impl LlmJudge for CommandLlmJudge {
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected)
-                    if stdin_done && stdout_bytes.is_some() && stderr_bytes.is_some() => {}
+                    if stdin_done && stdout_bytes.is_some() && stderr_bytes.is_some() =>
+                {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     terminate_and_reap(&mut child)?;
                     join_process_threads(threads)?;
