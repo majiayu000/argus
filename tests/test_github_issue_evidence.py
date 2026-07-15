@@ -472,7 +472,7 @@ def test_route_gate_rejects_inconsistent_trust_metadata(tmp_path: Path) -> None:
     assert "trusted_state" in payload["missing"]
 
 
-def test_route_gate_explicit_state_stays_compatible_with_body_hint_evidence(
+def test_route_gate_explicit_state_cannot_override_body_hint_evidence(
     tmp_path: Path,
 ) -> None:
     fixture = ROOT / "examples/fixtures/issue-body-hint-ready-to-implement.json"
@@ -525,8 +525,9 @@ def test_route_gate_explicit_state_stays_compatible_with_body_hint_evidence(
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["decision"] == "allowed"
+    assert payload["decision"] == "needs_human"
     assert payload["current_state"] == "ready_to_implement"
+    assert "trusted_state" in payload["missing"]
 
 
 def test_route_gate_blocks_closed_issue_evidence(tmp_path: Path) -> None:

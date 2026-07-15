@@ -156,6 +156,18 @@ def test_route_gate_ignores_unrelated_broken_packet(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     copy_pack(repo)
     replace_unrelated_packet_with_loop(repo)
+    evidence_path = repo / "issue-evidence.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "github_state": "OPEN",
+                "state": "ready_to_spec",
+                "state_source": "label",
+                "state_trusted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     result, payload = run_route_gate(
         repo,
@@ -165,6 +177,8 @@ def test_route_gate_ignores_unrelated_broken_packet(tmp_path: Path) -> None:
         "999",
         "--state",
         "ready_to_spec",
+        "--evidence",
+        str(evidence_path),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

@@ -8,7 +8,7 @@ evidence JSON, but this script only evaluates it and never writes remote state.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import sys
 from pathlib import Path
@@ -26,6 +26,8 @@ MERGE_PATHS = {"gh_pr_merge", "api_fallback", "merged_by_other"}
 BLOCKED_RESOLVER_ROLES = {"implementer", "orchestrator", "coordinator", "unknown"}
 REVIEW_SOURCES = {"independent_lane", "self_review"}
 LANE_FAILURE_KINDS = {"usage_limit", "crash", "zero_output", "closed", "other"}
+MAX_EVIDENCE_AGE = timedelta(minutes=5)
+MAX_FUTURE_CLOCK_SKEW = timedelta(seconds=30)
 
 
 def _as_bool(value: Any) -> bool:
@@ -445,7 +447,10 @@ def _lane_failure_items(evidence: dict[str, Any]) -> tuple[list[str], list[str],
     return satisfied, missing, reasons
 
 
-def _ordering_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+def _ordering_items(
+    evidence: dict[str, Any],
+    evaluated_at: datetime,
+) -> tuple[list[str], list[str], list[str]]:
     satisfied: list[str] = []
     missing: list[str] = []
     reasons: list[str] = []
@@ -462,6 +467,17 @@ def _ordering_items(evidence: dict[str, Any]) -> tuple[list[str], list[str], lis
             )
         else:
             satisfied.append(f"gate query completed at {completed_at}")
+            age = evaluated_at - completed_time
+            if age > MAX_EVIDENCE_AGE:
+                reasons.append(
+                    "gate query evidence is stale: age exceeds 5 minutes"
+                )
+            elif age < -MAX_FUTURE_CLOCK_SKEW:
+                reasons.append(
+                    "gate query evidence timestamp is too far in the future"
+                )
+            else:
+                satisfied.append("gate query evidence is fresh")
     else:
         missing.append("gate_query_completed_at")
 
@@ -515,6 +531,8 @@ def evaluate_pr_gate(
     evidence: dict[str, Any],
     repo: Path | None = None,
     config: PackConfig | None = None,
+    *,
+    evaluated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Evaluate merge-readiness evidence and return a stable decision object."""
 
@@ -580,7 +598,13 @@ def evaluate_pr_gate(
         missing.extend(checker_missing)
         reasons.extend(checker_reasons)
 
-    ordering_satisfied, ordering_missing, ordering_reasons = _ordering_items(evidence)
+    now = evaluated_at or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("evaluated_at must be timezone-aware")
+    ordering_satisfied, ordering_missing, ordering_reasons = _ordering_items(
+        evidence,
+        now,
+    )
     satisfied.extend(ordering_satisfied)
     missing.extend(ordering_missing)
     reasons.extend(ordering_reasons)

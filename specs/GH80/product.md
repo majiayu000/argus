@@ -35,11 +35,15 @@ GitHub review 状态，却无法在仓库内重放 `pr_gate` 与 runtime ledger 
    无效 packet、缺失配置或 schema/template 不一致必须返回非零状态。
 4. B-004 `github_pr_evidence.py` 必须只读采集同仓库 PR 的当前 head、CI、
    review threads、merge state 与 linked-work 证据，不得写 issue、PR、review
-   或 branch。
+   或 branch；review-thread connection 必须分页到 `hasNextPage=false`，分页证据
+   缺失、重复或过程中 head 漂移必须失败。
 5. B-005 `pr_gate.py` 必须离线评估 evidence；当前 head、linked work、CI、
    review source、review threads、merge state 或授权证据缺失/陈旧时不得返回
    `allowed`；`independent_lane` 必须携带绑定当前 PR/head 的已验证 review
    artifact，不能只信任调用方传入的字符串。
+   PR gate evidence 超过五分钟或明显来自未来时必须失败；route gate 也不得把
+   调用方显式 `--state` 当成 readiness label，auto 只能豁免 workflow 明确声明的
+   human gate。
 6. B-006 `runtime_ledger_gate.py` 必须验证 queue checkpoint 的 tranche budget、
    spec coverage、PR gate evidence、reviewer lane 失败与 self-review 授权；声明
    merge-ready/merged 但证据不完整时必须阻断。

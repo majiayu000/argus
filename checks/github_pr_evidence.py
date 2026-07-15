@@ -36,6 +36,7 @@ from github_review_evidence import (
     load_lane_failures,
     load_review_artifact,
 )
+from github_review_threads import REVIEW_THREADS_QUERY, collect_review_threads as collect_all_review_threads
 from sensitive_enforcement import (
     approved_spec_source_commits,
     build_approved_spec_evidence,
@@ -49,33 +50,6 @@ PR_VIEW_FIELDS = [
     "number", "state", "isDraft", "headRefOid", "mergeStateStatus", "body",
     "closingIssuesReferences", "statusCheckRollup", "reviews",
 ]
-
-REVIEW_THREADS_QUERY = """
-query SpecRailReviewThreads($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          resolvedBy {
-            login
-          }
-          comments(first: 5) {
-            nodes {
-              url
-              author {
-                login
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-""".strip()
 
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 STATUS_CONTEXT_STATES = {"SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED"}
@@ -163,20 +137,7 @@ def collect_issue_view(github_repo: str, issue_number: int) -> dict[str, Any]:
 
 
 def collect_review_threads(owner: str, name: str, pr_number: int) -> dict[str, Any]:
-    return json_object(run_gh_json(
-        [
-            "api",
-            "graphql",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-            "-F",
-            f"number={pr_number}",
-            "-f",
-            f"query={REVIEW_THREADS_QUERY}",
-        ]
-    ), "review threads GraphQL response")
+    return collect_all_review_threads(owner, name, pr_number, run_gh_json)
 
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:

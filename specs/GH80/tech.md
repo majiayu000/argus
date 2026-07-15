@@ -37,11 +37,11 @@ GitHub snapshot/reference/sensitive helpers，`pr_gate.py` 依赖 workflow polic
 | B-001 | SpecRail root files及 `checks/ schemas/ templates/ skills/ tools/ review/ policies/ examples/ docs/` | `python3 checks/check_workflow.py --repo .` |
 | B-002 | 复制清单与 git diff | `git diff --name-status origin/main...HEAD`；确认 Argus 原文件未被修改 |
 | B-003 | `checks/check_workflow.py`、现有 `specs/GH*/` | `python3 checks/check_workflow.py --repo . --all-specs` |
-| B-004 | `checks/github_pr_evidence.py` 及 helpers | 对 PR #75 生成 evidence；前后比较远端 PR head/state 未变化 |
-| B-005 | `checks/github_review_evidence.py`、`checks/github_pr_evidence.py`、`checks/pr_gate.py` | 当前-head review artifact 可通过；missing/stale artifact 必须 blocked |
+| B-004 | `checks/github_pr_evidence.py`、`checks/github_review_threads.py` | 对当前 PR 生成 evidence；分页到末页，分页不完整/重复/head 漂移负例必须 blocked |
+| B-005 | `checks/github_review_evidence.py`、`checks/github_pr_evidence.py`、`checks/pr_gate.py`、`checks/route_gate.py` | 当前-head review artifact 可通过；超过五分钟的 evidence、显式 state 绕过与 missing artifact 必须 blocked |
 | B-006 | `checks/runtime_ledger_gate.py`、runtime schema/rules | 对 `.git/codex/implx/current.json` 的兼容副本运行 gate；缺证据负例必须 blocked |
 | B-007 | `.github/workflows/workflow-check.yml` | `git diff` 保留 `.github/workflows/ci.yml`；GitHub Actions 两个 workflow 均可见 |
-| B-008 | `specrail-source.json`、`specrail-manifest.json`、`checks/verify_specrail_adoption.py` | source checkout 与 143 个 managed target files 的 hash 全匹配；`git diff --check` |
+| B-008 | `specrail-source.json`、`specrail-manifest.json`、`checks/verify_specrail_adoption.py` | source checkout 与全部 managed target files 的 hash 全匹配；manifest 保持确定性紧凑格式；`git diff --check` |
 
 ## 数据流
 

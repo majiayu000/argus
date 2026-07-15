@@ -33,6 +33,7 @@ from sensitive_enforcement import (
     evaluate_sensitive_evidence,
     sensitive_registry,
     trusted_default_base,
+    validate_approved_spec_evidence,
     validate_sensitive_registry,
 )
 
@@ -163,6 +164,7 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
     allowed_actions: list[str] = []
     required_artifacts: list[str] = []
     human_gates: list[str] = []
+    waived_human_gates: list[str] = []
     duplicate_work_result: dict[str, Any] | None = None
     sensitive_classification: dict[str, Any] | None = None
     sensitive_errors: list[str] = []
@@ -219,6 +221,27 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
     required = [str(artifact) for artifact in policy.get("required_artifacts", [])]
     creates = [str(artifact) for artifact in policy.get("creates_artifacts", [])]
     human_gates = [str(gate) for gate in policy.get("human_gates", [])]
+    auth_modes = config.workflow.get("auth_modes")
+    auth_mode = getattr(args, "auth_mode", "review")
+    if not isinstance(auth_modes, dict) or not isinstance(auth_modes.get(auth_mode), dict):
+        return blocked_result(
+            route,
+            explicit_state,
+            args,
+            [f"workflow does not define auth mode {auth_mode}"],
+        )
+    configured_waivers = auth_modes[auth_mode].get("waived_human_gates", [])
+    if not isinstance(configured_waivers, list):
+        return blocked_result(
+            route,
+            explicit_state,
+            args,
+            [f"workflow auth mode {auth_mode} has invalid human-gate waivers"],
+        )
+    waived_human_gates = [
+        gate for gate in human_gates if gate in {str(item) for item in configured_waivers}
+    ]
+    active_human_gates = [gate for gate in human_gates if gate not in waived_human_gates]
 
     if current_state is None:
         missing.append("current_state")
@@ -233,16 +256,44 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
 
     if (
         route in READINESS_GATED_ROUTES
-        and "readiness_label" in human_gates
-        and state_from_evidence
+        and "readiness_label" in active_human_gates
         and current_state in allowed_from
-        and not state_trusted
     ):
-        missing.append("trusted_state")
-        reasons.append(
-            f"state {current_state} came from untrusted {state_source} evidence; "
-            "maintainer readiness label required"
+        trusted_readiness = (
+            state_trusted
+            and evidence_state == current_state
+            and state_source == "label"
         )
+        if trusted_readiness:
+            satisfied.append("readiness_label: trusted maintainer-controlled label evidence")
+        else:
+            missing.append("trusted_state")
+            reasons.append(
+                f"state {current_state} came from untrusted {state_source} evidence; "
+                "maintainer readiness label required; an explicit --state cannot override it"
+            )
+
+    if route == "implement" and "spec_approval" in active_human_gates:
+        repository = evidence.get("repository")
+        if not isinstance(repository, str) or not repository.strip() or args.issue is None:
+            missing.append("approved_spec")
+            reasons.append(
+                "spec_approval requires repository, linked issue, and approved_spec evidence"
+            )
+        else:
+            try:
+                validate_approved_spec_evidence(
+                    config,
+                    repo,
+                    evidence.get("approved_spec"),
+                    repository=repository.strip(),
+                    issue=args.issue,
+                )
+            except SpecRailError as exc:
+                missing.append("approved_spec")
+                reasons.append(str(exc))
+            else:
+                satisfied.append("spec_approval: approved spec evidence revalidated")
 
     provided_artifacts = dict(evidence.get("artifacts", {})) if isinstance(evidence.get("artifacts"), dict) else {}
     for raw_artifact in args.artifact or []:
@@ -394,14 +445,15 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
         blocked_actions.extend(["final_approval", "merge", "force_push"])
 
     if missing:
-        if (
-            current_state is None
-            or any(item.startswith("allowed_state:") for item in missing)
-            or "trusted_state" in missing
-        ):
-            decision = "needs_human" if human_gates else "blocked"
-        else:
+        deterministic_missing = [
+            item for item in missing if item not in {"trusted_state", "approved_spec"}
+        ]
+        if deterministic_missing:
             decision = "warn" if args.mode in {"dry_run", "advisory"} else "blocked"
+        elif human_gates:
+            decision = "needs_human"
+        else:
+            decision = "blocked"
     else:
         decision = "allowed"
         reasons.append(f"route {route} passed local SpecRail gates")
@@ -439,6 +491,7 @@ def evaluate_route(args: argparse.Namespace) -> dict[str, Any]:
         "missing": sorted(set(missing)),
         "required_artifacts": sorted(set(required_artifacts)),
         "human_gates": human_gates,
+        "waived_human_gates": waived_human_gates,
         "allowed_actions": sorted(set(allowed_actions)),
         "blocked_actions": sorted(set(blocked_actions)),
         "duplicate_work_gate": duplicate_work_result,
@@ -507,6 +560,12 @@ def main() -> int:
     parser.add_argument("--issue", type=int, help="Linked GitHub issue number")
     parser.add_argument("--pr", type=int, help="Linked pull request number")
     parser.add_argument("--state", help="Canonical SpecRail state")
+    parser.add_argument(
+        "--auth-mode",
+        default="review",
+        choices=["review", "auto"],
+        help="Invocation authorization mode; repository defaults never enable auto",
+    )
     parser.add_argument("--label", action="append", default=[], help="Issue/PR label evidence")
     parser.add_argument(
         "--artifact",

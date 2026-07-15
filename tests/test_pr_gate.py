@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from shutil import copyfile
 from pathlib import Path
 
@@ -198,7 +199,23 @@ def test_pr_gate_blocks_pr_that_changes_an_approved_spec(tmp_path: Path) -> None
 
 
 def fixture(name: str) -> dict[str, object]:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    original = datetime.fromisoformat(
+        payload["gate_query_completed_at"].replace("Z", "+00:00")
+    )
+    current = datetime.now(timezone.utc)
+    delta = current - original
+    payload["gate_query_completed_at"] = current.isoformat().replace("+00:00", "Z")
+    artifact = payload.get("review_artifact")
+    if isinstance(artifact, dict) and isinstance(artifact.get("checked_at"), str):
+        artifact["checked_at"] = payload["gate_query_completed_at"]
+    dispatched = payload.get("merge_dispatched_at")
+    if isinstance(dispatched, str):
+        parsed = datetime.fromisoformat(dispatched.replace("Z", "+00:00"))
+        payload["merge_dispatched_at"] = (parsed + delta).isoformat().replace(
+            "+00:00", "Z"
+        )
+    return payload
 
 
 def test_pr_gate_allows_clean_authorized_merge() -> None:
@@ -207,6 +224,32 @@ def test_pr_gate_allows_clean_authorized_merge() -> None:
     assert result["decision"] == "allowed"
     assert result["missing"] == []
     assert result["reasons"] == []
+
+
+def test_pr_gate_blocks_stale_gate_query_evidence() -> None:
+    evidence = clean_evidence()
+    stale = datetime.now(timezone.utc) - timedelta(minutes=6)
+    timestamp = stale.isoformat().replace("+00:00", "Z")
+    evidence["gate_query_completed_at"] = timestamp
+    evidence["review_artifact"]["checked_at"] = timestamp
+
+    result = evaluate_pr_gate(evidence)
+
+    assert result["decision"] == "blocked"
+    assert "gate query evidence is stale: age exceeds 5 minutes" in result["reasons"]
+
+
+def test_pr_gate_blocks_gate_query_too_far_in_future() -> None:
+    evidence = clean_evidence()
+    future = datetime.now(timezone.utc) + timedelta(minutes=1)
+    timestamp = future.isoformat().replace("+00:00", "Z")
+    evidence["gate_query_completed_at"] = timestamp
+    evidence["review_artifact"]["checked_at"] = timestamp
+
+    result = evaluate_pr_gate(evidence)
+
+    assert result["decision"] == "blocked"
+    assert "gate query evidence timestamp is too far in the future" in result["reasons"]
 
 
 def test_pr_gate_allows_legacy_linked_issue_without_structured_reference() -> None:
