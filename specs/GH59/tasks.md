@@ -7,8 +7,8 @@
 - [x] `SP59-T5` 将 manifest 字段接入 JSON 输出。Owner: core + CLI。Done when: JSON 含 capability/evidence/resolved_host。Verify: schema 与 snapshot tests。Evidence: PR #63。
 - [x] `SP59-T6` 从 frontmatter/description 提取意图粗类。Owner: agent intent。Done when: 意图分类单测通过。Verify: intent focused tests。Evidence: PR #63。
 - [x] `SP59-T7` 实现意图-能力错配三档判决。Owner: agent decision。Done when: GH58 六个 fixture 全部符合 expected decision。Verify: `cargo run -p argus-cli -- corpus test --corpus corpus/agent`。Evidence: PR #63 + 当前 6/6 corpus 通过。
-- [ ] `SP59-T8` 在冻结且维护者已合并的 synthetic fixture 评估集上计算指标。Owner: evaluation。Done when: 输出数据集类型、TP/FP/FN/TN、precision/recall；真实 worklist 不伪造 recall。Verify: `cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json`。
-- [ ] `SP59-T9` 增加可选 `--llm-judge`。Owner: CLI + agent judge。Done when: 默认关闭且确定性核心不依赖网络/LLM。Verify: 关闭态重复扫描输出一致。
+- [x] `SP59-T8` 在冻结且维护者已合并的 synthetic fixture 评估集上计算指标。Owner: evaluation。Done when: 输出数据集类型、TP/FP/FN/TN、precision/recall；真实 worklist 不伪造 recall。Verify: `cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json`。Evidence: 6 samples，TP=4/FP=0/FN=0/TN=2，synthetic precision=1.0/recall=1.0。
+- [x] `SP59-T9` 增加可选 `--llm-judge`。Owner: CLI + agent judge。Done when: 默认关闭且确定性核心不依赖网络/LLM。Verify: 关闭态重复扫描输出一致。Evidence: request/response、升级不降级、缺 command、非零退出、超时、stdout/stderr 超限 tests。
 
 ## Spec Packet
 
@@ -39,6 +39,8 @@
   0 未命中样本，禁止据此声称 recall。
 - 核心原则：能力**陈述**与判决**分离**——出现能力不等于 block，只有意图错配
   或高危组合才升级。benign-net-tool 是这条原则的守门 fixture。
-- LLM 判官是可选增强，不得进确定性核心，避免破坏可复现与离线可用。
-- 分阶段合并：L2 清单先行（低风险陈述层），L3 错配后行（改 verdict，需
-  eval 数字）。
+- LLM 判官是可选增强，不进入确定性核心；默认路径重复扫描输出一致且不启动
+  外部进程。显式开启时使用无 shell 的 command path、严格 JSON、超时与双向
+  输出限制，错误不静默降级。
+- T1-T9 均已有实现与复验命令；真实 worklist 的人工 precision 与完整语料
+  recall 仍是明确标注的后续评估，不影响本 issue 的 synthetic 验收限定。

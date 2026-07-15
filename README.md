@@ -52,6 +52,9 @@ cargo run -p argus-cli -- scan path/to/pkg --format json
 # and high-risk config flags such as alwaysLoad: true (AGT-05).
 cargo run -p argus-cli -- agent scan ~/.claude
 cargo run -p argus-cli -- agent scan path/to/skill .mcp.json --format json
+
+# Recompute the explicitly synthetic GH-58 fixture metrics.
+cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 ```
 
 The compiled binary is named `argus` and exits non-zero on `block`.
@@ -81,7 +84,8 @@ executing anything.
 | `AGT-03-remote-exec` | high → block | remote download piped to a shell (`curl … \| sh`, `iwr … \| iex`) in hook/skill scripts |
 | `AGT-03-secret-exfil` | high → block | high-sensitivity credential access combined with network egress in the same script |
 | `capability-misfit` | high → block | declared skill intent does not justify high-risk capability combinations such as credential exfiltration or agent config/hook writes |
-| `agent-config-write` / `hook-persistence` | high → block | script writes `.claude/settings*.json` or hook paths, or persists auto-approving hooks |
+| `agent-config-write` | medium → approval or high → block | script writes `.claude/settings*.json` or hook paths; matching agent-config intent is declarative, mismatched intent blocks |
+| `hook-persistence` | high → block | script persists or auto-approves an agent hook |
 | `credential-access` / `network-exfiltration` | high → block | manifest-backed evidence for credential reads and off-box network exfiltration |
 | `AGT-05-mcp-always-load` | medium → approval | `mcpServers.<name>.alwaysLoad: true` (permanent full trust) |
 | `AGT-05-enable-all-project-mcp` | medium → approval | `enableAllProjectMcpServers: true` |
@@ -93,6 +97,33 @@ executing anything.
 | `AGT-02-baseline-unreadable` | info | `--baseline` file could not be read/parsed (scan continues; not treated as "no drift") |
 
 AGT-04 (install-time high-context file diff) remains follow-up work — see issue #57.
+
+### Optional external semantic judge
+
+The deterministic scanner remains the default and never starts a process or
+uses the network. To add an explicitly configured semantic layer, pass both
+`--llm-judge` and the path to an executable bridge:
+
+```bash
+argus agent scan path/to/skill \
+  --llm-judge \
+  --llm-judge-command ./my-llm-judge-bridge \
+  --format json
+```
+
+Argus starts that exact executable without a shell or interpolated arguments,
+writes a versioned JSON request to stdin, and requires a strict JSON response
+containing `schema_version`, `decision`, and a non-empty `rationale`. The bridge
+can recommend `allow`, `allow-with-approval`, or `block`; its result becomes an
+additional `llm-intent-judge` finding, so it can escalate but never erase or
+downgrade deterministic findings.
+
+The opt-in process is fail-closed: 30-second timeout, 4 MiB request limit,
+1 MiB limits for stdout and stderr, and a 4096-byte rationale limit. Timeouts,
+non-zero exits, output overflow, invalid UTF-8/JSON, unknown response fields,
+or unsupported decisions make the scan return an operational error. The
+bridge owns any network/API configuration; Argus contains no provider URL or
+credential handling.
 
 ## AGT-02 description-drift baseline (GH-64)
 
