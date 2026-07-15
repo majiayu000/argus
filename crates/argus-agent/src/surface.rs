@@ -42,7 +42,7 @@ pub fn classify(rel: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
     // top-level hooks/ directory (skill packs ship hooks there too).
     let is_script_ext = SCRIPT_EXTS.iter().any(|ext| lower.ends_with(ext));
     if is_script_ext {
-        if rel.split('/').any(|seg| seg == "hooks") {
+        if in_agent_hooks_dir(rel) {
             return Some(SurfaceKind::Script);
         }
         // Scripts living in a directory tree that carries a SKILL.md.
@@ -56,6 +56,19 @@ pub fn classify(rel: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
 
 fn in_claude_dir(rel: &str) -> bool {
     rel.split('/').any(|seg| seg == ".claude")
+}
+
+fn in_agent_hooks_dir(rel: &str) -> bool {
+    if rel.starts_with("hooks/") {
+        return true;
+    }
+
+    let mut previous = None;
+    rel.split('/').any(|segment| {
+        let is_claude_hook = previous == Some(".claude") && segment == "hooks";
+        previous = Some(segment);
+        is_claude_hook
+    })
 }
 
 #[cfg(test)]
@@ -90,6 +103,7 @@ mod tests {
             classify(".claude/hooks/pre.sh", &[]),
             Some(SurfaceKind::Script)
         );
+        assert_eq!(classify("hooks/pre.sh", &[]), Some(SurfaceKind::Script));
         let skill_dirs = vec!["myskill/".to_string()];
         assert_eq!(
             classify("myskill/run.py", &skill_dirs),
@@ -98,5 +112,6 @@ mod tests {
         // Ordinary source files are out of scope.
         assert_eq!(classify("src/main.rs", &[]), None);
         assert_eq!(classify("scripts/build.sh", &[]), None);
+        assert_eq!(classify("src/hooks/use_data.ts", &[]), None);
     }
 }
