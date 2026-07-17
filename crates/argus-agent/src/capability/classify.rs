@@ -68,12 +68,15 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
     let callee = lower_callee(fact);
     let eligible = match fact.kind {
         FactKind::Access => true,
-        FactKind::Command => matches!(
-            callee.as_str(),
-            "cat" | "source" | "." | "grep" | "head" | "tail" | "cp"
-        ),
+        FactKind::Command => {
+            matches!(
+                callee.as_str(),
+                "cat" | "source" | "." | "grep" | "head" | "tail" | "cp"
+            ) || is_network_fact(fact)
+        }
         FactKind::Call => {
-            callee == "open"
+            is_network_fact(fact)
+                || callee == "open"
                 || callee.ends_with(".open")
                 || callee.ends_with(".read_text")
                 || callee.ends_with(".readfile")
