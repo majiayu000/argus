@@ -182,6 +182,27 @@ pub(super) fn is_exec_fact(fact: &Fact) -> bool {
     )
 }
 
+pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
+    if fact.kind != FactKind::Pipeline {
+        return false;
+    }
+    let source = fact
+        .callee
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let sink = fact
+        .arguments
+        .first()
+        .and_then(|value| value.resolved.as_deref())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        source.as_str(),
+        "curl" | "wget" | "iwr" | "invoke-webrequest"
+    ) && matches!(sink.as_str(), "sh" | "bash" | "zsh" | "iex")
+}
+
 pub(super) fn is_destructive_fact(fact: &Fact) -> bool {
     fact.kind == FactKind::Command
         && fact.callee.as_deref() == Some("rm")

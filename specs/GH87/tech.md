@@ -12,16 +12,19 @@ location, canonical callee, arguments, resolved constant values, redirects, and 
 state. The capability layer classifies only those facts; raw comments and inert strings never enter
 the classifier.
 
-The analyzer performs bounded local resolution: import aliases, shell aliases, direct assignments,
-string literals, and `+`/shell concatenation. Unknown identifiers remain unresolved. Parse trees
-with error or missing nodes return an error through `scan_agent_surface`. Ruby remains classified as
-a script for compatibility but emits a Medium `analysis_incomplete` manifest finding rather than an
-empty allow.
+The analyzer performs bounded local resolution in source order: import aliases (including named
+JS/TS and CommonJS destructuring), shell aliases, direct assignments, string literals, and
+`+`/shell concatenation. Dynamic reassignments invalidate stale constants, and nested scopes use
+isolated binding environments. Unknown identifiers remain unresolved. Remote-shell escalation
+requires a network source and shell sink in the same parsed pipeline rather than unrelated facts in
+one file. Parse trees with error or missing nodes return an error through `scan_agent_surface`.
+Ruby remains classified as a script for compatibility but emits a Medium `analysis_incomplete`
+manifest finding rather than an empty allow.
 
 ## Planned Changes Manifest
 
 <!-- specrail-planned-changes
-{"version":1,"issue":87,"complete":true,"paths":["Cargo.lock","Cargo.toml","crates/argus-agent/Cargo.toml","crates/argus-agent/src/capability.rs","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/lib.rs","crates/argus-agent/tests/fixtures/agt06-alias-concat/SKILL.md","crates/argus-agent/tests/fixtures/agt06-alias-concat/collect.py","crates/argus-agent/tests/fixtures/agt06-comment-only/SKILL.md","crates/argus-agent/tests/fixtures/agt06-comment-only/examples.ts","crates/argus-agent/tests/integration.rs","specs/GH59/product.md","specs/GH59/tasks.md","specs/GH59/tech.md","specs/GH87/product.md","specs/GH87/tasks.md","specs/GH87/tech.md"],"spec_refs":["specs/GH87/product.md","specs/GH87/tech.md","specs/GH87/tasks.md"]}
+{"version":1,"issue":87,"complete":true,"paths":["Cargo.lock","Cargo.toml","crates/argus-agent/Cargo.toml","crates/argus-agent/src/capability.rs","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/capability/syntax/tests.rs","crates/argus-agent/src/lib.rs","crates/argus-agent/tests/fixtures/agt06-alias-concat/SKILL.md","crates/argus-agent/tests/fixtures/agt06-alias-concat/collect.py","crates/argus-agent/tests/fixtures/agt06-comment-only/SKILL.md","crates/argus-agent/tests/fixtures/agt06-comment-only/examples.ts","crates/argus-agent/tests/integration.rs","specs/GH59/product.md","specs/GH59/tasks.md","specs/GH59/tech.md","specs/GH87/product.md","specs/GH87/tasks.md","specs/GH87/tech.md"],"spec_refs":["specs/GH87/product.md","specs/GH87/tech.md","specs/GH87/tasks.md"]}
 -->
 
 ## Product-to-Test Mapping
