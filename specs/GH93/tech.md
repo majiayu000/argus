@@ -29,11 +29,12 @@ GH-93
 - 位置优先使用首个合法 `file:positive-line` evidence，其次 finding.location，
   最后 report.path；后两者不含 region。已知 `package.json:scripts` 语义 locator
   映射回真实 `package.json`；package/agent 的相对 finding 路径基于 report.path
-  解析，lockfile 保持自身文件路径；所有路径按 UTF-8 URI-reference 百分号编码。
+  解析，单文件 agent 与 lockfile 保持自身文件路径；所有路径按 UTF-8
+  URI-reference 百分号编码。
 - properties 保留 artifact kind、package name/version、decision、capability、host、
   evidence；缺失字段省略而不是填空字符串。
 - 使用固定 FNV-1a 64-bit 算法生成 `argusFinding/v1` fingerprint，输入格式版本化，
-  不依赖随机 hash seed。
+  使用未加扫描根的逻辑 finding/evidence path，不依赖随机 hash seed 或临时解压目录。
 
 `emit_report` 与 `cmd_agent_scan` 只在已有 report 后调用 renderer。现有 `main`
 error path 仍只写 stderr/exit 2，因此不会输出误导性的 clean SARIF。

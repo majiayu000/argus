@@ -108,7 +108,7 @@ fn rule_name(rule_id: &str) -> String {
 }
 
 fn result(report: &ScanReport, finding: &Finding, rule_index: usize) -> Value {
-    let (uri, line) = finding_location(report, finding);
+    let (uri, line, logical_uri) = finding_location(report, finding);
     let mut physical_location = Map::new();
     physical_location.insert("artifactLocation".to_string(), json!({"uri": uri}));
     if let Some(start_line) = line {
@@ -122,7 +122,7 @@ fn result(report: &ScanReport, finding: &Finding, rule_index: usize) -> Value {
         "message": {"text": finding.detail},
         "locations": [{"physicalLocation": physical_location}],
         "partialFingerprints": {
-            "argusFinding/v1": finding_fingerprint(report, finding, &uri, line)
+            "argusFinding/v1": finding_fingerprint(report, finding, &logical_uri, line)
         },
         "properties": result_properties(report, finding)
     })
@@ -157,7 +157,7 @@ fn result_properties(report: &ScanReport, finding: &Finding) -> Value {
     Value::Object(properties)
 }
 
-fn finding_location(report: &ScanReport, finding: &Finding) -> (String, Option<u64>) {
+fn finding_location(report: &ScanReport, finding: &Finding) -> (String, Option<u64>, String) {
     if let Some((path, line)) = finding
         .evidence
         .as_deref()
@@ -165,29 +165,47 @@ fn finding_location(report: &ScanReport, finding: &Finding) -> (String, Option<u
         .iter()
         .find_map(|entry| parse_evidence_location(entry))
     {
-        return (report_location_uri(report, &path), Some(line));
+        let logical_uri = normalize_uri(&path);
+        return (report_location_uri(report, &path), Some(line), logical_uri);
     }
     if let Some(location) = finding
         .location
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        return (report_location_uri(report, artifact_path(location)), None);
+        let logical_path = artifact_path(location);
+        return (
+            report_location_uri(report, logical_path),
+            None,
+            normalize_uri(logical_path),
+        );
     }
-    (normalize_uri(&report.path.to_string_lossy()), None)
+    (
+        normalize_uri(&report.path.to_string_lossy()),
+        None,
+        String::new(),
+    )
 }
 
 fn report_location_uri(report: &ScanReport, location: &str) -> String {
     let location_path = std::path::Path::new(location);
-    if matches!(
-        report.artifact,
-        ArtifactKind::PackageDir | ArtifactKind::AgentSurface
-    ) && !location_path.is_absolute()
-        && report.path != std::path::Path::new(".")
-    {
-        return normalize_uri(&report.path.join(location_path).to_string_lossy());
+    if location_path.is_absolute() {
+        return normalize_uri(location);
     }
-    normalize_uri(location)
+    match report.artifact {
+        ArtifactKind::Lockfile => normalize_uri(&report.path.to_string_lossy()),
+        ArtifactKind::AgentSurface
+            if report.path.file_name() == Some(location_path.as_os_str()) =>
+        {
+            normalize_uri(&report.path.to_string_lossy())
+        }
+        ArtifactKind::PackageDir | ArtifactKind::AgentSurface
+            if report.path != std::path::Path::new(".") =>
+        {
+            normalize_uri(&report.path.join(location_path).to_string_lossy())
+        }
+        ArtifactKind::PackageDir | ArtifactKind::AgentSurface => normalize_uri(location),
+    }
 }
 
 fn artifact_path(location: &str) -> &str {
@@ -358,7 +376,7 @@ mod tests {
     fn lockfile_snapshot_preserves_artifact_kind() {
         let document = render(&[report(
             ArtifactKind::Lockfile,
-            "package-lock.json",
+            "sub/package-lock.json",
             vec![Finding::new(
                 "lockfile-http-resolved",
                 Severity::High,
@@ -368,7 +386,7 @@ mod tests {
         let result = first_result(&document);
         assert_eq!(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "package-lock.json"
+            "sub/package-lock.json"
         );
         assert!(result["locations"][0]["physicalLocation"]
             .get("region")
@@ -398,6 +416,21 @@ mod tests {
         );
         assert_eq!(result["properties"]["capability"], "net_egress");
         assert_eq!(result["properties"]["resolved_host"], "api.example.com");
+    }
+
+    #[test]
+    fn single_file_agent_surface_does_not_join_file_to_itself() {
+        let document = render(&[report(
+            ArtifactKind::AgentSurface,
+            "config/.mcp.json",
+            vec![
+                Finding::new("injection-override", Severity::Critical, "override").at(".mcp.json"),
+            ],
+        )]);
+        assert_eq!(
+            first_result(&document)["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "config/.mcp.json"
+        );
     }
 
     #[test]
@@ -456,12 +489,26 @@ mod tests {
 
     #[test]
     fn fingerprint_is_repeatable() {
-        let input = report(
+        let first = report(
             ArtifactKind::PackageDir,
-            "fixture",
+            "/tmp/argus-random-a/package",
             vec![Finding::new("remote-download", Severity::High, "curl").at("index.js")],
         );
-        assert_eq!(render(std::slice::from_ref(&input)), render(&[input]));
+        let second = report(
+            ArtifactKind::PackageDir,
+            "/tmp/argus-random-b/package",
+            vec![Finding::new("remote-download", Severity::High, "curl").at("index.js")],
+        );
+        let first_document = render(&[first]);
+        let second_document = render(&[second]);
+        assert_eq!(
+            first_result(&first_document)["partialFingerprints"],
+            first_result(&second_document)["partialFingerprints"]
+        );
+        assert_ne!(
+            first_result(&first_document)["locations"],
+            first_result(&second_document)["locations"]
+        );
     }
 
     #[test]
