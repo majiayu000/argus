@@ -14,7 +14,7 @@ CHECKS = ROOT / "checks"
 FIXTURES = ROOT / "examples" / "fixtures"
 sys.path.insert(0, str(CHECKS))
 
-from review_json_gate import evaluate_review_gate  # noqa: E402
+from review_json_gate import evaluate_review_gate, parse_unified_diff  # noqa: E402
 
 
 def load_review(name: str) -> dict[str, object]:
@@ -23,6 +23,76 @@ def load_review(name: str) -> dict[str, object]:
 
 def load_diff() -> str:
     return (FIXTURES / "pr-diff.patch").read_text(encoding="utf-8")
+
+
+def test_parse_unified_diff_accepts_multi_commit_mail_patch_envelopes() -> None:
+    patch = """From aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Mon Sep 17 00:00:00 2001
+Subject: [PATCH 1/2] add first file
+---
+diff --git a/first.txt b/first.txt
+new file mode 100644
+--- /dev/null
++++ b/first.txt
+@@ -0,0 +1 @@
++first
+--SIGNATURE--
+2.50.0
+
+From bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Mon Sep 17 00:00:00 2001
+Subject: [PATCH 2/2] update second file
+---
+diff --git a/second.txt b/second.txt
+--- a/second.txt
++++ b/second.txt
+@@ -1 +1,2 @@
+ existing
++second
+--SIGNATURE--
+2.50.0
+"""
+    patch = patch.replace("--SIGNATURE--", "-- ")
+
+    index = parse_unified_diff(patch)
+
+    assert index.right["first.txt"] == {1}
+    assert index.left["second.txt"] == {1}
+    assert index.right["second.txt"] == {1, 2}
+
+
+def test_parse_unified_diff_rejects_bare_line_before_hunk_is_complete() -> None:
+    malformed = """diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,2 +1,2 @@
+ context
+
++replacement
+"""
+
+    with pytest.raises(ValueError, match="unsupported diff line inside hunk"):
+        parse_unified_diff(malformed)
+
+
+@pytest.mark.parametrize(
+    "suffix, message",
+    [
+        ("", "diff ended before hunk counts were consumed"),
+        (
+            "diff --git a/next.txt b/next.txt\n",
+            "diff file boundary before hunk counts were consumed",
+        ),
+    ],
+)
+def test_parse_unified_diff_rejects_truncated_hunk(suffix: str, message: str) -> None:
+    truncated = """diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,2 +1,2 @@
+ context
+""" + suffix
+
+    with pytest.raises(ValueError, match=message):
+        parse_unified_diff(truncated)
 
 
 def test_review_json_gate_allows_valid_review() -> None:

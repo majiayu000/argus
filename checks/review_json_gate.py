@@ -32,8 +32,8 @@ FORBIDDEN_FINAL_AUTHORITY = {
     "ship it": re.compile(r"\bship\s+it\b", re.IGNORECASE),
 }
 HUNK_RE = re.compile(
-    r"^@@ -(?P<old_start>[0-9]+)(?:,[0-9]+)? "
-    r"\+(?P<new_start>[0-9]+)(?:,[0-9]+)? @@"
+    r"^@@ -(?P<old_start>[0-9]+)(?:,(?P<old_count>[0-9]+))? "
+    r"\+(?P<new_start>[0-9]+)(?:,(?P<new_count>[0-9]+))? @@"
 )
 SUGGESTION_FENCE_RE = re.compile(
     r"(?:^|\n)```suggestion[^\n]*\n(?P<content>.*?)\n```",
@@ -110,9 +110,13 @@ def parse_unified_diff(diff_text: str) -> DiffIndex:
     old_line = 0
     new_line = 0
     in_hunk = False
+    old_remaining = 0
+    new_remaining = 0
 
     for raw_line in diff_text.splitlines():
         if raw_line.startswith("diff --git "):
+            if in_hunk:
+                raise ValueError("diff file boundary before hunk counts were consumed")
             in_hunk = False
             old_path = None
             new_path = None
@@ -128,31 +132,51 @@ def parse_unified_diff(diff_text: str) -> DiffIndex:
 
         hunk = HUNK_RE.match(raw_line)
         if hunk:
+            if in_hunk:
+                raise ValueError("new diff hunk before prior hunk counts were consumed")
             if old_path is None and new_path is None:
                 raise ValueError("diff hunk is missing file paths")
             old_line = int(hunk.group("old_start"))
             new_line = int(hunk.group("new_start"))
-            in_hunk = True
+            old_remaining = int(hunk.group("old_count") or 1)
+            new_remaining = int(hunk.group("new_count") or 1)
+            in_hunk = old_remaining > 0 or new_remaining > 0
             continue
 
         if not in_hunk:
             continue
 
         if raw_line.startswith(" "):
+            if old_remaining == 0 or new_remaining == 0:
+                raise ValueError("context line exceeds declared diff hunk counts")
             _add_line(left, old_path, old_line)
             _add_line(right, new_path, new_line)
             old_line += 1
             new_line += 1
+            old_remaining -= 1
+            new_remaining -= 1
         elif raw_line.startswith("-"):
+            if old_remaining == 0:
+                raise ValueError("removal line exceeds declared diff hunk old count")
             _add_line(left, old_path, old_line)
             old_line += 1
+            old_remaining -= 1
         elif raw_line.startswith("+"):
+            if new_remaining == 0:
+                raise ValueError("addition line exceeds declared diff hunk new count")
             _add_line(right, new_path, new_line)
             new_line += 1
+            new_remaining -= 1
         elif raw_line.startswith("\\"):
             continue
         else:
             raise ValueError(f"unsupported diff line inside hunk: {raw_line!r}")
+
+        if old_remaining == 0 and new_remaining == 0:
+            in_hunk = False
+
+    if in_hunk:
+        raise ValueError("diff ended before hunk counts were consumed")
 
     return DiffIndex(left=left, right=right)
 
