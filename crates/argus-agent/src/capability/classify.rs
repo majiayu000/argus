@@ -66,16 +66,17 @@ pub(super) fn resolve_fact_host(fact: &Fact) -> Option<String> {
 
 pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
     let callee = lower_callee(fact);
+    let network_fact = is_network_fact(fact);
     let eligible = match fact.kind {
         FactKind::Access => true,
         FactKind::Command => {
             matches!(
                 callee.as_str(),
                 "cat" | "source" | "." | "grep" | "head" | "tail" | "cp"
-            ) || is_network_fact(fact)
+            ) || network_fact
         }
         FactKind::Call => {
-            is_network_fact(fact)
+            network_fact
                 || callee == "open"
                 || callee.ends_with(".open")
                 || callee.ends_with(".read_text")
@@ -91,10 +92,14 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
     fact.arguments
         .iter()
         .flat_map(|argument| {
-            [
-                argument.raw.as_str(),
-                argument.resolved.as_deref().unwrap_or(""),
-            ]
+            if network_fact {
+                [argument.executable_reference.as_deref().unwrap_or(""), ""]
+            } else {
+                [
+                    argument.raw.as_str(),
+                    argument.resolved.as_deref().unwrap_or(""),
+                ]
+            }
         })
         .chain((fact.kind == FactKind::Access).then_some(fact.text.as_str()))
         .find_map(|candidate| {
