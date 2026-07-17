@@ -73,12 +73,19 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - ⚠️ `token-harvest` — fires only when the dropper reads `~/.npmrc` literally OR pairs env-token reads with npm-publish/github-write.
 
 **argus coverage on PyPI (7) and crates.io (6)**
-- ⛔ Out of ecosystem scope. PyPI parity is a tracked gap; crates.io parity has no issue yet (argus is npm-first by SPEC).
+- ⚠️ Native PyPI and crates.io scanners now inspect sdists/wheels and `.crate`
+  archives before installation, including `setup.py`, import-time Python,
+  `build.rs`, and Rust source surfaces. The catalog has no recorded fixture for
+  the TrapDoor PyPI/crates payloads, so this is an available detection surface,
+  not a claim that those exact packages were validated.
 
 **Crates.io significance**
 [inference, medium] Combined with the Contagious Interview campaign and the earlier 2026 `faster_log` / `async_println` incident, this is the second time in 2026 we see crates.io as a deliberate vector for a multi-ecosystem campaign. The "crates.io is the clean registry" assumption no longer holds.
 
-**Gap**: argus has no defense for crates.io or PyPI. The PyPI worker's on-import payload would also dodge npm-style postinstall detection even if we eventually ported the lifecycle-script rule directly.
+**Remaining gap**: ecosystem support exists, but static rules can still miss
+obfuscated on-import payloads and compile-time behavior. A clean scan is not
+evidence that the TrapDoor variants are safe; event-specific recorded fixtures
+are still absent.
 
 ---
 
@@ -103,9 +110,13 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - Steals credentials from AWS, Azure, GCP, Kubernetes, password managers, "over 90 developer tool configurations".
 - Lateral-moves through cloud infrastructure.
 
-**argus coverage**: PyPI not yet supported — out of scope for M1.
+**argus coverage**: the PyPI scanner inspects sdist/wheel content, `setup.py`,
+import-time hooks, remote-download patterns, and credential-related literals.
+The real `durabletask` artifacts are not pinned in this corpus, so coverage is
+partial rather than event-validated.
 
-**Gap**: argus is npm-only. PyPI parity is M2+ work.
+**Gap**: heavy obfuscation and payloads assembled dynamically can bypass static
+text rules; there is no `durabletask`-specific recorded fixture.
 
 ---
 
@@ -170,7 +181,9 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - Three coordinated supply chain attacks in 48 hours across npm, PyPI, and Docker Hub.
 - All three targeted secrets: API keys, cloud creds, SSH keys, CI tokens.
 
-**argus coverage**: npm payloads covered by existing rules. PyPI/Docker out of scope.
+**argus coverage**: npm and PyPI package artifacts have native static scanners;
+Docker images remain out of scope. No single fixture reproduces all three
+campaign payloads.
 
 ---
 
@@ -190,9 +203,13 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - `pytorch-lightning` 2.6.2 and 2.6.3 included a hidden `_runtime` directory and an obfuscated **JavaScript** payload that executes when the Python module is imported.
 - Mixed-ecosystem attack — Python package shipping JS as part of the payload.
 
-**argus coverage**: Out of scope (PyPI).
+**argus coverage**: the PyPI scanner handles wheels/sdists and scans Python and
+packaged content, so the ecosystem is in scope. The mixed Python-to-JavaScript
+loader is not represented by a dedicated fixture and may evade lexical rules.
 
-**Gap (note)**: When argus eventually does PyPI, the rule that catches "Python package ships a `.js` payload that runs at import" is interesting — it parallels the npm `binary-file` rule.
+**Gap (note)**: a Python-specific rule for “package ships JavaScript and launches
+it at import time” remains useful; generic content scanning is not equivalent
+to modeling that execution chain.
 
 ---
 
@@ -203,7 +220,8 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - Datadog attributes it to TeamPCP / Shai-Hulud-family campaign.
 - LiteLLM is an AI-gateway widely embedded in agent stacks — high blast radius into LLM credential pools.
 
-**argus coverage**: Out of scope (PyPI).
+**argus coverage**: PyPI artifacts are in scope for static scanning, but this
+catalog does not contain pinned LiteLLM artifacts or a dedicated fixture.
 
 ---
 
@@ -216,7 +234,12 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 
 **argus coverage**: `typosquatting` + `low-reputation` would fire on names. `network-exfiltration` on the Telegram POST. `credential-access` is debatable since secrets come from runtime arguments, not files.
 
-**Gap**: argus's typosquat dictionary today includes `react`/`react-dom`/`lodash` but NOT crypto names like `bs58`, `ethersproject-*`, `@solana/web3.js`. The popular-packages list needs ecosystem extension. Catalogued in the corpus next-fixture queue.
+**Current status**: `name::POPULAR_PACKAGES` now includes `bs58`, `ethers`,
+`web3`, `viem`, `wagmi`, `hardhat`, and `truffle`; the synthetic
+`crypto-key-stealer` corpus fixture exercises the rule combination. That
+regression evidence does not prove every scoped or prefixed real-world name is
+normalized correctly, so the incident remains partial rather than a blanket
+direct-catch claim.
 
 ---
 
@@ -320,7 +343,8 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 - CVSS 10.0. Affected Linux distros (Debian, Gentoo, Arch, Fedora, openSUSE, Alpine sid/testing).
 - Patched in 5.6.2 on 2024-05-29.
 
-**argus coverage**: argus is npm/PyPI-only. **Full gap.**
+**argus coverage**: OS source tarballs, Autotools macros, and distribution build
+pipelines are outside Argus's package-registry command surface. **Full gap.**
 
 **Inference [confidence: high]**: even a hypothetical argus-for-tarballs would have missed this — the backdoor was in compiled binary "test fixtures" and a single-purpose `.m4` macro that only ran via autotools. `binary-file` would have flagged the test artifacts as suspicious, but the project has many legitimate binary test fixtures.
 
@@ -372,13 +396,13 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 
 2. **Worms collapse the incident-response window.** Pre-Shai-Hulud, a stolen maintainer token led to a hand-crafted poisoned version. Post-Shai-Hulud, the same stolen token automatically poisons every package the victim can publish, within minutes. The 16-minute chalk window is now baseline.
 
-3. **Provenance attestation is not a panacea.** TanStack proved that an attacker who pivots through legitimate CI infrastructure gets a real Sigstore signature on malicious bytes. argus's #14 follow-up (full signature verification) is still worth doing, but it does not stop the strongest current attack class.
+3. **Provenance attestation is not a panacea.** TanStack proved that an attacker who pivots through legitimate CI infrastructure gets a real Sigstore signature on malicious bytes. Argus now offers opt-in full Sigstore verification, but it does not stop this attack class because provenance authenticates the builder and bytes, not benign intent.
 
 4. **The lifecycle-script monoculture is intact.** Nearly every 2025–2026 incident uses `preinstall` or `postinstall`. Bun's `trustedDependencies` and pnpm's `approve-builds` are the strongest registry-side mitigations; argus's default `--ignore-scripts` posture lands in the same spot. PR #6 confirms argus never runs lifecycle scripts during scan.
 
 5. **Crypto-wallet attacks have moved from install-time to runtime hooks.** `runtime-hook` + `wallet-interception` are the rules that fire on the chalk/debug pattern. `@solana/web3.js` ran the same playbook months earlier.
 
-6. **Cross-ecosystem attacks are now routine.** TeamPCP publishes the same payload to npm and PyPI in the same hour. PyTorch Lightning shipped JS-in-Python. argus's PyPI-parity story is real M2 work.
+6. **Cross-ecosystem attacks are now routine.** TeamPCP publishes the same payload to npm and PyPI in the same hour. PyTorch Lightning shipped JS-in-Python. Argus now has native commands for eight ecosystems, but rule parity and event-specific fixture coverage remain uneven.
 
 ---
 
@@ -389,17 +413,17 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 | Incident (Year) | Initial vector | Payload class | argus rule(s) | Verdict |
 |---|---|---|---|---|
 | TrapDoor (2026-05) — npm half | fresh-account lookalike publish | crypto-jacking + AI-context poisoning | lifecycle-script + ai-context-poisoning + credential-access + network-exfiltration | ✅ corpus fixture `trapdoor-ai-context` |
-| TrapDoor (2026-05) — PyPI + crates.io halves | same | same | — | ⛔ ecosystem gap |
+| TrapDoor (2026-05) — PyPI + crates.io halves | same | same | PyPI/crates static package and install/build surfaces | ⚠️ ecosystem supported; exact variants not fixture-validated |
 | Mini Shai-Hulud wave 5 atool (2026-05) | maintainer compromise | worm | lifecycle-script + token-harvest + github-write-api + npm-publish | ✅ catches post-install |
-| Microsoft durabletask (2026-05) | maintainer compromise | cred stealer | — (PyPI) | ⛔ ecosystem gap |
+| Microsoft durabletask (2026-05) | maintainer compromise | cred stealer | PyPI setup/import/content rules | ⚠️ obfuscation; no pinned event fixture |
 | node-ipc (2026-05) | maintainer compromise | runtime cred stealer | runtime-hook + network-exfiltration | ⚠️ heavy obfuscation in single bundle |
 | TanStack (2026-05) | CI pwn-request + cache poisoning | worm-class but **with valid provenance** | lifecycle-script + content rules | ⚠️ provenance check (#15) does not help |
 | Bitwarden CLI (2026-04) | maintainer compromise | multi-stage cred stealer + worm | lifecycle-script + token-harvest + github-write-api | ✅ |
 | Axios RAT (2026-03) | maintainer compromise | RAT | depends on install vs runtime | ⚠️ |
 | SAP `@cap-js/*` (2026-04) | TeamPCP worm | cred stealer | lifecycle-script + token-harvest | ✅ |
-| PyTorch Lightning (2026-04) | maintainer compromise | JS-in-Python loader | — | ⛔ ecosystem gap |
-| LiteLLM PyPI (2026-03) | TeamPCP worm | cred stealer | — | ⛔ ecosystem gap |
-| galedonovan crypto typosquats (2026-03) | typosquat | runtime key theft | typosquatting + low-reputation + network-exfiltration | ⚠️ dictionary needs crypto names |
+| PyTorch Lightning (2026-04) | maintainer compromise | JS-in-Python loader | PyPI content/import-time rules | ⚠️ mixed-language execution chain not fixture-validated |
+| LiteLLM PyPI (2026-03) | TeamPCP worm | cred stealer | PyPI setup/import/content rules | ⚠️ no pinned event fixture |
+| galedonovan crypto typosquats (2026-03) | typosquat | runtime key theft | typosquatting + low-reputation + network-exfiltration | ⚠️ crypto dictionary + synthetic fixture; real package set not validated |
 | Shai-Hulud OG (2025-09) | maintainer phishing | worm | full set | ✅ corpus fixture `worm-behavior` |
 | chalk/debug (2025-09) | maintainer phishing | wallet rewriter | runtime-hook + wallet-interception | ✅ corpus fixture `runtime-wallet-hook` |
 | s1ngularity / Nx (2025-08) | maintainer phishing | cred harvest | lifecycle-script + credential-access | ✅ |
@@ -410,10 +434,10 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 | ua-parser/coa/rc (2021-10) | maintainer compromise | DanaBot | lifecycle-script + remote-download + binary-execution | ✅ corpus fixture `lifecycle-curl-sh` |
 | event-stream (2018-10) | social engineering of exhausted maintainer | targeted bitcoin theft | lifecycle-script | ⚠️ Copay-specific unpack hard to model |
 
-**Summary** (2025–2026 incidents only):
-- ✅ Direct catch: 8 / 18 incidents (TrapDoor npm half added)
-- ⚠️ Partial / bypassable: 4 / 18 incidents
-- ⛔ Ecosystem/architecture gap: 6 / 18 incidents (4 PyPI, 1 crates.io [TrapDoor], 1 GitHub Actions)
+**Summary** (the 17 rows dated 2025–2026 above):
+- ✅ Direct catch: 8 / 17 incidents
+- ⚠️ Partial / bypassable or not event-fixture-validated: 8 / 17 incidents
+- ⛔ Architecture gap: 1 / 17 incidents (GitHub Actions consumer workflow scanning)
 
 ---
 
@@ -421,29 +445,31 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 
 Each gap below is a real candidate for an argus follow-up issue or a sibling tool.
 
-### Gaps argus can close in M1.x
+### Implemented since the original catalog snapshot
 
-1. **Typosquat dictionary needs crypto names.** Add `bs58`, `ethers`, `web3.js`, `@solana/web3.js`, `viem`, `wagmi`, `@flashbots/*`, `hardhat`, `truffle` to `name::POPULAR_PACKAGES`. Cheap. Caught 1 attack in this catalog.
+- The crypto/web3 popular-package dictionary and synthetic
+  `crypto-key-stealer` fixture now exist.
+- PyPI and crates.io are joined by native Go, NuGet, Maven, RubyGems, and
+  Composer/Packagist scanners. Ecosystem support does not imply equal rule
+  depth or event-specific validation.
+- Full Sigstore verification and caller-supplied identity patterns are
+  available as an opt-in npm provenance layer.
 
-2. **Version-shape anomaly rule.** When a package's version jumps multiple minors or a major in a single hour, that is suspicious — Bitwarden CLI, Axios, chalk all had this signature. Implementable as a rule over the packument's `time` field. New rule `version-shape-anomaly` (info or block depending on severity).
+### Current scanner gaps
 
-3. **Rapid-publish-window rule.** Multiple packages from the same maintainer published in a < 1 hour window is the Shai-Hulud / atool signature. Requires querying the npm user's recent publish history — needs additional registry endpoint.
+1. **Version-shape anomaly rule.** When a package's version jumps multiple minors or a major in a single hour, that is suspicious — Bitwarden CLI, Axios, chalk all had this signature. Implementable as a rule over the packument's `time` field. New rule `version-shape-anomaly` (info or block depending on severity).
 
-4. **Builder-identity allowlist.** argus's #14 follow-up (full Sigstore verify) is the prerequisite. Once signatures are verified, refuse `provenance-verified-subject` unless the cert OIDC identity matches `https://github.com/<allowed-orgs>/...`.
+2. **Rapid-publish-window rule.** Multiple packages from the same maintainer published in a < 1 hour window is the Shai-Hulud / atool signature. Requires querying the npm user's recent publish history — needs additional registry endpoint.
 
-### Gaps argus cannot close in M1.x
+3. **GitHub Actions consumer-side scanning.** tj-actions-style attacks require scanning workflow YAML for mutable tags and unsafe `pull_request_target` patterns. Different surface; outside the current package-registry commands.
 
-5. **PyPI parity.** TeamPCP runs the same playbook against PyPI. Either argus grows a PyPI mode or a sibling tool ships. M2.
+4. **CI provenance pwn-request defense.** TanStack proves provenance attestation alone is insufficient. Mitigation lives in maintainer-side workflow design, not consumer-side scanning.
 
-6. **GitHub Actions consumer-side scanning.** tj-actions-style attacks require scanning workflow YAML for mutable tags and unsafe `pull_request_target` patterns. Different surface; out of scope for npm scanner.
-
-7. **CI provenance pwn-request defense.** TanStack proves provenance attestation alone is insufficient. Mitigation lives in maintainer-side workflow design, not consumer-side scanning.
-
-8. **Long-game maintainer trust attacks.** xz-utils-class incidents need social-graph / commit-pattern anomaly detection. Open research problem; not for argus.
+5. **Long-game maintainer trust attacks.** xz-utils-class incidents need social-graph / commit-pattern anomaly detection. Open research problem; not for argus.
 
 ### New corpus fixtures worth adding (M1.x)
 
-- `crypto-key-stealer/` — typosquats a crypto library, hooks `Base58.decode`, POST key to Telegram. Maps to galedonovan.
+- `crypto-key-stealer/` — implemented synthetic regression fixture; typosquats a crypto library, hooks `Base58.decode`, and POSTs a key to Telegram. Maps to galedonovan, but is not a preserved copy of the real malicious packages.
 - `obfuscated-runtime-bundle/` — large minified single-file bundle with hidden `globalThis.fetch` rewrite. Maps to node-ipc.
 - `version-shape-anomaly/` (synthetic) — a packument fixture that suddenly jumps from 1.7.x to 1.14.x. Once the rule exists.
 - `slsa-signed-malicious/` — synthesizes a tarball + valid attestation for malicious content. Tests that argus's provenance check correctly does NOT clear it just because the digest matches. Maps to TanStack.

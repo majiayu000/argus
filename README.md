@@ -3,9 +3,29 @@
 [![CI](https://github.com/majiayu000/argus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/majiayu000/argus/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> "100-eyed guardian." Static install-time scanner for npm, PyPI, and crates.io supply-chain attacks, with opt-in Sigstore signature verification.
+> "100-eyed guardian." Static install-time scanner for eight package ecosystems, with opt-in Sigstore signature verification for npm provenance.
 
-`argus` is a Rust CLI that decides whether a package (npm, PyPI sdist/wheel, or `.crate` archive) or an npm lockfile is safe to install, before any lifecycle script, `setup.py`, or `build.rs` ever runs. It implements the deterministic-rule layer plus optional cryptographic provenance verification — see the "Status" section below for the current capability snapshot.
+`argus` is a pre-release Rust CLI that inspects package artifacts from npm,
+PyPI, crates.io, Go modules, NuGet, Maven, RubyGems, and Composer/Packagist
+before package build or install hooks run. It combines artifact-integrity checks
+with ecosystem-specific static rules; neither a matching digest nor a clean
+static scan proves that an artifact is safe. See the matrix below and the
+"Status" section for the implemented capability snapshot.
+
+## Ecosystem capability matrix
+
+All rows describe code implemented on `main`, not a released binary contract.
+
+| Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
+|---|---|---|---|---|
+| npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, and text/binary content rules | Static rules can miss obfuscated or dynamic behavior; full Sigstore verification is opt-in |
+| PyPI | `pypi-fetch` | PyPI JSON `digests.sha256` | sdist/wheel; `setup.py`, import-time Python surfaces, and package content | Does not execute Python or prove runtime behavior |
+| crates.io | `crates-fetch` | crates.io API SHA-256 `checksum` | `.crate`; `build.rs`, Rust source, and proc-macro structure | Does not compile code or execute procedural macros |
+| Go modules | `go-fetch` | GOPROXY `.ziphash` `h1:` directory hash | Module ZIP; `init`, package initializers, process and network calls | Source detection is regex-based; `sum.golang.org` transparency is not verified |
+| NuGet | `nuget-fetch` | Catalog SHA-512 `packageHash` when available | `.nupkg`; PowerShell install hooks and MSBuild `.targets`/`.props` | Does not verify `.signature.p7s` or inspect DLL bytecode; unavailable catalog hashes are reported explicitly |
+| Maven | `maven-fetch` | `.jar.sha256`, falling back to weaker `.jar.sha1` | JAR; `pom.xml`, manifests, resources, and embedded build scripts | Does not inspect `.class` bytecode; SHA-1 fallback detects corruption but is not collision-resistant |
+| RubyGems | `gems-fetch` | Registry SHA-256 `sha` | `.gem`; gemspec, `extconf.rb`, and Ruby source | Static rules do not execute Ruby; internal archive checksums are not an independent trust anchor |
+| Composer / Packagist | `composer-fetch` | Packagist `dist.shasum` SHA-1 | Dist ZIP; lifecycle hooks, `autoload.files`, and PHP source | SHA-1 is weak, missing hashes are high-risk, VCS-only packages are unsupported, and dynamic PHP can evade regex rules |
 
 ## Decisions
 
@@ -34,13 +54,28 @@ cargo run -p argus-cli -- pypi-fetch django@5.0.0 --prefer both --format json
 cargo run -p argus-cli -- crates-fetch serde@1.0.228
 cargo run -p argus-cli -- crates-fetch tokio --format json
 
+# Fetch a Go module: GOPROXY zip -> h1 dirhash verify -> static source scan
+cargo run -p argus-cli -- go-fetch golang.org/x/text@v0.16.0
+
+# Fetch a NuGet package: .nupkg -> catalog hash (when available) -> hook scan
+cargo run -p argus-cli -- nuget-fetch Newtonsoft.Json@13.0.3
+
+# Fetch a Maven artifact: JAR checksum -> POM/resource/build-script scan
+cargo run -p argus-cli -- maven-fetch org.apache.commons:commons-lang3:3.14.0
+
+# Fetch a RubyGem: registry SHA-256 -> nested .gem extraction -> Ruby scan
+cargo run -p argus-cli -- gems-fetch rake@13.2.1
+
+# Fetch a Composer package: Packagist dist ZIP -> lifecycle/PHP scan
+cargo run -p argus-cli -- composer-fetch monolog/monolog@3.7.0
+
 # Custom registry that serves tarballs from a separate CDN/host:
 cargo run -p argus-cli -- fetch internal-tool@1.2.3 \
   --registry https://npm.corp.example \
   --allow-tarball-host cdn.corp.example \
   --allow-tarball-host objects.corp.example
 
-# Run the full regression corpus (10 fixtures + 1 lockfile)
+# Run the full regression corpus (6 agent + 11 package + 1 lockfile cases)
 cargo run -p argus-cli -- corpus test
 
 # Machine-readable output
@@ -194,6 +229,11 @@ description change?"; whether the new content is *malicious* is still AGT-01's
 - `crates/argus-fetch` — npm registry client.
 - `crates/argus-pypi` — PyPI registry client (sdist + wheel).
 - `crates/argus-crates` — crates.io registry client (.crate + build.rs).
+- `crates/argus-go` — Go module proxy client (ZIP + `h1:` dirhash).
+- `crates/argus-nuget` — NuGet v3 client (`.nupkg` + MSBuild/PowerShell surfaces).
+- `crates/argus-maven` — Maven Central client (JAR + POM/build resources).
+- `crates/argus-rubygems` — RubyGems client (nested `.gem` archive + Ruby surfaces).
+- `crates/argus-composer` — Packagist/Composer client (dist ZIP + Composer/PHP surfaces).
 - `crates/argus-cli` — the `argus` binary.
 
 ## Development
@@ -217,14 +257,15 @@ package registry. Build it from source against `main`; we treat `main` as the
 shipping branch and the [`CHANGELOG`](CHANGELOG.md) `[Unreleased]` section as
 the current ship-list.
 
-Capability snapshot (as of 2026-05-29):
+Capability snapshot (as of 2026-07-18):
 
 - **M0** — rule engine + regression corpus + CI ([#4](https://github.com/majiayu000/argus/pull/4), [#5](https://github.com/majiayu000/argus/pull/5)).
-- **M1** — npm tarball fetch + safe extraction + scan ([#6](https://github.com/majiayu000/argus/pull/6)), plus PyPI sdist/wheel ([#23](https://github.com/majiayu000/argus/pull/23)) and crates.io `.crate` + `build.rs` analysis ([#24](https://github.com/majiayu000/argus/pull/24)).
+- **M1** — npm tarball fetch + safe extraction + scan ([#6](https://github.com/majiayu000/argus/pull/6)); PyPI sdist/wheel ([#23](https://github.com/majiayu000/argus/pull/23)); crates.io `.crate` + `build.rs` analysis ([#24](https://github.com/majiayu000/argus/pull/24)); and the completed [#22](https://github.com/majiayu000/argus/issues/22) long-tail umbrella: NuGet ([#49](https://github.com/majiayu000/argus/pull/49)), Maven ([#50](https://github.com/majiayu000/argus/pull/50)), RubyGems ([#51](https://github.com/majiayu000/argus/pull/51)), Composer/Packagist ([#52](https://github.com/majiayu000/argus/pull/52)), and Go modules ([#53](https://github.com/majiayu000/argus/pull/53)).
 - **M2** — Sigstore signature verification (DSSE + Fulcio chain + Rekor inclusion + OIDC identity allowlist), opt-in behind the `sigstore` Cargo feature. Closes [#14](https://github.com/majiayu000/argus/issues/14); honest threat-disclosure of what M2 still does NOT prevent lives in [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10.
 
-Long-tail ecosystem coverage (Maven / NuGet / Go modules / RubyGems / Packagist)
-is tracked under [#22](https://github.com/majiayu000/argus/issues/22); launch-readiness polish under [#42](https://github.com/majiayu000/argus/issues/42).
+These entries mean implemented and covered by repository tests on `main`.
+Argus remains **unreleased**: there is no tagged binary distribution or package
+registry release yet, and normal installation still requires building from source.
 
 Detection coverage is intentionally **not** claimed in headline numbers without
 benchmark evidence — see [`corpus/`](corpus/) for the regression set the
@@ -243,7 +284,7 @@ This project is one layer of an open-source stack for running coding agents (Cla
 |---|---|---|
 | Extend | [claude-skill-registry](https://github.com/majiayu000/claude-skill-registry) | Discover and search community Claude Code skills |
 | Extend | [spellbook](https://github.com/majiayu000/spellbook) | Cross-runtime skills for Claude Code, Codex, and multi-agent workflows |
-| Trust | [argus](https://github.com/majiayu000/argus) **◀ you are here** | Static install-time scanner for supply-chain attacks (npm / PyPI / crates.io) |
+| Trust | [argus](https://github.com/majiayu000/argus) **◀ you are here** | Static install-time scanner for eight package ecosystems (npm, PyPI, crates.io, Go, NuGet, Maven, RubyGems, Composer) |
 | Trust | [vibeguard](https://github.com/majiayu000/vibeguard) | Rules, hooks, and guards against hallucinated or unverified agent changes |
 | Remember | [remem](https://github.com/majiayu000/remem) | Local-first persistent memory for Claude Code and Codex sessions |
 | Orchestrate | [harness](https://github.com/majiayu000/harness) | Rust agent orchestration platform — rules, skills, GC, observability |
