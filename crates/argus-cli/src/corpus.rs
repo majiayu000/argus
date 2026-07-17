@@ -1,6 +1,6 @@
 //! Regression-corpus execution and explicitly scoped evaluation metrics.
 
-use crate::{corpus_path, Format};
+use crate::{corpus_path, EvaluationFormat};
 use anyhow::{bail, ensure, Context, Result};
 use argus_agent::scan_agent_surface;
 use argus_core::ScanReport;
@@ -132,7 +132,7 @@ pub(crate) fn cmd_test(corpus_root: &Path) -> Result<ExitCode> {
     Ok(ExitCode::from(0))
 }
 
-pub(crate) fn cmd_eval(corpus_root: &Path, format: Format) -> Result<ExitCode> {
+pub(crate) fn cmd_eval(corpus_root: &Path, format: EvaluationFormat) -> Result<ExitCode> {
     let mut reports = Vec::new();
     for index_path in corpus_index_paths(corpus_root)? {
         let index = load_index(&index_path)?;
@@ -166,11 +166,11 @@ pub(crate) fn cmd_eval(corpus_root: &Path, format: Format) -> Result<ExitCode> {
     }
 
     match format {
-        Format::Json if reports.len() == 1 => {
+        EvaluationFormat::Json if reports.len() == 1 => {
             println!("{}", serde_json::to_string_pretty(&reports[0])?)
         }
-        Format::Json => println!("{}", serde_json::to_string_pretty(&reports)?),
-        Format::Text => {
+        EvaluationFormat::Json => println!("{}", serde_json::to_string_pretty(&reports)?),
+        EvaluationFormat::Text => {
             for report in &reports {
                 println!("dataset_type: {}", report.dataset_type);
                 println!("label_source: {}", report.label_source);
@@ -406,8 +406,8 @@ mod tests {
     #[test]
     fn corpus_commands_execute_the_frozen_agent_dataset() {
         cmd_test(&agent_corpus()).expect("corpus test command");
-        cmd_eval(&agent_corpus(), Format::Json).expect("JSON corpus eval command");
-        cmd_eval(&agent_corpus(), Format::Text).expect("text corpus eval command");
+        cmd_eval(&agent_corpus(), EvaluationFormat::Json).expect("JSON corpus eval command");
+        cmd_eval(&agent_corpus(), EvaluationFormat::Text).expect("text corpus eval command");
     }
 
     #[test]

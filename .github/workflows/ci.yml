@@ -19,6 +19,9 @@ jobs:
     name: fmt + clippy + test + corpus
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
 
@@ -41,3 +44,27 @@ jobs:
 
       - name: argus corpus test
         run: cargo run -q -p argus-cli -- corpus test --corpus corpus
+
+      - name: Generate clean SARIF smoke result
+        shell: bash
+        run: |
+          mkdir -p target/argus-sarif-smoke
+          printf '%s\n' '{"name":"argus-sarif-smoke","version":"1.0.0"}' > target/argus-sarif-smoke/package.json
+          cargo run -q -p argus-cli -- scan target/argus-sarif-smoke --format sarif > target/argus-sarif-smoke.sarif
+
+      - name: Validate finding SARIF structure
+        shell: bash
+        run: |
+          set +e
+          cargo run -q -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh --format sarif > target/argus-sarif-findings.sarif
+          scan_status=$?
+          set -e
+          test "$scan_status" -eq 1
+          jq -e '(.runs[0].tool.driver.rules | length) > 0 and (.runs[0].results | all(.ruleId and .locations[0].physicalLocation.artifactLocation.uri and .partialFingerprints["argusFinding/v1"]))' target/argus-sarif-findings.sarif
+
+      - name: Upload SARIF smoke result
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: target/argus-sarif-smoke.sarif
+          category: argus-sarif-smoke
