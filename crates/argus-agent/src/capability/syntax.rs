@@ -29,6 +29,7 @@ pub(super) struct Fact {
     pub kind: FactKind,
     pub line: usize,
     pub callee: Option<String>,
+    pub receiver: Option<StaticValue>,
     pub arguments: Vec<StaticValue>,
     pub redirect: Option<StaticValue>,
     pub text: String,
@@ -56,6 +57,7 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
             kind: FactKind::Unsupported,
             line: 1,
             callee: None,
+            receiver: None,
             arguments: Vec::new(),
             redirect: None,
             text: format!("unsupported script language for {}", file.rel),
@@ -158,6 +160,7 @@ fn collect_facts(
             kind: FactKind::Assignment,
             line: line(node),
             callee: None,
+            receiver: None,
             arguments: assignment_values(node, source, bindings, language)?,
             redirect: None,
             text: text(node, source)?.to_string(),
@@ -209,6 +212,7 @@ fn collect_facts(
                 kind: FactKind::Access,
                 line: line(node),
                 callee: None,
+                receiver: None,
                 arguments: Vec::new(),
                 redirect: None,
                 text: text(node, source)?.to_string(),
@@ -252,6 +256,7 @@ fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
         kind: FactKind::Pipeline,
         line: line(node),
         callee: source_callee,
+        receiver: None,
         arguments: sink.into_iter().collect(),
         redirect: None,
         text: text(node, source)?.to_string(),
@@ -291,6 +296,7 @@ fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Resu
         kind: FactKind::Command,
         line: line(node),
         callee: Some(canonical_callee(name, bindings)),
+        receiver: None,
         arguments,
         redirect,
         text: text(node, source)?.to_string(),
@@ -306,6 +312,7 @@ fn bash_redirect_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
             kind: FactKind::Command,
             line: line(node),
             callee: None,
+            receiver: None,
             arguments: Vec::new(),
             redirect: None,
             text: text(node, source)?.to_string(),
@@ -340,11 +347,15 @@ fn call_fact(
     function_field: &str,
     arguments_field: &str,
 ) -> Result<Fact> {
-    let function = node
-        .child_by_field_name(function_field)
+    let function_node = node.child_by_field_name(function_field);
+    let function = function_node
         .map(|child| text(child, source))
         .transpose()?
         .unwrap_or_default();
+    let receiver = function_node
+        .and_then(|child| child.child_by_field_name("object"))
+        .map(|child| static_value(child, source, bindings, language))
+        .transpose()?;
     let mut arguments = Vec::new();
     if let Some(list) = node.child_by_field_name(arguments_field) {
         let mut cursor = list.walk();
@@ -356,6 +367,7 @@ fn call_fact(
         kind: FactKind::Call,
         line: line(node),
         callee: Some(canonical_callee(function, bindings)),
+        receiver,
         arguments,
         redirect: None,
         text: text(node, source)?.to_string(),
@@ -560,11 +572,22 @@ fn static_value(
     language: ScriptLanguage,
 ) -> Result<StaticValue> {
     let raw = text(node, source)?;
+    let executable_reference = executable_reference(node, source, language)?
+        .map(|value| canonical_reference(&value, bindings));
     Ok(StaticValue {
         raw: raw.to_string(),
         resolved: resolve_static(raw, &bindings.constants),
-        executable_reference: executable_reference(node, source, language)?,
+        executable_reference,
     })
+}
+
+fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
+    bindings
+        .aliases
+        .iter()
+        .fold(raw.to_string(), |value, (alias, canonical)| {
+            value.replace(&format!("{alias}."), &format!("{canonical}."))
+        })
 }
 
 fn resolve_static(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {

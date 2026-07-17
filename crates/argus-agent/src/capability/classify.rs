@@ -34,9 +34,7 @@ pub(super) fn is_network_fact(fact: &Fact) -> bool {
             | "https.get"
             | "https.request"
     );
-    direct
-        || (matches!(callee.as_str(), "sudo" | "env") && has_network_client_argument(fact))
-        || (is_exec_wrapper(&callee) && has_network_client_argument(fact))
+    direct || wrapper_network_client(fact, &callee).is_some()
 }
 
 pub(super) fn is_incomplete_fact(fact: &Fact) -> bool {
@@ -94,10 +92,13 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
     if !eligible {
         return None;
     }
+    let provenance_only = network_fact
+        || fact.kind == FactKind::Assignment
+        || (fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
     fact.arguments
         .iter()
         .flat_map(|argument| {
-            if network_fact {
+            if provenance_only {
                 [argument.executable_reference.as_deref().unwrap_or(""), ""]
             } else {
                 [
@@ -125,22 +126,36 @@ pub(super) fn writes_agent_config(fact: &Fact) -> bool {
     if !is_writer {
         return false;
     }
-    fact.redirect
-        .iter()
-        .flat_map(|target| {
-            [
-                target.raw.as_str(),
-                target.resolved.as_deref().unwrap_or(""),
-            ]
-        })
-        .chain(fact.arguments.iter().flat_map(|argument| {
-            [
-                argument.raw.as_str(),
-                argument.resolved.as_deref().unwrap_or(""),
-            ]
-        }))
-        .chain(std::iter::once(fact.text.as_str()))
-        .any(|value| agent_config_write_re().is_match(value))
+    if fact.redirect.iter().any(static_value_is_agent_config) {
+        return true;
+    }
+    if callee.ends_with(".write_text") {
+        return fact
+            .receiver
+            .as_ref()
+            .is_some_and(static_value_is_agent_config);
+    }
+    let target = if callee == "open"
+        || callee.ends_with(".writefile")
+        || callee.ends_with(".writefilesync")
+        || callee.ends_with(".appendfile")
+        || callee.ends_with(".appendfilesync")
+    {
+        fact.arguments.first()
+    } else if matches!(callee.as_str(), "tee" | "cp" | "mv" | "install" | "sed") {
+        fact.arguments.last()
+    } else {
+        None
+    };
+    target.is_some_and(static_value_is_agent_config)
+}
+
+fn static_value_is_agent_config(value: &super::syntax::StaticValue) -> bool {
+    agent_config_write_re().is_match(&value.raw)
+        || value
+            .resolved
+            .as_deref()
+            .is_some_and(|resolved| agent_config_write_re().is_match(resolved))
 }
 
 pub(super) fn resolved_payload_matches(fact: &Fact, pattern: &Regex) -> bool {
@@ -257,22 +272,72 @@ fn is_exec_wrapper(callee: &str) -> bool {
     )
 }
 
-fn has_network_client_argument(fact: &Fact) -> bool {
-    fact.arguments.iter().any(|argument| {
-        [
-            argument.raw.as_str(),
-            argument.resolved.as_deref().unwrap_or(""),
-        ]
-        .into_iter()
-        .any(contains_network_client_token)
-    })
+fn wrapper_network_client<'a>(fact: &'a Fact, callee: &str) -> Option<&'a str> {
+    if is_exec_wrapper(callee) {
+        return fact
+            .arguments
+            .first()
+            .and_then(|argument| first_executed_token(&argument.raw))
+            .filter(|token| is_network_client_token(token));
+    }
+    if !matches!(callee, "sudo" | "env") {
+        return None;
+    }
+    shell_wrapper_command(&fact.arguments, callee).filter(|token| is_network_client_token(token))
 }
 
-fn contains_network_client_token(value: &str) -> bool {
-    value
-        .to_ascii_lowercase()
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| matches!(token, "curl" | "wget" | "iwr" | "invoke-webrequest" | "nc"))
+fn first_executed_token(raw: &str) -> Option<&str> {
+    let mut value = raw.trim();
+    if let Some((name, assigned)) = value.split_once('=') {
+        if name.trim() == "args" {
+            value = assigned.trim();
+        }
+    }
+    value = value.trim_start_matches(['[', '(']).trim_start();
+    let token = value.split(',').next()?.split_whitespace().next()?;
+    Some(token.trim_matches(['\'', '"']))
+}
+
+fn shell_wrapper_command<'a>(
+    arguments: &'a [super::syntax::StaticValue],
+    wrapper: &str,
+) -> Option<&'a str> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        let value = argument.resolved.as_deref().unwrap_or(&argument.raw);
+        if wrapper == "env" && value.contains('=') && !value.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if value.starts_with('-') {
+            let takes_value = matches!(
+                value,
+                "-u" | "--user"
+                    | "-g"
+                    | "--group"
+                    | "-h"
+                    | "--host"
+                    | "-C"
+                    | "--chdir"
+                    | "-R"
+                    | "--chroot"
+                    | "-D"
+                    | "--close-from"
+                    | "--unset"
+            );
+            index += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        return Some(value.trim_matches(['\'', '"']));
+    }
+    None
+}
+
+fn is_network_client_token(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "curl" | "wget" | "iwr" | "invoke-webrequest" | "nc"
+    )
 }
 
 fn sensitive_match_rank(value: &str) -> u8 {
