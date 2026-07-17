@@ -81,6 +81,9 @@ cargo run -p argus-cli -- corpus test
 # Machine-readable output
 cargo run -p argus-cli -- scan path/to/pkg --format json
 
+# SARIF 2.1.0 for code-scanning integrations
+cargo run -p argus-cli -- scan path/to/pkg --format sarif > argus.sarif
+
 # Scan agent surfaces: MCP configs, skills, hooks, AGENTS.md / CLAUDE.md.
 # Detects injection/override language (AGT-01), dangerous script
 # capabilities like curl|sh or secret-read + network-egress (AGT-03),
@@ -93,6 +96,35 @@ cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 ```
 
 The compiled binary is named `argus` and exits non-zero on `block`.
+
+### SARIF and GitHub Code Scanning
+
+`--format sarif` is available on package/lockfile scans, every ecosystem fetch
+command, and `agent scan`. The output preserves Argus rule IDs, severity,
+file/line evidence when present, package coordinates, and stable partial
+fingerprints. A finding without a line uses an artifact-level location; Argus
+does not invent line 1.
+
+Generic SARIF consumers can read the generated file directly. A GitHub Actions
+job can upload it with the official action (currently `v4`):
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v7
+  - run: argus scan path/to/pkg --format sarif > argus.sarif
+  - uses: github/codeql-action/upload-sarif@v4
+    with:
+      sarif_file: argus.sarif
+```
+
+Argus writes SARIF only after a complete scan report exists. Invalid input,
+parser failures, network failures, and other operational errors still write an
+error to stderr, exit `2`, and leave stdout empty instead of emitting a clean
+SARIF run. A successful SARIF report retains the normal decision exit codes:
+`allow` = 0, `block` = 1, and `allow-with-approval` = 2.
 
 ## Rule coverage (Milestone 0)
 
