@@ -3,7 +3,7 @@
 [![CI](https://github.com/majiayu000/argus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/majiayu000/argus/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> "100-eyed guardian." Static install-time scanner for eight package ecosystems, with opt-in Sigstore signature verification for npm provenance.
+> "100-eyed guardian." Static install-time scanner for eight package ecosystems, with opt-in Sigstore verification plumbing for npm provenance.
 
 `argus` is a pre-release Rust CLI that inspects package artifacts from npm,
 PyPI, crates.io, Go modules, NuGet, Maven, RubyGems, and Composer/Packagist
@@ -18,7 +18,7 @@ All rows describe code implemented on `main`, not a released binary contract.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
-| npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, and text/binary content rules | Static rules can miss obfuscated or dynamic behavior; full Sigstore verification is opt-in |
+| npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, and text/binary content rules | Static rules can miss obfuscated or dynamic behavior; Sigstore plumbing is opt-in and real npm v0.2 bundles cannot yet reach a Verified verdict because of the documented upstream `intoto/0.0.2` gap |
 | PyPI | `pypi-fetch` | PyPI JSON `digests.sha256` | sdist/wheel; `setup.py`, import-time Python surfaces, and package content | Does not execute Python or prove runtime behavior |
 | crates.io | `crates-fetch` | crates.io API SHA-256 `checksum` | `.crate`; `build.rs`, Rust source, and proc-macro structure | Does not compile code or execute procedural macros |
 | Go modules | `go-fetch` | GOPROXY `.ziphash` `h1:` directory hash when available | Module ZIP; `init`, package initializers, process and network calls | Missing/unusable `.ziphash` is reported as `go-integrity-unverified` Info and can still allow; source detection is regex-based and `sum.golang.org` transparency is not verified |
@@ -261,7 +261,7 @@ Capability snapshot (as of 2026-07-18):
 
 - **M0** — rule engine + regression corpus + CI ([#4](https://github.com/majiayu000/argus/pull/4), [#5](https://github.com/majiayu000/argus/pull/5)).
 - **M1** — npm tarball fetch + safe extraction + scan ([#6](https://github.com/majiayu000/argus/pull/6)); PyPI sdist/wheel ([#23](https://github.com/majiayu000/argus/pull/23)); crates.io `.crate` + `build.rs` analysis ([#24](https://github.com/majiayu000/argus/pull/24)); and the completed [#22](https://github.com/majiayu000/argus/issues/22) long-tail umbrella: NuGet ([#49](https://github.com/majiayu000/argus/pull/49)), Maven ([#50](https://github.com/majiayu000/argus/pull/50)), RubyGems ([#51](https://github.com/majiayu000/argus/pull/51)), Composer/Packagist ([#52](https://github.com/majiayu000/argus/pull/52)), and Go modules ([#53](https://github.com/majiayu000/argus/pull/53)).
-- **M2** — Sigstore signature verification (DSSE + Fulcio chain + Rekor inclusion + OIDC identity allowlist), opt-in behind the `sigstore` Cargo feature. Closes [#14](https://github.com/majiayu000/argus/issues/14); honest threat-disclosure of what M2 still does NOT prevent lives in [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10.
+- **M2 plumbing** — the DSSE, Fulcio-chain, Rekor-inclusion, and OIDC identity-policy path is opt-in behind the `sigstore` Cargo feature ([#14](https://github.com/majiayu000/argus/issues/14)). The current upstream verifier rejects real npm v0.2 `intoto/0.0.2` bundles, so they produce `provenance-signature-invalid` rather than a green Verified verdict; see [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10.
 
 These entries mean implemented and covered by repository tests on `main`.
 Argus remains **unreleased**: there is no tagged binary distribution or package
