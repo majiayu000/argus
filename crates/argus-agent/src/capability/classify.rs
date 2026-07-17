@@ -1,12 +1,13 @@
 use super::syntax::{Fact, FactKind};
 use super::{agent_config_write_re, resolve_host, sensitive_read_re};
+use regex::Regex;
 
 pub(super) fn is_network_fact(fact: &Fact) -> bool {
     if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
         return false;
     }
     let callee = lower_callee(fact);
-    matches!(
+    let direct = matches!(
         callee.as_str(),
         "curl"
             | "wget"
@@ -32,7 +33,10 @@ pub(super) fn is_network_fact(fact: &Fact) -> bool {
             | "http.request"
             | "https.get"
             | "https.request"
-    )
+    );
+    direct
+        || (matches!(callee.as_str(), "sudo" | "env") && has_network_client_argument(fact))
+        || (is_exec_wrapper(&callee) && has_network_client_argument(fact))
 }
 
 pub(super) fn is_incomplete_fact(fact: &Fact) -> bool {
@@ -72,7 +76,7 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
         FactKind::Command => {
             matches!(
                 callee.as_str(),
-                "cat" | "source" | "." | "grep" | "head" | "tail" | "cp"
+                "cat" | "source" | "." | "grep" | "head" | "tail" | "cp" | "echo" | "printf"
             ) || network_fact
         }
         FactKind::Call => {
@@ -84,6 +88,7 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
                 || callee.ends_with(".readfilesync")
                 || callee.ends_with(".getenv")
         }
+        FactKind::Assignment => true,
         _ => false,
     };
     if !eligible {
@@ -102,11 +107,9 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
             }
         })
         .chain((fact.kind == FactKind::Access).then_some(fact.text.as_str()))
-        .find_map(|candidate| {
-            sensitive_read_re()
-                .find(candidate)
-                .map(|matched| matched.as_str().to_string())
-        })
+        .flat_map(|candidate| sensitive_read_re().find_iter(candidate))
+        .max_by_key(|matched| sensitive_match_rank(matched.as_str()))
+        .map(|matched| matched.as_str().to_string())
 }
 
 pub(super) fn writes_agent_config(fact: &Fact) -> bool {
@@ -136,7 +139,19 @@ pub(super) fn writes_agent_config(fact: &Fact) -> bool {
                 argument.resolved.as_deref().unwrap_or(""),
             ]
         }))
+        .chain(std::iter::once(fact.text.as_str()))
         .any(|value| agent_config_write_re().is_match(value))
+}
+
+pub(super) fn resolved_payload_matches(fact: &Fact, pattern: &Regex) -> bool {
+    pattern.is_match(&fact.text)
+        || fact.arguments.iter().any(|argument| {
+            pattern.is_match(&argument.raw)
+                || argument
+                    .resolved
+                    .as_deref()
+                    .is_some_and(|value| pattern.is_match(value))
+        })
 }
 
 fn call_mode_is_write(fact: &Fact) -> bool {
@@ -221,8 +236,67 @@ pub(super) fn is_destructive_fact(fact: &Fact) -> bool {
 }
 
 fn lower_callee(fact: &Fact) -> String {
-    fact.callee
+    let lower = fact
+        .callee
         .as_deref()
         .unwrap_or_default()
+        .to_ascii_lowercase();
+    lower.strip_prefix("node:").unwrap_or(&lower).to_string()
+}
+
+fn is_exec_wrapper(callee: &str) -> bool {
+    matches!(
+        callee,
+        "subprocess.run"
+            | "subprocess.call"
+            | "subprocess.popen"
+            | "child_process.exec"
+            | "child_process.execsync"
+            | "child_process.spawn"
+            | "child_process.spawnsync"
+    )
+}
+
+fn has_network_client_argument(fact: &Fact) -> bool {
+    fact.arguments.iter().any(|argument| {
+        [
+            argument.raw.as_str(),
+            argument.resolved.as_deref().unwrap_or(""),
+        ]
+        .into_iter()
+        .any(contains_network_client_token)
+    })
+}
+
+fn contains_network_client_token(value: &str) -> bool {
+    value
         .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| matches!(token, "curl" | "wget" | "iwr" | "invoke-webrequest" | "nc"))
+}
+
+fn sensitive_match_rank(value: &str) -> u8 {
+    let lower = value.to_ascii_lowercase();
+    if [
+        ".aws/credentials",
+        ".npmrc",
+        "id_rsa",
+        ".ssh/",
+        "keychain",
+        "anthropic_api_key",
+        "openai_api_key",
+        "aws_secret_access_key",
+        "github_token",
+        "claude_code_oauth_token",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || (lower.contains(".env")
+            && !lower.contains("process.env")
+            && !lower.contains("import.meta.env"))
+    {
+        2
+    } else {
+        1
+    }
 }

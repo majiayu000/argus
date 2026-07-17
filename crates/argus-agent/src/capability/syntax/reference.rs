@@ -33,6 +33,10 @@ fn collect(
         }
     } else {
         match node.kind() {
+            "subscript" | "subscript_expression" if is_environment_subscript(raw) => {
+                append(output, raw);
+                return Ok(());
+            }
             "string_fragment"
             | "raw_string"
             | "escape_sequence"
@@ -66,6 +70,14 @@ fn collect(
         collect(child, source, language, output)?;
     }
     Ok(())
+}
+
+fn is_environment_subscript(raw: &str) -> bool {
+    let compact: String = raw
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact.starts_with("process.env[") || compact.starts_with("os.environ[")
 }
 
 fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {

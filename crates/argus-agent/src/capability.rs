@@ -16,7 +16,8 @@ mod syntax;
 
 use classify::{
     is_destructive_fact, is_exec_fact, is_incomplete_fact, is_network_fact, is_obfuscation_fact,
-    is_remote_shell_pipeline_fact, resolve_fact_host, sensitive_read, writes_agent_config,
+    is_remote_shell_pipeline_fact, resolve_fact_host, resolved_payload_matches, sensitive_read,
+    writes_agent_config,
 };
 use syntax::FactKind;
 
@@ -262,7 +263,7 @@ fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
             );
         }
 
-        if writes_agent_config(&fact) && hook_persistence_re().is_match(&fact.text) {
+        if writes_agent_config(&fact) && resolved_payload_matches(&fact, hook_persistence_re()) {
             push_hit(
                 &mut hits,
                 &mut seen,
