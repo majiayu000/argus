@@ -432,14 +432,21 @@ fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Find
 
 fn push_hit(
     hits: &mut Vec<CapabilityHit>,
-    seen: &mut BTreeSet<(String, usize, &'static str, Option<String>)>,
+    seen: &mut BTreeSet<(String, usize, &'static str, String, Option<String>)>,
     capability: &'static str,
     file: &SurfaceFile,
     line: usize,
     detail: impl Into<String>,
     resolved_host: Option<String>,
 ) {
-    let key = (file.rel.clone(), line, capability, resolved_host.clone());
+    let detail = detail.into();
+    let key = (
+        file.rel.clone(),
+        line,
+        capability,
+        detail.clone(),
+        resolved_host.clone(),
+    );
     if !seen.insert(key) {
         return;
     }
@@ -447,7 +454,7 @@ fn push_hit(
         capability,
         rel: file.rel.clone(),
         line,
-        detail: detail.into(),
+        detail,
         resolved_host,
     });
 }
