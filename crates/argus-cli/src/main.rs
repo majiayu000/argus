@@ -10,6 +10,7 @@
 mod agent;
 mod corpus;
 mod corpus_path;
+mod sarif;
 
 use anyhow::{bail, Context, Result};
 use argus_composer::{
@@ -264,13 +265,20 @@ enum CorpusOp {
         /// Path to the corpus directory containing an evaluation-enabled index.
         #[arg(long, default_value = "corpus/agent")]
         corpus: PathBuf,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
+        #[arg(long, value_enum, default_value_t = EvaluationFormat::Text)]
+        format: EvaluationFormat,
     },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum Format {
+    Text,
+    Json,
+    Sarif,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum EvaluationFormat {
     Text,
     Json,
 }
@@ -558,6 +566,10 @@ fn cmd_fetch(
 fn emit_report(report: &ScanReport, format: Format) -> Result<ExitCode> {
     match format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Sarif => println!(
+            "{}",
+            serde_json::to_string_pretty(&sarif::render_reports(std::slice::from_ref(report))?)?
+        ),
         Format::Text => print_report_text(report),
     }
     let code = match report.decision {

@@ -1,6 +1,6 @@
 //! `argus agent scan` command handling, including AGT-02 baseline modes.
 
-use crate::{print_report_text, Format};
+use crate::{print_report_text, sarif, Format};
 use anyhow::{bail, Context, Result};
 use argus_agent::{
     scan_agent_surface_with_baseline, scan_agent_surface_with_judge, BaselineMode, LlmJudge,
@@ -84,6 +84,10 @@ pub fn cmd_agent_scan(
                 println!("{}", serde_json::to_string_pretty(&reports)?);
             }
         }
+        Format::Sarif => println!(
+            "{}",
+            serde_json::to_string_pretty(&sarif::render_reports(&reports)?)?
+        ),
         Format::Text => {
             for report in &reports {
                 print_report_text(report);
