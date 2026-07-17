@@ -1,24 +1,9 @@
 # Tasks — GH-86 文档能力快照校准
 
-- [x] `SP86-T1` 完成八生态能力矩阵。Owner: docs。Dependencies: none。
-  Done when: 每行包含 CLI、完整性来源、制品/检查面和限制。
-  Verify: 对照 `crates/argus-cli/src/main.rs` 与 PR #49–#53。
-  Covers: B-001, B-002, B-009。
-- [x] `SP86-T2` 补全 README Usage、Layout、Status、headline 和 stack table。
-  Owner: docs。Dependencies: SP86-T1。Done when: 五处公开描述一致、八个命令
-  可发现、#22 改为历史并链接 #49–#53、pre-release 状态保留。
-  Verify: `cargo run -q -p argus-cli -- --help` 与定向 `rg`。
-  Covers: B-001, B-003, B-004, B-005。
-- [x] `SP86-T3` 校准攻击目录。Owner: docs/security claims。Dependencies: none。
-  Done when: PyPI/crates.io/crypto 过期 gap 被修正，真实事件只按现有证据给 verdict，
-  汇总计数与逐行一致。Verify: 定向 `rg`、源码/fixture 对照与人工计数。
-  Covers: B-006, B-007, B-008, B-009。
-- [x] `SP86-T4` 执行确定性验证并记录证据。Owner: coordinator。
-  Dependencies: SP86-T1, SP86-T2, SP86-T3。Done when: diff hygiene、workspace
-  check/test、corpus test、CLI help 与文档定向检查全部通过。
-  Verify: `git diff --check origin/main...HEAD`; `cargo check --workspace --all-targets`;
-  `cargo test --workspace --all-targets`; `cargo run -q -p argus-cli -- corpus test --corpus corpus`。
-  Covers: B-001, B-005, B-006, B-008, B-010。
+- [x] `SP86-T1` 完成八生态能力矩阵。Covers: B-001, B-002, B-009。Owner: docs。Dependencies: none。Done when: 每行包含 CLI、完整性来源、制品/检查面和限制。Verify: 对照 `crates/argus-cli/src/main.rs` 与 PR #49–#53。
+- [x] `SP86-T2` 补全 README Usage、Layout、Status、headline 和 stack table。Covers: B-001, B-003, B-004, B-005。Owner: docs。Dependencies: SP86-T1。Done when: 五处公开描述一致、八个命令可发现、#22 改为历史并链接 #49–#53、pre-release 状态保留。Verify: `cargo run -q -p argus-cli -- --help` 与定向 `rg`。
+- [x] `SP86-T3` 校准攻击目录。Covers: B-006, B-007, B-008, B-009。Owner: docs/security claims。Dependencies: none。Done when: PyPI/crates.io/crypto 过期 gap 被修正，真实事件只按现有证据给 verdict，汇总计数与逐行一致。Verify: 定向 `rg`、源码/fixture 对照与人工计数。
+- [x] `SP86-T4` 执行确定性验证并记录证据。Covers: B-001, B-005, B-006, B-008, B-010。Owner: coordinator。Dependencies: SP86-T1, SP86-T2, SP86-T3。Done when: diff hygiene、workspace check/test、corpus test、CLI help 与文档定向检查全部通过。Verify: `git diff --check origin/main...HEAD`; `cargo check --workspace --all-targets`; `cargo test --workspace --all-targets -- --test-threads=1`; `cargo run -q -p argus-cli -- corpus test --corpus corpus`。
 
 ## Invariant Coverage
 
