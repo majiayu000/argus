@@ -21,6 +21,10 @@ one file. Parse trees with error or missing nodes return an error through `scan_
 Ruby remains classified as a script for compatibility but emits a Medium `analysis_incomplete`
 manifest finding rather than an empty allow.
 
+Sensitive values passed directly to network calls retain syntax-node provenance. Shell expansion
+nodes and Python/JS/TS identifier, member-access, and `getenv` nodes are eligible credential reads;
+ordinary string fragments, single-quoted shell dollars, and escaped shell dollars are not.
+
 ## Planned Changes Manifest
 
 <!-- specrail-planned-changes

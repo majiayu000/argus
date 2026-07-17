@@ -1,46 +1,72 @@
 use super::ScriptLanguage;
+use anyhow::{Context, Result};
+use tree_sitter::Node;
 
-pub(super) fn executable_reference(raw: &str, language: ScriptLanguage) -> Option<String> {
-    if language == ScriptLanguage::Bash {
-        return (raw.contains('$') || raw.trim_start().starts_with('@')).then(|| raw.to_string());
-    }
-    let chars: Vec<char> = raw.chars().collect();
+pub(super) fn executable_reference(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+) -> Result<Option<String>> {
     let mut output = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let quote = chars[index];
-        if matches!(quote, '\'' | '"') {
-            index += 1;
-            while index < chars.len() {
-                if chars[index] == '\\' {
-                    index += 2;
-                } else if chars[index] == quote {
-                    index += 1;
-                    break;
-                } else {
-                    index += 1;
-                }
-            }
-            continue;
+    collect(node, source, language, &mut output)?;
+    Ok((!output.trim().is_empty()).then_some(output))
+}
+
+fn collect(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    output: &mut String,
+) -> Result<()> {
+    let raw = node
+        .utf8_text(source)
+        .context("read executable reference syntax node")?;
+    if language == ScriptLanguage::Bash {
+        if raw.trim_matches(['\'', '"']).trim_start().starts_with('@')
+            || matches!(
+                node.kind(),
+                "simple_expansion" | "expansion" | "command_substitution"
+            )
+        {
+            append(output, raw);
+            return Ok(());
         }
-        if quote == '`' {
-            index += 1;
-            while index < chars.len() && chars[index] != '`' {
-                if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-                    index += 2;
-                    while index < chars.len() && chars[index] != '}' {
-                        output.push(chars[index]);
-                        index += 1;
+    } else {
+        match node.kind() {
+            "string_fragment"
+            | "raw_string"
+            | "escape_sequence"
+            | "comment"
+            | "property_identifier" => return Ok(()),
+            "attribute" | "member_expression" => {
+                append(output, raw);
+                return Ok(());
+            }
+            "call" | "call_expression" => {
+                if let Some(function) = node.child_by_field_name("function") {
+                    let callee = function
+                        .utf8_text(source)
+                        .context("read call reference callee")?;
+                    if callee.to_ascii_lowercase().ends_with("getenv") {
+                        append(output, &format!("{callee}("));
                     }
-                } else {
-                    index += 1;
                 }
             }
-            index += usize::from(index < chars.len());
-            continue;
+            "identifier" => append(output, raw),
+            _ => {}
         }
-        output.push(chars[index]);
-        index += 1;
     }
-    (!output.trim().is_empty()).then_some(output)
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect(child, source, language, output)?;
+    }
+    Ok(())
+}
+
+fn append(output: &mut String, value: &str) {
+    if !output.is_empty() {
+        output.push(' ');
+    }
+    output.push_str(value);
 }

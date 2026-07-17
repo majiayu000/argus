@@ -158,7 +158,7 @@ fn collect_facts(
             kind: FactKind::Assignment,
             line: line(node),
             callee: None,
-            arguments: assignment_values(node, source, bindings, language),
+            arguments: assignment_values(node, source, bindings, language)?,
             redirect: None,
             text: text(node, source)?.to_string(),
         });
@@ -271,18 +271,17 @@ fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Resu
             continue;
         };
         match node.field_name_for_child(index as u32) {
-            Some("argument") => arguments.push(static_value(
-                text(child, source)?,
-                bindings,
-                ScriptLanguage::Bash,
-            )),
+            Some("argument") => {
+                arguments.push(static_value(child, source, bindings, ScriptLanguage::Bash)?)
+            }
             Some("redirect") => {
                 if let Some(destination) = child.child_by_field_name("destination") {
                     redirect = Some(static_value(
-                        text(destination, source)?,
+                        destination,
+                        source,
                         bindings,
                         ScriptLanguage::Bash,
-                    ));
+                    )?);
                 }
             }
             _ => {}
@@ -319,10 +318,11 @@ fn bash_redirect_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
         if node.field_name_for_child(index as u32) == Some("redirect") {
             if let Some(destination) = child.child_by_field_name("destination") {
                 fact.redirect = Some(static_value(
-                    text(destination, source)?,
+                    destination,
+                    source,
                     bindings,
                     ScriptLanguage::Bash,
-                ));
+                )?);
                 break;
             }
         }
@@ -349,7 +349,7 @@ fn call_fact(
     if let Some(list) = node.child_by_field_name(arguments_field) {
         let mut cursor = list.walk();
         for child in list.named_children(&mut cursor) {
-            arguments.push(static_value(text(child, source)?, bindings, language));
+            arguments.push(static_value(child, source, bindings, language)?);
         }
     }
     Ok(Fact {
@@ -367,13 +367,13 @@ fn assignment_values(
     source: &[u8],
     bindings: &Bindings,
     language: ScriptLanguage,
-) -> Vec<StaticValue> {
-    ["value", "right"]
+) -> Result<Vec<StaticValue>> {
+    let value = ["value", "right"]
         .iter()
-        .find_map(|field| node.child_by_field_name(field))
-        .and_then(|child| text(child, source).ok())
-        .map(|value| vec![static_value(value, bindings, language)])
-        .unwrap_or_default()
+        .find_map(|field| node.child_by_field_name(field));
+    value
+        .map(|child| static_value(child, source, bindings, language).map(|value| vec![value]))
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 fn parse_assignment(
@@ -553,12 +553,18 @@ fn parse_shell_alias(statement: &str, bindings: &mut Bindings) {
     }
 }
 
-fn static_value(raw: &str, bindings: &Bindings, language: ScriptLanguage) -> StaticValue {
-    StaticValue {
+fn static_value(
+    node: Node<'_>,
+    source: &[u8],
+    bindings: &Bindings,
+    language: ScriptLanguage,
+) -> Result<StaticValue> {
+    let raw = text(node, source)?;
+    Ok(StaticValue {
         raw: raw.to_string(),
         resolved: resolve_static(raw, &bindings.constants),
-        executable_reference: executable_reference(raw, language),
-    }
+        executable_reference: executable_reference(node, source, language)?,
+    })
 }
 
 fn resolve_static(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {
