@@ -165,16 +165,29 @@ fn finding_location(report: &ScanReport, finding: &Finding) -> (String, Option<u
         .iter()
         .find_map(|entry| parse_evidence_location(entry))
     {
-        return (normalize_uri(&path), Some(line));
+        return (report_location_uri(report, &path), Some(line));
     }
     if let Some(location) = finding
         .location
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        return (normalize_uri(artifact_path(location)), None);
+        return (report_location_uri(report, artifact_path(location)), None);
     }
     (normalize_uri(&report.path.to_string_lossy()), None)
+}
+
+fn report_location_uri(report: &ScanReport, location: &str) -> String {
+    let location_path = std::path::Path::new(location);
+    if matches!(
+        report.artifact,
+        ArtifactKind::PackageDir | ArtifactKind::AgentSurface
+    ) && !location_path.is_absolute()
+        && report.path != std::path::Path::new(".")
+    {
+        return normalize_uri(&report.path.join(location_path).to_string_lossy());
+    }
+    normalize_uri(location)
 }
 
 fn artifact_path(location: &str) -> &str {
@@ -315,7 +328,7 @@ mod tests {
         assert_eq!(result["level"], "error");
         assert_eq!(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "package.json"
+            "fixtures/demo/package.json"
         );
         assert!(result["locations"][0]["physicalLocation"]
             .get("region")
@@ -332,7 +345,7 @@ mod tests {
         )]);
         assert_eq!(
             first_result(&document)["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "package.json"
+            "fixtures/demo/package.json"
         );
         assert_eq!(
             normalize_uri("dir name/#frag?.js"),
@@ -377,7 +390,7 @@ mod tests {
         assert_eq!(result["level"], "warning");
         assert_eq!(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "scripts/fetch.sh"
+            "skill/scripts/fetch.sh"
         );
         assert_eq!(
             result["locations"][0]["physicalLocation"]["region"]["startLine"],

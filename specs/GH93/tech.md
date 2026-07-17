@@ -28,7 +28,8 @@ GH-93
 - result 按 report/findings 原顺序输出，ruleIndex 指向排序后的 descriptor。
 - 位置优先使用首个合法 `file:positive-line` evidence，其次 finding.location，
   最后 report.path；后两者不含 region。已知 `package.json:scripts` 语义 locator
-  映射回真实 `package.json`，所有路径按 UTF-8 URI-reference 百分号编码。
+  映射回真实 `package.json`；package/agent 的相对 finding 路径基于 report.path
+  解析，lockfile 保持自身文件路径；所有路径按 UTF-8 URI-reference 百分号编码。
 - properties 保留 artifact kind、package name/version、decision、capability、host、
   evidence；缺失字段省略而不是填空字符串。
 - 使用固定 FNV-1a 64-bit 算法生成 `argusFinding/v1` fingerprint，输入格式版本化，
