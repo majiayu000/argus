@@ -3,8 +3,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use tree_sitter::{Language, Node, Parser};
 
+mod receiver;
 mod reference;
 
+use receiver::writer_receiver_value;
 use reference::executable_reference;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,7 +356,7 @@ fn call_fact(
         .unwrap_or_default();
     let receiver = function_node
         .and_then(|child| child.child_by_field_name("object"))
-        .map(|child| static_value(child, source, bindings, language))
+        .map(|child| writer_receiver_value(child, source, bindings, language))
         .transpose()?;
     let mut arguments = Vec::new();
     if let Some(list) = node.child_by_field_name(arguments_field) {

@@ -334,8 +334,9 @@ fn shell_wrapper_command<'a>(
 }
 
 fn is_network_client_token(value: &str) -> bool {
+    let executable = value.rsplit(['/', '\\']).next().unwrap_or(value);
     matches!(
-        value.to_ascii_lowercase().as_str(),
+        executable.to_ascii_lowercase().as_str(),
         "curl" | "wget" | "iwr" | "invoke-webrequest" | "nc"
     )
 }
