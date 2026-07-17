@@ -527,20 +527,15 @@ mod tests {
 
     #[cfg(unix)]
     fn judge_script(body: &str) -> (tempfile::TempDir, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().expect("judge tempdir");
         let path = dir.path().join("judge.sh");
-        let draft = dir.path().join("judge.sh.tmp");
-        std::fs::write(&draft, format!("#!/bin/sh\n{body}\n")).expect("write judge script");
-        let mut permissions = std::fs::metadata(&draft)
-            .expect("judge metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&draft, permissions).expect("set judge permissions");
-        // Publish only after the writer has closed, so Linux never observes an
-        // executable inode that is still open for writing (ETXTBSY).
-        std::fs::rename(&draft, &path).expect("publish judge script");
+        let body_path = dir.path().join("judge-body.sh");
+        std::fs::write(&body_path, format!("{body}\n")).expect("write judge scenario");
+        let runner =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/judge-runner.sh");
+        symlink(runner, &path).expect("link stable judge runner");
         (dir, path)
     }
 
