@@ -48,7 +48,11 @@ fn collect(
                         .utf8_text(source)
                         .context("read call reference callee")?;
                     if callee.to_ascii_lowercase().ends_with("getenv") {
-                        append(output, &format!("{callee}("));
+                        if let Some(key) = literal_getenv_key(node, source)? {
+                            append(output, &key);
+                        } else {
+                            append(output, &format!("{callee}("));
+                        }
                     }
                 }
             }
@@ -62,6 +66,29 @@ fn collect(
         collect(child, source, language, output)?;
     }
     Ok(())
+}
+
+fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return Ok(None);
+    };
+    let mut cursor = arguments.walk();
+    let Some(argument) = arguments.named_children(&mut cursor).next() else {
+        return Ok(None);
+    };
+    let raw = argument
+        .utf8_text(source)
+        .context("read getenv key syntax node")?
+        .trim();
+    if raw.len() < 2 {
+        return Ok(None);
+    }
+    let first = raw.as_bytes()[0];
+    let last = *raw.as_bytes().last().unwrap_or(&0);
+    if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+        return Ok(Some(raw[1..raw.len() - 1].to_string()));
+    }
+    Ok(None)
 }
 
 fn append(output: &mut String, value: &str) {
