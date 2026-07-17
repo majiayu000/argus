@@ -21,7 +21,7 @@ All rows describe code implemented on `main`, not a released binary contract.
 | npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, and text/binary content rules | Static rules can miss obfuscated or dynamic behavior; full Sigstore verification is opt-in |
 | PyPI | `pypi-fetch` | PyPI JSON `digests.sha256` | sdist/wheel; `setup.py`, import-time Python surfaces, and package content | Does not execute Python or prove runtime behavior |
 | crates.io | `crates-fetch` | crates.io API SHA-256 `checksum` | `.crate`; `build.rs`, Rust source, and proc-macro structure | Does not compile code or execute procedural macros |
-| Go modules | `go-fetch` | GOPROXY `.ziphash` `h1:` directory hash | Module ZIP; `init`, package initializers, process and network calls | Source detection is regex-based; `sum.golang.org` transparency is not verified |
+| Go modules | `go-fetch` | GOPROXY `.ziphash` `h1:` directory hash when available | Module ZIP; `init`, package initializers, process and network calls | Missing/unusable `.ziphash` is reported as `go-integrity-unverified` Info and can still allow; source detection is regex-based and `sum.golang.org` transparency is not verified |
 | NuGet | `nuget-fetch` | Catalog SHA-512 `packageHash` when available | `.nupkg`; PowerShell install hooks and MSBuild `.targets`/`.props` | Does not verify `.signature.p7s` or inspect DLL bytecode; unavailable catalog hashes are reported explicitly |
 | Maven | `maven-fetch` | `.jar.sha256`, falling back to weaker `.jar.sha1` | JAR; `pom.xml`, manifests, resources, and embedded build scripts | Does not inspect `.class` bytecode; SHA-1 fallback detects corruption but is not collision-resistant |
 | RubyGems | `gems-fetch` | Registry SHA-256 `sha` | `.gem`; gemspec, `extconf.rb`, and Ruby source | Static rules do not execute Ruby; internal archive checksums are not an independent trust anchor |
@@ -54,7 +54,7 @@ cargo run -p argus-cli -- pypi-fetch django@5.0.0 --prefer both --format json
 cargo run -p argus-cli -- crates-fetch serde@1.0.228
 cargo run -p argus-cli -- crates-fetch tokio --format json
 
-# Fetch a Go module: GOPROXY zip -> h1 dirhash verify -> static source scan
+# Fetch a Go module: GOPROXY zip -> h1 verify when .ziphash exists -> static scan
 cargo run -p argus-cli -- go-fetch golang.org/x/text@v0.16.0
 
 # Fetch a NuGet package: .nupkg -> catalog hash (when available) -> hook scan
