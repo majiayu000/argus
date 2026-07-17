@@ -352,6 +352,43 @@ fn gh59_credential_exfiltration_blocks_with_resolved_host() {
     );
 }
 
+#[test]
+fn gh87_alias_and_constant_concat_bypass_blocks() {
+    let report = scan_agent_surface(&fixture("agt06-alias-concat"))
+        .expect("scan syntax-aware bypass fixture");
+    assert_eq!(report.decision, Decision::Block);
+    let rules = report.rule_ids();
+    assert!(
+        rules.contains(&"AGT-03-secret-exfil".to_string()),
+        "{rules:?}"
+    );
+    assert!(
+        rules.contains(&"credential-access".to_string()),
+        "{rules:?}"
+    );
+    assert!(
+        rules.contains(&"network-exfiltration".to_string()),
+        "{rules:?}"
+    );
+    let egress = report
+        .findings
+        .iter()
+        .find(|finding| finding.capability.as_deref() == Some("net_egress"))
+        .expect("resolved network capability");
+    assert_eq!(
+        egress.resolved_host.as_deref(),
+        Some("collector.attacker.example.invalid")
+    );
+}
+
+#[test]
+fn gh87_comment_and_documentation_only_fixture_allows() {
+    let report =
+        scan_agent_surface(&fixture("agt06-comment-only")).expect("scan comment-only fixture");
+    assert_eq!(report.decision, Decision::Allow);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
+
 struct RecordingJudge {
     decision: Decision,
     request: Mutex<Option<LlmJudgeRequest>>,

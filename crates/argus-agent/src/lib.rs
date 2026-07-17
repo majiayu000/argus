@@ -106,7 +106,7 @@ fn scan_agent_surface_inner(
 
     let mut findings: Vec<Finding> = Vec::new();
     injection::run(&files, &mut findings);
-    capability::run(&files, &mut findings);
+    capability::run(&files, &mut findings)?;
     config::run(path, &files, &mut findings);
 
     match mode {
@@ -503,6 +503,24 @@ mod tests {
         assert!(
             result.is_err(),
             "oversized skill script was silently skipped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_supported_skill_script_returns_error() -> Result<()> {
+        let root = tempdir();
+        std::fs::write(root.join("SKILL.md"), "---\nname: demo\n---\n")?;
+        std::fs::create_dir_all(root.join("scripts"))?;
+        std::fs::write(root.join("scripts/install.py"), "def broken(:\n  pass")?;
+
+        let error = scan_agent_surface(&root)
+            .expect_err("malformed supported script produced a scan decision");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("scripts/install.py"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("incomplete Python syntax parse"),
+            "{diagnostic}"
         );
         Ok(())
     }

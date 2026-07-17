@@ -5,10 +5,20 @@
 //! high-risk mismatches, keeping benign capability use at approval level.
 
 use crate::{SurfaceFile, SurfaceKind};
+use anyhow::Result;
 use argus_core::{Finding, Severity};
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
+
+mod classify;
+mod syntax;
+
+use classify::{
+    is_destructive_fact, is_exec_fact, is_incomplete_fact, is_network_fact, is_obfuscation_fact,
+    resolve_fact_host, sensitive_read, writes_agent_config,
+};
+use syntax::FactKind;
 
 const RULE_REMOTE_EXEC: &str = "AGT-03-remote-exec";
 const RULE_SECRET_EXFIL: &str = "AGT-03-secret-exfil";
@@ -113,24 +123,6 @@ impl CapabilityHit {
     }
 }
 
-fn remote_exec_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)((curl|wget)[^\n|]*\|\s*(ba|z|da)?sh\b)|((iwr|invoke-webrequest)[^\n]*\|\s*iex\b)")
-            .expect("remote-exec pattern compiles")
-    })
-}
-
-fn network_call_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)\b(curl|wget|iwr|invoke-webrequest|nc)\b|fetch\s*\(|XMLHttpRequest|requests\.(get|post|put)|urllib\.request|httpx\.(get|post|put)",
-        )
-        .expect("network call pattern compiles")
-    })
-}
-
 fn url_host_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -166,61 +158,55 @@ fn hook_persistence_re() -> &'static Regex {
     })
 }
 
-fn obfuscation_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)(base64\s+(-d|--decode|-D)|openssl\s+enc|atob\s*\(|fromCharCode|eval\s*\()",
-        )
-        .expect("obfuscation pattern compiles")
-    })
-}
-
-fn shell_pipe_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)\|\s*(ba|z|da)?sh\b|\|\s*iex\b").expect("shell pipe pattern compiles")
-    })
-}
-
-pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) {
+pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     let intent = Intent::from_files(files);
     for file in files {
         if file.kind != SurfaceKind::Script {
             continue;
         }
-        let hits = extract_capabilities(file);
+        let hits = extract_capabilities(file)?;
         emit_findings(intent, &hits, findings);
     }
+    Ok(())
 }
 
-fn extract_capabilities(file: &SurfaceFile) -> Vec<CapabilityHit> {
+fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
-
-    for (idx, line) in file.content.lines().enumerate() {
-        let line_no = idx + 1;
-
-        if remote_exec_re().is_match(line) {
+    for fact in syntax::analyze(file)? {
+        if fact.kind == FactKind::Unsupported {
             push_hit(
                 &mut hits,
                 &mut seen,
-                "exec_eval",
+                "analysis_incomplete",
                 file,
-                line_no,
-                "remote download piped to shell",
+                fact.line,
+                fact.text,
+                None,
+            );
+            continue;
+        }
+
+        if is_incomplete_fact(&fact) {
+            push_hit(
+                &mut hits,
+                &mut seen,
+                "analysis_incomplete",
+                file,
+                fact.line,
+                "dynamic import, require, or command dispatch could not be statically resolved",
                 None,
             );
         }
 
-        if network_call_re().is_match(line) {
-            if let Some(host) = resolve_host(line) {
+        if is_network_fact(&fact) {
+            if let Some(host) = resolve_fact_host(&fact) {
                 push_hit(
                     &mut hits,
                     &mut seen,
                     "net_egress",
                     file,
-                    line_no,
+                    fact.line,
                     format!("network egress to {host}"),
                     Some(host),
                 );
@@ -230,78 +216,90 @@ fn extract_capabilities(file: &SurfaceFile) -> Vec<CapabilityHit> {
                     &mut seen,
                     "unresolved_host",
                     file,
-                    line_no,
+                    fact.line,
                     "network egress host could not be statically resolved",
                     None,
                 );
             }
         }
 
-        if let Some(m) = sensitive_read_re().find(line) {
+        if let Some(sensitive) = sensitive_read(&fact) {
             push_hit(
                 &mut hits,
                 &mut seen,
                 "sensitive_read",
                 file,
-                line_no,
+                fact.line,
                 format!(
                     "reads sensitive token or credential `{}`",
-                    snippet(m.as_str())
+                    snippet(&sensitive)
                 ),
                 None,
             );
         }
 
-        if agent_config_write_re().is_match(line) {
+        if writes_agent_config(&fact) {
             push_hit(
                 &mut hits,
                 &mut seen,
                 "agent_config_write",
                 file,
-                line_no,
+                fact.line,
                 "writes agent configuration or hook path",
                 None,
             );
         }
 
-        if hook_persistence_re().is_match(line) {
+        if writes_agent_config(&fact) && hook_persistence_re().is_match(&fact.text) {
             push_hit(
                 &mut hits,
                 &mut seen,
                 "persistence",
                 file,
-                line_no,
+                fact.line,
                 "persists or auto-approves an agent hook",
                 None,
             );
         }
 
-        if obfuscation_re().is_match(line) {
+        if is_obfuscation_fact(&fact) {
             push_hit(
                 &mut hits,
                 &mut seen,
                 "obfuscation",
                 file,
-                line_no,
+                fact.line,
                 "decodes or evaluates obfuscated content",
                 None,
             );
         }
 
-        if shell_pipe_re().is_match(line) {
+        if is_exec_fact(&fact) {
             push_hit(
                 &mut hits,
                 &mut seen,
                 "exec_eval",
                 file,
-                line_no,
-                "pipes data into shell execution",
+                fact.line,
+                "executes code, a subprocess, or a shell pipeline",
+                None,
+            );
+        }
+
+        if is_destructive_fact(&fact) {
+            push_hit(
+                &mut hits,
+                &mut seen,
+                "destructive",
+                file,
+                fact.line,
+                "performs recursive or forced deletion",
                 None,
             );
         }
     }
 
-    hits
+    Ok(hits)
 }
 
 fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Finding>) {
@@ -317,6 +315,8 @@ fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Find
     let persistence = hits_for(hits, "persistence");
     let obfuscation = hits_for(hits, "obfuscation");
     let exec_eval = hits_for(hits, "exec_eval");
+    let destructive = hits_for(hits, "destructive");
+    let incomplete = hits_for(hits, "analysis_incomplete");
 
     let mut emitted_high = false;
 
@@ -403,8 +403,16 @@ fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Find
         }
     }
 
-    if !emitted_high && (!net.is_empty() || !unresolved.is_empty() || !sensitive.is_empty()) {
-        for hit in net.iter().chain(unresolved.iter()).chain(sensitive.iter()) {
+    if !emitted_high {
+        for hit in net
+            .iter()
+            .chain(unresolved.iter())
+            .chain(sensitive.iter())
+            .chain(exec_eval.iter())
+            .chain(obfuscation.iter())
+            .chain(destructive.iter())
+            .chain(incomplete.iter())
+        {
             findings.push(hit.finding(RULE_CAPABILITY_MANIFEST, Severity::Medium, &hit.detail));
         }
     }
@@ -507,6 +515,10 @@ fn snippet(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) {
+        super::run(files, findings).expect("capability analysis");
+    }
 
     fn script(content: &str) -> SurfaceFile {
         SurfaceFile {
@@ -673,6 +685,43 @@ mod tests {
         assert_rules(&f, &[RULE_AGENT_CONFIG_WRITE, RULE_CAPABILITY_MISFIT]);
         assert!(f.iter().any(|x| x.severity == Severity::High));
         assert_eq!(crate::decision::derive(&f), argus_core::Decision::Block);
+    }
+
+    #[test]
+    fn unsupported_language_is_explicit_manifest() {
+        let mut findings = Vec::new();
+        run(
+            &[SurfaceFile {
+                rel: "hook.rb".into(),
+                content: "puts 'hello'".into(),
+                kind: SurfaceKind::Script,
+            }],
+            &mut findings,
+        );
+        assert_rules(&findings, &[RULE_CAPABILITY_MANIFEST]);
+        assert_eq!(
+            findings[0].capability.as_deref(),
+            Some("analysis_incomplete")
+        );
+        assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn dynamic_require_is_explicit_manifest() {
+        let mut findings = Vec::new();
+        run(
+            &[SurfaceFile {
+                rel: "hook.js".into(),
+                content: "const client = require(moduleName);".into(),
+                kind: SurfaceKind::Script,
+            }],
+            &mut findings,
+        );
+        assert_rules(&findings, &[RULE_CAPABILITY_MANIFEST]);
+        assert_eq!(
+            findings[0].capability.as_deref(),
+            Some("analysis_incomplete")
+        );
     }
 
     fn assert_rules(findings: &[Finding], expected: &[&str]) {
