@@ -60,6 +60,11 @@ quick-xml = "0.38"
 hex = "0.4"
 tempfile = "3"
 subtle = "2"
+tree-sitter = "0.24.7"
+tree-sitter-bash = "0.23.3"
+tree-sitter-python = "0.23.6"
+tree-sitter-javascript = "0.23.1"
+tree-sitter-typescript = "0.23.2"
 
 # argus-verify (Sigstore) deps. DSSE signature verification (M2 Day 1) uses the
 # RustCrypto stack directly; the heavier `sigstore` crate (Fulcio chain + Rekor)

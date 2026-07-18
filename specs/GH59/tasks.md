@@ -1,9 +1,9 @@
 # Tasks — GH-59 能力清单 + 意图-能力错配检测
 
 - [x] `SP59-T1` 将词法层降级为候选粗筛。Owner: agent lexical rules。Done when: AGT-01/03/05 不再单独承担最终恶意判定且现有单测不回归。Verify: `cargo test -p argus-agent`。Evidence: PR #63 + 当前 25 个 agent tests 通过。
-- [x] `SP59-T2` 提取 shell 脚本能力。Owner: agent capability。Done when: shell 正负例产生稳定 manifest。Verify: capability focused tests。Evidence: PR #63。
-- [x] `SP59-T3` 提取 Python 与 JS/TS 脚本能力。Owner: agent capability。Done when: 各语言正负例产生稳定 manifest。Verify: capability focused tests。Evidence: PR #63。
-- [x] `SP59-T4` 解析静态 host 并输出 unresolved signal。Owner: agent capability。Done when: 字面 host 与无法解析的拼接均有测试。Verify: host-resolution tests。Evidence: PR #63。
+- [x] `SP59-T2` 提取 shell 脚本能力。Owner: agent capability。Done when: shell 正负例产生稳定 manifest。Verify: capability focused tests。Evidence: PR #63 建立 manifest，GH-87 完成 Tree-sitter command/redirect/pipeline facts。
+- [x] `SP59-T3` 提取 Python 与 JS/TS 脚本能力。Owner: agent capability。Done when: 各语言正负例产生稳定 manifest。Verify: capability focused tests。Evidence: PR #63 建立 manifest，GH-87 完成 Tree-sitter call/access/assignment facts 与 alias 解析。
+- [x] `SP59-T4` 解析静态 host 并输出 unresolved signal。Owner: agent capability。Done when: 字面 host 与无法解析的拼接均有测试。Verify: host-resolution tests。Evidence: GH-87 覆盖 literal、constant concat、dynamic unresolved 与 incomplete parse。
 - [x] `SP59-T5` 将 manifest 字段接入 JSON 输出。Owner: core + CLI。Done when: JSON 含 capability/evidence/resolved_host。Verify: schema 与 snapshot tests。Evidence: PR #63。
 - [x] `SP59-T6` 从 frontmatter/description 提取意图粗类。Owner: agent intent。Done when: 意图分类单测通过。Verify: intent focused tests。Evidence: PR #63。
 - [x] `SP59-T7` 实现意图-能力错配三档判决。Owner: agent decision。Done when: GH58 六个 fixture 全部符合 expected decision。Verify: `cargo run -p argus-cli -- corpus test --corpus corpus/agent`。Evidence: PR #63 + 当前 6/6 corpus 通过。

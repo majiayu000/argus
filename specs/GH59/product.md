@@ -50,12 +50,12 @@ GH-59
 
 ## Acceptance Criteria
 
-- [ ] 脚本能力提取（tree-sitter 或等价），含 host 静态解析 + unresolved 信号。
-- [ ] JSON 清单 schema：`{capability, evidence:[file:line], resolved_host?}`。
-- [ ] 意图/错配规则过全部 GH-58 fixture，两负例保持非 block。
-- [ ] 在 GH-58 冻结 fixture 集上可复验地计算 synthetic precision/recall；
+- [x] 脚本能力提取（tree-sitter 或等价），含 host 静态解析 + unresolved 信号。
+- [x] JSON 清单 schema：`{capability, evidence:[file:line], resolved_host?}`。
+- [x] 意图/错配规则过全部 GH-58 fixture，两负例保持非 block。
+- [x] 在 GH-58 冻结 fixture 集上可复验地计算 synthetic precision/recall；
       849 行真实 worklist 在获得人工标签和完整负例前不得宣称 recall。
-- [ ] `--llm-judge` 可选、默认关；核心保持确定性。
+- [x] `--llm-judge` 可选、默认关；核心保持确定性。
 
 ## 评估契约修订
 
@@ -81,3 +81,5 @@ fixture。`expectedDecision == block` 是 positive label，当前扫描 decision
 分阶段：能力清单与错配判决已在 PR #63 合入；本次完成可复验的 synthetic
 fixture 指标和显式 opt-in 的 LLM judge。词法层降级需保证现有
 AGT-01/03/05 单测不回归。真实语料指标不得与 synthetic 指标混写。
+GH-87 将 PR #63 的逐行正则候选提取替换为实际执行结构的 Tree-sitter facts；
+解析不完整会报错，暂不支持的脚本语言会显式输出 `analysis_incomplete` manifest。
