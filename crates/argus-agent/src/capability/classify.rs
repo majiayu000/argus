@@ -1,15 +1,19 @@
 use super::syntax::{
-    is_shell_wrapper, shell_wrapper_command, Fact, FactKind, ScriptLanguage, StaticValue,
+    bounded_command_invocation, bounded_shell_pipeline, effective_command_token, is_exec_wrapper,
+    is_shell_wrapper, shell_wrapper_invocation, ArgumentShape, Fact, FactKind, ScriptLanguage,
+    StaticValue,
 };
 use super::{agent_config_write_re, resolve_host, sensitive_read_re};
 use regex::Regex;
 
 pub(super) fn is_network_fact(fact: &Fact) -> bool {
-    if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
-        return false;
-    }
+    network_invocation(fact).is_some()
+}
+
+fn network_invocation(fact: &Fact) -> Option<(String, Vec<StaticValue>)> {
+    matches!(fact.kind, FactKind::Command | FactKind::Call).then_some(())?;
     let callee = lower_callee(fact);
-    let direct = matches!(
+    if matches!(
         callee.as_str(),
         "curl"
             | "wget"
@@ -37,8 +41,28 @@ pub(super) fn is_network_fact(fact: &Fact) -> bool {
             | "https.request"
             | "xmlhttprequest.open"
             | "xmlhttprequest.send"
-    );
-    direct || wrapper_network_client(fact, &callee).is_some()
+    ) {
+        return Some((callee, fact.arguments.clone()));
+    }
+    if is_exec_wrapper(&callee) {
+        let (client, arguments) = match fact.argument_shape {
+            ArgumentShape::Argv => {
+                let client = fact.arguments.first().and_then(static_value_text)?;
+                (executable_basename(client), fact.arguments[1..].to_vec())
+            }
+            ArgumentShape::CommandString => {
+                let command = fact.arguments.first()?.resolved.as_deref()?;
+                bounded_command_invocation(command, true)?
+            }
+            ArgumentShape::Direct => return None,
+        };
+        return is_network_client_token(&client).then_some((client, arguments));
+    }
+    if is_shell_wrapper(&callee) {
+        let (client, arguments) = shell_wrapper_invocation(&fact.arguments, &callee)?;
+        return is_network_client_token(&client).then(|| (executable_basename(&client), arguments));
+    }
+    None
 }
 
 pub(super) fn is_incomplete_fact(fact: &Fact) -> bool {
@@ -143,16 +167,18 @@ fn pipeline_sink_is_network(fact: &Fact) -> bool {
             .iter()
             .enumerate()
             .any(|(index, argument)| {
-                curl_argument_reads_stdin(&fact.pipeline_sink_arguments, index, argument)
+                curl_argument_input(&fact.pipeline_sink_arguments, index, argument)
+                    == Some(CurlInput::Stdin)
             }),
         _ => false,
     }
 }
 
 fn network_sensitive_match(fact: &Fact) -> Option<String> {
+    let (client, arguments) = network_invocation(fact)?;
     let mut matches = Vec::new();
-    for (index, argument) in fact.arguments.iter().enumerate() {
-        let reads_file = network_argument_reads_file(fact, index, argument);
+    for (index, argument) in arguments.iter().enumerate() {
+        let reads_file = network_argument_reads_file(&client, &arguments, index, argument);
         let candidates = [
             argument.executable_reference.as_deref().unwrap_or(""),
             if reads_file {
@@ -221,75 +247,90 @@ fn best_sensitive_match<'a>(candidates: impl IntoIterator<Item = &'a str>) -> Op
         .max_by_key(|matched| sensitive_match_rank(matched))
 }
 
-fn network_argument_reads_file(fact: &Fact, index: usize, argument: &StaticValue) -> bool {
+fn network_argument_reads_file(
+    client: &str,
+    arguments: &[StaticValue],
+    index: usize,
+    argument: &StaticValue,
+) -> bool {
     let candidate = argument.executable_reference.as_deref().unwrap_or("");
     if candidate.contains("open(") {
         return true;
     }
-    effective_network_client(fact).as_deref() == Some("curl")
-        && curl_argument_reads_file(&fact.arguments, index, argument)
+    client == "curl" && curl_argument_input(arguments, index, argument) == Some(CurlInput::File)
+}
+
+fn static_value_text(value: &StaticValue) -> Option<&str> {
+    Some(
+        value
+            .resolved
+            .as_deref()
+            .unwrap_or(value.raw.as_str())
+            .trim_matches(['\'', '"']),
+    )
 }
 
 fn previous_argument(arguments: &[StaticValue], index: usize) -> Option<&str> {
     let previous = index
         .checked_sub(1)
         .and_then(|offset| arguments.get(offset))?;
-    Some(
-        previous
-            .resolved
-            .as_deref()
-            .unwrap_or(previous.raw.as_str())
-            .trim_matches(['\'', '"']),
-    )
+    static_value_text(previous)
 }
 
-fn curl_argument_reads_file(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CurlInput {
+    File,
+    Stdin,
+}
+
+fn curl_argument_input(
     arguments: &[StaticValue],
     index: usize,
     argument: &StaticValue,
-) -> bool {
-    let raw = argument.raw.trim_matches(['\'', '"']);
+) -> Option<CurlInput> {
+    let value = static_value_text(argument)?;
     let previous = previous_argument(arguments, index);
-    raw.starts_with("--upload-file=")
-        || (raw.starts_with("-T") && raw.len() > 2)
-        || ((raw.starts_with("--data=")
-            || raw.starts_with("--data-binary=")
-            || raw.starts_with("--form="))
-            && raw.contains("=@"))
-        || (raw.starts_with('@')
-            && previous.is_some_and(|option| {
-                matches!(option, "-d" | "--data" | "--data-binary" | "-F" | "--form")
-            }))
-        || (raw.contains("=@") && previous.is_some_and(|option| matches!(option, "-F" | "--form")))
-        || previous.is_some_and(|option| matches!(option, "-T" | "--upload-file"))
+    if let Some(path) = value.strip_prefix("--upload-file=") {
+        return curl_path_input(path);
+    }
+    if let Some(path) = value.strip_prefix("-T").filter(|path| !path.is_empty()) {
+        return curl_path_input(path);
+    }
+    for prefix in ["--data-binary=@", "--data=@", "-d@"] {
+        if let Some(path) = value.strip_prefix(prefix) {
+            return curl_path_input(path);
+        }
+    }
+    for prefix in ["--form=", "-F"] {
+        if let Some(form) = value.strip_prefix(prefix).filter(|form| !form.is_empty()) {
+            if let Some((_, path)) = form.split_once("=@") {
+                return curl_path_input(path);
+            }
+        }
+    }
+    if previous.is_some_and(|option| matches!(option, "-d" | "--data" | "--data-binary")) {
+        return value.strip_prefix('@').and_then(curl_path_input);
+    }
+    if previous.is_some_and(|option| matches!(option, "-F" | "--form")) {
+        if let Some((_, path)) = value.split_once("=@") {
+            return curl_path_input(path);
+        }
+        return value.strip_prefix('@').and_then(curl_path_input);
+    }
+    previous
+        .filter(|option| matches!(*option, "-T" | "--upload-file"))
+        .and_then(|_| curl_path_input(value))
 }
 
-fn curl_argument_reads_stdin(
-    arguments: &[StaticValue],
-    index: usize,
-    argument: &StaticValue,
-) -> bool {
-    let value = argument
-        .resolved
-        .as_deref()
-        .unwrap_or(argument.raw.as_str())
-        .trim_matches(['\'', '"']);
-    value == "--upload-file=-"
-        || value == "-T-"
-        || ((value.starts_with("--data=")
-            || value.starts_with("--data-binary=")
-            || value.starts_with("--form="))
-            && value.ends_with("=@-"))
-        || (value == "@-"
-            && previous_argument(arguments, index).is_some_and(|option| {
-                matches!(option, "-d" | "--data" | "--data-binary" | "-F" | "--form")
-            }))
-        || (value.ends_with("=@-")
-            && previous_argument(arguments, index)
-                .is_some_and(|option| matches!(option, "-F" | "--form")))
-        || (value == "-"
-            && previous_argument(arguments, index)
-                .is_some_and(|option| matches!(option, "-T" | "--upload-file")))
+fn curl_path_input(path: &str) -> Option<CurlInput> {
+    let path = path.trim_matches(['\'', '"']);
+    if path.is_empty() {
+        None
+    } else if path == "-" {
+        Some(CurlInput::Stdin)
+    } else {
+        Some(CurlInput::File)
+    }
 }
 
 fn pipeline_stage_emits_sensitive(
@@ -313,14 +354,6 @@ fn argument_is_positional(arguments: &[StaticValue], index: usize) -> bool {
             .unwrap_or(argument.raw.as_str())
             .starts_with('-')
     })
-}
-
-fn effective_network_client(fact: &Fact) -> Option<String> {
-    let callee = lower_callee(fact);
-    if is_network_client_token(&callee) {
-        return Some(executable_basename(&callee));
-    }
-    wrapper_network_client(fact, &callee).map(executable_basename)
 }
 
 fn nc_zero_io(arguments: &[StaticValue]) -> bool {
@@ -494,10 +527,10 @@ pub(super) fn is_obfuscation_fact(fact: &Fact) -> bool {
 
 pub(super) fn is_exec_fact(fact: &Fact) -> bool {
     if fact.kind == FactKind::Pipeline {
-        let lower = fact.text.to_ascii_lowercase();
-        return ["| sh", "|sh", "| bash", "|bash", "| zsh", "|zsh", "| iex"]
+        return pipeline_stage_callees(fact)
             .iter()
-            .any(|marker| lower.contains(marker));
+            .skip(1)
+            .any(|callee| is_shell_sink(callee));
     }
     if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
         return false;
@@ -508,20 +541,7 @@ pub(super) fn is_exec_fact(fact: &Fact) -> bool {
 
 pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
     match fact.kind {
-        FactKind::Pipeline => {
-            let source = fact
-                .callee
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let sink = fact
-                .arguments
-                .first()
-                .and_then(|value| value.resolved.as_deref())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            is_network_client_token(&source) && is_shell_sink(&sink)
-        }
+        FactKind::Pipeline => remote_shell_direct(fact),
         FactKind::Command | FactKind::Call => {
             let callee = lower_callee(fact);
             if !is_string_executor(fact, &callee) {
@@ -558,40 +578,71 @@ fn string_executor_command(fact: &Fact, callee: &str) -> Option<String> {
 /// wrapper: split the pipeline once and check whether a network client is
 /// piped into a shell interpreter. No recursion into nested command strings.
 fn remote_shell_command_string(command: &str) -> bool {
-    let segments: Vec<&str> = command.split('|').collect();
-    if segments.len() < 2 || segments.iter().any(|segment| segment.trim().is_empty()) {
+    let Some((segments, edges)) = bounded_shell_pipeline(command) else {
         return false;
-    }
-    let source = effective_command_token(segments[0]);
-    let sink = effective_command_token(segments[segments.len() - 1]);
-    source.is_some_and(|token| is_network_client_token(&token))
-        && sink.is_some_and(|token| is_shell_sink(&token))
+    };
+    let commands = segments
+        .iter()
+        .map(|segment| effective_command_token(segment))
+        .collect::<Vec<_>>();
+    remote_shell_commands(&commands, &edges)
 }
 
-/// First token of a pipeline segment after stripping quotes, flags,
-/// `VAR=value` prefixes, and shell wrappers (`sudo`, `env`), normalized to a
-/// lowercase basename.
-fn effective_command_token(segment: &str) -> Option<String> {
-    segment
-        .split_whitespace()
-        .map(|token| token.trim_matches(['\'', '"', '`']))
-        .find(|token| {
-            !token.is_empty()
-                && !token.starts_with('-')
-                && !token.contains('=')
-                && !is_shell_wrapper(token)
-        })
-        .map(|token| {
-            token
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(token)
-                .to_ascii_lowercase()
-        })
+fn remote_shell_direct(fact: &Fact) -> bool {
+    let Some(scan_text) = fact.pipeline_scan_text.as_deref() else {
+        return false;
+    };
+    let Some((segments, edges)) = bounded_shell_pipeline(scan_text) else {
+        return false;
+    };
+    let commands = pipeline_stage_callees(fact)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    if commands.len() != segments.len() {
+        return false;
+    }
+    remote_shell_commands(&commands, &edges)
+}
+
+fn remote_shell_commands(commands: &[Option<String>], edges: &[bool]) -> bool {
+    for source_index in 0..commands.len().saturating_sub(1) {
+        let Some(source) = commands[source_index].as_deref() else {
+            continue;
+        };
+        if !is_network_client_token(source) {
+            continue;
+        }
+        for sink_index in source_index + 1..commands.len() {
+            if edges[source_index..sink_index]
+                .iter()
+                .all(|connected| *connected)
+                && commands[sink_index].as_deref().is_some_and(is_shell_sink)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn pipeline_stage_callees(fact: &Fact) -> Vec<String> {
+    let mut stages = fact
+        .pipeline_sources
+        .iter()
+        .map(|(callee, _)| callee.clone())
+        .collect::<Vec<_>>();
+    if let Some(sink) = fact.arguments.first().and_then(static_value_text) {
+        stages.push(sink.to_string());
+    }
+    stages
 }
 
 fn is_shell_sink(token: &str) -> bool {
-    matches!(token, "sh" | "bash" | "zsh" | "iex")
+    matches!(
+        executable_basename(token).as_str(),
+        "sh" | "bash" | "zsh" | "iex"
+    )
 }
 
 pub(super) fn is_destructive_fact(fact: &Fact) -> bool {
@@ -613,47 +664,6 @@ fn lower_callee(fact: &Fact) -> String {
     let lower = lower.strip_prefix("globalthis.").unwrap_or(lower);
     let lower = lower.strip_prefix("window.").unwrap_or(lower);
     lower.to_string()
-}
-
-fn is_exec_wrapper(callee: &str) -> bool {
-    matches!(
-        callee,
-        "exec"
-            | "os.system"
-            | "subprocess.run"
-            | "subprocess.call"
-            | "subprocess.popen"
-            | "child_process.exec"
-            | "child_process.execsync"
-            | "child_process.spawn"
-            | "child_process.spawnsync"
-    )
-}
-
-fn wrapper_network_client<'a>(fact: &'a Fact, callee: &str) -> Option<&'a str> {
-    if is_exec_wrapper(callee) {
-        return fact
-            .arguments
-            .first()
-            .and_then(|argument| first_executed_token(&argument.raw))
-            .filter(|token| is_network_client_token(token));
-    }
-    if !is_shell_wrapper(callee) {
-        return None;
-    }
-    shell_wrapper_command(&fact.arguments, callee).filter(|token| is_network_client_token(token))
-}
-
-fn first_executed_token(raw: &str) -> Option<&str> {
-    let mut value = raw.trim();
-    if let Some((name, assigned)) = value.split_once('=') {
-        if name.trim() == "args" {
-            value = assigned.trim();
-        }
-    }
-    value = value.trim_start_matches(['[', '(']).trim_start();
-    let token = value.split(',').next()?.split_whitespace().next()?;
-    Some(token.trim_matches(['\'', '"']))
 }
 
 fn is_network_client_token(value: &str) -> bool {
