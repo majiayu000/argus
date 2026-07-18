@@ -32,6 +32,8 @@ pub(super) struct StaticValue {
     pub executable_reference: Option<String>,
 }
 
+pub(super) type PipelineStage = (String, Vec<StaticValue>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Fact {
     pub kind: FactKind,
@@ -40,7 +42,8 @@ pub(super) struct Fact {
     pub callee: Option<String>,
     pub receiver: Option<StaticValue>,
     pub arguments: Vec<StaticValue>,
-    pub pipeline_source_arguments: Vec<StaticValue>,
+    pub pipeline_sources: Vec<PipelineStage>,
+    pub pipeline_sink_arguments: Vec<StaticValue>,
     pub redirect: Option<StaticValue>,
     pub text: String,
 }
@@ -71,7 +74,8 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
             callee: None,
             receiver: None,
             arguments: Vec::new(),
-            pipeline_source_arguments: Vec::new(),
+            pipeline_sources: Vec::new(),
+            pipeline_sink_arguments: Vec::new(),
             redirect: None,
             text: format!("unsupported script language for {}", file.rel),
         }]);
@@ -176,7 +180,8 @@ fn collect_facts(
             callee: None,
             receiver: None,
             arguments: assignment_values(node, source, bindings, language)?,
-            pipeline_source_arguments: Vec::new(),
+            pipeline_sources: Vec::new(),
+            pipeline_sink_arguments: Vec::new(),
             redirect: None,
             text: text(node, source)?.to_string(),
         });
@@ -230,7 +235,8 @@ fn collect_facts(
                 callee: None,
                 receiver: None,
                 arguments: Vec::new(),
-                pipeline_source_arguments: Vec::new(),
+                pipeline_sources: Vec::new(),
+                pipeline_sink_arguments: Vec::new(),
                 redirect: None,
                 text: text(node, source)?.to_string(),
             });
@@ -269,8 +275,15 @@ fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
             resolved: Some(callee),
             executable_reference: None,
         });
-    let pipeline_source_arguments = commands
-        .first()
+    let pipeline_sources = commands
+        .iter()
+        .take(commands.len().saturating_sub(1))
+        .filter_map(|fact| {
+            pipeline_command_callee(fact).map(|callee| (callee, fact.arguments.clone()))
+        })
+        .collect();
+    let pipeline_sink_arguments = commands
+        .last()
         .map(|fact| fact.arguments.clone())
         .unwrap_or_default();
     Ok(Fact {
@@ -280,7 +293,8 @@ fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
         callee: source_callee,
         receiver: None,
         arguments: sink.into_iter().collect(),
-        pipeline_source_arguments,
+        pipeline_sources,
+        pipeline_sink_arguments,
         redirect: None,
         text: text(node, source)?.to_string(),
     })
@@ -332,7 +346,8 @@ fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Resu
         callee: Some(canonical_callee(name, bindings)),
         receiver: None,
         arguments,
-        pipeline_source_arguments: Vec::new(),
+        pipeline_sources: Vec::new(),
+        pipeline_sink_arguments: Vec::new(),
         redirect,
         text: text(node, source)?.to_string(),
     })
@@ -350,7 +365,8 @@ fn bash_redirect_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
             callee: None,
             receiver: None,
             arguments: Vec::new(),
-            pipeline_source_arguments: Vec::new(),
+            pipeline_sources: Vec::new(),
+            pipeline_sink_arguments: Vec::new(),
             redirect: None,
             text: text(node, source)?.to_string(),
         }
@@ -407,7 +423,8 @@ fn call_fact(
         callee: Some(canonical_callee(function, bindings)),
         receiver,
         arguments,
-        pipeline_source_arguments: Vec::new(),
+        pipeline_sources: Vec::new(),
+        pipeline_sink_arguments: Vec::new(),
         redirect: None,
         text: text(node, source)?.to_string(),
     })

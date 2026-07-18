@@ -82,11 +82,19 @@ fn collect(
                     let callee = function
                         .utf8_text(source)
                         .context("read call reference callee")?;
-                    if callee.to_ascii_lowercase().ends_with("getenv") {
-                        if let Some(key) = literal_getenv_key(node, source)? {
+                    let lower = callee.to_ascii_lowercase();
+                    if lower.ends_with("getenv") {
+                        if let Some(key) = literal_first_argument(node, source)? {
                             append(output, &key);
                         } else {
                             append(output, &format!("{callee}("));
+                        }
+                    } else if language == ScriptLanguage::Python
+                        && (lower == "open" || lower.ends_with(".open"))
+                    {
+                        if let Some(path) = literal_first_argument(node, source)? {
+                            append(output, &format!("open({path})"));
+                            return Ok(());
                         }
                     }
                 }
@@ -121,7 +129,7 @@ fn is_environment_subscript(raw: &str) -> bool {
     compact.starts_with("process.env[") || compact.starts_with("os.environ[")
 }
 
-fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
+fn literal_first_argument(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
     let Some(arguments) = node.child_by_field_name("arguments") else {
         return Ok(None);
     };
@@ -131,7 +139,7 @@ fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
     };
     let raw = argument
         .utf8_text(source)
-        .context("read getenv key syntax node")?
+        .context("read literal call argument syntax node")?
         .trim();
     if raw.len() < 2 {
         return Ok(None);

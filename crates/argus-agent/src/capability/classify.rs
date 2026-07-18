@@ -97,22 +97,14 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<(String, bool)> {
     if !eligible {
         return None;
     }
-    let provenance_only = network_fact
-        || fact.kind == FactKind::Assignment
-        || fact.kind == FactKind::Pipeline
-        || (fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
-    let arguments = if fact.kind == FactKind::Pipeline {
-        &fact.pipeline_source_arguments
+    let sensitive = if network_fact {
+        network_sensitive_match(fact)
+    } else if fact.kind == FactKind::Pipeline {
+        pipeline_sensitive_match(fact)
     } else {
-        &fact.arguments
-    };
-    let network_correlatable = network_fact
-        || fact.kind == FactKind::Pipeline
-        || !matches!(fact.kind, FactKind::Assignment)
-            && !(fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
-    arguments
-        .iter()
-        .flat_map(|argument| {
+        let provenance_only = fact.kind == FactKind::Assignment
+            || (fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
+        let candidates = fact.arguments.iter().flat_map(|argument| {
             if provenance_only {
                 [argument.executable_reference.as_deref().unwrap_or(""), ""]
             } else {
@@ -121,18 +113,238 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<(String, bool)> {
                     argument.resolved.as_deref().unwrap_or(""),
                 ]
             }
-        })
-        .chain((fact.kind == FactKind::Access).then_some(fact.text.as_str()))
-        .flat_map(|candidate| sensitive_read_re().find_iter(candidate))
-        .max_by_key(|matched| sensitive_match_rank(matched.as_str()))
-        .map(|matched| (matched.as_str().to_string(), network_correlatable))
+        });
+        best_sensitive_match(
+            candidates.chain((fact.kind == FactKind::Access).then_some(fact.text.as_str())),
+        )
+    };
+    let network_correlatable = network_fact
+        || fact.kind == FactKind::Pipeline
+        || !matches!(fact.kind, FactKind::Assignment)
+            && !(fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
+    sensitive.map(|matched| (matched, network_correlatable))
 }
 
 fn pipeline_sink_is_network(fact: &Fact) -> bool {
-    fact.arguments
+    let Some(sink) = fact
+        .arguments
         .first()
         .and_then(|sink| sink.resolved.as_deref())
-        .is_some_and(is_network_client_token)
+    else {
+        return false;
+    };
+    if !is_network_client_token(sink) {
+        return false;
+    }
+    match executable_basename(sink).as_str() {
+        "nc" => !nc_zero_io(&fact.pipeline_sink_arguments),
+        "curl" => fact
+            .pipeline_sink_arguments
+            .iter()
+            .enumerate()
+            .any(|(index, argument)| {
+                curl_argument_reads_stdin(&fact.pipeline_sink_arguments, index, argument)
+            }),
+        _ => false,
+    }
+}
+
+fn network_sensitive_match(fact: &Fact) -> Option<String> {
+    let mut matches = Vec::new();
+    for (index, argument) in fact.arguments.iter().enumerate() {
+        let reads_file = network_argument_reads_file(fact, index, argument);
+        let candidates = [
+            argument.executable_reference.as_deref().unwrap_or(""),
+            if reads_file {
+                argument.raw.as_str()
+            } else {
+                ""
+            },
+            reads_file
+                .then_some(argument.resolved.as_deref())
+                .flatten()
+                .unwrap_or(""),
+        ];
+        for candidate in candidates {
+            for matched in sensitive_read_re().find_iter(candidate) {
+                if !is_sensitive_path(matched.as_str()) || reads_file {
+                    matches.push(matched.as_str().to_string());
+                }
+            }
+        }
+    }
+    matches
+        .into_iter()
+        .max_by_key(|matched| sensitive_match_rank(matched))
+}
+
+fn pipeline_sensitive_match(fact: &Fact) -> Option<String> {
+    let mut matches = Vec::new();
+    for (callee, arguments) in &fact.pipeline_sources {
+        for (index, argument) in arguments.iter().enumerate() {
+            let reads_file =
+                executable_basename(callee) == "cat" && argument_is_positional(arguments, index);
+            let candidates = [
+                argument.executable_reference.as_deref().unwrap_or(""),
+                if reads_file {
+                    argument.raw.as_str()
+                } else {
+                    ""
+                },
+                reads_file
+                    .then_some(argument.resolved.as_deref())
+                    .flatten()
+                    .unwrap_or(""),
+            ];
+            for candidate in candidates {
+                for matched in sensitive_read_re().find_iter(candidate) {
+                    if pipeline_stage_emits_sensitive(callee, arguments, index, matched.as_str()) {
+                        matches.push(matched.as_str().to_string());
+                    }
+                }
+            }
+        }
+    }
+    matches
+        .into_iter()
+        .max_by_key(|matched| sensitive_match_rank(matched))
+}
+
+fn best_sensitive_match<'a>(candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    candidates
+        .into_iter()
+        .flat_map(|candidate| {
+            sensitive_read_re()
+                .find_iter(candidate)
+                .map(|matched| matched.as_str().to_string())
+        })
+        .max_by_key(|matched| sensitive_match_rank(matched))
+}
+
+fn network_argument_reads_file(fact: &Fact, index: usize, argument: &StaticValue) -> bool {
+    let candidate = argument.executable_reference.as_deref().unwrap_or("");
+    if candidate.contains("open(") {
+        return true;
+    }
+    effective_network_client(fact).as_deref() == Some("curl")
+        && curl_argument_reads_file(&fact.arguments, index, argument)
+}
+
+fn previous_argument(arguments: &[StaticValue], index: usize) -> Option<&str> {
+    let previous = index
+        .checked_sub(1)
+        .and_then(|offset| arguments.get(offset))?;
+    Some(
+        previous
+            .resolved
+            .as_deref()
+            .unwrap_or(previous.raw.as_str())
+            .trim_matches(['\'', '"']),
+    )
+}
+
+fn curl_argument_reads_file(
+    arguments: &[StaticValue],
+    index: usize,
+    argument: &StaticValue,
+) -> bool {
+    let raw = argument.raw.trim_matches(['\'', '"']);
+    let previous = previous_argument(arguments, index);
+    raw.starts_with("--upload-file=")
+        || (raw.starts_with("-T") && raw.len() > 2)
+        || ((raw.starts_with("--data=")
+            || raw.starts_with("--data-binary=")
+            || raw.starts_with("--form="))
+            && raw.contains("=@"))
+        || (raw.starts_with('@')
+            && previous.is_some_and(|option| {
+                matches!(option, "-d" | "--data" | "--data-binary" | "-F" | "--form")
+            }))
+        || (raw.contains("=@") && previous.is_some_and(|option| matches!(option, "-F" | "--form")))
+        || previous.is_some_and(|option| matches!(option, "-T" | "--upload-file"))
+}
+
+fn curl_argument_reads_stdin(
+    arguments: &[StaticValue],
+    index: usize,
+    argument: &StaticValue,
+) -> bool {
+    let value = argument
+        .resolved
+        .as_deref()
+        .unwrap_or(argument.raw.as_str())
+        .trim_matches(['\'', '"']);
+    value == "--upload-file=-"
+        || value == "-T-"
+        || ((value.starts_with("--data=")
+            || value.starts_with("--data-binary=")
+            || value.starts_with("--form="))
+            && value.ends_with("=@-"))
+        || (value == "@-"
+            && previous_argument(arguments, index).is_some_and(|option| {
+                matches!(option, "-d" | "--data" | "--data-binary" | "-F" | "--form")
+            }))
+        || (value.ends_with("=@-")
+            && previous_argument(arguments, index)
+                .is_some_and(|option| matches!(option, "-F" | "--form")))
+        || (value == "-"
+            && previous_argument(arguments, index)
+                .is_some_and(|option| matches!(option, "-T" | "--upload-file")))
+}
+
+fn pipeline_stage_emits_sensitive(
+    callee: &str,
+    arguments: &[StaticValue],
+    index: usize,
+    matched: &str,
+) -> bool {
+    match executable_basename(callee).as_str() {
+        "echo" | "printf" => !is_sensitive_path(matched),
+        "cat" => is_sensitive_path(matched) && argument_is_positional(arguments, index),
+        _ => false,
+    }
+}
+
+fn argument_is_positional(arguments: &[StaticValue], index: usize) -> bool {
+    arguments.get(index).is_some_and(|argument| {
+        !argument
+            .resolved
+            .as_deref()
+            .unwrap_or(argument.raw.as_str())
+            .starts_with('-')
+    })
+}
+
+fn effective_network_client(fact: &Fact) -> Option<String> {
+    let callee = lower_callee(fact);
+    if is_network_client_token(&callee) {
+        return Some(executable_basename(&callee));
+    }
+    wrapper_network_client(fact, &callee).map(executable_basename)
+}
+
+fn nc_zero_io(arguments: &[StaticValue]) -> bool {
+    arguments.iter().any(|argument| {
+        let value = argument
+            .resolved
+            .as_deref()
+            .unwrap_or(argument.raw.as_str());
+        value == "--zero"
+            || value
+                .strip_prefix('-')
+                .is_some_and(|flags| !flags.starts_with('-') && flags.contains('z'))
+    })
+}
+
+fn is_sensitive_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let dotenv = lower.trim_matches(|character: char| {
+        character.is_whitespace() || ",;:\"'()[]{}".contains(character)
+    }) == ".env";
+    dotenv
+        || [".aws/credentials", ".npmrc", "id_rsa", ".ssh/", "keychain"]
+            .iter()
+            .any(|marker| lower.contains(marker))
 }
 
 pub(super) fn writes_agent_config(fact: &Fact) -> bool {
@@ -315,12 +527,9 @@ pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
             if !is_string_executor(fact, &callee) {
                 return false;
             }
-            fact.arguments.first().is_some_and(|argument| {
-                argument
-                    .resolved
-                    .as_deref()
-                    .is_some_and(remote_shell_command_string)
-            })
+            string_executor_command(fact, &callee)
+                .as_deref()
+                .is_some_and(remote_shell_command_string)
         }
         _ => false,
     }
@@ -329,6 +538,20 @@ pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
 fn is_string_executor(fact: &Fact, callee: &str) -> bool {
     is_exec_wrapper(callee)
         || (fact.language == ScriptLanguage::Bash && matches!(callee, "eval" | "iex"))
+}
+
+fn string_executor_command(fact: &Fact, callee: &str) -> Option<String> {
+    if fact.language == ScriptLanguage::Bash && matches!(callee, "eval" | "iex") {
+        let arguments: Option<Vec<&str>> = fact
+            .arguments
+            .iter()
+            .map(|argument| argument.resolved.as_deref())
+            .collect();
+        return arguments
+            .filter(|values| !values.is_empty())
+            .map(|values| values.join(" "));
+    }
+    fact.arguments.first()?.resolved.clone()
 }
 
 /// Bounded one-level parse of a shell command string handed to an exec
@@ -434,11 +657,18 @@ fn first_executed_token(raw: &str) -> Option<&str> {
 }
 
 fn is_network_client_token(value: &str) -> bool {
-    let executable = value.rsplit(['/', '\\']).next().unwrap_or(value);
     matches!(
-        executable.to_ascii_lowercase().as_str(),
+        executable_basename(value).as_str(),
         "curl" | "wget" | "iwr" | "invoke-webrequest" | "nc"
     )
+}
+
+fn executable_basename(value: &str) -> String {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase()
 }
 
 fn sensitive_match_rank(value: &str) -> u8 {
