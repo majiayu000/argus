@@ -137,9 +137,14 @@ fn write_target(fact: &Fact) -> Option<&StaticValue> {
     if callee.ends_with(".write_text") || callee.ends_with(".write_bytes") {
         return fact.receiver.as_ref();
     }
-    if [".writefile", ".writefilesync", ".appendfile", ".appendfilesync"]
-        .iter()
-        .any(|suffix| callee.ends_with(suffix))
+    if [
+        ".writefile",
+        ".writefilesync",
+        ".appendfile",
+        ".appendfilesync",
+    ]
+    .iter()
+    .any(|suffix| callee.ends_with(suffix))
     {
         return fact.arguments.first();
     }

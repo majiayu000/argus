@@ -529,7 +529,6 @@ fn snippet(s: &str) -> String {
     out
 }
 
-
 #[cfg(test)]
 #[path = "capability/tests.rs"]
 mod tests;
