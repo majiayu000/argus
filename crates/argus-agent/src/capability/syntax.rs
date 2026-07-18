@@ -35,16 +35,18 @@ pub(super) struct StaticValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Fact {
     pub kind: FactKind,
+    pub language: ScriptLanguage,
     pub line: usize,
     pub callee: Option<String>,
     pub receiver: Option<StaticValue>,
     pub arguments: Vec<StaticValue>,
+    pub pipeline_source_arguments: Vec<StaticValue>,
     pub redirect: Option<StaticValue>,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScriptLanguage {
+pub(super) enum ScriptLanguage {
     Bash,
     Python,
     JavaScript,
@@ -56,6 +58,7 @@ enum ScriptLanguage {
 struct Bindings {
     aliases: BTreeMap<String, String>,
     constants: BTreeMap<String, String>,
+    provenance: BTreeMap<String, String>,
 }
 
 pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
@@ -63,10 +66,12 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
     if language == ScriptLanguage::Unsupported {
         return Ok(vec![Fact {
             kind: FactKind::Unsupported,
+            language,
             line: 1,
             callee: None,
             receiver: None,
             arguments: Vec::new(),
+            pipeline_source_arguments: Vec::new(),
             redirect: None,
             text: format!("unsupported script language for {}", file.rel),
         }]);
@@ -166,10 +171,12 @@ fn collect_facts(
     if is_assignment(node.kind(), language) {
         facts.push(Fact {
             kind: FactKind::Assignment,
+            language,
             line: line(node),
             callee: None,
             receiver: None,
             arguments: assignment_values(node, source, bindings, language)?,
+            pipeline_source_arguments: Vec::new(),
             redirect: None,
             text: text(node, source)?.to_string(),
         });
@@ -218,10 +225,12 @@ fn collect_facts(
         {
             facts.push(Fact {
                 kind: FactKind::Access,
+                language,
                 line: line(node),
                 callee: None,
                 receiver: None,
                 arguments: Vec::new(),
+                pipeline_source_arguments: Vec::new(),
                 redirect: None,
                 text: text(node, source)?.to_string(),
             });
@@ -251,32 +260,40 @@ fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
             commands.push(bash_command_fact(child, source, bindings)?);
         }
     }
-    let source_callee = commands.first().and_then(|fact| {
-        let callee = fact.callee.clone()?;
-        if is_shell_wrapper(&callee) {
-            return shell_wrapper_command(&fact.arguments, &callee)
-                .map(str::to_string)
-                .or(Some(callee));
-        }
-        Some(callee)
-    });
+    let source_callee = commands.first().and_then(pipeline_command_callee);
     let sink = commands
         .last()
-        .and_then(|fact| fact.callee.clone())
+        .and_then(pipeline_command_callee)
         .map(|callee| StaticValue {
             raw: callee.clone(),
             resolved: Some(callee),
             executable_reference: None,
         });
+    let pipeline_source_arguments = commands
+        .first()
+        .map(|fact| fact.arguments.clone())
+        .unwrap_or_default();
     Ok(Fact {
         kind: FactKind::Pipeline,
+        language: ScriptLanguage::Bash,
         line: line(node),
         callee: source_callee,
         receiver: None,
         arguments: sink.into_iter().collect(),
+        pipeline_source_arguments,
         redirect: None,
         text: text(node, source)?.to_string(),
     })
+}
+
+fn pipeline_command_callee(fact: &Fact) -> Option<String> {
+    let callee = fact.callee.clone()?;
+    if is_shell_wrapper(&callee) {
+        return shell_wrapper_command(&fact.arguments, &callee)
+            .map(str::to_string)
+            .or(Some(callee));
+    }
+    Some(callee)
 }
 
 fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
@@ -310,10 +327,12 @@ fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Resu
     }
     Ok(Fact {
         kind: FactKind::Command,
+        language: ScriptLanguage::Bash,
         line: line(node),
         callee: Some(canonical_callee(name, bindings)),
         receiver: None,
         arguments,
+        pipeline_source_arguments: Vec::new(),
         redirect,
         text: text(node, source)?.to_string(),
     })
@@ -326,10 +345,12 @@ fn bash_redirect_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
     } else {
         Fact {
             kind: FactKind::Command,
+            language: ScriptLanguage::Bash,
             line: line(node),
             callee: None,
             receiver: None,
             arguments: Vec::new(),
+            pipeline_source_arguments: Vec::new(),
             redirect: None,
             text: text(node, source)?.to_string(),
         }
@@ -381,10 +402,12 @@ fn call_fact(
     }
     Ok(Fact {
         kind: FactKind::Call,
+        language,
         line: line(node),
         callee: Some(canonical_callee(function, bindings)),
         receiver,
         arguments,
+        pipeline_source_arguments: Vec::new(),
         redirect: None,
         text: text(node, source)?.to_string(),
     })
@@ -438,7 +461,15 @@ fn parse_assignment(
     }
     bindings.constants.remove(name);
     bindings.aliases.remove(name);
+    bindings.provenance.remove(name);
     let raw_value = text(value_node, source)?;
+    if language == ScriptLanguage::Bash {
+        if let Some(provenance) =
+            static_value(value_node, source, bindings, language)?.executable_reference
+        {
+            bindings.provenance.insert(name.to_string(), provenance);
+        }
+    }
     let resolved = resolve_static(raw_value, &bindings.constants).or_else(|| {
         (language == ScriptLanguage::Bash && !raw_value.contains('$'))
             .then(|| raw_value.trim().to_string())
@@ -600,11 +631,18 @@ fn static_value(
 }
 
 fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
-    bindings
+    let aliased = bindings
         .aliases
         .iter()
         .fold(raw.to_string(), |value, (alias, canonical)| {
             replace_identifier_token(&value, alias, canonical)
+        });
+    bindings
+        .provenance
+        .iter()
+        .fold(aliased, |value, (name, provenance)| {
+            let braced = replace_identifier_token(&value, &format!("${{{name}}}"), provenance);
+            replace_identifier_token(&braced, &format!("${name}"), provenance)
         })
 }
 
@@ -699,6 +737,7 @@ fn invalidate_assignments(
             if is_identifier(name) {
                 bindings.constants.remove(name);
                 bindings.aliases.remove(name);
+                bindings.provenance.remove(name);
             }
         }
     }

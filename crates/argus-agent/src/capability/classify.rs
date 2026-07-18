@@ -1,4 +1,6 @@
-use super::syntax::{is_shell_wrapper, shell_wrapper_command, Fact, FactKind, StaticValue};
+use super::syntax::{
+    is_shell_wrapper, shell_wrapper_command, Fact, FactKind, ScriptLanguage, StaticValue,
+};
 use super::{agent_config_write_re, resolve_host, sensitive_read_re};
 use regex::Regex;
 
@@ -68,7 +70,7 @@ pub(super) fn resolve_fact_host(fact: &Fact) -> Option<String> {
     })
 }
 
-pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
+pub(super) fn sensitive_read(fact: &Fact) -> Option<(String, bool)> {
     let callee = lower_callee(fact);
     let network_fact = is_network_fact(fact);
     let eligible = match fact.kind {
@@ -89,6 +91,7 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
                 || callee.ends_with(".getenv")
         }
         FactKind::Assignment => true,
+        FactKind::Pipeline => pipeline_sink_is_network(fact),
         _ => false,
     };
     if !eligible {
@@ -96,8 +99,18 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
     }
     let provenance_only = network_fact
         || fact.kind == FactKind::Assignment
+        || fact.kind == FactKind::Pipeline
         || (fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
-    fact.arguments
+    let arguments = if fact.kind == FactKind::Pipeline {
+        &fact.pipeline_source_arguments
+    } else {
+        &fact.arguments
+    };
+    let network_correlatable = network_fact
+        || fact.kind == FactKind::Pipeline
+        || !matches!(fact.kind, FactKind::Assignment)
+            && !(fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
+    arguments
         .iter()
         .flat_map(|argument| {
             if provenance_only {
@@ -112,30 +125,42 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
         .chain((fact.kind == FactKind::Access).then_some(fact.text.as_str()))
         .flat_map(|candidate| sensitive_read_re().find_iter(candidate))
         .max_by_key(|matched| sensitive_match_rank(matched.as_str()))
-        .map(|matched| matched.as_str().to_string())
+        .map(|matched| (matched.as_str().to_string(), network_correlatable))
+}
+
+fn pipeline_sink_is_network(fact: &Fact) -> bool {
+    fact.arguments
+        .first()
+        .and_then(|sink| sink.resolved.as_deref())
+        .is_some_and(is_network_client_token)
 }
 
 pub(super) fn writes_agent_config(fact: &Fact) -> bool {
     if fact.redirect.iter().any(static_value_is_agent_config) {
         return true;
     }
-    write_target(fact).is_some_and(static_value_is_agent_config)
+    write_targets(fact)
+        .into_iter()
+        .any(static_value_is_agent_config)
 }
 
-/// Map a fact to the static value naming its write destination. Targets are
-/// derived from the operation's shape (receiver, first argument, last
-/// argument) so every writer with the same shape shares one entry instead of
-/// a per-callee early return.
-fn write_target(fact: &Fact) -> Option<&StaticValue> {
+/// Map a fact to the static values naming configuration-sensitive endpoints.
+/// Targets are derived from the operation's shape (receiver, positional
+/// operands, first argument, last argument) so every writer with the same
+/// shape shares one entry instead of a per-callee early return.
+fn write_targets(fact: &Fact) -> Vec<&StaticValue> {
     if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
-        return None;
+        return Vec::new();
     }
     let callee = lower_callee(fact);
-    if matches!(callee.as_str(), "tee" | "cp" | "mv" | "install" | "sed") {
-        return fact.arguments.last();
+    if matches!(callee.as_str(), "cp" | "mv") {
+        return positional_file_operands(&fact.arguments);
+    }
+    if matches!(callee.as_str(), "tee" | "install" | "sed") {
+        return fact.arguments.last().into_iter().collect();
     }
     if callee.ends_with(".write_text") || callee.ends_with(".write_bytes") {
-        return fact.receiver.as_ref();
+        return fact.receiver.iter().collect();
     }
     if [
         ".writefile",
@@ -146,17 +171,70 @@ fn write_target(fact: &Fact) -> Option<&StaticValue> {
     .iter()
     .any(|suffix| callee.ends_with(suffix))
     {
-        return fact.arguments.first();
+        return fact.arguments.first().into_iter().collect();
     }
     if (callee == "open" || callee == "opensync" || callee.ends_with(".opensync"))
         && call_mode_is_write(fact)
     {
-        return fact.arguments.first();
+        return fact.arguments.first().into_iter().collect();
     }
     if callee == "createwritestream" || callee.ends_with(".createwritestream") {
-        return fact.arguments.first();
+        return fact.arguments.first().into_iter().collect();
     }
-    None
+    Vec::new()
+}
+
+fn positional_file_operands(arguments: &[StaticValue]) -> Vec<&StaticValue> {
+    let mut operands = Vec::new();
+    let mut target_directory = None;
+    let mut options = true;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        let value = argument
+            .resolved
+            .as_deref()
+            .unwrap_or(argument.raw.as_str());
+        if options && value == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if options && matches!(value, "-S" | "--suffix") {
+            index += 2;
+            continue;
+        }
+        if options && matches!(value, "-t" | "--target-directory") {
+            if let Some(target) = arguments.get(index + 1) {
+                target_directory = Some(target);
+            }
+            index += 2;
+            continue;
+        }
+        if options
+            && (value.starts_with("--target-directory=")
+                || value
+                    .strip_prefix("-t")
+                    .is_some_and(|path| !path.is_empty()))
+        {
+            target_directory = Some(argument);
+            index += 1;
+            continue;
+        }
+        if options && value.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        operands.push(argument);
+        index += 1;
+    }
+    match target_directory {
+        Some(target) if !operands.is_empty() => {
+            operands.push(target);
+            operands
+        }
+        None if operands.len() >= 2 => operands,
+        _ => Vec::new(),
+    }
 }
 
 fn static_value_is_agent_config(value: &StaticValue) -> bool {
@@ -233,19 +311,24 @@ pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
             is_network_client_token(&source) && is_shell_sink(&sink)
         }
         FactKind::Command | FactKind::Call => {
-            if !is_exec_wrapper(&lower_callee(fact)) {
+            let callee = lower_callee(fact);
+            if !is_string_executor(fact, &callee) {
                 return false;
             }
             fact.arguments.first().is_some_and(|argument| {
-                let command = argument
+                argument
                     .resolved
-                    .clone()
-                    .unwrap_or_else(|| argument.raw.trim_matches(['\'', '"', '`']).to_string());
-                remote_shell_command_string(&command)
+                    .as_deref()
+                    .is_some_and(remote_shell_command_string)
             })
         }
         _ => false,
     }
+}
+
+fn is_string_executor(fact: &Fact, callee: &str) -> bool {
+    is_exec_wrapper(callee)
+        || (fact.language == ScriptLanguage::Bash && matches!(callee, "eval" | "iex"))
 }
 
 /// Bounded one-level parse of a shell command string handed to an exec

@@ -191,3 +191,63 @@ fn unsupported_script_is_explicit() {
     let facts = analyze(&script("hook.rb", "puts 'hello'")).expect("unsupported fact");
     assert_eq!(facts[0].kind, FactKind::Unsupported);
 }
+
+#[test]
+fn gh102_facts_preserve_source_language() {
+    let shell = analyze(&script("run.sh", "eval \"echo safe\"")).expect("parse shell");
+    assert!(shell.iter().any(
+        |fact| fact.callee.as_deref() == Some("eval") && fact.language == ScriptLanguage::Bash
+    ));
+
+    let python = analyze(&script("run.py", "eval('echo safe')")).expect("parse python");
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval")
+            && fact.language == ScriptLanguage::Python));
+}
+
+#[test]
+fn gh102_shell_provenance_preserves_literal_suffix() {
+    let facts = analyze(&script(
+        "collect.sh",
+        "CRED=\"$HOME/.aws/credentials\"\necho \"$CRED\"",
+    ))
+    .expect("parse shell");
+    let assignment = facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Assignment)
+        .expect("assignment fact");
+    assert_eq!(
+        assignment.arguments[0].executable_reference.as_deref(),
+        Some("$HOME/.aws/credentials")
+    );
+    let echo = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("echo"))
+        .expect("echo command");
+    assert!(echo.arguments[0]
+        .executable_reference
+        .as_deref()
+        .is_some_and(|reference| reference.contains("$HOME/.aws/credentials")));
+}
+
+#[test]
+fn gh102_shell_provenance_does_not_invent_literal_or_dynamic_suffixes() {
+    for source in [
+        "FIELD=\"$USER:OPENAI_API_KEY\"\necho \"$FIELD\"",
+        "PATH_REF=\"$HOME/$SUFFIX\"\necho \"$PATH_REF\"",
+        "FIELD=\"OPENAI_API_KEY\"\necho \"$FIELD\"",
+        "CRED=\"/home/demo/.aws/credentials\"\necho \"$CRED\"",
+        "CRED='$HOME/.aws/credentials'\necho \"$CRED\"",
+    ] {
+        let facts = analyze(&script("collect.sh", source)).expect("parse shell");
+        let echo = facts
+            .iter()
+            .find(|fact| fact.callee.as_deref() == Some("echo"))
+            .expect("echo command");
+        assert!(!echo.arguments[0]
+            .executable_reference
+            .as_deref()
+            .is_some_and(|reference| reference.contains(".aws/credentials")));
+    }
+}

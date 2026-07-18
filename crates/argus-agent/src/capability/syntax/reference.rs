@@ -9,7 +9,36 @@ pub(super) fn executable_reference(
 ) -> Result<Option<String>> {
     let mut output = String::new();
     collect(node, source, language, &mut output)?;
+    if language == ScriptLanguage::Bash
+        && !output.is_empty()
+        && !output.contains(char::is_whitespace)
+    {
+        let raw = node
+            .utf8_text(source)
+            .context("read executable reference syntax node")?;
+        output = bash_path_provenance(raw, &output);
+    }
     Ok((!output.trim().is_empty()).then_some(output))
+}
+
+/// Preserve a static path suffix adjacent to one executed shell reference.
+/// This keeps `$HOME/.aws/credentials` intact without treating unrelated
+/// literal field names (for example `$USER:OPENAI_API_KEY`) as provenance.
+fn bash_path_provenance(raw: &str, reference: &str) -> String {
+    let value = raw.trim().trim_matches(['\'', '"']);
+    let Some(start) = value.find(reference) else {
+        return reference.to_string();
+    };
+    let suffix = value[start + reference.len()..].trim_end_matches(['\'', '"']);
+    let is_static_path = suffix.starts_with('/')
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._~-".contains(character));
+    if is_static_path {
+        format!("{reference}{suffix}")
+    } else {
+        reference.to_string()
+    }
 }
 
 fn collect(

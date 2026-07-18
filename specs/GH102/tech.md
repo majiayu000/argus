@@ -47,11 +47,14 @@ Link to `product.md`.
 纯字面表达式仍没有 executable provenance。Bash 的变量扩展与相邻字面片段
 按源码顺序组合；无法静态确定的动态片段保留为未解析，不猜测内容。
 classifier 继续只读取 provenance 字段，不退回对全部 raw 文本做敏感匹配。
+capability 聚合层同时保留 assignment/local-use 的既有 credential-access
+manifest，但只有直接读取、网络参数或相连网络管道中的结构化来源可参与
+secret-exfil 的网络相关性判定，避免“本地使用 + 无关联网”被错误合并。
 
 ## 计划变更清单
 
 <!-- specrail-planned-changes
-{"version":1,"issue":102,"complete":true,"paths":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/capability/syntax/reference.rs","crates/argus-agent/src/capability/syntax/tests.rs","crates/argus-agent/src/capability/tests.rs","crates/argus-agent/tests/gh87_capability.rs"],"spec_refs":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md"]}
+{"version":1,"issue":102,"complete":true,"paths":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md","crates/argus-agent/src/capability.rs","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/capability/syntax/reference.rs","crates/argus-agent/src/capability/syntax/tests.rs","crates/argus-agent/src/capability/tests.rs","crates/argus-agent/tests/gh87_capability.rs"],"spec_refs":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md"]}
 -->
 
 ## Product-to-Test Mapping
