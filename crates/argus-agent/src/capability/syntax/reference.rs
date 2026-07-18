@@ -33,7 +33,9 @@ fn collect(
         }
     } else {
         match node.kind() {
-            "subscript" | "subscript_expression" if is_environment_subscript(raw) => {
+            "subscript" | "subscript_expression"
+                if is_environment_subscript(raw) || subscript_base_is_identifier(node) =>
+            {
                 append(output, raw);
                 return Ok(());
             }
@@ -70,6 +72,16 @@ fn collect(
         collect(child, source, language, output)?;
     }
     Ok(())
+}
+
+/// Keep subscripts on plain identifiers intact (e.g. `environ['GITHUB_TOKEN']`)
+/// so alias canonicalization and sensitive-key matching see the full
+/// expression instead of a bare identifier with the key dropped.
+fn subscript_base_is_identifier(node: Node<'_>) -> bool {
+    ["value", "object"].iter().any(|field| {
+        node.child_by_field_name(field)
+            .is_some_and(|child| child.kind() == "identifier")
+    })
 }
 
 fn is_environment_subscript(raw: &str) -> bool {

@@ -3,9 +3,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use tree_sitter::{Language, Node, Parser};
 
+mod normalize;
 mod receiver;
 mod reference;
 
+pub(super) use normalize::{is_shell_wrapper, shell_wrapper_command};
+
+use normalize::{
+    constructed_class, is_identifier, replace_identifier_token, resolve_static, unquote,
+};
 use receiver::writer_receiver_value;
 use reference::executable_reference;
 
@@ -245,7 +251,15 @@ fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Res
             commands.push(bash_command_fact(child, source, bindings)?);
         }
     }
-    let source_callee = commands.first().and_then(|fact| fact.callee.clone());
+    let source_callee = commands.first().and_then(|fact| {
+        let callee = fact.callee.clone()?;
+        if is_shell_wrapper(&callee) {
+            return shell_wrapper_command(&fact.arguments, &callee)
+                .map(str::to_string)
+                .or(Some(callee));
+        }
+        Some(callee)
+    });
     let sink = commands
         .last()
         .and_then(|fact| fact.callee.clone())
@@ -438,6 +452,8 @@ fn parse_assignment(
     ) {
         if let Some(module) = required_module(raw_value) {
             bindings.aliases.insert(name.to_string(), module);
+        } else if let Some(class) = constructed_class(raw_value) {
+            bindings.aliases.insert(name.to_string(), class);
         }
     }
     Ok(())
@@ -588,62 +604,8 @@ fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
         .aliases
         .iter()
         .fold(raw.to_string(), |value, (alias, canonical)| {
-            value.replace(&format!("{alias}."), &format!("{canonical}."))
+            replace_identifier_token(&value, alias, canonical)
         })
-}
-
-fn resolve_static(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {
-    let raw = raw.trim();
-    if raw.contains('+') {
-        let mut output = String::new();
-        for part in raw.split('+') {
-            let value = resolve_static(part.trim(), constants)?;
-            output.push_str(&value);
-        }
-        return Some(output);
-    }
-    if let Some(value) = unquote(raw) {
-        return expand_shell_variables(&value, constants);
-    }
-    if is_identifier(raw) {
-        return constants.get(raw).cloned();
-    }
-    if raw.contains('$') {
-        return expand_shell_variables(raw, constants);
-    }
-    None
-}
-
-fn expand_shell_variables(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {
-    let bytes = raw.as_bytes();
-    let mut output = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'$' {
-            output.push(bytes[index] as char);
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let braced = index < bytes.len() && bytes[index] == b'{';
-        if braced {
-            index += 1;
-        }
-        let start = index;
-        while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-        {
-            index += 1;
-        }
-        if start == index || (braced && (index >= bytes.len() || bytes[index] != b'}')) {
-            return None;
-        }
-        let name = &raw[start..index];
-        if braced {
-            index += 1;
-        }
-        output.push_str(constants.get(name)?);
-    }
-    Some(output)
 }
 
 fn canonical_callee(raw: &str, bindings: &Bindings) -> String {
@@ -667,19 +629,6 @@ fn canonical_callee(raw: &str, bindings: &Bindings) -> String {
 fn required_module(raw: &str) -> Option<String> {
     let inner = raw.trim().strip_prefix("require(")?.strip_suffix(')')?;
     unquote(inner.trim())
-}
-
-fn unquote(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.len() < 2 {
-        return None;
-    }
-    let first = raw.as_bytes()[0];
-    let last = *raw.as_bytes().last()?;
-    if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
-        return Some(raw[1..raw.len() - 1].to_string());
-    }
-    None
 }
 
 fn is_import(kind: &str, language: ScriptLanguage) -> bool {
@@ -769,12 +718,6 @@ fn has_ancestor_kind(node: Node<'_>, kinds: &[&str]) -> bool {
         parent = current.parent();
     }
     false
-}
-
-fn is_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Result<&'a str> {

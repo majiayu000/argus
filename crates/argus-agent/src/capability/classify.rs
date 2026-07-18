@@ -1,4 +1,4 @@
-use super::syntax::{Fact, FactKind};
+use super::syntax::{is_shell_wrapper, shell_wrapper_command, Fact, FactKind, StaticValue};
 use super::{agent_config_write_re, resolve_host, sensitive_read_re};
 use regex::Regex;
 
@@ -33,6 +33,8 @@ pub(super) fn is_network_fact(fact: &Fact) -> bool {
             | "http.request"
             | "https.get"
             | "https.request"
+            | "xmlhttprequest.open"
+            | "xmlhttprequest.send"
     );
     direct || wrapper_network_client(fact, &callee).is_some()
 }
@@ -114,43 +116,45 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<String> {
 }
 
 pub(super) fn writes_agent_config(fact: &Fact) -> bool {
-    let callee = lower_callee(fact);
-    let is_writer = fact.redirect.is_some()
-        || matches!(callee.as_str(), "tee" | "cp" | "mv" | "install" | "sed")
-        || callee == "open" && call_mode_is_write(fact)
-        || callee.ends_with(".write_text")
-        || callee.ends_with(".writefile")
-        || callee.ends_with(".writefilesync")
-        || callee.ends_with(".appendfile")
-        || callee.ends_with(".appendfilesync");
-    if !is_writer {
-        return false;
-    }
     if fact.redirect.iter().any(static_value_is_agent_config) {
         return true;
     }
-    if callee.ends_with(".write_text") {
-        return fact
-            .receiver
-            .as_ref()
-            .is_some_and(static_value_is_agent_config);
-    }
-    let target = if callee == "open"
-        || callee.ends_with(".writefile")
-        || callee.ends_with(".writefilesync")
-        || callee.ends_with(".appendfile")
-        || callee.ends_with(".appendfilesync")
-    {
-        fact.arguments.first()
-    } else if matches!(callee.as_str(), "tee" | "cp" | "mv" | "install" | "sed") {
-        fact.arguments.last()
-    } else {
-        None
-    };
-    target.is_some_and(static_value_is_agent_config)
+    write_target(fact).is_some_and(static_value_is_agent_config)
 }
 
-fn static_value_is_agent_config(value: &super::syntax::StaticValue) -> bool {
+/// Map a fact to the static value naming its write destination. Targets are
+/// derived from the operation's shape (receiver, first argument, last
+/// argument) so every writer with the same shape shares one entry instead of
+/// a per-callee early return.
+fn write_target(fact: &Fact) -> Option<&StaticValue> {
+    if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
+        return None;
+    }
+    let callee = lower_callee(fact);
+    if matches!(callee.as_str(), "tee" | "cp" | "mv" | "install" | "sed") {
+        return fact.arguments.last();
+    }
+    if callee.ends_with(".write_text") || callee.ends_with(".write_bytes") {
+        return fact.receiver.as_ref();
+    }
+    if [".writefile", ".writefilesync", ".appendfile", ".appendfilesync"]
+        .iter()
+        .any(|suffix| callee.ends_with(suffix))
+    {
+        return fact.arguments.first();
+    }
+    if (callee == "open" || callee == "opensync" || callee.ends_with(".opensync"))
+        && call_mode_is_write(fact)
+    {
+        return fact.arguments.first();
+    }
+    if callee == "createwritestream" || callee.ends_with(".createwritestream") {
+        return fact.arguments.first();
+    }
+    None
+}
+
+fn static_value_is_agent_config(value: &StaticValue) -> bool {
     agent_config_write_re().is_match(&value.raw)
         || value
             .resolved
@@ -203,42 +207,80 @@ pub(super) fn is_exec_fact(fact: &Fact) -> bool {
     if !matches!(fact.kind, FactKind::Command | FactKind::Call) {
         return false;
     }
-    matches!(
-        lower_callee(fact).as_str(),
-        "eval"
-            | "exec"
-            | "iex"
-            | "os.system"
-            | "subprocess.run"
-            | "subprocess.call"
-            | "subprocess.popen"
-            | "child_process.exec"
-            | "child_process.execsync"
-            | "child_process.spawn"
-            | "child_process.spawnsync"
-            | "function"
-    )
+    let callee = lower_callee(fact);
+    callee == "eval" || callee == "iex" || callee == "function" || is_exec_wrapper(&callee)
 }
 
 pub(super) fn is_remote_shell_pipeline_fact(fact: &Fact) -> bool {
-    if fact.kind != FactKind::Pipeline {
+    match fact.kind {
+        FactKind::Pipeline => {
+            let source = fact
+                .callee
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let sink = fact
+                .arguments
+                .first()
+                .and_then(|value| value.resolved.as_deref())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            is_network_client_token(&source) && is_shell_sink(&sink)
+        }
+        FactKind::Command | FactKind::Call => {
+            if !is_exec_wrapper(&lower_callee(fact)) {
+                return false;
+            }
+            fact.arguments.first().is_some_and(|argument| {
+                let command = argument
+                    .resolved
+                    .clone()
+                    .unwrap_or_else(|| argument.raw.trim_matches(['\'', '"', '`']).to_string());
+                remote_shell_command_string(&command)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Bounded one-level parse of a shell command string handed to an exec
+/// wrapper: split the pipeline once and check whether a network client is
+/// piped into a shell interpreter. No recursion into nested command strings.
+fn remote_shell_command_string(command: &str) -> bool {
+    let segments: Vec<&str> = command.split('|').collect();
+    if segments.len() < 2 || segments.iter().any(|segment| segment.trim().is_empty()) {
         return false;
     }
-    let source = fact
-        .callee
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let sink = fact
-        .arguments
-        .first()
-        .and_then(|value| value.resolved.as_deref())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(
-        source.as_str(),
-        "curl" | "wget" | "iwr" | "invoke-webrequest"
-    ) && matches!(sink.as_str(), "sh" | "bash" | "zsh" | "iex")
+    let source = effective_command_token(segments[0]);
+    let sink = effective_command_token(segments[segments.len() - 1]);
+    source.is_some_and(|token| is_network_client_token(&token))
+        && sink.is_some_and(|token| is_shell_sink(&token))
+}
+
+/// First token of a pipeline segment after stripping quotes, flags,
+/// `VAR=value` prefixes, and shell wrappers (`sudo`, `env`), normalized to a
+/// lowercase basename.
+fn effective_command_token(segment: &str) -> Option<String> {
+    segment
+        .split_whitespace()
+        .map(|token| token.trim_matches(['\'', '"', '`']))
+        .find(|token| {
+            !token.is_empty()
+                && !token.starts_with('-')
+                && !token.contains('=')
+                && !is_shell_wrapper(token)
+        })
+        .map(|token| {
+            token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .to_ascii_lowercase()
+        })
+}
+
+fn is_shell_sink(token: &str) -> bool {
+    matches!(token, "sh" | "bash" | "zsh" | "iex")
 }
 
 pub(super) fn is_destructive_fact(fact: &Fact) -> bool {
@@ -256,13 +298,18 @@ fn lower_callee(fact: &Fact) -> String {
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    lower.strip_prefix("node:").unwrap_or(&lower).to_string()
+    let lower = lower.strip_prefix("node:").unwrap_or(&lower);
+    let lower = lower.strip_prefix("globalthis.").unwrap_or(lower);
+    let lower = lower.strip_prefix("window.").unwrap_or(lower);
+    lower.to_string()
 }
 
 fn is_exec_wrapper(callee: &str) -> bool {
     matches!(
         callee,
-        "subprocess.run"
+        "exec"
+            | "os.system"
+            | "subprocess.run"
             | "subprocess.call"
             | "subprocess.popen"
             | "child_process.exec"
@@ -280,7 +327,7 @@ fn wrapper_network_client<'a>(fact: &'a Fact, callee: &str) -> Option<&'a str> {
             .and_then(|argument| first_executed_token(&argument.raw))
             .filter(|token| is_network_client_token(token));
     }
-    if !matches!(callee, "sudo" | "env") {
+    if !is_shell_wrapper(callee) {
         return None;
     }
     shell_wrapper_command(&fact.arguments, callee).filter(|token| is_network_client_token(token))
@@ -296,41 +343,6 @@ fn first_executed_token(raw: &str) -> Option<&str> {
     value = value.trim_start_matches(['[', '(']).trim_start();
     let token = value.split(',').next()?.split_whitespace().next()?;
     Some(token.trim_matches(['\'', '"']))
-}
-
-fn shell_wrapper_command<'a>(
-    arguments: &'a [super::syntax::StaticValue],
-    wrapper: &str,
-) -> Option<&'a str> {
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        let value = argument.resolved.as_deref().unwrap_or(&argument.raw);
-        if wrapper == "env" && value.contains('=') && !value.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        if value.starts_with('-') {
-            let takes_value = matches!(
-                value,
-                "-u" | "--user"
-                    | "-g"
-                    | "--group"
-                    | "-h"
-                    | "--host"
-                    | "-C"
-                    | "--chdir"
-                    | "-R"
-                    | "--chroot"
-                    | "-D"
-                    | "--close-from"
-                    | "--unset"
-            );
-            index += if takes_value { 2 } else { 1 };
-            continue;
-        }
-        return Some(value.trim_matches(['\'', '"']));
-    }
-    None
 }
 
 fn is_network_client_token(value: &str) -> bool {
