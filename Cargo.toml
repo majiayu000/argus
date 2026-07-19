@@ -11,6 +11,7 @@ members = [
     "crates/argus-maven",
     "crates/argus-nuget",
     "crates/argus-go",
+    "crates/argus-intel",
     "crates/argus-agent",
     "crates/argus-cli",
     "crates/argus-test-support",
@@ -27,10 +28,13 @@ rust-version = "1.75"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.3.2"
 regex = "1"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 semver = "1"
+pep440_rs = "0.7.3"
+unicode_categories = "0.1.1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 toml = "0.8.23"
@@ -46,6 +50,7 @@ argus-composer = { path = "crates/argus-composer" }
 argus-maven = { path = "crates/argus-maven" }
 argus-nuget = { path = "crates/argus-nuget" }
 argus-go = { path = "crates/argus-go" }
+argus-intel = { path = "crates/argus-intel" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
 
@@ -78,6 +83,7 @@ x509-cert = "0.2"
 spki = "0.7"
 rcgen = "0.13"
 rand_core = { version = "0.6", features = ["getrandom"] }
+rustix = { version = "1", features = ["fs"] }
 
 [profile.release]
 lto = "thin"

@@ -33,24 +33,58 @@ pub(crate) fn render_reports(reports: &[ScanReport]) -> Result<Value> {
         }
     }
 
+    let mut run = json!({
+        "tool": {
+            "driver": {
+                "name": "argus",
+                "fullName": "argus supply-chain install guard",
+                "version": env!("CARGO_PKG_VERSION"),
+                "semanticVersion": env!("CARGO_PKG_VERSION"),
+                "informationUri": INFORMATION_URI,
+                "rules": rules
+            }
+        },
+        "invocations": [{"executionSuccessful": true}],
+        "results": results
+    });
+    if let Some(status) = intelligence_status(reports)? {
+        let run_object = run
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("internal SARIF run is not an object"))?;
+        run_object.insert(
+            "properties".to_string(),
+            json!({"argusIntelligence": status}),
+        );
+    }
+
     Ok(json!({
         "$schema": SARIF_SCHEMA,
         "version": "2.1.0",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "argus",
-                    "fullName": "argus supply-chain install guard",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "semanticVersion": env!("CARGO_PKG_VERSION"),
-                    "informationUri": INFORMATION_URI,
-                    "rules": rules
-                }
-            },
-            "invocations": [{"executionSuccessful": true}],
-            "results": results
-        }]
+        "runs": [run]
     }))
+}
+
+fn intelligence_status(reports: &[ScanReport]) -> Result<Option<&argus_core::IntelSnapshotStatus>> {
+    let Some(first_report) = reports.first() else {
+        return Ok(None);
+    };
+    let Some(first) = first_report.intelligence.as_ref() else {
+        if reports.iter().any(|report| report.intelligence.is_some()) {
+            return Err(anyhow!(
+                "cannot mix reports with and without intelligence in one SARIF run"
+            ));
+        }
+        return Ok(None);
+    };
+    if reports
+        .iter()
+        .any(|report| report.intelligence.as_ref() != Some(first))
+    {
+        return Err(anyhow!(
+            "cannot represent different intelligence snapshots in one SARIF run"
+        ));
+    }
+    Ok(Some(first))
 }
 
 fn collect_rule_severities(reports: &[ScanReport]) -> BTreeMap<String, Severity> {
@@ -315,6 +349,8 @@ mod tests {
             package_version: Some("1.2.3".to_string()),
             decision: Decision::Block,
             findings,
+            coordinate: None,
+            intelligence: None,
         }
     }
 

@@ -551,6 +551,8 @@ mod tests {
                 package_version: None,
                 decision: Decision::Allow,
                 findings: Vec::new(),
+                coordinate: None,
+                intelligence: None,
             },
         }
     }

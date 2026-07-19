@@ -86,6 +86,8 @@ pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
         package_version: package.version.clone(),
         decision,
         findings,
+        coordinate: None,
+        intelligence: None,
     })
 }
 

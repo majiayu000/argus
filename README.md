@@ -134,6 +134,44 @@ URL (including base path), publisher, target publication time, and policy. A
 cache entry is reusable for 15 minutes only when it was fetched no earlier than
 the target publication time.
 
+### Offline known-malicious package intelligence
+
+Argus can explicitly import a fixed revision of the OpenSSF
+`malicious-packages` OSV data set and use the verified local snapshot while
+scanning any of the eight supported registries:
+
+```bash
+REVISION="$(git -C /path/to/malicious-packages rev-parse HEAD)"
+
+cargo run -p argus-cli -- intel import \
+  --source https://github.com/ossf/malicious-packages \
+  --revision "$REVISION" \
+  --output ~/.cache/argus/malicious-packages.json
+
+cargo run -p argus-cli -- intel status \
+  --db ~/.cache/argus/malicious-packages.json
+
+cargo run -p argus-cli -- fetch suspicious-package@1.2.3 \
+  --malicious-db ~/.cache/argus/malicious-packages.json \
+  --format json
+```
+
+Only `intel import` uses the network. It accepts the canonical GitHub source,
+a full pinned commit SHA, and the bounded GitHub-to-codeload archive redirect.
+Normal scans load and verify the local snapshot without making an intelligence
+request. Missing, corrupt, incompatible, or future-dated data is an operational
+error when `--malicious-db` is enabled; Argus does not silently continue as if
+there were no match.
+
+A match emits `known-malicious-package` at Critical severity and blocks the
+package. A non-match means only that the exact coordinate was absent from the
+pinned snapshot—it is not evidence that the package is safe. Text, JSON, and
+SARIF output retain the snapshot source, revision, import time, age, and
+archive/records/snapshot digests even when there is no match.
+
+This data set is malicious-package intelligence. It is deliberately separate
+from general CVE/advisory lookup, which remains tracked by GH-94.
+
 ### SARIF and GitHub Code Scanning
 
 `--format sarif` is available on package/lockfile scans, every ecosystem fetch

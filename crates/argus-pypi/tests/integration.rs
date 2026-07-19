@@ -124,6 +124,39 @@ fn fetch_error_for_artifact_filename(
 }
 
 #[test]
+fn pypi_registry_metadata_name_mismatch_fails_closed() {
+    let registry = "https://mock.registry";
+    let artifact_url = format!("{registry}/p/other-package-1.0.0.tar.gz");
+    let packument = packument_for_artifact(
+        "other-package",
+        "1.0.0",
+        "other-package-1.0.0.tar.gz",
+        &artifact_url,
+        "sdist",
+        &"a".repeat(64),
+    );
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/pypi/demo/json"),
+        packument.into_bytes(),
+    );
+    let opts = PypiFetchOptions {
+        registry: registry.to_string(),
+        prefer: PreferredFormat::Sdist,
+        ..PypiFetchOptions::default()
+    };
+    let pkg = PypiPackageRef::parse("demo").unwrap();
+
+    let error = fetch_and_scan_pypi(&pkg, &opts, &transport)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("registry package identity mismatch"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn pypi_rejects_parent_dir_artifact_filename_before_extracting() -> anyhow::Result<()> {
     let cache_parent = tempfile::tempdir()?;
     let escaped_dir = cache_parent.path().join("escaped-pypi-artifact");

@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use argus_core::url::{host_of, validate_artifact_url};
-use argus_core::{Finding, ScanReport};
+use argus_core::{Ecosystem, Finding, PackageCoordinate, ScanReport};
 use std::path::PathBuf;
 
 mod metadata;
@@ -89,6 +89,12 @@ pub fn fetch_and_scan_composer(
         .with_context(|| format!("resolve version for {full_name}"))?;
 
     let resolved_version = version_obj.version.clone();
+    let coordinate = PackageCoordinate::new(
+        Ecosystem::Packagist,
+        full_name.clone(),
+        resolved_version.clone(),
+    )
+    .context("normalize Packagist registry coordinate")?;
     let dist = version_obj.dist.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Composer package {full_name}@{resolved_version} has no dist — VCS-only packages \
@@ -174,6 +180,7 @@ pub fn fetch_and_scan_composer(
     if report.package_version.is_none() {
         report.package_version = Some(resolved_version);
     }
+    report.coordinate = Some(coordinate);
     Ok(report)
 }
 

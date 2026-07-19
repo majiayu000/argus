@@ -14,7 +14,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
-use argus_core::{Finding, ScanReport};
+use argus_core::{canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport};
 use std::path::PathBuf;
 
 mod metadata;
@@ -105,9 +105,26 @@ pub fn fetch_and_scan_crate(
         .with_context(|| format!("fetch crates.io packument {packument_url}"))?;
     let packument: CratesPackument = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse crates.io packument {packument_url}"))?;
+    let requested_name = canonicalize_package_name(Ecosystem::CratesIo, &pkg.name)
+        .context("normalize requested crates.io package name")?;
+    let registry_name = canonicalize_package_name(Ecosystem::CratesIo, &packument.crate_meta.name)
+        .context("normalize crates.io registry metadata package name")?;
+    if requested_name != registry_name {
+        bail!(
+            "crates.io registry package identity mismatch: requested `{}` but metadata names `{}`",
+            pkg.name,
+            packument.crate_meta.name
+        );
+    }
 
     let version = resolve_version(&packument, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let coordinate = PackageCoordinate::new(
+        Ecosystem::CratesIo,
+        packument.crate_meta.name.clone(),
+        version.clone(),
+    )
+    .context("normalize crates.io registry coordinate")?;
     let ver_meta = packument
         .versions
         .iter()
@@ -164,6 +181,7 @@ pub fn fetch_and_scan_crate(
     if report.package_version.is_none() {
         report.package_version = Some(version);
     }
+    report.coordinate = Some(coordinate);
     Ok(report)
 }
 

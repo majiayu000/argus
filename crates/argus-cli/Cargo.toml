@@ -29,9 +29,11 @@ argus-composer = { workspace = true }
 argus-maven = { workspace = true }
 argus-nuget = { workspace = true }
 argus-go = { workspace = true }
+argus-intel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]

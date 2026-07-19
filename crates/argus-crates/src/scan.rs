@@ -34,6 +34,8 @@ pub fn scan_crate_archive(
         package_version: scan.version,
         decision,
         findings: scan.findings,
+        coordinate: None,
+        intelligence: None,
     })
 }
 

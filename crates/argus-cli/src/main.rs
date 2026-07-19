@@ -1,15 +1,10 @@
-//! argus CLI binary.
-//!
-//! Subcommands:
-//! - `argus scan <path>` — scan one package directory or lockfile.
-//! - `argus fetch <pkg>[@version]` — download from npm, verify integrity,
-//!   extract, scan.
-//! - `argus corpus test ...` — run the regression corpus and diff against
-//!   each case's `expectedDecision` + `rules`.
+//! argus CLI binary and subcommand router.
 
 mod agent;
 mod corpus;
 mod corpus_path;
+mod intel;
+mod report;
 mod sarif;
 
 use anyhow::{bail, Context, Result};
@@ -17,7 +12,7 @@ use argus_composer::{
     fetch_and_scan_composer, ComposerFetchOptions, ComposerRef,
     HttpTransport as ComposerHttpTransport,
 };
-use argus_core::{Decision, ScanReport};
+use argus_core::ScanReport;
 use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
 };
@@ -37,9 +32,13 @@ use argus_rubygems::{
     fetch_and_scan_gems, GemFetchOptions, GemRef, HttpTransport as GemsHttpTransport,
 };
 use argus_rules::{scan_lockfile, scan_package_dir};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use report::emit_report;
+pub(crate) use report::print_report_text;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -59,11 +58,18 @@ enum Cmd {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Agent supply-chain surface commands (MCP configs, skills, hooks, AGENTS.md).
     Agent {
         #[command(subcommand)]
         op: AgentOp,
+    },
+    /// Offline known-malicious package intelligence commands.
+    Intel {
+        #[command(subcommand)]
+        op: intel::IntelOp,
     },
     /// Fetch a package from an npm registry, verify integrity, extract, and scan.
     Fetch {
@@ -115,6 +121,8 @@ enum Cmd {
         sigstore_identity: Vec<String>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a package from PyPI, verify SHA-256, safe-extract sdist/wheel, scan.
     PypiFetch {
@@ -131,6 +139,8 @@ enum Cmd {
         prefer: PypiFormat,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources.
     CratesFetch {
@@ -144,6 +154,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a Go module from a GOPROXY, verify the dirhash h1 checksum, safe-extract the zip, scan init/exec/network surfaces.
     GoFetch {
@@ -157,6 +169,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a package from NuGet, verify catalog SHA-512, safe-extract .nupkg, scan.
     NugetFetch {
@@ -170,6 +184,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources.
     MavenFetch {
@@ -183,6 +199,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a gem from RubyGems, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources.
     GemsFetch {
@@ -196,6 +214,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Fetch a Composer package from Packagist, verify SHA-1, safe-extract, scan.
     ComposerFetch {
@@ -209,6 +229,8 @@ enum Cmd {
         cache_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        #[command(flatten)]
+        intel: intel::ScanIntelArgs,
     },
     /// Regression-corpus operations.
     Corpus {
@@ -304,8 +326,14 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
+    let scan_started_at = Utc::now();
     match cli.cmd {
-        Cmd::Scan { path, format } => cmd_scan(&path, format),
+        Cmd::Scan {
+            path,
+            format,
+            intel,
+        } => cmd_scan(&path, format, intel, scan_started_at),
+        Cmd::Intel { op } => intel::cmd_intel(op),
         Cmd::Fetch {
             pkg,
             registry,
@@ -317,6 +345,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sigstore_issuer,
             sigstore_identity,
             format,
+            intel,
         } => cmd_fetch(
             &pkg,
             registry,
@@ -328,6 +357,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sigstore_issuer,
             sigstore_identity,
             format,
+            intel,
+            scan_started_at,
         ),
         Cmd::PypiFetch {
             pkg,
@@ -335,43 +366,58 @@ fn run(cli: Cli) -> Result<ExitCode> {
             cache_dir,
             prefer,
             format,
-        } => cmd_pypi_fetch(&pkg, registry, cache_dir, prefer.into(), format),
+            intel,
+        } => cmd_pypi_fetch(
+            &pkg,
+            registry,
+            cache_dir,
+            prefer.into(),
+            format,
+            intel,
+            scan_started_at,
+        ),
         Cmd::CratesFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_crates_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_crates_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::GoFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_go_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_go_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::NugetFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_nuget_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_nuget_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::MavenFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_maven_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_maven_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::GemsFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_gems_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_gems_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::ComposerFetch {
             pkg,
             registry,
             cache_dir,
             format,
-        } => cmd_composer_fetch(&pkg, registry, cache_dir, format),
+            intel,
+        } => cmd_composer_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
         Cmd::Agent {
             op:
                 AgentOp::Scan {
@@ -399,9 +445,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-fn cmd_scan(path: &Path, format: Format) -> Result<ExitCode> {
+fn cmd_scan(
+    path: &Path,
+    format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
+) -> Result<ExitCode> {
     let report = scan_path(path)?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_crates_fetch(
@@ -409,6 +460,8 @@ fn cmd_crates_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref = CrateRef::parse(pkg).with_context(|| format!("parse crates.io spec `{pkg}`"))?;
     let opts = CratesFetchOptions {
@@ -419,7 +472,7 @@ fn cmd_crates_fetch(
     let transport = CratesHttpTransport::new();
     let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
         .with_context(|| format!("crates-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_go_fetch(
@@ -427,6 +480,8 @@ fn cmd_go_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref =
         GoModuleRef::parse(pkg).with_context(|| format!("parse Go module spec `{pkg}`"))?;
@@ -438,7 +493,7 @@ fn cmd_go_fetch(
     let transport = GoHttpTransport::new();
     let report = fetch_and_scan_go(&pkg_ref, &opts, &transport)
         .with_context(|| format!("go-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_nuget_fetch(
@@ -446,6 +501,8 @@ fn cmd_nuget_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref = NugetRef::parse(pkg).with_context(|| format!("parse NuGet spec `{pkg}`"))?;
     let opts = NugetFetchOptions {
@@ -456,7 +513,7 @@ fn cmd_nuget_fetch(
     let transport = NugetHttpTransport::new();
     let report = fetch_and_scan_nuget(&pkg_ref, &opts, &transport)
         .with_context(|| format!("nuget-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_maven_fetch(
@@ -464,6 +521,8 @@ fn cmd_maven_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref =
         MavenRef::parse(pkg).with_context(|| format!("parse Maven coordinate `{pkg}`"))?;
@@ -475,7 +534,7 @@ fn cmd_maven_fetch(
     let transport = MavenHttpTransport::new();
     let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
         .with_context(|| format!("maven-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_gems_fetch(
@@ -483,6 +542,8 @@ fn cmd_gems_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref = GemRef::parse(pkg).with_context(|| format!("parse RubyGems spec `{pkg}`"))?;
     let opts = GemFetchOptions {
@@ -493,7 +554,7 @@ fn cmd_gems_fetch(
     let transport = GemsHttpTransport::new();
     let report = fetch_and_scan_gems(&pkg_ref, &opts, &transport)
         .with_context(|| format!("gems-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_composer_fetch(
@@ -501,6 +562,8 @@ fn cmd_composer_fetch(
     registry: String,
     cache_dir: Option<PathBuf>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref =
         ComposerRef::parse(pkg).with_context(|| format!("parse Composer spec `{pkg}`"))?;
@@ -512,7 +575,7 @@ fn cmd_composer_fetch(
     let transport = ComposerHttpTransport::new();
     let report = fetch_and_scan_composer(&pkg_ref, &opts, &transport)
         .with_context(|| format!("composer-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 fn cmd_pypi_fetch(
@@ -521,6 +584,8 @@ fn cmd_pypi_fetch(
     cache_dir: Option<PathBuf>,
     prefer: PypiPreferredFormat,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref =
         PypiPackageRef::parse(pkg).with_context(|| format!("parse PyPI package spec `{pkg}`"))?;
@@ -533,7 +598,7 @@ fn cmd_pypi_fetch(
     let transport = PypiHttpTransport::new();
     let report = fetch_and_scan_pypi(&pkg_ref, &opts, &transport)
         .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,6 +613,8 @@ fn cmd_fetch(
     sigstore_issuer: String,
     sigstore_identity: Vec<String>,
     format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
     if metadata_cache_dir.is_some() && !metadata_anomaly {
@@ -572,32 +639,17 @@ fn cmd_fetch(
     let transport = HttpTransport::new();
     let report = fetch_and_scan(&pkg_ref, &opts, &transport)
         .with_context(|| format!("fetch + scan {pkg}"))?;
-    emit_report(&report, format)
+    finish_scan(report, format, intel, scan_started_at)
 }
 
-/// Exit codes are part of the CLI contract.
-///
-/// - `0` — `allow` (clean)
-/// - `1` — `block` (a rule fired and the package must not be installed)
-/// - `2` — `allow-with-approval` (only a recognised native-build pattern
-///   fired; a human reviewer must sign off before install). Distinct from
-///   `allow` so CI gates can require explicit approval rather than silently
-///   passing.
-fn emit_report(report: &ScanReport, format: Format) -> Result<ExitCode> {
-    match format {
-        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        Format::Sarif => println!(
-            "{}",
-            serde_json::to_string_pretty(&sarif::render_reports(std::slice::from_ref(report))?)?
-        ),
-        Format::Text => print_report_text(report),
-    }
-    let code = match report.decision {
-        Decision::Allow => 0,
-        Decision::Block => 1,
-        Decision::AllowWithApproval => 2,
-    };
-    Ok(ExitCode::from(code))
+fn finish_scan(
+    mut report: ScanReport,
+    format: Format,
+    intel: intel::ScanIntelArgs,
+    scan_started_at: DateTime<Utc>,
+) -> Result<ExitCode> {
+    intel::apply_malicious_snapshot(&mut report, intel.malicious_db.as_deref(), scan_started_at)?;
+    emit_report(&report, format)
 }
 
 fn scan_path(path: &Path) -> Result<ScanReport> {
@@ -607,108 +659,5 @@ fn scan_path(path: &Path) -> Result<ScanReport> {
         scan_lockfile(path).with_context(|| format!("scan lockfile {}", path.display()))
     } else {
         bail!("path is neither a directory nor a file: {}", path.display());
-    }
-}
-
-pub(crate) fn print_report_text(report: &ScanReport) {
-    print!("{}", render_report_text(report));
-}
-
-fn render_report_text(report: &ScanReport) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::new();
-    writeln!(
-        output,
-        "decision: {}  package: {}",
-        report.decision.as_str(),
-        report.package_name.as_deref().unwrap_or("<unnamed>"),
-    )
-    .expect("writing a report to String cannot fail");
-    writeln!(output, "path: {}", report.path.display())
-        .expect("writing a report to String cannot fail");
-    if report.findings.is_empty() {
-        writeln!(output, "findings: none").expect("writing a report to String cannot fail");
-        return output;
-    }
-    writeln!(output, "findings:").expect("writing a report to String cannot fail");
-    for f in &report.findings {
-        let loc = f.location.as_deref().unwrap_or("");
-        writeln!(
-            output,
-            "  - [{}] {} — {} ({})",
-            severity_tag(f),
-            f.rule_id,
-            f.detail,
-            loc
-        )
-        .expect("writing a report to String cannot fail");
-        if let Some(evidence) = f.evidence.as_ref() {
-            writeln!(output, "    evidence: {}", evidence.join(", "))
-                .expect("writing a report to String cannot fail");
-        }
-    }
-    output
-}
-
-fn severity_tag(f: &argus_core::Finding) -> &'static str {
-    match f.severity {
-        argus_core::Severity::Critical => "CRIT",
-        argus_core::Severity::High => "HIGH",
-        argus_core::Severity::Medium => "MED ",
-        argus_core::Severity::Low => "LOW ",
-        argus_core::Severity::Info => "INFO",
-    }
-}
-
-#[cfg(test)]
-mod npm_anomaly_render_tests {
-    use super::*;
-    use argus_core::{ArtifactKind, Finding, Severity};
-
-    fn report() -> ScanReport {
-        let mut finding = Finding::new(
-            "version-shape-anomaly",
-            Severity::Medium,
-            "policy=npm-anomaly-v1; target=3.0.0@2025-02-21T00:00:00Z",
-        );
-        finding.evidence = Some(vec![
-            "policy=npm-anomaly-v1".to_string(),
-            "target_version=3.0.0".to_string(),
-        ]);
-        ScanReport {
-            artifact: ArtifactKind::PackageDir,
-            path: PathBuf::from("@scope/demo@3.0.0"),
-            package_name: Some("@scope/demo".to_string()),
-            package_version: Some("3.0.0".to_string()),
-            decision: Decision::AllowWithApproval,
-            findings: vec![finding],
-        }
-    }
-
-    #[test]
-    fn npm_anomaly_render_preserves_text_json_and_sarif_evidence() {
-        let report = report();
-        let text = render_report_text(&report);
-        assert!(text.contains("version-shape-anomaly"));
-        assert!(text.contains("evidence: policy=npm-anomaly-v1"));
-
-        let json = serde_json::to_value(&report).expect("serialize anomaly report");
-        assert_eq!(json["findings"][0]["evidence"][1], "target_version=3.0.0");
-
-        let sarif = sarif::render_reports(&[report]).expect("render anomaly SARIF");
-        assert_eq!(
-            sarif["runs"][0]["results"][0]["properties"]["evidence"][0],
-            "policy=npm-anomaly-v1"
-        );
-        assert_eq!(
-            sarif["runs"][0]["results"][0]["properties"]["decision"],
-            "allow-with-approval"
-        );
-        assert_eq!(
-            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
-                ["uri"],
-            "%40scope/demo%403.0.0"
-        );
     }
 }

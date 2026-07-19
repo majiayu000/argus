@@ -135,6 +135,8 @@ fn scan_agent_surface_inner(
         package_version: None,
         decision: decision::derive(&findings),
         findings,
+        coordinate: None,
+        intelligence: None,
     };
 
     if let Some(judge) = judge {

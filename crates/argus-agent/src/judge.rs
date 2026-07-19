@@ -181,6 +181,8 @@ mod tests {
             package_version: None,
             decision: Decision::Allow,
             findings: Vec::new(),
+            coordinate: None,
+            intelligence: None,
         };
         let error = LlmJudgeRequest::from_scan(&files, &report).unwrap_err();
         assert!(error.to_string().contains("exceeding"), "{error:#}");

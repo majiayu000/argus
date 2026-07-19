@@ -13,6 +13,7 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
   - [2024](#2024)
   - [Pre-2024 (seminal)](#pre-2024-seminal)
 - [Cross-cutting patterns](#cross-cutting-patterns)
+- [Offline known-malicious package intelligence](#offline-known-malicious-package-intelligence)
 - [argus rule coverage matrix](#argus-rule-coverage-matrix)
 - [Detection gaps and next steps](#detection-gaps-and-next-steps)
 - [Sources](#sources)
@@ -442,6 +443,27 @@ failures, and corrupt/oversized cache data are operational errors.
 `--metadata-cache-dir` entries are isolated by full normalized registry base
 URL (including path), publisher, target publication time, and policy; the TTL
 is 15 minutes and entries older than the target publication time are not reused.
+
+### Offline known-malicious package intelligence
+
+The optional `known-malicious-package` layer matches the exact registry-selected
+package coordinate against a locally verified snapshot imported from a fixed
+OpenSSF `malicious-packages` commit. It complements the lexical and structural
+rules above: a package already classified by that data set can block even when
+its current artifact avoids a known text signature.
+
+The import path pins the canonical source and full commit revision, bounds the
+download and archive, validates supported OSV records, and atomically replaces
+the previous snapshot only after integrity checks pass. Scan-time matching is
+offline. Enabling the layer with a missing, corrupt, incompatible, or
+future-dated database is an operational error, not an empty result.
+
+An exact or supported-range match produces a Critical block finding with the
+primary advisory ID, aliases, source revision, coordinate, and match evidence.
+Withdrawn records remain auditable but do not match; aliases never become
+package identity. A non-match is reported as “absent from this pinned
+snapshot,” not “safe.” This layer intentionally excludes general CVE
+advisories; vulnerability lookup remains the separate GH-94 capability.
 
 ---
 

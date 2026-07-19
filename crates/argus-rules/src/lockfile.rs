@@ -99,6 +99,8 @@ pub fn scan_lockfile(path: &Path) -> Result<ScanReport> {
         package_version: parsed.version,
         decision,
         findings,
+        coordinate: None,
+        intelligence: None,
     })
 }
 
