@@ -1,34 +1,102 @@
-use super::ScriptLanguage;
+use super::{bash::is_translated_string, ScriptLanguage};
 use anyhow::{Context, Result};
 use tree_sitter::Node;
 
-pub(super) fn executable_reference(
+pub(super) struct ExecutableReferenceAnalysis {
+    pub combined: Option<String>,
+    pub fragments: Vec<ExecutableReferenceFragment>,
+}
+
+pub(super) struct ExecutableReferenceFragment {
+    pub raw: String,
+    pub value: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+pub(super) fn executable_references(
     node: Node<'_>,
     source: &[u8],
     language: ScriptLanguage,
-) -> Result<Option<String>> {
+) -> Result<ExecutableReferenceAnalysis> {
     let mut output = String::new();
-    collect(node, source, language, &mut output)?;
-    Ok((!output.trim().is_empty()).then_some(output))
+    let mut fragments = Vec::new();
+    collect(
+        node,
+        node.start_byte(),
+        source,
+        language,
+        &mut output,
+        &mut fragments,
+    )?;
+    if language == ScriptLanguage::Bash
+        && !output.is_empty()
+        && !output.contains(char::is_whitespace)
+    {
+        let raw = node
+            .utf8_text(source)
+            .context("read executable reference syntax node")?;
+        output = bash_path_provenance(raw, &output);
+    }
+    if language == ScriptLanguage::Bash {
+        for fragment in &mut fragments {
+            if !fragment.value.contains(char::is_whitespace) {
+                fragment.value = bash_path_provenance(&fragment.raw, &fragment.value);
+            }
+        }
+    }
+    Ok(ExecutableReferenceAnalysis {
+        combined: (!output.trim().is_empty()).then_some(output),
+        fragments,
+    })
+}
+
+/// Preserve a static path suffix adjacent to one executed shell reference.
+/// This keeps `$HOME/.aws/credentials` intact without treating unrelated
+/// literal field names (for example `$USER:OPENAI_API_KEY`) as provenance.
+fn bash_path_provenance(raw: &str, reference: &str) -> String {
+    let value = raw.trim().trim_matches(['\'', '"']);
+    let Some(start) = value.find(reference) else {
+        return reference.to_string();
+    };
+    let suffix = value[start + reference.len()..].trim_end_matches(['\'', '"']);
+    let is_static_path = suffix.starts_with('/')
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._~-".contains(character));
+    if is_static_path {
+        format!("{reference}{suffix}")
+    } else {
+        reference.to_string()
+    }
 }
 
 fn collect(
     node: Node<'_>,
+    root_start: usize,
     source: &[u8],
     language: ScriptLanguage,
     output: &mut String,
+    fragments: &mut Vec<ExecutableReferenceFragment>,
 ) -> Result<()> {
     let raw = node
         .utf8_text(source)
         .context("read executable reference syntax node")?;
     if language == ScriptLanguage::Bash {
-        if raw.trim_matches(['\'', '"']).trim_start().starts_with('@')
-            || matches!(
-                node.kind(),
-                "simple_expansion" | "expansion" | "command_substitution"
-            )
-        {
-            append(output, raw);
+        if is_translated_string(node, source)? {
+            return Ok(());
+        }
+        if matches!(
+            node.kind(),
+            "arithmetic_expansion"
+                | "command_substitution"
+                | "process_substitution"
+                | "translated_string"
+        ) {
+            return Ok(());
+        }
+        if matches!(node.kind(), "simple_expansion" | "expansion") {
+            append(output, fragments, node, root_start, raw, raw);
             return Ok(());
         }
     } else {
@@ -36,7 +104,7 @@ fn collect(
             "subscript" | "subscript_expression"
                 if is_environment_subscript(raw) || subscript_base_is_identifier(node) =>
             {
-                append(output, raw);
+                append(output, fragments, node, root_start, raw, raw);
                 return Ok(());
             }
             "string_fragment"
@@ -45,7 +113,7 @@ fn collect(
             | "comment"
             | "property_identifier" => return Ok(()),
             "attribute" | "member_expression" => {
-                append(output, raw);
+                append(output, fragments, node, root_start, raw, raw);
                 return Ok(());
             }
             "call" | "call_expression" => {
@@ -53,23 +121,45 @@ fn collect(
                     let callee = function
                         .utf8_text(source)
                         .context("read call reference callee")?;
-                    if callee.to_ascii_lowercase().ends_with("getenv") {
-                        if let Some(key) = literal_getenv_key(node, source)? {
-                            append(output, &key);
+                    let lower = callee.to_ascii_lowercase();
+                    if lower.ends_with("getenv") {
+                        if let Some(key) = literal_first_argument(node, source)? {
+                            append(output, fragments, node, root_start, raw, &key);
                         } else {
-                            append(output, &format!("{callee}("));
+                            append(
+                                output,
+                                fragments,
+                                node,
+                                root_start,
+                                raw,
+                                &format!("{callee}("),
+                            );
+                        }
+                    } else if language == ScriptLanguage::Python
+                        && (lower == "open" || lower.ends_with(".open"))
+                    {
+                        if let Some(path) = literal_first_argument(node, source)? {
+                            append(
+                                output,
+                                fragments,
+                                node,
+                                root_start,
+                                raw,
+                                &format!("open({path})"),
+                            );
+                            return Ok(());
                         }
                     }
                 }
             }
-            "identifier" => append(output, raw),
+            "identifier" => append(output, fragments, node, root_start, raw, raw),
             _ => {}
         }
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect(child, source, language, output)?;
+        collect(child, root_start, source, language, output, fragments)?;
     }
     Ok(())
 }
@@ -92,7 +182,7 @@ fn is_environment_subscript(raw: &str) -> bool {
     compact.starts_with("process.env[") || compact.starts_with("os.environ[")
 }
 
-fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
+fn literal_first_argument(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
     let Some(arguments) = node.child_by_field_name("arguments") else {
         return Ok(None);
     };
@@ -102,7 +192,7 @@ fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
     };
     let raw = argument
         .utf8_text(source)
-        .context("read getenv key syntax node")?
+        .context("read literal call argument syntax node")?
         .trim();
     if raw.len() < 2 {
         return Ok(None);
@@ -115,9 +205,22 @@ fn literal_getenv_key(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn append(output: &mut String, value: &str) {
+fn append(
+    output: &mut String,
+    fragments: &mut Vec<ExecutableReferenceFragment>,
+    node: Node<'_>,
+    root_start: usize,
+    raw: &str,
+    value: &str,
+) {
     if !output.is_empty() {
         output.push(' ');
     }
     output.push_str(value);
+    fragments.push(ExecutableReferenceFragment {
+        raw: raw.to_string(),
+        value: value.to_string(),
+        start_byte: node.start_byte().saturating_sub(root_start),
+        end_byte: node.end_byte().saturating_sub(root_start),
+    });
 }

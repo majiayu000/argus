@@ -1,19 +1,27 @@
 use crate::SurfaceFile;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::{Language, Node, Parser};
 
+mod bash;
 mod normalize;
 mod receiver;
 mod reference;
+mod shell;
 
-pub(super) use normalize::{is_shell_wrapper, shell_wrapper_command};
+pub(super) use normalize::{
+    bounded_command_invocation, effective_command_token, is_exec_wrapper, is_shell_wrapper,
+    shell_wrapper_invocation,
+};
+pub(super) use shell::bounded_shell_pipeline;
 
+use bash::{bash_argument_value, bash_command_fact, bash_pipeline_fact, bash_redirect_fact};
 use normalize::{
-    constructed_class, is_identifier, replace_identifier_token, resolve_static, unquote,
+    command_argument_shape, constructed_class, contains_missing, exec_wrapper_argument_nodes,
+    is_identifier, language_for, replace_identifier_token, resolve_static_value, unquote,
 };
 use receiver::writer_receiver_value;
-use reference::executable_reference;
+use reference::executable_references;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FactKind {
@@ -25,26 +33,64 @@ pub(super) enum FactKind {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArgumentShape {
+    Direct,
+    CommandString,
+    Argv,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticValue {
     pub raw: String,
     pub resolved: Option<String>,
     pub executable_reference: Option<String>,
+    pub executable_reference_fragments: Vec<ExecutableReferenceFragment>,
+    pub shell_argument: ShellArgument,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExecutableReferenceFragment {
+    pub raw: String,
+    pub resolved: String,
+    pub constant_resolved: Option<String>,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ShellArgument {
+    NotShell,
+    Known(ShellArgumentValue),
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ShellArgumentValue {
+    pub text: String,
+    pub raw_boundaries: Vec<usize>,
+}
+
+pub(super) type PipelineStage = (String, Vec<StaticValue>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Fact {
     pub kind: FactKind,
+    pub language: ScriptLanguage,
     pub line: usize,
     pub callee: Option<String>,
     pub receiver: Option<StaticValue>,
     pub arguments: Vec<StaticValue>,
+    pub argument_shape: ArgumentShape,
+    pub pipeline_sources: Vec<PipelineStage>,
+    pub pipeline_sink_arguments: Vec<StaticValue>,
+    pub pipeline_scan_text: Option<String>,
     pub redirect: Option<StaticValue>,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScriptLanguage {
+pub(super) enum ScriptLanguage {
     Bash,
     Python,
     JavaScript,
@@ -56,6 +102,8 @@ enum ScriptLanguage {
 struct Bindings {
     aliases: BTreeMap<String, String>,
     constants: BTreeMap<String, String>,
+    provenance: BTreeMap<String, String>,
+    suppressed_constants: BTreeSet<String>,
 }
 
 pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
@@ -63,10 +111,15 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
     if language == ScriptLanguage::Unsupported {
         return Ok(vec![Fact {
             kind: FactKind::Unsupported,
+            language,
             line: 1,
             callee: None,
             receiver: None,
             arguments: Vec::new(),
+            argument_shape: ArgumentShape::Direct,
+            pipeline_sources: Vec::new(),
+            pipeline_sink_arguments: Vec::new(),
+            pipeline_scan_text: None,
             redirect: None,
             text: format!("unsupported script language for {}", file.rel),
         }]);
@@ -100,21 +153,6 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
     Ok(facts)
 }
 
-fn language_for(rel: &str) -> ScriptLanguage {
-    let lower = rel.to_ascii_lowercase();
-    if lower.ends_with(".sh") || lower.ends_with(".bash") || lower.ends_with(".zsh") {
-        ScriptLanguage::Bash
-    } else if lower.ends_with(".py") {
-        ScriptLanguage::Python
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
-        ScriptLanguage::JavaScript
-    } else if lower.ends_with(".ts") {
-        ScriptLanguage::TypeScript
-    } else {
-        ScriptLanguage::Unsupported
-    }
-}
-
 fn grammar(language: ScriptLanguage) -> Language {
     match language {
         ScriptLanguage::Bash => tree_sitter_bash::LANGUAGE.into(),
@@ -123,15 +161,6 @@ fn grammar(language: ScriptLanguage) -> Language {
         ScriptLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         ScriptLanguage::Unsupported => unreachable!("unsupported language has no grammar"),
     }
-}
-
-fn contains_missing(node: Node<'_>) -> bool {
-    if node.is_missing() {
-        return true;
-    }
-    let mut cursor = node.walk();
-    let missing = node.named_children(&mut cursor).any(contains_missing);
-    missing
 }
 
 fn collect_facts(
@@ -166,10 +195,15 @@ fn collect_facts(
     if is_assignment(node.kind(), language) {
         facts.push(Fact {
             kind: FactKind::Assignment,
+            language,
             line: line(node),
             callee: None,
             receiver: None,
             arguments: assignment_values(node, source, bindings, language)?,
+            argument_shape: ArgumentShape::Direct,
+            pipeline_sources: Vec::new(),
+            pipeline_sink_arguments: Vec::new(),
+            pipeline_scan_text: None,
             redirect: None,
             text: text(node, source)?.to_string(),
         });
@@ -218,10 +252,15 @@ fn collect_facts(
         {
             facts.push(Fact {
                 kind: FactKind::Access,
+                language,
                 line: line(node),
                 callee: None,
                 receiver: None,
                 arguments: Vec::new(),
+                argument_shape: ArgumentShape::Direct,
+                pipeline_sources: Vec::new(),
+                pipeline_sink_arguments: Vec::new(),
+                pipeline_scan_text: None,
                 redirect: None,
                 text: text(node, source)?.to_string(),
             });
@@ -243,118 +282,6 @@ fn collect_facts(
     Ok(())
 }
 
-fn bash_pipeline_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
-    let mut commands = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "command" {
-            commands.push(bash_command_fact(child, source, bindings)?);
-        }
-    }
-    let source_callee = commands.first().and_then(|fact| {
-        let callee = fact.callee.clone()?;
-        if is_shell_wrapper(&callee) {
-            return shell_wrapper_command(&fact.arguments, &callee)
-                .map(str::to_string)
-                .or(Some(callee));
-        }
-        Some(callee)
-    });
-    let sink = commands
-        .last()
-        .and_then(|fact| fact.callee.clone())
-        .map(|callee| StaticValue {
-            raw: callee.clone(),
-            resolved: Some(callee),
-            executable_reference: None,
-        });
-    Ok(Fact {
-        kind: FactKind::Pipeline,
-        line: line(node),
-        callee: source_callee,
-        receiver: None,
-        arguments: sink.into_iter().collect(),
-        redirect: None,
-        text: text(node, source)?.to_string(),
-    })
-}
-
-fn bash_command_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
-    let name = node
-        .child_by_field_name("name")
-        .map(|child| text(child, source))
-        .transpose()?
-        .unwrap_or_default();
-    let mut arguments = Vec::new();
-    let mut redirect = None;
-    for index in 0..node.child_count() {
-        let Some(child) = node.child(index) else {
-            continue;
-        };
-        match node.field_name_for_child(index as u32) {
-            Some("argument") => {
-                arguments.push(static_value(child, source, bindings, ScriptLanguage::Bash)?)
-            }
-            Some("redirect") => {
-                if let Some(destination) = child.child_by_field_name("destination") {
-                    redirect = Some(static_value(
-                        destination,
-                        source,
-                        bindings,
-                        ScriptLanguage::Bash,
-                    )?);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(Fact {
-        kind: FactKind::Command,
-        line: line(node),
-        callee: Some(canonical_callee(name, bindings)),
-        receiver: None,
-        arguments,
-        redirect,
-        text: text(node, source)?.to_string(),
-    })
-}
-
-fn bash_redirect_fact(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Fact> {
-    let body = node.child_by_field_name("body");
-    let mut fact = if let Some(command) = body.filter(|child| child.kind() == "command") {
-        bash_command_fact(command, source, bindings)?
-    } else {
-        Fact {
-            kind: FactKind::Command,
-            line: line(node),
-            callee: None,
-            receiver: None,
-            arguments: Vec::new(),
-            redirect: None,
-            text: text(node, source)?.to_string(),
-        }
-    };
-    for index in 0..node.child_count() {
-        let Some(child) = node.child(index) else {
-            continue;
-        };
-        if node.field_name_for_child(index as u32) == Some("redirect") {
-            if let Some(destination) = child.child_by_field_name("destination") {
-                fact.redirect = Some(static_value(
-                    destination,
-                    source,
-                    bindings,
-                    ScriptLanguage::Bash,
-                )?);
-                break;
-            }
-        }
-    }
-    fact.line = line(node);
-    fact.text = text(node, source)?.to_string();
-    Ok(fact)
-}
-
 fn call_fact(
     node: Node<'_>,
     source: &[u8],
@@ -372,19 +299,31 @@ fn call_fact(
         .and_then(|child| child.child_by_field_name("object"))
         .map(|child| writer_receiver_value(child, source, bindings, language))
         .transpose()?;
-    let mut arguments = Vec::new();
+    let callee = canonical_callee(function, bindings);
+    let mut argument_nodes = Vec::new();
     if let Some(list) = node.child_by_field_name(arguments_field) {
         let mut cursor = list.walk();
         for child in list.named_children(&mut cursor) {
-            arguments.push(static_value(child, source, bindings, language)?);
+            argument_nodes.push(child);
         }
     }
+    let (argument_shape, argument_nodes) =
+        exec_wrapper_argument_nodes(&callee, argument_nodes, source);
+    let arguments = argument_nodes
+        .into_iter()
+        .map(|child| static_value(child, source, bindings, language))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Fact {
         kind: FactKind::Call,
+        language,
         line: line(node),
-        callee: Some(canonical_callee(function, bindings)),
+        callee: Some(callee),
         receiver,
         arguments,
+        argument_shape,
+        pipeline_sources: Vec::new(),
+        pipeline_sink_arguments: Vec::new(),
+        pipeline_scan_text: None,
         redirect: None,
         text: text(node, source)?.to_string(),
     })
@@ -438,12 +377,26 @@ fn parse_assignment(
     }
     bindings.constants.remove(name);
     bindings.aliases.remove(name);
+    bindings.provenance.remove(name);
+    bindings.suppressed_constants.remove(name);
     let raw_value = text(value_node, source)?;
-    let resolved = resolve_static(raw_value, &bindings.constants).or_else(|| {
-        (language == ScriptLanguage::Bash && !raw_value.contains('$'))
-            .then(|| raw_value.trim().to_string())
-    });
+    if language == ScriptLanguage::Bash {
+        let value = static_value(value_node, source, bindings, language)?;
+        if let Some(provenance) = value.executable_reference {
+            bindings.provenance.insert(name.to_string(), provenance);
+        } else if raw_value.contains('$') {
+            bindings.suppressed_constants.insert(name.to_string());
+        }
+    }
+    let resolved =
+        resolve_static_node(value_node, source, language, &bindings.constants)?.or_else(|| {
+            (language == ScriptLanguage::Bash && !raw_value.contains('$'))
+                .then(|| raw_value.trim().to_string())
+        });
     if let Some(value) = resolved {
+        if language == ScriptLanguage::Bash && value.contains('$') {
+            bindings.suppressed_constants.insert(name.to_string());
+        }
         bindings.constants.insert(name.to_string(), value);
     }
     if matches!(
@@ -590,21 +543,121 @@ fn static_value(
     language: ScriptLanguage,
 ) -> Result<StaticValue> {
     let raw = text(node, source)?;
-    let executable_reference = executable_reference(node, source, language)?
+    let shell_argument = if language == ScriptLanguage::Bash {
+        match bash_argument_value(node, source)? {
+            Some(value) => ShellArgument::Known(value),
+            None => ShellArgument::Dynamic,
+        }
+    } else {
+        ShellArgument::NotShell
+    };
+    let reference_analysis = executable_references(node, source, language)?;
+    let executable_reference = reference_analysis
+        .combined
         .map(|value| canonical_reference(&value, bindings));
+    let executable_reference_fragments = reference_analysis
+        .fragments
+        .into_iter()
+        .map(|fragment| ExecutableReferenceFragment {
+            raw: fragment.raw,
+            resolved: canonical_reference(&fragment.value, bindings),
+            constant_resolved: constant_reference(&fragment.value, bindings),
+            start_byte: fragment.start_byte,
+            end_byte: fragment.end_byte,
+        })
+        .collect();
     Ok(StaticValue {
         raw: raw.to_string(),
-        resolved: resolve_static(raw, &bindings.constants),
+        resolved: resolve_static_node(node, source, language, &bindings.constants)?,
         executable_reference,
+        executable_reference_fragments,
+        shell_argument,
     })
 }
 
+fn resolve_static_node(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    constants: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    if language == ScriptLanguage::Bash && bash_argument_value(node, source)?.is_none() {
+        return Ok(None);
+    }
+    let concatenation = matches!(
+        (language, node.kind()),
+        (ScriptLanguage::Python, "binary_operator")
+            | (
+                ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+                "binary_expression"
+            )
+    );
+    if concatenation {
+        let Some(operator) = node.child_by_field_name("operator") else {
+            return Ok(None);
+        };
+        if text(operator, source)? != "+" {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(left), Some(right)) = (
+            resolve_static_node(left, source, language, constants)?,
+            resolve_static_node(right, source, language, constants)?,
+        ) else {
+            return Ok(None);
+        };
+        return Ok(Some(left + &right));
+    }
+    if node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let Some(child) = children.next() else {
+            return Ok(None);
+        };
+        if children.next().is_some() {
+            return Ok(None);
+        }
+        return resolve_static_node(child, source, language, constants);
+    }
+    Ok(resolve_static_value(
+        text(node, source)?,
+        node.kind(),
+        language,
+        constants,
+    ))
+}
+
+fn constant_reference(raw: &str, bindings: &Bindings) -> Option<String> {
+    let resolved = bindings
+        .constants
+        .iter()
+        .filter(|(name, _)| !bindings.suppressed_constants.contains(*name))
+        .fold(raw.to_string(), |value, (name, constant)| {
+            let braced = replace_identifier_token(&value, &format!("${{{name}}}"), constant);
+            replace_identifier_token(&braced, &format!("${name}"), constant)
+        });
+    (resolved != raw).then_some(resolved)
+}
+
 fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
-    bindings
+    let aliased = bindings
         .aliases
         .iter()
         .fold(raw.to_string(), |value, (alias, canonical)| {
             replace_identifier_token(&value, alias, canonical)
+        });
+    bindings
+        .provenance
+        .iter()
+        .filter(|(name, _)| !bindings.suppressed_constants.contains(*name))
+        .fold(aliased, |value, (name, provenance)| {
+            let braced = replace_identifier_token(&value, &format!("${{{name}}}"), provenance);
+            replace_identifier_token(&braced, &format!("${name}"), provenance)
         })
 }
 
@@ -699,6 +752,7 @@ fn invalidate_assignments(
             if is_identifier(name) {
                 bindings.constants.remove(name);
                 bindings.aliases.remove(name);
+                bindings.provenance.remove(name);
             }
         }
     }
