@@ -1,11 +1,11 @@
 //! Static detection rules for argus.
 //!
-//! Each rule is a pure function that takes a [`PackageContext`] (for
-//! directory scans) or a parsed lockfile, and appends `Finding`s.
+//! Each rule is a pure function that takes a [`PackageContext`] and appends
+//! `Finding`s. Lockfiles are normalized and evaluated by `argus-lockfile`.
 //!
-//! The top-level entry points are [`scan_package_dir`] and
-//! [`scan_lockfile`]. They never execute any code from the scanned
-//! artifact — files are read as text or treated as opaque bytes.
+//! The top-level entry point is [`scan_package_dir`]. It never executes code
+//! from the scanned artifact — files are read as text or treated as opaque
+//! bytes.
 
 use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Decision, Finding, ScanReport};
@@ -17,12 +17,10 @@ mod binary;
 mod content;
 mod decision;
 mod lifecycle;
-mod lockfile;
 mod name;
 
 pub use content::scan_text_file;
 pub use decision::derive_from_findings as derive_decision_from_findings;
-pub use lockfile::scan_lockfile;
 pub use name::levenshtein;
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.

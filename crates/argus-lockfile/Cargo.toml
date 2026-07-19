@@ -1,0 +1,18 @@
+[package]
+name = "argus-lockfile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded, deterministic lockfile normalization for Argus."
+
+[dependencies]
+argus-core = { workspace = true }
+base64 = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+toml = { workspace = true }
+url = { workspace = true }
+yaml-rust2 = { workspace = true }

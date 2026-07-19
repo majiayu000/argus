@@ -76,7 +76,7 @@ operational error。`total_units = record_units + traversed_non_record_units`，
 | uv 1 | 每个 `[[package]]` | dependencies/optional-dependencies/dev-dependencies 子项及每个 sdist/wheel artifact | version, revision, resolution-markers, options, manifest |
 | Cargo 3/4 | 每个 `[[package]]` | package dependencies 每个 locator | version, metadata |
 | GoSum grammar-v1 | 每个非空 line | none | none；comment/blank line 不允许 |
-| Bundler 2/3/4 | GEM/GIT/PATH 各 specs entry；version ≥2.5 时可选 `CHECKSUMS` 每个 lock-name 行；Bundler 4 可另有最多一条 self-checksum | 每个 spec dependency、DEPENDENCIES entry；普通 CHECKSUMS line 须按 name/version/platform exact 关联一个 spec，self-checksum 须 exact 匹配 BUNDLED WITH version | PLATFORMS, RUBY VERSION, BUNDLED WITH, section remote/revision/glob |
+| Bundler 2/3/4 | GEM/GIT/PATH 各 specs entry | 每个 spec dependency、DEPENDENCIES entry；version ≥2.5 时普通 CHECKSUMS line 须逐行按 name/version/platform exact 关联一个 spec；Bundler 4 self-checksum 须 exact 匹配 BUNDLED WITH version。普通/self checksum 都是所关联 spec 或 lockfile metadata 的 integrity evidence，不另生成 dependency record | PLATFORMS, RUBY VERSION, BUNDLED WITH, section remote/revision/glob |
 | Composer schema-v1 | packages/packages-dev 每个 package | require, require-dev, conflict, provide, replace, suggest 每个 edge | `_readme`, content-hash, aliases, minimum-stability, stability-flags, prefer-stable, prefer-lowest, platform, platform-dev, plugin-api-version |
 
 known section 内的未知 nested entry、整个合法 section 被跳过、edge 无法关联、计数
@@ -161,7 +161,7 @@ report renderer 前返回 exit 2、stderr 与空 stdout。
 ## Planned Changes Manifest
 
 <!-- specrail-planned-changes
-{"version":1,"issue":91,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","crates/argus-cli/Cargo.toml","crates/argus-cli/src/main.rs","crates/argus-cli/tests/lockfile_cli.rs","crates/argus-lockfile/Cargo.toml","crates/argus-lockfile/src/bounds.rs","crates/argus-lockfile/src/detect.rs","crates/argus-lockfile/src/lib.rs","crates/argus-lockfile/src/model.rs","crates/argus-lockfile/src/parsers/bundler.rs","crates/argus-lockfile/src/parsers/cargo.rs","crates/argus-lockfile/src/parsers/composer.rs","crates/argus-lockfile/src/parsers/go_sum.rs","crates/argus-lockfile/src/parsers/mod.rs","crates/argus-lockfile/src/parsers/package_lock.rs","crates/argus-lockfile/src/parsers/pnpm.rs","crates/argus-lockfile/src/parsers/poetry.rs","crates/argus-lockfile/src/parsers/uv.rs","crates/argus-lockfile/src/parsers/yarn.rs","crates/argus-lockfile/src/policy.rs","crates/argus-lockfile/tests/detection.rs","crates/argus-lockfile/tests/js_formats.rs","crates/argus-lockfile/tests/policy.rs","crates/argus-lockfile/tests/python_rust_go_formats.rs","crates/argus-lockfile/tests/resource_limits.rs","crates/argus-lockfile/tests/ruby_composer_formats.rs","crates/argus-rules/src/decision.rs","crates/argus-rules/src/lib.rs","crates/argus-rules/src/lockfile.rs","docs/supply-chain-attacks.md","specs/GH91/product.md","specs/GH91/tasks.md","specs/GH91/tech.md"],"spec_refs":["specs/GH91/product.md","specs/GH91/tasks.md","specs/GH91/tech.md"]}
+{"version":1,"issue":91,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","corpus/index.json","corpus/lockfiles/http-resolved/package-lock.json","corpus/lockfiles/package-lock-http-resolved.json","crates/argus-cli/Cargo.toml","crates/argus-cli/src/corpus.rs","crates/argus-cli/src/main.rs","crates/argus-cli/tests/lockfile_cli.rs","crates/argus-lockfile/Cargo.toml","crates/argus-lockfile/src/bounds.rs","crates/argus-lockfile/src/detect.rs","crates/argus-lockfile/src/lib.rs","crates/argus-lockfile/src/model.rs","crates/argus-lockfile/src/parsers/bundler.rs","crates/argus-lockfile/src/parsers/cargo.rs","crates/argus-lockfile/src/parsers/composer.rs","crates/argus-lockfile/src/parsers/go_sum.rs","crates/argus-lockfile/src/parsers/mod.rs","crates/argus-lockfile/src/parsers/package_lock.rs","crates/argus-lockfile/src/parsers/pnpm.rs","crates/argus-lockfile/src/parsers/poetry.rs","crates/argus-lockfile/src/parsers/uv.rs","crates/argus-lockfile/src/parsers/yarn.rs","crates/argus-lockfile/src/policy.rs","crates/argus-lockfile/tests/detection.rs","crates/argus-lockfile/tests/js_formats.rs","crates/argus-lockfile/tests/policy.rs","crates/argus-lockfile/tests/python_rust_go_formats.rs","crates/argus-lockfile/tests/resource_limits.rs","crates/argus-lockfile/tests/ruby_composer_formats.rs","crates/argus-rules/src/decision.rs","crates/argus-rules/src/lib.rs","crates/argus-rules/src/lockfile.rs","docs/supply-chain-attacks.md","specs/GH91/tasks.md","specs/GH91/tech.md"],"spec_refs":["specs/GH91/product.md","specs/GH91/tasks.md","specs/GH91/tech.md"]}
 -->
 
 ## Product-to-Test Mapping
@@ -203,7 +203,8 @@ SP91-T1 的硬依赖，之前不得创建临时同义类型或启动 GH-91 imple
   Bundler/Composer parser 与 `ruby_composer_formats.rs`。三个 lane 不得修改
   `Cargo.toml`、`Cargo.lock`、`lib.rs`、`parsers/mod.rs` 或彼此文件。
 - T2/T3/T4 全部停止写入后，SP91-T5 串行接收 root/crate manifest、`Cargo.lock` 与
-  public integration 文件所有权，完成 `policy.rs`、CLI/rules/文档接线；如 parser
+  public integration 文件所有权，完成 `policy.rs`、CLI、CLI corpus adapter、
+  rules/文档接线；如 parser
   contract 需变更，退回 T1 重新冻结并停止并行 lane，禁止各 lane 竞写 public 文件。
 - SP91-T6 在所有 writable owner 退出后只执行验证，不修改实现或测试。
 
@@ -222,10 +223,10 @@ SP91-T1 的硬依赖，之前不得创建临时同义类型或启动 GH-91 imple
 
 ## 测试计划
 
-- [ ] Unit：detect、model、policy 与资源上限。
-- [ ] Fixture：九格式版本/正负/partial-operational-error/invalid 矩阵。
-- [ ] CLI：自动/显式格式、allowlist、text/JSON/SARIF 与退出码。
-- [ ] Repository：workspace check/test、corpus test。
+- [x] Unit：detect、model、policy 与资源上限。
+- [x] Fixture：九格式版本/正负/partial-operational-error/invalid 矩阵。
+- [x] CLI：自动/显式格式、allowlist、text/JSON/SARIF 与退出码。
+- [x] Repository：workspace check/test、corpus test。
 
 ## 回滚方案
 

@@ -35,8 +35,29 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
 | **Reusable-action hijack** | Mutable tag in a popular GitHub Action repointed to malicious code | tj-actions/changed-files (Mar 2025) |
 | **Long-game maintainer trust** | Attacker spends 18+ months becoming a maintainer | xz-utils (CVE-2024-3094) |
 | **Crypto-wallet rewriter** | Runtime hook on `globalThis.fetch` or wallet RPC rewrites destination addresses | @solana/web3.js (Dec 2024), chalk/debug (Sep 2025) |
-| **Lockfile poisoning** | `resolved` URL points at a non-allowlisted host or plain HTTP | hypothetical — covered by argus today |
+| **Lockfile source/integrity drift** | Locked download source changes to plain HTTP or an unexpected exact host; integrity evidence becomes missing, weak, or invalid | policy signal; not itself proof of malicious intent |
 | **Build-script smuggling** | Backdoor lives in generated `.m4`/binary not the source | xz-utils (CVE-2024-3094) |
+
+---
+
+### Lockfile metadata coverage boundary
+
+Argus statically parses the closed version sets for `package-lock.json`,
+Classic/Berry `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`,
+`Cargo.lock`, `go.sum`, `Gemfile.lock`, and `composer.lock`. It evaluates every
+normalized source and preserves each artifact integrity locator. Plain HTTP,
+unexpected exact hosts, mutable git refs, missing required hashes, and invalid
+hash encodings block; weak-only SHA-1/MD5 evidence requires approval.
+Integrity that a format legitimately cannot carry is reported as aggregated
+Info and does not alter an otherwise-allow decision.
+
+This is source and integrity metadata analysis, not incident attribution.
+Lockfile findings do not assert that a dependency is vulnerable or malicious,
+do not query advisory/intelligence services, and do not prove that matching
+bytes are safe. Unknown versions, unsupported entries, partial coverage,
+parse failures, and resource-limit failures produce an operational error
+before any report is rendered. No package manager, VCS command, shell, or
+network client is used by the lockfile crate.
 
 ---
 

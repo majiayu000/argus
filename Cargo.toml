@@ -12,6 +12,7 @@ members = [
     "crates/argus-nuget",
     "crates/argus-go",
     "crates/argus-intel",
+    "crates/argus-lockfile",
     "crates/argus-agent",
     "crates/argus-cli",
     "crates/argus-test-support",
@@ -38,6 +39,7 @@ unicode_categories = "0.1.1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 toml = "0.8.23"
+yaml-rust2 = { version = "0.8.1", default-features = false }
 
 argus-core = { path = "crates/argus-core" }
 argus-agent = { path = "crates/argus-agent" }
@@ -51,6 +53,7 @@ argus-maven = { path = "crates/argus-maven" }
 argus-nuget = { path = "crates/argus-nuget" }
 argus-go = { path = "crates/argus-go" }
 argus-intel = { path = "crates/argus-intel" }
+argus-lockfile = { path = "crates/argus-lockfile" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
 

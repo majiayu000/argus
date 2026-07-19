@@ -103,10 +103,14 @@
     {
       "id": "lockfile-http-resolved",
       "kind": "lockfile",
-      "path": "lockfiles/package-lock-http-resolved.json",
+      "path": "lockfiles/http-resolved/package-lock.json",
       "packageName": "http-resolved-demo",
       "expectedDecision": "block",
-      "rules": ["lockfile-http-resolved", "untrusted-registry-host"],
+      "rules": [
+        "lockfile-http-resolved",
+        "lockfile-integrity-unavailable",
+        "untrusted-registry-host"
+      ],
       "notes": "Models lockfile poisoning through a plain HTTP tarball URL."
     }
   ]
