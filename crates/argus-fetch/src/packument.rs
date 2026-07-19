@@ -16,11 +16,20 @@ pub struct Packument {
     pub dist_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub versions: BTreeMap<String, PackumentVersion>,
+    #[serde(default)]
+    pub time: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackumentVersion {
     pub dist: Dist,
+    #[serde(default, rename = "_npmUser")]
+    pub npm_user: Option<NpmUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NpmUser {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
