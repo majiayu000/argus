@@ -35,6 +35,9 @@ Link to `product.md`.
 shell 的裸字面 word 只有在 AST 节点不含 expansion/substitution 且字符集合
 安全时才形成静态值；`eval`/`iex` 只有全部参数均为静态值时才按顺序组合，
 任一动态参数都使整条命令保持 unknown。
+受支持语言的 quoted string 必须按 AST 字面量节点求值，Python/JavaScript/
+TypeScript 的 `+` 拼接则递归求值左右 AST 子节点，避免把 URL 等字面内容
+中的 `+` 误当作拼接操作符；不得用 raw 字符串 fallback 绕过静态值边界。
 
 ### 2. 将单个写目标改为配置敏感端点迭代
 
@@ -111,15 +114,48 @@ comment boundary。分类在任意连续 edge 区间寻找 network→shell；dir
 AST pipeline 的 command/redirected-statement stage 统一抽取，支持
 tabs、绝对 sink、`|&` 与 pipeline 外层 redirection，同时 remote-shell
 判断仍只消费上述共享 scanner 的 edge 结果。
-curl 的 separate/attached `@`、form 与
-upload-file 统一由一个 operand decoder 区分 File/Stdin；受支持语言的显式 `open(path)`
-可作为文件读取上下文；非 curl 的 `@path` 与普通路径文本不得被视为凭证
-文件内容，`nc -z` 也不得视为 stdin 传输。
+curl argv 只遍历一次，并按 option arity 消费 separate operand；被前一
+option 消费的 option-like token 不得再次解释。arity 来自 curl 8.7.1
+generated-help 的完整 value-option schema（含 proxy/preproxy/proxy1.0）；
+short option cluster 逐项解码，遇到
+data/form/upload 或其他带值 option 后由余下 token/下一 argv 提供 operand。
+decoder 再按选项族生成可组合的 File/Stdin 来源标志：
+data/data-ascii/data-binary/json 只接受前导 `@`，data-urlencode 只接受
+`@file` 与不含 `=` 的 `name@file`。form 按 curl 8.7.1 parser 语义切分
+第一个 `name=`（允许空 name）：`@` 使用逗号 source list 且每个 source
+携带自身属性，`<` 只接受单 source；word 只识别双引号及其中的 `\\`/`\"`
+转义。`headers=@file` 与 `headers=<file` 作为额外文件来源，
+`type`/`filename` 等其他属性保持 metadata。decoder 保存真实 file-source
+字符串与独立 stdin 标志；classifier 只扫描这些 source，不得因同 token
+存在安全文件而扫描 `filename=` 等 metadata。普通 data/urlencode/upload
+路径不得套用 form word 解码，其中的字面引号属于文件名本身，不能被剥除后
+误判为 stdin 或规范敏感路径。form word 仅在首个非空白字符为双引号时进入
+quoted 模式，未闭合引号按 curl 8.7.1 `get_param_word` 回退为 unquoted
+扫描。动态 source 只关联 syntax 层中与该 curl file-source byte span
+直接相交的 argument-relative raw-reference→canonical-reference fragment，
+禁止 substring identity 或 argument 级聚合 provenance。upload-file 保持
+path/`-` 语义。
+`--data-raw` 与 `--form-string` 明确不具备文件读取语义。受支持语言的显式
+`open(path)` 可作为文件读取上下文；非 curl 的 `@path` 与普通路径文本不得
+被视为凭证文件内容，`nc -z` 也不得视为 stdin 传输。
+direct Bash argv 必须另存 shell-normalized text 与 argument-relative raw
+byte-boundary map：去除 quote syntax，并按
+`\\$`/``\\` ``/`\\\"`/`\\\\`/反斜杠换行规则处理转义，再进入 curl form
+grammar；即使同一 word 含未解析变量也不得丢失已知词法结构。curl 解析出的
+source span 经 boundary map 映回 raw 后，仍只与真实 expansion fragment
+相交；单引号或 `\\$` 抑制的 `$` 来源不参与直接敏感扫描。command/process/
+arithmetic substitution 保持 dynamic，不得从 substitution 文本猜文件来源。
+assignment constants 同时保留可传递的 suppressed-origin，禁止直接、别名链或
+混合常量展开后的 `$NAME` 再激活单引号或 escaped-dollar 内容；精确 source
+constant 若为 `-`，则仅在该 curl option/source 允许 stdin 时提升 stdin
+标志。ANSI-C `$'…'` argv 按 Bash escape/octal/hex/Unicode/control 语义解码
+并生成同类 boundary map，且 word 前缀、后缀及相邻 ANSI-C 片段均参与组合；
+locale-translated `$"…"` 在 standalone 或 word 拼接位置都保持 dynamic。
 
 ## 计划变更清单
 
 <!-- specrail-planned-changes
-{"version":1,"issue":102,"complete":true,"paths":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md","crates/argus-agent/src/capability.rs","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/capability/syntax/bash.rs","crates/argus-agent/src/capability/syntax/normalize.rs","crates/argus-agent/src/capability/syntax/shell.rs","crates/argus-agent/src/capability/syntax/reference.rs","crates/argus-agent/src/capability/syntax/tests.rs","crates/argus-agent/src/capability/tests.rs","crates/argus-agent/src/capability/tests/gh102.rs","crates/argus-agent/tests/gh87_capability.rs"],"spec_refs":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md"]}
+{"version":1,"issue":102,"complete":true,"paths":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md","crates/argus-agent/src/capability.rs","crates/argus-agent/src/capability/classify.rs","crates/argus-agent/src/capability/classify/curl.rs","crates/argus-agent/src/capability/syntax.rs","crates/argus-agent/src/capability/syntax/bash.rs","crates/argus-agent/src/capability/syntax/normalize.rs","crates/argus-agent/src/capability/syntax/shell.rs","crates/argus-agent/src/capability/syntax/reference.rs","crates/argus-agent/src/capability/syntax/tests.rs","crates/argus-agent/src/capability/tests.rs","crates/argus-agent/src/capability/tests/gh102.rs","crates/argus-agent/src/capability/tests/gh102_curl.rs","crates/argus-agent/tests/gh87_capability.rs"],"spec_refs":["specs/GH102/product.md","specs/GH102/tech.md","specs/GH102/tasks.md"]}
 -->
 
 ## Product-to-Test Mapping

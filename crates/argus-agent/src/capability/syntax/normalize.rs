@@ -219,6 +219,8 @@ fn token_static_values(tokens: &[String]) -> Vec<StaticValue> {
             raw: token.clone(),
             resolved: Some(token.clone()),
             executable_reference: None,
+            executable_reference_fragments: Vec::new(),
+            shell_argument: super::ShellArgument::NotShell,
         })
         .collect()
 }
@@ -527,14 +529,6 @@ pub(super) fn constructed_class(raw: &str) -> Option<String> {
 
 pub(super) fn resolve_static(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {
     let raw = raw.trim();
-    if raw.contains('+') {
-        let mut output = String::new();
-        for part in raw.split('+') {
-            let value = resolve_static(part.trim(), constants)?;
-            output.push_str(&value);
-        }
-        return Some(output);
-    }
     if let Some(value) = unquote(raw) {
         return expand_shell_variables(&value, constants);
     }
@@ -553,14 +547,82 @@ pub(super) fn resolve_static_value(
     language: ScriptLanguage,
     constants: &BTreeMap<String, String>,
 ) -> Option<String> {
-    resolve_static(raw, constants).or_else(|| {
-        (language == ScriptLanguage::Bash
-            && node_kind == "word"
-            && raw.chars().all(|character| {
-                character.is_ascii_alphanumeric() || "_./:@%+=,~-".contains(character)
-            }))
-        .then(|| raw.to_string())
-    })
+    resolve_literal(raw, node_kind, language, constants)
+        .or_else(|| resolve_static(raw, constants))
+        .or_else(|| {
+            (language == ScriptLanguage::Bash
+                && node_kind == "word"
+                && raw.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "_./:@%+=,~-".contains(character)
+                }))
+            .then(|| raw.to_string())
+        })
+}
+
+fn resolve_literal(
+    raw: &str,
+    node_kind: &str,
+    language: ScriptLanguage,
+    constants: &BTreeMap<String, String>,
+) -> Option<String> {
+    match (language, node_kind) {
+        (ScriptLanguage::Bash, "raw_string") => unquote(raw),
+        (ScriptLanguage::Bash, "string") => {
+            unquote(raw).and_then(|value| expand_shell_double_quoted(&value, constants))
+        }
+        (
+            ScriptLanguage::Python | ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "string",
+        ) => unquote(raw),
+        _ => None,
+    }
+}
+
+fn expand_shell_double_quoted(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut output = String::new();
+    let mut chunk_start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && bytes
+                .get(index + 1)
+                .is_some_and(|next| matches!(*next, b'$' | b'`' | b'"' | b'\\' | b'\n'))
+        {
+            output.push_str(&raw[chunk_start..index]);
+            if bytes[index + 1] != b'\n' {
+                output.push(bytes[index + 1] as char);
+            }
+            index += 2;
+            chunk_start = index;
+            continue;
+        }
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        output.push_str(&raw[chunk_start..index]);
+        index += 1;
+        let braced = index < bytes.len() && bytes[index] == b'{';
+        if braced {
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+        {
+            index += 1;
+        }
+        if start == index || (braced && (index >= bytes.len() || bytes[index] != b'}')) {
+            return None;
+        }
+        output.push_str(constants.get(&raw[start..index])?);
+        if braced {
+            index += 1;
+        }
+        chunk_start = index;
+    }
+    output.push_str(&raw[chunk_start..]);
+    Some(output)
 }
 
 fn expand_shell_variables(raw: &str, constants: &BTreeMap<String, String>) -> Option<String> {

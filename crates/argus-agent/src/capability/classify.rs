@@ -6,6 +6,10 @@ use super::syntax::{
 use super::{agent_config_write_re, resolve_host, sensitive_read_re};
 use regex::Regex;
 
+mod curl;
+
+use curl::curl_argument_inputs;
+
 pub(super) fn is_network_fact(fact: &Fact) -> bool {
     network_invocation(fact).is_some()
 }
@@ -162,40 +166,37 @@ fn pipeline_sink_is_network(fact: &Fact) -> bool {
     }
     match executable_basename(sink).as_str() {
         "nc" => !nc_zero_io(&fact.pipeline_sink_arguments),
-        "curl" => fact
-            .pipeline_sink_arguments
+        "curl" => curl_argument_inputs(&fact.pipeline_sink_arguments)
             .iter()
-            .enumerate()
-            .any(|(index, argument)| {
-                curl_argument_input(&fact.pipeline_sink_arguments, index, argument)
-                    == Some(CurlInput::Stdin)
-            }),
+            .any(|input| input.reads_stdin()),
         _ => false,
     }
 }
 
 fn network_sensitive_match(fact: &Fact) -> Option<String> {
     let (client, arguments) = network_invocation(fact)?;
+    let curl_inputs = (client == "curl").then(|| curl_argument_inputs(&arguments));
     let mut matches = Vec::new();
     for (index, argument) in arguments.iter().enumerate() {
-        let reads_file = network_argument_reads_file(&client, &arguments, index, argument);
-        let candidates = [
-            argument.executable_reference.as_deref().unwrap_or(""),
-            if reads_file {
-                argument.raw.as_str()
-            } else {
-                ""
-            },
-            reads_file
-                .then_some(argument.resolved.as_deref())
-                .flatten()
-                .unwrap_or(""),
-        ];
-        for candidate in candidates {
+        let executable = argument.executable_reference.as_deref().unwrap_or("");
+        let explicit_file_read = executable.contains("open(");
+        let mut collect = |candidate: &str, file_content: bool| {
             for matched in sensitive_read_re().find_iter(candidate) {
-                if !is_sensitive_path(matched.as_str()) || reads_file {
+                if !is_sensitive_path(matched.as_str()) || file_content {
                     matches.push(matched.as_str().to_string());
                 }
+            }
+        };
+        collect(executable, explicit_file_read);
+        if explicit_file_read {
+            collect(argument.raw.as_str(), true);
+            if let Some(resolved) = argument.resolved.as_deref() {
+                collect(resolved, true);
+            }
+        }
+        if let Some(input) = curl_inputs.as_ref().and_then(|inputs| inputs.get(index)) {
+            for source in input.file_sources() {
+                collect(source, true);
             }
         }
     }
@@ -247,19 +248,6 @@ fn best_sensitive_match<'a>(candidates: impl IntoIterator<Item = &'a str>) -> Op
         .max_by_key(|matched| sensitive_match_rank(matched))
 }
 
-fn network_argument_reads_file(
-    client: &str,
-    arguments: &[StaticValue],
-    index: usize,
-    argument: &StaticValue,
-) -> bool {
-    let candidate = argument.executable_reference.as_deref().unwrap_or("");
-    if candidate.contains("open(") {
-        return true;
-    }
-    client == "curl" && curl_argument_input(arguments, index, argument) == Some(CurlInput::File)
-}
-
 fn static_value_text(value: &StaticValue) -> Option<&str> {
     Some(
         value
@@ -268,69 +256,6 @@ fn static_value_text(value: &StaticValue) -> Option<&str> {
             .unwrap_or(value.raw.as_str())
             .trim_matches(['\'', '"']),
     )
-}
-
-fn previous_argument(arguments: &[StaticValue], index: usize) -> Option<&str> {
-    let previous = index
-        .checked_sub(1)
-        .and_then(|offset| arguments.get(offset))?;
-    static_value_text(previous)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CurlInput {
-    File,
-    Stdin,
-}
-
-fn curl_argument_input(
-    arguments: &[StaticValue],
-    index: usize,
-    argument: &StaticValue,
-) -> Option<CurlInput> {
-    let value = static_value_text(argument)?;
-    let previous = previous_argument(arguments, index);
-    if let Some(path) = value.strip_prefix("--upload-file=") {
-        return curl_path_input(path);
-    }
-    if let Some(path) = value.strip_prefix("-T").filter(|path| !path.is_empty()) {
-        return curl_path_input(path);
-    }
-    for prefix in ["--data-binary=@", "--data=@", "-d@"] {
-        if let Some(path) = value.strip_prefix(prefix) {
-            return curl_path_input(path);
-        }
-    }
-    for prefix in ["--form=", "-F"] {
-        if let Some(form) = value.strip_prefix(prefix).filter(|form| !form.is_empty()) {
-            if let Some((_, path)) = form.split_once("=@") {
-                return curl_path_input(path);
-            }
-        }
-    }
-    if previous.is_some_and(|option| matches!(option, "-d" | "--data" | "--data-binary")) {
-        return value.strip_prefix('@').and_then(curl_path_input);
-    }
-    if previous.is_some_and(|option| matches!(option, "-F" | "--form")) {
-        if let Some((_, path)) = value.split_once("=@") {
-            return curl_path_input(path);
-        }
-        return value.strip_prefix('@').and_then(curl_path_input);
-    }
-    previous
-        .filter(|option| matches!(*option, "-T" | "--upload-file"))
-        .and_then(|_| curl_path_input(value))
-}
-
-fn curl_path_input(path: &str) -> Option<CurlInput> {
-    let path = path.trim_matches(['\'', '"']);
-    if path.is_empty() {
-        None
-    } else if path == "-" {
-        Some(CurlInput::Stdin)
-    } else {
-        Some(CurlInput::File)
-    }
 }
 
 fn pipeline_stage_emits_sensitive(

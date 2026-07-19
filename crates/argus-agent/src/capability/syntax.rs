@@ -1,6 +1,6 @@
 use crate::SurfaceFile;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::{Language, Node, Parser};
 
 mod bash;
@@ -15,14 +15,13 @@ pub(super) use normalize::{
 };
 pub(super) use shell::bounded_shell_pipeline;
 
-use bash::{bash_command_fact, bash_pipeline_fact, bash_redirect_fact};
+use bash::{bash_argument_value, bash_command_fact, bash_pipeline_fact, bash_redirect_fact};
 use normalize::{
     command_argument_shape, constructed_class, contains_missing, exec_wrapper_argument_nodes,
-    is_identifier, language_for, replace_identifier_token, resolve_static, resolve_static_value,
-    unquote,
+    is_identifier, language_for, replace_identifier_token, resolve_static_value, unquote,
 };
 use receiver::writer_receiver_value;
-use reference::executable_reference;
+use reference::executable_references;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FactKind {
@@ -46,6 +45,30 @@ pub(super) struct StaticValue {
     pub raw: String,
     pub resolved: Option<String>,
     pub executable_reference: Option<String>,
+    pub executable_reference_fragments: Vec<ExecutableReferenceFragment>,
+    pub shell_argument: ShellArgument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExecutableReferenceFragment {
+    pub raw: String,
+    pub resolved: String,
+    pub constant_resolved: Option<String>,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ShellArgument {
+    NotShell,
+    Known(ShellArgumentValue),
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ShellArgumentValue {
+    pub text: String,
+    pub raw_boundaries: Vec<usize>,
 }
 
 pub(super) type PipelineStage = (String, Vec<StaticValue>);
@@ -80,6 +103,7 @@ struct Bindings {
     aliases: BTreeMap<String, String>,
     constants: BTreeMap<String, String>,
     provenance: BTreeMap<String, String>,
+    suppressed_constants: BTreeSet<String>,
 }
 
 pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
@@ -354,19 +378,25 @@ fn parse_assignment(
     bindings.constants.remove(name);
     bindings.aliases.remove(name);
     bindings.provenance.remove(name);
+    bindings.suppressed_constants.remove(name);
     let raw_value = text(value_node, source)?;
     if language == ScriptLanguage::Bash {
-        if let Some(provenance) =
-            static_value(value_node, source, bindings, language)?.executable_reference
-        {
+        let value = static_value(value_node, source, bindings, language)?;
+        if let Some(provenance) = value.executable_reference {
             bindings.provenance.insert(name.to_string(), provenance);
+        } else if raw_value.contains('$') {
+            bindings.suppressed_constants.insert(name.to_string());
         }
     }
-    let resolved = resolve_static(raw_value, &bindings.constants).or_else(|| {
-        (language == ScriptLanguage::Bash && !raw_value.contains('$'))
-            .then(|| raw_value.trim().to_string())
-    });
+    let resolved =
+        resolve_static_node(value_node, source, language, &bindings.constants)?.or_else(|| {
+            (language == ScriptLanguage::Bash && !raw_value.contains('$'))
+                .then(|| raw_value.trim().to_string())
+        });
     if let Some(value) = resolved {
+        if language == ScriptLanguage::Bash && value.contains('$') {
+            bindings.suppressed_constants.insert(name.to_string());
+        }
         bindings.constants.insert(name.to_string(), value);
     }
     if matches!(
@@ -513,13 +543,105 @@ fn static_value(
     language: ScriptLanguage,
 ) -> Result<StaticValue> {
     let raw = text(node, source)?;
-    let executable_reference = executable_reference(node, source, language)?
+    let shell_argument = if language == ScriptLanguage::Bash {
+        match bash_argument_value(node, source)? {
+            Some(value) => ShellArgument::Known(value),
+            None => ShellArgument::Dynamic,
+        }
+    } else {
+        ShellArgument::NotShell
+    };
+    let reference_analysis = executable_references(node, source, language)?;
+    let executable_reference = reference_analysis
+        .combined
         .map(|value| canonical_reference(&value, bindings));
+    let executable_reference_fragments = reference_analysis
+        .fragments
+        .into_iter()
+        .map(|fragment| ExecutableReferenceFragment {
+            raw: fragment.raw,
+            resolved: canonical_reference(&fragment.value, bindings),
+            constant_resolved: constant_reference(&fragment.value, bindings),
+            start_byte: fragment.start_byte,
+            end_byte: fragment.end_byte,
+        })
+        .collect();
     Ok(StaticValue {
         raw: raw.to_string(),
-        resolved: resolve_static_value(raw, node.kind(), language, &bindings.constants),
+        resolved: resolve_static_node(node, source, language, &bindings.constants)?,
         executable_reference,
+        executable_reference_fragments,
+        shell_argument,
     })
+}
+
+fn resolve_static_node(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    constants: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    if language == ScriptLanguage::Bash && bash_argument_value(node, source)?.is_none() {
+        return Ok(None);
+    }
+    let concatenation = matches!(
+        (language, node.kind()),
+        (ScriptLanguage::Python, "binary_operator")
+            | (
+                ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+                "binary_expression"
+            )
+    );
+    if concatenation {
+        let Some(operator) = node.child_by_field_name("operator") else {
+            return Ok(None);
+        };
+        if text(operator, source)? != "+" {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(left), Some(right)) = (
+            resolve_static_node(left, source, language, constants)?,
+            resolve_static_node(right, source, language, constants)?,
+        ) else {
+            return Ok(None);
+        };
+        return Ok(Some(left + &right));
+    }
+    if node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let Some(child) = children.next() else {
+            return Ok(None);
+        };
+        if children.next().is_some() {
+            return Ok(None);
+        }
+        return resolve_static_node(child, source, language, constants);
+    }
+    Ok(resolve_static_value(
+        text(node, source)?,
+        node.kind(),
+        language,
+        constants,
+    ))
+}
+
+fn constant_reference(raw: &str, bindings: &Bindings) -> Option<String> {
+    let resolved = bindings
+        .constants
+        .iter()
+        .filter(|(name, _)| !bindings.suppressed_constants.contains(*name))
+        .fold(raw.to_string(), |value, (name, constant)| {
+            let braced = replace_identifier_token(&value, &format!("${{{name}}}"), constant);
+            replace_identifier_token(&braced, &format!("${name}"), constant)
+        });
+    (resolved != raw).then_some(resolved)
 }
 
 fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
@@ -532,6 +654,7 @@ fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
     bindings
         .provenance
         .iter()
+        .filter(|(name, _)| !bindings.suppressed_constants.contains(*name))
         .fold(aliased, |value, (name, provenance)| {
             let braced = replace_identifier_token(&value, &format!("${{{name}}}"), provenance);
             replace_identifier_token(&braced, &format!("${name}"), provenance)
