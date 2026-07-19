@@ -21,6 +21,8 @@ argus-rules = { workspace = true }
 argus-verify = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }

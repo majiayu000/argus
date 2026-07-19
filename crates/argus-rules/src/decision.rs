@@ -60,7 +60,17 @@ const INFO_ONLY_RULES: &[&str] = &[
     // not be authenticated. Surfaced (not silently skipped) but not a verdict
     // on its own — mirrors `missing-provenance`.
     "go-integrity-unverified",
+    // npm metadata anomaly evaluation could not establish a complete,
+    // bounded history. These findings preserve uncertainty without turning
+    // missing evidence into a verdict.
+    "npm-version-shape-unassessed",
+    "npm-rapid-publish-unassessed",
 ];
+
+/// Bounded npm metadata anomalies require explicit human approval when they
+/// are the only policy-weighted findings. They never downgrade an unrelated
+/// blocking finding.
+const APPROVAL_ONLY_RULES: &[&str] = &["version-shape-anomaly", "rapid-publish-window"];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
 /// decision from Block to AllowWithApproval.
@@ -98,8 +108,18 @@ pub fn derive_from_findings(findings: &[Finding]) -> Decision {
         return Decision::Allow;
     }
 
-    let has_native_build = decision_ids.contains("known-native-build-pattern");
-    let has_high_risk = decision_ids
+    let residual_ids = decision_ids
+        .iter()
+        .copied()
+        .filter(|id| !APPROVAL_ONLY_RULES.contains(id))
+        .collect::<BTreeSet<_>>();
+
+    if residual_ids.is_empty() {
+        return Decision::AllowWithApproval;
+    }
+
+    let has_native_build = residual_ids.contains("known-native-build-pattern");
+    let has_high_risk = residual_ids
         .iter()
         .any(|id| !DOWNGRADE_SAFE_RULES.contains(id));
 
@@ -189,6 +209,44 @@ mod tests {
         let findings = vec![
             f("remote-download"),
             Finding::new("provenance-verified-subject", Severity::Info, ""),
+        ];
+        assert_eq!(derive_from_findings(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn anomaly_decision_requires_approval_for_closed_anomaly_set() {
+        let findings = [
+            Finding::new("version-shape-anomaly", Severity::Medium, ""),
+            Finding::new("rapid-publish-window", Severity::Medium, ""),
+            Finding::new("missing-provenance", Severity::Info, ""),
+        ];
+        assert_eq!(derive_from_findings(&findings), Decision::AllowWithApproval);
+    }
+
+    #[test]
+    fn anomaly_decision_unassessed_set_is_allow() {
+        let findings = [
+            Finding::new("npm-version-shape-unassessed", Severity::Info, ""),
+            Finding::new("npm-rapid-publish-unassessed", Severity::Info, ""),
+        ];
+        assert_eq!(derive_from_findings(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn anomaly_decision_preserves_native_build_approval() {
+        let findings = [
+            f("lifecycle-script"),
+            Finding::new("known-native-build-pattern", Severity::Info, ""),
+            Finding::new("version-shape-anomaly", Severity::Medium, ""),
+        ];
+        assert_eq!(derive_from_findings(&findings), Decision::AllowWithApproval);
+    }
+
+    #[test]
+    fn anomaly_decision_never_overrides_residual_block() {
+        let findings = [
+            f("remote-download"),
+            Finding::new("rapid-publish-window", Severity::Medium, ""),
         ];
         assert_eq!(derive_from_findings(&findings), Decision::Block);
     }

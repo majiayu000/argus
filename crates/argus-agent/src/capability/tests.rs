@@ -261,6 +261,14 @@ fn py(content: &str) -> SurfaceFile {
     }
 }
 
+fn ts(content: &str) -> SurfaceFile {
+    SurfaceFile {
+        rel: "hook.ts".into(),
+        content: content.into(),
+        kind: SurfaceKind::Script,
+    }
+}
+
 fn formatter() -> SurfaceFile {
     skill("description: Formats markdown documents")
 }
@@ -393,3 +401,8 @@ fn gh101_pathlib_write_bytes_is_config_write() {
     assert!(f.iter().any(|x| x.rule_id == RULE_CAPABILITY_MISFIT));
     assert_block(&f);
 }
+
+#[path = "tests/gh102.rs"]
+mod gh102;
+#[path = "tests/gh102_curl.rs"]
+mod gh102_curl;
