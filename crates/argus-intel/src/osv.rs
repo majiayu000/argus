@@ -1,15 +1,21 @@
-pub(crate) use crate::osv_profile::SUPPORTED_SCHEMA_VERSIONS;
 use crate::osv_profile::{profile, SchemaProfile};
 use anyhow::{bail, Context, Result};
+use argus_core::{canonicalize_package_name, Ecosystem, PackageCoordinate};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use std::sync::LazyLock;
 
-#[derive(Debug, Deserialize)]
+pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &[
+    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.1", "1.4.0", "1.5.0", "1.6.0", "1.6.1", "1.6.2",
+    "1.6.3", "1.6.4", "1.6.5", "1.6.6", "1.6.7", "1.7.0", "1.7.2", "1.7.3", "1.7.4", "1.7.5",
+    "1.8.0",
+];
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvRecord {
+pub struct OsvRecord {
     pub schema_version: String,
     pub id: String,
     #[serde(deserialize_with = "deserialize_utc")]
@@ -40,9 +46,9 @@ pub(crate) struct OsvRecord {
     pub database_specific: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvAffected {
+pub struct OsvAffected {
     pub package: OsvPackage,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub severity: Vec<OsvSeverity>,
@@ -56,18 +62,18 @@ pub(crate) struct OsvAffected {
     pub database_specific: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvPackage {
+pub struct OsvPackage {
     pub ecosystem: String,
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_present_optional")]
     pub purl: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvRange {
+pub struct OsvRange {
     #[serde(rename = "type")]
     pub range_type: String,
     #[serde(default, deserialize_with = "deserialize_present_optional")]
@@ -77,9 +83,9 @@ pub(crate) struct OsvRange {
     pub database_specific: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvEvent {
+pub struct OsvEvent {
     #[serde(default, deserialize_with = "deserialize_present_optional")]
     pub introduced: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_optional")]
@@ -90,9 +96,9 @@ pub(crate) struct OsvEvent {
     pub limit: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvSeverity {
+pub struct OsvSeverity {
     #[serde(rename = "type")]
     pub severity_type: String,
     pub score: String,
@@ -100,17 +106,17 @@ pub(crate) struct OsvSeverity {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvReference {
+pub struct OsvReference {
     #[serde(rename = "type")]
     pub reference_type: String,
     pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OsvCredit {
+pub struct OsvCredit {
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_present_optional")]
     pub contact: Option<Vec<String>>,
@@ -119,50 +125,262 @@ pub(crate) struct OsvCredit {
     pub credit_type: Option<String>,
 }
 
-pub(crate) fn parse_record(bytes: &[u8]) -> Result<OsvRecord> {
-    let value: Value = serde_json::from_slice(bytes).context("parse OSV advisory JSON")?;
-    let schema_profile = validate_version_shape(&value)?;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OsvIntervalMatch {
+    pub introduced: String,
+    pub fixed: Option<String>,
+    pub last_affected: Option<String>,
+    pub limit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsvRangeMatch {
+    pub range_type: String,
+    pub intervals: Vec<OsvIntervalMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsvAffectedMatch {
+    pub affected_index: usize,
+    pub exact_versions: Vec<String>,
+    pub ranges: Vec<OsvRangeMatch>,
+    pub severity: Vec<OsvSeverity>,
+}
+
+pub fn parse_osv_record(bytes: &[u8]) -> Result<OsvRecord> {
+    let mut value: Value = serde_json::from_slice(bytes).context("parse OSV advisory JSON")?;
+    let (schema_profile, schema_version) = validate_version_shape(&mut value)?;
     let record: OsvRecord =
         serde_json::from_value(value).context("parse OSV advisory JSON schema")?;
-    validate_common(&record, schema_profile)?;
+    validate_common(&record, schema_profile, &schema_version)?;
     Ok(record)
 }
 
-fn validate_version_shape(value: &Value) -> Result<&'static SchemaProfile> {
+pub(crate) fn parse_record(bytes: &[u8]) -> Result<OsvRecord> {
+    parse_osv_record(bytes)
+}
+
+pub fn match_osv_affected(
+    record: &OsvRecord,
+    coordinate: &PackageCoordinate,
+) -> Result<Vec<OsvAffectedMatch>> {
+    validate_osv_coordinate(coordinate)?;
+    let mut matches = Vec::new();
+    for (affected_index, affected) in record.affected.iter().enumerate() {
+        let Some(ecosystem) = crate::normalize::ecosystem_from_osv(&affected.package.ecosystem)
+        else {
+            continue;
+        };
+        if ecosystem != coordinate.ecosystem
+            || canonicalize_package_name(ecosystem, &affected.package.name)?
+                != coordinate.canonical_name
+        {
+            continue;
+        }
+        let mut exact_versions = Vec::new();
+        for version in &affected.versions {
+            if crate::matcher::compare_versions(ecosystem, &coordinate.version, version)?
+                == std::cmp::Ordering::Equal
+            {
+                exact_versions.push(version.clone());
+            }
+        }
+        exact_versions.sort();
+        exact_versions.dedup();
+        let expected_range = match ecosystem {
+            Ecosystem::Npm | Ecosystem::CratesIo | Ecosystem::Go => "SEMVER",
+            Ecosystem::PyPi
+            | Ecosystem::NuGet
+            | Ecosystem::Maven
+            | Ecosystem::RubyGems
+            | Ecosystem::Packagist => "ECOSYSTEM",
+        };
+        let mut ranges = Vec::new();
+        for range in &affected.ranges {
+            if range.range_type != expected_range || range.repo.is_some() {
+                bail!(
+                    "advisory `{}` uses unsupported range for {}",
+                    record.id,
+                    ecosystem.osv_name()
+                );
+            }
+            let intervals = matching_intervals(ecosystem, &coordinate.version, &range.events)?;
+            if !intervals.is_empty() {
+                ranges.push(OsvRangeMatch {
+                    range_type: range.range_type.clone(),
+                    intervals,
+                });
+            }
+        }
+        ranges.sort_by(|left, right| {
+            (&left.range_type, &left.intervals).cmp(&(&right.range_type, &right.intervals))
+        });
+        ranges.dedup_by(|left, right| {
+            left.range_type == right.range_type && left.intervals == right.intervals
+        });
+        if !exact_versions.is_empty() || !ranges.is_empty() {
+            matches.push(OsvAffectedMatch {
+                affected_index,
+                exact_versions,
+                ranges,
+                severity: affected.severity.clone(),
+            });
+        }
+    }
+    Ok(matches)
+}
+
+pub fn validate_osv_coordinate(coordinate: &PackageCoordinate) -> Result<()> {
+    coordinate
+        .validate()
+        .context("validate package coordinate before OSV matching")?;
+    validate_exact_version_shape(coordinate.ecosystem, &coordinate.version)?;
+    crate::matcher::parse_version(coordinate.ecosystem, &coordinate.version)
+        .context("validate queried package exact version")
+}
+
+fn validate_exact_version_shape(ecosystem: Ecosystem, raw: &str) -> Result<()> {
+    if raw.chars().any(char::is_whitespace) {
+        bail!("exact package version must not contain whitespace");
+    }
+    match ecosystem {
+        Ecosystem::Go => {
+            let value = raw.strip_prefix('v').unwrap_or(raw);
+            let core = value.split_once(['-', '+']).map_or(value, |(core, _)| core);
+            if core.split('.').count() != 3 {
+                bail!("exact Go version must have major, minor, and patch components");
+            }
+        }
+        Ecosystem::Maven if raw.as_bytes().windows(2).any(|pair| pair == b"${") => {
+            bail!("unresolved Maven property expression is not an exact resolved package version");
+        }
+        Ecosystem::Maven
+            if raw.starts_with(['[', '('])
+                || raw.ends_with([']', ')'])
+                || raw.contains([',', '*'])
+                || raw.eq_ignore_ascii_case("LATEST")
+                || raw.eq_ignore_ascii_case("RELEASE") =>
+        {
+            bail!("Maven version ranges are not exact package versions");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn matching_intervals(
+    ecosystem: Ecosystem,
+    candidate: &str,
+    events: &[OsvEvent],
+) -> Result<Vec<OsvIntervalMatch>> {
+    let mut introduced: Option<&str> = None;
+    let mut matches = Vec::new();
+    for event in events {
+        if let Some(start) = event.introduced.as_deref() {
+            introduced = Some(start);
+            continue;
+        }
+        let start = introduced
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("OSV range closes before introduced"))?;
+        if interval_contains(ecosystem, candidate, start, event)? {
+            matches.push(OsvIntervalMatch {
+                introduced: start.to_string(),
+                fixed: event.fixed.clone(),
+                last_affected: event.last_affected.clone(),
+                limit: event.limit.clone(),
+            });
+        }
+    }
+    if let Some(start) = introduced {
+        let after_start = start == "0"
+            || crate::matcher::compare_versions(ecosystem, candidate, start)?
+                != std::cmp::Ordering::Less;
+        if after_start {
+            matches.push(OsvIntervalMatch {
+                introduced: start.to_string(),
+                fixed: None,
+                last_affected: None,
+                limit: None,
+            });
+        }
+    }
+    Ok(matches)
+}
+
+fn interval_contains(
+    ecosystem: Ecosystem,
+    candidate: &str,
+    introduced: &str,
+    closing: &OsvEvent,
+) -> Result<bool> {
+    let after_start = introduced == "0"
+        || crate::matcher::compare_versions(ecosystem, candidate, introduced)?
+            != std::cmp::Ordering::Less;
+    let (end, inclusive) = if let Some(value) = closing.fixed.as_deref() {
+        (value, false)
+    } else if let Some(value) = closing.limit.as_deref() {
+        (value, false)
+    } else if let Some(value) = closing.last_affected.as_deref() {
+        (value, true)
+    } else {
+        bail!("OSV range closing event has no boundary");
+    };
+    let order = crate::matcher::compare_versions(ecosystem, candidate, end)?;
+    Ok(after_start && (order == std::cmp::Ordering::Less || (inclusive && order.is_eq())))
+}
+
+fn validate_version_shape(value: &mut Value) -> Result<(&'static SchemaProfile, String)> {
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("OSV advisory must be a JSON object"))?;
-    let version = object
-        .get("schema_version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("OSV schema_version must be a string"))?;
-    let schema_profile = profile(version)
+    let version = match object.get("schema_version") {
+        None => {
+            object.insert(
+                "schema_version".to_string(),
+                Value::String("1.0.0".to_string()),
+            );
+            "1.0.0".to_string()
+        }
+        Some(Value::String(version)) if !version.is_empty() => version.clone(),
+        Some(_) => bail!("OSV schema_version must be a non-empty string"),
+    };
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&version.as_str()) {
+        bail!("unsupported OSV schema_version `{version}`");
+    }
+    let profile_version = match version.as_str() {
+        "1.3.1" => "1.3.0",
+        "1.6.1" | "1.6.2" | "1.6.3" | "1.6.4" | "1.6.5" | "1.6.6" | "1.6.7" => "1.6.0",
+        "1.7.5" | "1.8.0" => "1.7.4",
+        supported => supported,
+    };
+    let schema_profile = profile(profile_version)
         .ok_or_else(|| anyhow::anyhow!("unsupported OSV schema_version `{version}`"))?;
     reject_unless(
         object,
         "database_specific",
         schema_profile.fields.top_database_specific,
-        version,
+        &version,
     )?;
     reject_unless(
         object,
         "credits",
         schema_profile.fields.credits_and_top_severity,
-        version,
+        &version,
     )?;
     reject_unless(
         object,
         "severity",
         schema_profile.fields.credits_and_top_severity,
-        version,
+        &version,
     )?;
-    reject_unless(object, "upstream", schema_profile.fields.upstream, version)?;
+    reject_unless(object, "upstream", schema_profile.fields.upstream, &version)?;
     for field in ["aliases", "severity", "affected", "references"] {
         reject_null_unless(
             object,
             field,
             schema_profile.fields.nullable_core_collections,
-            version,
+            &version,
         )?;
     }
 
@@ -175,7 +393,7 @@ fn validate_version_shape(value: &Value) -> Result<&'static SchemaProfile> {
                 item,
                 "severity",
                 schema_profile.fields.affected_severity_and_credit_type,
-                version,
+                &version,
             )?;
             if let Some(ranges) = item.get("ranges").and_then(Value::as_array) {
                 for range in ranges {
@@ -186,7 +404,7 @@ fn validate_version_shape(value: &Value) -> Result<&'static SchemaProfile> {
                         range,
                         "database_specific",
                         schema_profile.fields.last_affected_and_range_database,
-                        version,
+                        &version,
                     )?;
                     if !schema_profile.fields.last_affected_and_range_database
                         && range
@@ -220,7 +438,7 @@ fn validate_version_shape(value: &Value) -> Result<&'static SchemaProfile> {
     {
         bail!("field `credits[].type` is not defined by OSV schema {version}");
     }
-    Ok(schema_profile)
+    Ok((schema_profile, version))
 }
 
 fn reject_unless(
@@ -247,7 +465,11 @@ fn reject_null_unless(
     Ok(())
 }
 
-fn validate_common(record: &OsvRecord, schema_profile: &SchemaProfile) -> Result<()> {
+fn validate_common(
+    record: &OsvRecord,
+    schema_profile: &SchemaProfile,
+    schema_version: &str,
+) -> Result<()> {
     validate_text("advisory id", &record.id)?;
     schema_profile.validate_id(&record.id)?;
     if record.affected.is_empty() {
@@ -262,7 +484,7 @@ fn validate_common(record: &OsvRecord, schema_profile: &SchemaProfile) -> Result
     for upstream in &record.upstream {
         validate_text("upstream advisory id", upstream)?;
     }
-    validate_severities(&record.severity, schema_profile)?;
+    validate_severities(&record.severity, schema_profile, schema_version)?;
     for affected in &record.affected {
         validate_text("OSV package ecosystem", &affected.package.ecosystem)?;
         schema_profile.validate_ecosystem(&affected.package.ecosystem)?;
@@ -276,7 +498,7 @@ fn validate_common(record: &OsvRecord, schema_profile: &SchemaProfile) -> Result
         for version in &affected.versions {
             validate_text("OSV exact version", version)?;
         }
-        validate_severities(&affected.severity, schema_profile)?;
+        validate_severities(&affected.severity, schema_profile, schema_version)?;
         if !record.severity.is_empty() && !affected.severity.is_empty() {
             bail!("top-level and affected-level severity cannot both be present");
         }
@@ -356,7 +578,11 @@ fn validate_common(record: &OsvRecord, schema_profile: &SchemaProfile) -> Result
     Ok(())
 }
 
-fn validate_severities(severities: &[OsvSeverity], schema_profile: &SchemaProfile) -> Result<()> {
+fn validate_severities(
+    severities: &[OsvSeverity],
+    schema_profile: &SchemaProfile,
+    schema_version: &str,
+) -> Result<()> {
     for severity in severities {
         if !schema_profile
             .severity_types
@@ -365,8 +591,16 @@ fn validate_severities(severities: &[OsvSeverity], schema_profile: &SchemaProfil
             bail!("unsupported OSV severity type `{}`", severity.severity_type);
         }
         validate_severity_score(&severity.severity_type, &severity.score)?;
-        if severity.source.is_some() {
-            bail!("OSV severity source was introduced after schema 1.7.4");
+        if schema_version == "1.8.0" {
+            if severity
+                .source
+                .as_deref()
+                .is_some_and(|source| !matches!(source, "NVD" | "CNA" | "SELF"))
+            {
+                bail!("unsupported OSV severity source");
+            }
+        } else if severity.source.is_some() {
+            bail!("OSV severity source was introduced in schema 1.8.0");
         }
     }
     Ok(())

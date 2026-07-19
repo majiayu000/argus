@@ -13,6 +13,7 @@ members = [
     "crates/argus-go",
     "crates/argus-intel",
     "crates/argus-lockfile",
+    "crates/argus-osv",
     "crates/argus-agent",
     "crates/argus-cli",
     "crates/argus-test-support",
@@ -35,6 +36,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 semver = "1"
 pep440_rs = "0.7.3"
+polycvss = "0.4"
 unicode_categories = "0.1.1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
@@ -54,6 +56,7 @@ argus-nuget = { path = "crates/argus-nuget" }
 argus-go = { path = "crates/argus-go" }
 argus-intel = { path = "crates/argus-intel" }
 argus-lockfile = { path = "crates/argus-lockfile" }
+argus-osv = { path = "crates/argus-osv" }
 argus-test-support = { path = "crates/argus-test-support" }
 argus-verify = { path = "crates/argus-verify" }
 

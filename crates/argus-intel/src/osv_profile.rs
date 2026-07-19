@@ -1,11 +1,6 @@
 // Implemented by the GH90 intelligence owner.
 use anyhow::{bail, Result};
 
-pub(crate) const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &[
-    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.7.1", "1.7.2",
-    "1.7.3", "1.7.4",
-];
-
 #[derive(Clone, Copy)]
 pub(crate) enum StringRule {
     Any,
@@ -490,14 +485,6 @@ pub(crate) static PROFILES: &[SchemaProfile] = &[
     },
     SchemaProfile {
         version: "1.7.0",
-        fields: FIELDS_1_7,
-        reference_types: REFERENCE_1_5,
-        severity_types: SEVERITY_1_7,
-        id_rule: StringRule::Frozen(PREFIX_1_7_0),
-        ecosystem_rule: StringRule::Frozen(ECOSYSTEM_1_7_0),
-    },
-    SchemaProfile {
-        version: "1.7.1",
         fields: FIELDS_1_7,
         reference_types: REFERENCE_1_5,
         severity_types: SEVERITY_1_7,

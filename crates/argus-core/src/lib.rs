@@ -482,6 +482,61 @@ impl IntelSnapshotStatus {
     }
 }
 
+/// Version of the machine-readable vulnerability query evidence contract.
+pub const VULNERABILITY_QUERY_EVIDENCE_VERSION: u8 = 1;
+
+/// Complete successful states for an OSV query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulnerabilityQueryStatus {
+    CompleteNoMatch,
+    CompleteWithFindings,
+    CompleteStale,
+}
+
+/// Provenance of the complete OSV snapshot used for a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulnerabilitySourceMode {
+    Network,
+    Cache,
+    Mixed,
+    OfflineFresh,
+    OfflineStale,
+}
+
+/// Stable evidence for one active advisory and exact package coordinate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulnerabilityAdvisoryEvidence {
+    pub coordinate: PackageCoordinate,
+    pub primary_id: String,
+    pub aliases: Vec<String>,
+    pub locators: Vec<String>,
+    pub matched_ranges: Vec<String>,
+    pub severity_type: Option<String>,
+    pub severity_score: Option<String>,
+    pub normalized_severity: String,
+    pub batch_summary_modified: String,
+    pub detail_modified: String,
+    pub database_modified: String,
+    pub source_url: String,
+}
+
+/// Audit metadata for a complete vulnerability query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulnerabilityQueryEvidence {
+    pub version: u8,
+    pub status: VulnerabilityQueryStatus,
+    pub source_mode: VulnerabilitySourceMode,
+    pub queried_coordinates: usize,
+    pub excluded_local_records: usize,
+    pub active_advisories: usize,
+    pub oldest_fetched_at: DateTime<Utc>,
+    pub newest_fetched_at: DateTime<Utc>,
+    pub maximum_age_seconds: u64,
+    pub advisories: Vec<VulnerabilityAdvisoryEvidence>,
+}
+
 /// Final report after running all rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {

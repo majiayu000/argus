@@ -144,6 +144,7 @@ dependencies = [
  "argus-lockfile",
  "argus-maven",
  "argus-nuget",
+ "argus-osv",
  "argus-pypi",
  "argus-rubygems",
  "argus-rules",
@@ -331,6 +332,26 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "argus-osv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-intel",
+ "argus-lockfile",
+ "chrono",
+ "hex",
+ "polycvss",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -1497,6 +1518,12 @@ dependencies = [
  "der",
  "spki",
 ]
+
+[[package]]
+name = "polycvss"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c72d064793cf89e1143b5eab68225f1118d5f88648bb503e2fd27bae12c13de"
 
 [[package]]
 name = "portable-atomic"

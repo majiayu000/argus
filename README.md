@@ -101,6 +101,17 @@ cargo run -p argus-cli -- scan package-lock.json \
   --lockfile-format package-lock \
   --allow-registry-host packages.corp.example
 
+# Query OSV for one exact package version. The cache directory is always
+# explicit; online mode sends this coordinate to api.osv.dev.
+cargo run -p argus-cli -- vulns package \
+  --ecosystem npm --name lodash --version 4.17.20 \
+  --cache-dir ~/.cache/argus/osv
+
+# Query every complete external coordinate in one supported lockfile without
+# network access. Offline mode requires a complete fresh cache snapshot.
+cargo run -p argus-cli -- vulns lockfile Cargo.lock \
+  --cache-dir ~/.cache/argus/osv --offline --format json
+
 # Scan agent surfaces: MCP configs, skills, hooks, AGENTS.md / CLAUDE.md.
 # Detects injection/override language (AGT-01), dangerous script
 # capabilities like curl|sh or secret-read + network-egress (AGT-03),
@@ -153,6 +164,52 @@ JSON, or SARIF report is emitted. Bounds are 64 MiB input, 100,000 records,
 RFC 8785 canonical finding/evidence JSON. Equality is accepted; plus one is
 rejected. This scan evaluates source and integrity metadata only: it does not
 claim vulnerability status, malicious-package status, or artifact safety.
+
+### Explicit OSV vulnerability queries
+
+`argus vulns` is an opt-in known-vulnerability query. It accepts either one
+exact package coordinate or the normalized external coordinates from any of
+the nine lockfile families above:
+
+```bash
+argus vulns package \
+  --ecosystem <npm|pypi|crates.io|go|nuget|maven|rubygems|packagist> \
+  --name <name> --version <exact> --cache-dir <dir>
+
+argus vulns lockfile <path> \
+  [--lockfile-format <package-lock|yarn|pnpm|poetry|uv|cargo|go-sum|bundler|composer>] \
+  --cache-dir <dir>
+```
+
+Both modes support `--format text|json|sarif` (default `text`),
+`--max-age-seconds` from `0` through `2592000` (default `86400`), and optional
+`--fail-on-severity low|medium|high|critical`. Active advisories normally
+produce `allow-with-approval` and exit `2`; a finding meeting the configured
+threshold produces `block` and exit `1`; a complete no-match produces `allow`
+and exit `0`.
+
+`--cache-dir` is required in online and offline modes. Online queries use only
+the fixed `https://api.osv.dev` service and disclose the exact package
+coordinates being checked. `--offline` prohibits all OSV network access and
+requires every coordinate to have a complete fresh cache entry.
+`--offline --allow-stale` explicitly authorizes only a complete stale snapshot
+and emits visible `vulnerability-data-stale` approval evidence. Missing,
+corrupt, partial, future-dated, or unauthorized stale cache data is an
+operational error: exit `2`, stderr, and empty stdout/no SARIF. Reports expose
+only the stable `<argus-osv-cache>` label, never the cache path.
+
+These results are deliberately separate:
+
+- `vulns` reports known vulnerabilities for exact versions from OSV.
+- `intel` matches an explicitly imported offline known-malicious package
+  snapshot.
+- provenance and lockfile integrity verify origin/digest evidence.
+- static package heuristics report suspicious install/runtime behavior.
+
+One result family does not rewrite another. A no-match is not proof that a
+package is benign, correctly sourced, or safe. `argus vulns` never installs,
+upgrades, edits a manifest/lockfile, starts a package manager, or executes
+package code.
 
 ### Opt-in npm metadata anomalies
 
