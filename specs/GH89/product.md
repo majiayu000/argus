@@ -59,8 +59,11 @@ Argus 的 npm 安装前扫描会校验制品并扫描源码，但尚未利用 pa
    `npm-rapid-publish-unassessed` Info finding，因为 search API 不承诺返回某一
    publisher 的完整活动；不得把候选不足当作 evaluated-clean。响应声明
    `total > 250` 时不得把截断页当作完整证据。
-7. B-007 元数据异常单独出现时最高为 Medium、结果为
-   `allow-with-approval`；不得覆盖或降低既有 High/Critical finding 导出的 block。
+7. B-007 `version-shape-anomaly` 与 `rapid-publish-window` 均为 Medium，并且是
+   闭集 approval-only rule：仅它们（一个或两个）与纯 Info finding 共存时，
+   decision 为 `allow-with-approval`；与现有 native-build approval 组合共存时仍为
+   `allow-with-approval`；只要存在任一按现有规则会 block 的 finding，最终仍为
+   block。两个 `*-unassessed` rule 是闭集 info-only rule，单独出现不改变 allow。
 8. B-008 显式启用元数据检测后，缺失或损坏的 `time`、目标版本
    `_npmUser.name`、search 响应必需字段、`total > 250`、body 超限、缓存损坏与
    transport 失败都必须以 operational error 失败；不得 warning 后按“无异常”
@@ -70,8 +73,9 @@ Argus 的 npm 安装前扫描会校验制品并扫描源码，但尚未利用 pa
    `-/v1/search`，最终 URL 必须保持同 origin 且不能逃出该 base path；必须复用
    HTTPS、host allowlist、redirect 校验、2 MiB body cap 和可注入 transport；
    单次 scan 每个 publisher 最多一页、一次网络请求。
-   可选持久缓存以 `(registry origin,publisher,npm-anomaly-v1)` 为键、TTL 15 分钟，
-   命中后仍执行同一 schema 与上限校验。
+   可选持久缓存以 `(normalized full registry base URL,publisher,npm-anomaly-v1)`
+   为键、TTL 15 分钟；base path 必须参与身份，命中后仍执行同一 schema 与上限
+   校验。
 10. B-010 text、JSON 与 SARIF 必须保留稳定 rule ID、证据与 package 坐标；相同
     fixture 重复运行产生相同 decision 和审计字段。
 
