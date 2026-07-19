@@ -158,7 +158,11 @@ text rules; there is no `durabletask`-specific recorded fixture.
 
 **argus coverage**: `lifecycle-script`, `token-harvest`, `github-write-api`, `npm-publish` all fire.
 
-**Gap**: 1-hour 33-min exposure window means rapid-publish detection matters more than after-the-fact rule firing.
+**Metadata signal**: opt-in `npm-anomaly-v1` can add
+`rapid-publish-window` when the exact publisher has at least five distinct
+package names among bounded npm search candidates in the preceding 24 hours.
+Because search is not a complete activity ledger, fewer candidates produce
+`npm-rapid-publish-unassessed`, not a clean result.
 
 ---
 
@@ -171,7 +175,12 @@ text rules; there is no `durabletask`-specific recorded fixture.
 
 **argus coverage**: depends on the RAT delivery mechanism (install-time vs runtime). If install-time: `lifecycle-script` + `binary-execution` or `remote-download`. If runtime: `runtime-hook` + `network-exfiltration`.
 
-**Gap**: argus does not currently flag "unusually large version-number gap" (axios was at 1.7.x; a 1.14.x jump is suspicious). A "version-shape anomaly" rule would help.
+**Metadata signal**: opt-in `npm-anomaly-v1` can add
+`version-shape-anomaly` for a same-major jump of at least ten minor versions
+(or a jump of at least two major versions) within 72 hours of the direct
+predecessor, after six earlier stable releases, 30 days of history, and a
+five-transition baseline check. Historical data that cannot satisfy those
+bounds produces `npm-version-shape-unassessed`.
 
 ---
 
@@ -406,6 +415,36 @@ pipelines are outside Argus's package-registry command surface. **Full gap.**
 
 ---
 
+### npm metadata-anomaly rules and limits
+
+The opt-in `npm-anomaly-v1` policy adds two metadata signals before install:
+`version-shape-anomaly` and `rapid-publish-window`. Both are Medium,
+approval-only findings. They cannot downgrade an existing blocking content,
+lifecycle, or integrity finding.
+
+Version-shape evaluation uses stable SemVer releases and RFC3339 packument
+times. It requires six earlier stable versions and 30 days of history; the
+target must follow its direct predecessor within `(0, 72h]`, cross either the
+`major_delta >= 2` or same-major `minor_delta >= 10` threshold, and differ from
+the previous five transition classes. Prereleases, backports, equal-time
+publishes, late entries, and established jump patterns do not trigger it.
+
+Rapid-publish evaluation uses only the target version's `_npmUser.name`. It
+queries one bounded npm search page (`size=250`, 2 MiB body cap), exact matches
+`publisher.username`, deduplicates events, and counts distinct package names
+within the preceding 24 hours. Five names trigger the finding. The npm search
+API exposes candidate current versions and does not guarantee complete
+publisher history, so fewer than five candidates produce the Info
+`npm-rapid-publish-unassessed`; they are never reported as clean.
+
+Missing required metadata, invalid or truncated schemas, transport/redirect
+failures, and corrupt/oversized cache data are operational errors.
+`--metadata-cache-dir` entries are isolated by full normalized registry base
+URL (including path), publisher, target publication time, and policy; the TTL
+is 15 minutes and entries older than the target publication time are not reused.
+
+---
+
 ## argus rule coverage matrix
 
 Mapping every incident above to argus's current detection rules. ⛔ = full gap, ⚠️ = partial / rule fires but easily bypassed, ✅ = a rule directly catches the attack pattern.
@@ -418,8 +457,8 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 | Microsoft durabletask (2026-05) | maintainer compromise | cred stealer | PyPI setup/import/content rules | ⚠️ obfuscation; no pinned event fixture |
 | node-ipc (2026-05) | maintainer compromise | runtime cred stealer | runtime-hook + network-exfiltration | ⚠️ heavy obfuscation in single bundle |
 | TanStack (2026-05) | CI pwn-request + cache poisoning | worm-class but **with valid provenance** | lifecycle-script + content rules | ⚠️ provenance check (#15) does not help |
-| Bitwarden CLI (2026-04) | maintainer compromise | multi-stage cred stealer + worm | lifecycle-script + token-harvest + github-write-api | ✅ |
-| Axios RAT (2026-03) | maintainer compromise | RAT | depends on install vs runtime | ⚠️ |
+| Bitwarden CLI (2026-04) | maintainer compromise | multi-stage cred stealer + worm | lifecycle-script + token-harvest + github-write-api; opt-in `rapid-publish-window` metadata signal | ✅ artifact rules; metadata signal remains candidate-bounded |
+| Axios RAT (2026-03) | maintainer compromise | RAT | depends on install vs runtime; opt-in `version-shape-anomaly` metadata signal | ⚠️ metadata policy adds review signal but does not prove malicious intent |
 | SAP `@cap-js/*` (2026-04) | TeamPCP worm | cred stealer | lifecycle-script + token-harvest | ✅ |
 | PyTorch Lightning (2026-04) | maintainer compromise | JS-in-Python loader | PyPI content/import-time rules | ⚠️ mixed-language execution chain not fixture-validated |
 | LiteLLM PyPI (2026-03) | TeamPCP worm | cred stealer | PyPI setup/import/content rules | ⚠️ no pinned event fixture |
@@ -455,24 +494,25 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 - Sigstore wrapper, trust-root, and caller-supplied identity-policy plumbing is
   available as an opt-in npm provenance layer; real npm v0.2 Verified verdicts
   remain blocked by the documented upstream `intoto/0.0.2` gap.
+- Opt-in `npm-anomaly-v1` implements bounded `version-shape-anomaly` and
+  `rapid-publish-window` review signals, with explicit Info unassessed states
+  when packument history or npm search candidates cannot support an assessment.
 
 ### Current scanner gaps
 
-1. **Version-shape anomaly rule.** When a package's version jumps multiple minors or a major in a single hour, that is suspicious — Bitwarden CLI, Axios, chalk all had this signature. Implementable as a rule over the packument's `time` field. New rule `version-shape-anomaly` (info or block depending on severity).
+1. **GitHub Actions consumer-side scanning.** tj-actions-style attacks require scanning workflow YAML for mutable tags and unsafe `pull_request_target` patterns. Different surface; outside the current package-registry commands.
 
-2. **Rapid-publish-window rule.** Multiple packages from the same maintainer published in a < 1 hour window is the Shai-Hulud / atool signature. Requires querying the npm user's recent publish history — needs additional registry endpoint.
+2. **CI provenance pwn-request defense.** TanStack proves provenance attestation alone is insufficient. Mitigation lives in maintainer-side workflow design, not consumer-side scanning.
 
-3. **GitHub Actions consumer-side scanning.** tj-actions-style attacks require scanning workflow YAML for mutable tags and unsafe `pull_request_target` patterns. Different surface; outside the current package-registry commands.
-
-4. **CI provenance pwn-request defense.** TanStack proves provenance attestation alone is insufficient. Mitigation lives in maintainer-side workflow design, not consumer-side scanning.
-
-5. **Long-game maintainer trust attacks.** xz-utils-class incidents need social-graph / commit-pattern anomaly detection. Open research problem; not for argus.
+3. **Long-game maintainer trust attacks.** xz-utils-class incidents need social-graph / commit-pattern anomaly detection. Open research problem; not for argus.
 
 ### New corpus fixtures worth adding (M1.x)
 
 - `crypto-key-stealer/` — implemented synthetic regression fixture; typosquats a crypto library, hooks `Base58.decode`, and POSTs a key to Telegram. Maps to galedonovan, but is not a preserved copy of the real malicious packages.
 - `obfuscated-runtime-bundle/` — large minified single-file bundle with hidden `globalThis.fetch` rewrite. Maps to node-ipc.
-- `version-shape-anomaly/` (synthetic) — a packument fixture that suddenly jumps from 1.7.x to 1.14.x. Once the rule exists.
+- `version-shape-anomaly/` (synthetic corpus form) — the implemented rule already
+  has offline packument/search integration fixtures; a named corpus artifact
+  could make the same scenario visible to corpus reporting.
 - `slsa-signed-malicious/` — synthesizes a tarball + valid attestation for malicious content. Tests that argus's provenance check correctly does NOT clear it just because the digest matches. Maps to TanStack.
 
 ---

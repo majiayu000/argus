@@ -78,6 +78,15 @@ enum Cmd {
         /// (mode 0700 on Unix) to avoid multi-user races in shared `/tmp`.
         #[arg(long)]
         cache_dir: Option<PathBuf>,
+        /// Evaluate bounded npm version-shape and rapid-publish metadata
+        /// anomalies. Disabled by default; enabling may issue one npm search
+        /// request for the resolved version's publisher.
+        #[arg(long)]
+        metadata_anomaly: bool,
+        /// Persistent cache directory for bounded npm search responses.
+        /// Used only with `--metadata-anomaly`.
+        #[arg(long)]
+        metadata_cache_dir: Option<PathBuf>,
         /// Additional host name that the tarball URL is allowed to resolve
         /// to (the registry host is always accepted). Pass multiple times
         /// for multiple hosts. Use this for custom registries that delegate
@@ -301,6 +310,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             pkg,
             registry,
             cache_dir,
+            metadata_anomaly,
+            metadata_cache_dir,
             allow_tarball_host,
             verify_sigstore,
             sigstore_issuer,
@@ -310,6 +321,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             &pkg,
             registry,
             cache_dir,
+            metadata_anomaly,
+            metadata_cache_dir,
             allow_tarball_host,
             verify_sigstore,
             sigstore_issuer,
@@ -528,6 +541,8 @@ fn cmd_fetch(
     pkg: &str,
     registry: String,
     cache_dir: Option<PathBuf>,
+    metadata_anomaly: bool,
+    metadata_cache_dir: Option<PathBuf>,
     allow_tarball_host: Vec<String>,
     verify_sigstore: bool,
     sigstore_issuer: String,
@@ -535,6 +550,9 @@ fn cmd_fetch(
     format: Format,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
+    if metadata_cache_dir.is_some() && !metadata_anomaly {
+        anyhow::bail!("--metadata-cache-dir requires --metadata-anomaly");
+    }
     if cfg!(feature = "sigstore") && verify_sigstore && sigstore_identity.is_empty() {
         anyhow::bail!(
             "--verify-sigstore requires at least one --sigstore-identity regex (an empty allowlist silently rejects every signed bundle)"
@@ -543,6 +561,8 @@ fn cmd_fetch(
     let opts = FetchOptions {
         registry,
         cache_dir,
+        metadata_anomaly,
+        metadata_cache_dir,
         tarball_host_allowlist: allow_tarball_host,
         verify_sigstore,
         sigstore_issuer,
@@ -591,27 +611,44 @@ fn scan_path(path: &Path) -> Result<ScanReport> {
 }
 
 pub(crate) fn print_report_text(report: &ScanReport) {
-    println!(
+    print!("{}", render_report_text(report));
+}
+
+fn render_report_text(report: &ScanReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(
+        output,
         "decision: {}  package: {}",
         report.decision.as_str(),
         report.package_name.as_deref().unwrap_or("<unnamed>"),
-    );
-    println!("path: {}", report.path.display());
+    )
+    .expect("writing a report to String cannot fail");
+    writeln!(output, "path: {}", report.path.display())
+        .expect("writing a report to String cannot fail");
     if report.findings.is_empty() {
-        println!("findings: none");
-        return;
+        writeln!(output, "findings: none").expect("writing a report to String cannot fail");
+        return output;
     }
-    println!("findings:");
+    writeln!(output, "findings:").expect("writing a report to String cannot fail");
     for f in &report.findings {
         let loc = f.location.as_deref().unwrap_or("");
-        println!(
+        writeln!(
+            output,
             "  - [{}] {} — {} ({})",
             severity_tag(f),
             f.rule_id,
             f.detail,
             loc
-        );
+        )
+        .expect("writing a report to String cannot fail");
+        if let Some(evidence) = f.evidence.as_ref() {
+            writeln!(output, "    evidence: {}", evidence.join(", "))
+                .expect("writing a report to String cannot fail");
+        }
     }
+    output
 }
 
 fn severity_tag(f: &argus_core::Finding) -> &'static str {
@@ -621,5 +658,57 @@ fn severity_tag(f: &argus_core::Finding) -> &'static str {
         argus_core::Severity::Medium => "MED ",
         argus_core::Severity::Low => "LOW ",
         argus_core::Severity::Info => "INFO",
+    }
+}
+
+#[cfg(test)]
+mod npm_anomaly_render_tests {
+    use super::*;
+    use argus_core::{ArtifactKind, Finding, Severity};
+
+    fn report() -> ScanReport {
+        let mut finding = Finding::new(
+            "version-shape-anomaly",
+            Severity::Medium,
+            "policy=npm-anomaly-v1; target=3.0.0@2025-02-21T00:00:00Z",
+        );
+        finding.evidence = Some(vec![
+            "policy=npm-anomaly-v1".to_string(),
+            "target_version=3.0.0".to_string(),
+        ]);
+        ScanReport {
+            artifact: ArtifactKind::PackageDir,
+            path: PathBuf::from("@scope/demo@3.0.0"),
+            package_name: Some("@scope/demo".to_string()),
+            package_version: Some("3.0.0".to_string()),
+            decision: Decision::AllowWithApproval,
+            findings: vec![finding],
+        }
+    }
+
+    #[test]
+    fn npm_anomaly_render_preserves_text_json_and_sarif_evidence() {
+        let report = report();
+        let text = render_report_text(&report);
+        assert!(text.contains("version-shape-anomaly"));
+        assert!(text.contains("evidence: policy=npm-anomaly-v1"));
+
+        let json = serde_json::to_value(&report).expect("serialize anomaly report");
+        assert_eq!(json["findings"][0]["evidence"][1], "target_version=3.0.0");
+
+        let sarif = sarif::render_reports(&[report]).expect("render anomaly SARIF");
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["evidence"][0],
+            "policy=npm-anomaly-v1"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["decision"],
+            "allow-with-approval"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "%40scope/demo%403.0.0"
+        );
     }
 }
