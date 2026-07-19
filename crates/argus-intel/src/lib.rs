@@ -19,6 +19,11 @@ pub use import::{
     ImportLimits, ImportOutcome, ImportRequest, CANONICAL_SOURCE,
 };
 pub use matcher::{IntelDatabase, MatchResult, RULE_KNOWN_MALICIOUS};
+pub use osv::{
+    match_osv_affected, parse_osv_record, validate_osv_coordinate, OsvAffected, OsvAffectedMatch,
+    OsvEvent, OsvIntervalMatch, OsvPackage, OsvRange, OsvRangeMatch, OsvRecord, OsvReference,
+    OsvSeverity, SUPPORTED_SCHEMA_VERSIONS,
+};
 pub use snapshot::{
     load_snapshot, AtomicCleanupState, AtomicWriteOutcome, SnapshotEnvelope, SnapshotRecord,
     SnapshotRecordCounts,

@@ -33,6 +33,16 @@ pub(crate) fn render_reports(reports: &[ScanReport]) -> Result<Value> {
         }
     }
 
+    let properties =
+        intelligence_status(reports)?.map(|status| json!({"argusIntelligence": status}));
+    Ok(render_document(rules, results, properties))
+}
+
+pub(crate) fn render_document(
+    rules: Vec<Value>,
+    results: Vec<Value>,
+    properties: Option<Value>,
+) -> Value {
     let mut run = json!({
         "tool": {
             "driver": {
@@ -47,21 +57,16 @@ pub(crate) fn render_reports(reports: &[ScanReport]) -> Result<Value> {
         "invocations": [{"executionSuccessful": true}],
         "results": results
     });
-    if let Some(status) = intelligence_status(reports)? {
-        let run_object = run
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("internal SARIF run is not an object"))?;
-        run_object.insert(
-            "properties".to_string(),
-            json!({"argusIntelligence": status}),
-        );
+    if let Some(properties) = properties {
+        run.as_object_mut()
+            .expect("internal SARIF run is an object")
+            .insert("properties".to_string(), properties);
     }
-
-    Ok(json!({
+    json!({
         "$schema": SARIF_SCHEMA,
         "version": "2.1.0",
         "runs": [run]
-    }))
+    })
 }
 
 fn intelligence_status(reports: &[ScanReport]) -> Result<Option<&argus_core::IntelSnapshotStatus>> {
@@ -128,7 +133,7 @@ fn rule_descriptor(rule_id: &str, severity: Severity) -> Value {
     })
 }
 
-fn rule_name(rule_id: &str) -> String {
+pub(crate) fn rule_name(rule_id: &str) -> String {
     rule_id
         .chars()
         .map(|character| {
@@ -255,7 +260,7 @@ fn parse_evidence_location(evidence: &str) -> Option<(String, u64)> {
     (line > 0).then(|| (path.to_string(), line))
 }
 
-fn normalize_uri(path: &str) -> String {
+pub(crate) fn normalize_uri(path: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let normalized = path.replace('\\', "/");
     let mut uri = String::with_capacity(normalized.len());
@@ -290,7 +295,7 @@ fn finding_fingerprint(
     format!("{:016x}", fnv1a64(material.as_bytes()))
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -299,7 +304,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn sarif_level(severity: Severity) -> &'static str {
+pub(crate) fn sarif_level(severity: Severity) -> &'static str {
     match severity {
         Severity::Critical | Severity::High => "error",
         Severity::Medium => "warning",
@@ -307,7 +312,7 @@ fn sarif_level(severity: Severity) -> &'static str {
     }
 }
 
-fn severity_name(severity: Severity) -> &'static str {
+pub(crate) fn severity_name(severity: Severity) -> &'static str {
     match severity {
         Severity::Critical => "critical",
         Severity::High => "high",
@@ -317,7 +322,7 @@ fn severity_name(severity: Severity) -> &'static str {
     }
 }
 
-fn severity_rank(severity: Severity) -> u8 {
+pub(crate) fn severity_rank(severity: Severity) -> u8 {
     match severity {
         Severity::Critical => 5,
         Severity::High => 4,

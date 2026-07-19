@@ -1,0 +1,23 @@
+[package]
+name = "argus-osv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded OSV advisory normalization and resolution for Argus."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-intel = { workspace = true }
+argus-lockfile = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+polycvss = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+url = { workspace = true }

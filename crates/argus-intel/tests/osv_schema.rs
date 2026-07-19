@@ -1,6 +1,10 @@
 mod fixtures;
 
-use argus_intel::{import_snapshot, ImportLimits, ImportRequest, CANONICAL_SOURCE};
+use argus_core::{Ecosystem, PackageCoordinate};
+use argus_intel::{
+    import_snapshot, validate_osv_coordinate, ImportLimits, ImportRequest, CANONICAL_SOURCE,
+    SUPPORTED_SCHEMA_VERSIONS,
+};
 use chrono::{TimeZone, Utc};
 use fixtures::{archive, exact_record, MockArchiveTransport, REVISION};
 use serde_json::{json, Value};
@@ -90,17 +94,32 @@ fn explicit_null_is_rejected_for_every_optional_non_null_field() {
 }
 
 #[test]
-fn schema_version_id_and_ecosystem_are_closed_to_1_7_4() {
-    for version in [
-        "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.7.1", "1.7.2",
-        "1.7.3", "1.7.4",
-    ] {
+fn schema_versions_are_closed_to_the_supported_official_tags() {
+    for version in SUPPORTED_SCHEMA_VERSIONS {
         let mut record = full_record();
-        record["schema_version"] = version.into();
+        record["schema_version"] = (*version).into();
         assert!(
             import_record(&record).is_ok(),
             "supported schema {version} was rejected"
         );
+    }
+
+    let mut legacy = full_record();
+    legacy.as_object_mut().unwrap().remove("schema_version");
+    assert!(import_record(&legacy).is_ok());
+    legacy["severity"] = json!([{
+        "type":"CVSS_V3",
+        "score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    }]);
+    assert!(
+        import_record(&legacy).is_err(),
+        "missing schema_version was treated as a modern schema"
+    );
+
+    for invalid_version in [json!("1.7.1"), json!("9.0.0"), json!(""), Value::Null] {
+        let mut record = full_record();
+        record["schema_version"] = invalid_version;
+        assert!(import_record(&record).is_err());
     }
 
     let mut invalid_id = full_record();
@@ -119,15 +138,42 @@ fn schema_version_id_and_ecosystem_are_closed_to_1_7_4() {
     let mut source = full_record();
     source["severity"] = json!([{
         "type":"CVSS_V3",
-        "score":"CVSS:3.1/AV:N",
+        "score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
         "source":"NVD"
     }]);
+    assert!(import_record(&source).is_err());
+    source["schema_version"] = "1.8.0".into();
+    for allowed_source in ["NVD", "CNA", "SELF"] {
+        source["severity"][0]["source"] = allowed_source.into();
+        assert!(
+            import_record(&source).is_ok(),
+            "1.8.0 source `{allowed_source}` was rejected"
+        );
+    }
+    source["severity"][0]["source"] = "UNKNOWN".into();
     assert!(import_record(&source).is_err());
 
     let mut early_upstream = full_record();
     early_upstream["schema_version"] = "1.6.0".into();
     early_upstream["upstream"] = json!(["MAL-PARENT"]);
     assert!(import_record(&early_upstream).is_err());
+}
+
+#[test]
+fn maven_exact_coordinate_rejects_unresolved_property_expressions() {
+    for version in ["${revision}", "1.2.3-${changelist}"] {
+        let coordinate =
+            PackageCoordinate::new(Ecosystem::Maven, "org.example:demo", version).unwrap();
+        assert!(
+            validate_osv_coordinate(&coordinate).is_err(),
+            "unresolved Maven property `{version}` was accepted"
+        );
+    }
+    for version in ["1.2.3-SNAPSHOT", "1.2.3-redhat-00001"] {
+        let coordinate =
+            PackageCoordinate::new(Ecosystem::Maven, "org.example:demo", version).unwrap();
+        validate_osv_coordinate(&coordinate).unwrap();
+    }
 }
 
 #[test]
@@ -194,7 +240,8 @@ fn collection_nullability_is_frozen_per_schema_profile() {
         }
     }
     for version in [
-        "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.7.1", "1.7.2", "1.7.3", "1.7.4",
+        "1.4.0", "1.5.0", "1.6.0", "1.6.1", "1.6.2", "1.6.3", "1.6.4", "1.6.5", "1.6.6", "1.6.7",
+        "1.7.0", "1.7.2", "1.7.3", "1.7.4", "1.7.5", "1.8.0",
     ] {
         let mut record = full_record();
         record["schema_version"] = version.into();

@@ -13,6 +13,7 @@ Curated reference of real npm / PyPI / GitHub Actions / OS-level supply-chain in
   - [2024](#2024)
   - [Pre-2024 (seminal)](#pre-2024-seminal)
 - [Cross-cutting patterns](#cross-cutting-patterns)
+- [Known-vulnerability query boundary](#known-vulnerability-query-boundary)
 - [Offline known-malicious package intelligence](#offline-known-malicious-package-intelligence)
 - [argus rule coverage matrix](#argus-rule-coverage-matrix)
 - [Detection gaps and next steps](#detection-gaps-and-next-steps)
@@ -58,6 +59,32 @@ bytes are safe. Unknown versions, unsupported entries, partial coverage,
 parse failures, and resource-limit failures produce an operational error
 before any report is rendered. No package manager, VCS command, shell, or
 network client is used by the lockfile crate.
+
+---
+
+## Known-vulnerability query boundary
+
+`argus vulns` is a separate, opt-in OSV query for exact package versions. It
+supports the eight normalized ecosystems (npm, PyPI, crates.io, Go, NuGet,
+Maven, RubyGems, and Packagist) and all nine lockfile families listed above.
+The lockfile adapter excludes explicit local path/workspace/root records,
+deduplicates complete external coordinates, and preserves every locator as
+advisory evidence. It does not run a package manager or modify a manifest or
+lockfile.
+
+Online mode contacts only `https://api.osv.dev` and therefore discloses the
+queried package coordinates. `--offline` makes no OSV request and requires a
+complete cache snapshot; only an explicit `--offline --allow-stale` authorizes
+a complete stale snapshot, which is visibly approval-scoped. Missing, corrupt,
+partial, future-dated, or unauthorized stale data fails before text, JSON, or
+SARIF rendering. Output uses `<argus-osv-cache>` instead of the filesystem
+path.
+
+Known-vulnerable, known-malicious, provenance/integrity, and static heuristic
+signals answer different questions. An OSV no-match is not evidence that the
+package is non-malicious or safe, and a genuine provenance attestation does
+not mean the signed content has no vulnerability. `argus vulns` never
+automatically upgrades a dependency.
 
 ---
 

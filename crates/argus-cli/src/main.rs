@@ -5,7 +5,10 @@ mod corpus;
 mod corpus_path;
 mod intel;
 mod report;
+mod router;
 mod sarif;
+mod sarif_vulns;
+mod vulns;
 
 use anyhow::{bail, Context, Result};
 use argus_composer::{
@@ -81,6 +84,11 @@ enum Cmd {
     Intel {
         #[command(subcommand)]
         op: intel::IntelOp,
+    },
+    /// Query OSV for known vulnerabilities in exact package versions.
+    Vulns {
+        #[command(subcommand)]
+        op: router::VulnsOp,
     },
     /// Fetch a package from an npm registry, verify integrity, extract, and scan.
     Fetch {
@@ -383,6 +391,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             scan_started_at,
         ),
         Cmd::Intel { op } => intel::cmd_intel(op),
+        Cmd::Vulns { op } => vulns::cmd_vulns(op),
         Cmd::Fetch {
             pkg,
             registry,
