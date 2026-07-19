@@ -30,7 +30,9 @@ All rows describe code implemented on `main`, not a released binary contract.
 ## Decisions
 
 - **block** — at least one high-risk rule fired.
-- **allow-with-approval** — only a known native-build pattern or bounded npm metadata anomaly fired; require explicit approval.
+- **allow-with-approval** — only approval-scoped evidence such as a known
+  native-build pattern, bounded npm metadata anomaly, or weak-only lockfile
+  integrity fired; require explicit approval.
 - **allow** — no rule fired.
 
 ## Usage
@@ -90,6 +92,15 @@ cargo run -p argus-cli -- scan path/to/pkg --format json
 # SARIF 2.1.0 for code-scanning integrations
 cargo run -p argus-cli -- scan path/to/pkg --format sarif > argus.sarif
 
+# Lockfiles use basename + a closed structure/version signature.
+cargo run -p argus-cli -- scan path/to/project/pnpm-lock.yaml --format json
+
+# An explicit parser is validated together with the basename and signature.
+# Extra source hosts are exact DNS names, not patterns.
+cargo run -p argus-cli -- scan package-lock.json \
+  --lockfile-format package-lock \
+  --allow-registry-host packages.corp.example
+
 # Scan agent surfaces: MCP configs, skills, hooks, AGENTS.md / CLAUDE.md.
 # Detects injection/override language (AGT-01), dangerous script
 # capabilities like curl|sh or secret-read + network-egress (AGT-03),
@@ -102,6 +113,46 @@ cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 ```
 
 The compiled binary is named `argus` and exits non-zero on `block`.
+
+### Lockfile source and integrity policy
+
+`argus scan` statically normalizes nine lockfile families without starting a
+package manager, VCS command, shell, or network request:
+
+| Lockfile | Accepted closed versions/signature | Integrity interpretation |
+|---|---|---|
+| `package-lock.json` | npm lockfile 2, 3 | registry/URL entries require valid SRI; root/link/workspace records are unavailable by format |
+| `yarn.lock` | Classic 1; Berry metadata 4, 6, 8 | Classic uses SRI or the resolved SHA-1 fragment; Berry npm/archive records require checksum |
+| `pnpm-lock.yaml` | canonical 5.4, 6.0, 9.0 | registry/tarball records require SRI; link/workspace/file records are unavailable |
+| `poetry.lock` | 1.1, 2.0, 2.1 | every listed registry artifact is retained and requires a valid hash |
+| `uv.lock` | 1 | every listed registry/URL distribution is retained and requires a valid hash |
+| `Cargo.lock` | 3, 4 | registry packages require SHA-256; path and git records do not treat a VCS revision as an artifact hash |
+| `go.sum` | strict three-field grammar | every line requires a valid Go `h1:` digest; source host is unavailable by format |
+| `Gemfile.lock` | Bundler major 2, 3, 4; `CHECKSUMS` only where supported | exact lock-name checksum association; an absent checksum section is unavailable, not verified |
+| `composer.lock` | schema-v1 structure | non-empty dist SHA-1 is weak evidence; missing dist shasum is optional-absent |
+
+Every normalized source is evaluated independently. Plain HTTP is always
+Critical/block. HTTPS, SSH, and scp-like git hosts must exact-match the
+format's documented public hosts or a repeated `--allow-registry-host`; user
+entries accept one IDNA-normalized DNS host and reject schemes, ports, paths,
+userinfo, wildcards, suffix patterns, and IP literals. Git refs are immutable
+only when they are a 40- or 64-character lowercase commit digest.
+
+Strong SHA-256/384/512, SRI, and Go `h1:` evidence can allow; SHA-1/MD5-only
+evidence requires approval. Required missing evidence blocks at High, and
+unknown algorithms, malformed encodings/lengths, or conflicting values block
+at Critical. Legitimate `unavailable-by-format` records produce one
+format-scoped Info finding with a count and at most 20 stable locators; they do
+not change the decision.
+
+Detection is fail-closed: unknown/ambiguous basenames or signatures, new
+versions, unsupported entries, coverage mismatch, parse failure, or any bound
+failure exits operationally with code `2`, stderr, and empty stdout—no text,
+JSON, or SARIF report is emitted. Bounds are 64 MiB input, 100,000 records,
+64 nesting levels, 1 MiB per scalar, 1,000,000 total scalars, and 64 MiB of
+RFC 8785 canonical finding/evidence JSON. Equality is accepted; plus one is
+rejected. This scan evaluates source and integrity metadata only: it does not
+claim vulnerability status, malicious-package status, or artifact safety.
 
 ### Opt-in npm metadata anomalies
 
@@ -209,7 +260,7 @@ SARIF run. A successful SARIF report retains the normal decision exit codes:
 | content   | `remote-download`, `shell-pipe-execution`, `credential-access`, `network-exfiltration`, `binary-execution`, `runtime-hook`, `wallet-interception`, `token-harvest`, `github-write-api`, `npm-publish` |
 | binary    | `binary-file` |
 | name      | `typosquatting`, `low-reputation`, `dependency-confusion`, `public-registry-internal-name`, `known-native-build-pattern` |
-| lockfile  | `lockfile-http-resolved`, `untrusted-registry-host` |
+| lockfile  | `lockfile-http-resolved`, `untrusted-registry-host`, `lockfile-mutable-vcs-ref`, `lockfile-integrity-missing`, `lockfile-integrity-invalid`, `lockfile-integrity-weak`, `lockfile-integrity-unavailable` |
 | provenance | `missing-provenance` (info), `provenance-verified-subject` (info), `provenance-subject-mismatch` (block), `provenance-fetch-blocked` / `provenance-fetch-failed` / `provenance-parse-failed` (operational errors) |
 | npm metadata | `version-shape-anomaly`, `rapid-publish-window` (approval); `npm-version-shape-unassessed`, `npm-rapid-publish-unassessed` (info) |
 | ai-context | `ai-context-poisoning` — writes to `.cursorrules`, `CLAUDE.md`, `.claude/*`, `AGENTS.md`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, `.windsurfrules`. Pioneered at scale by the TrapDoor campaign (Socket.dev 2026-05-24). |
@@ -342,6 +393,8 @@ description change?"; whether the new content is *malicious* is still AGT-01's
 - `crates/argus-maven` — Maven Central client (JAR + POM/build resources).
 - `crates/argus-rubygems` — RubyGems client (nested `.gem` archive + Ruby surfaces).
 - `crates/argus-composer` — Packagist/Composer client (dist ZIP + Composer/PHP surfaces).
+- `crates/argus-lockfile` — bounded nine-format lockfile normalization and
+  source/integrity policy; no transport or process dependency.
 - `crates/argus-cli` — the `argus` binary.
 
 ## Development

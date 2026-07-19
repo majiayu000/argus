@@ -18,6 +18,10 @@ use argus_crates::{
 };
 use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
 use argus_go::{fetch_and_scan_go, GoFetchOptions, GoModuleRef, HttpTransport as GoHttpTransport};
+use argus_lockfile::{
+    evaluate as evaluate_lockfile, parse_lockfile, BoundedInput, DetectionRequest, FormatHint,
+    PolicyOptions, MAX_INPUT_BYTES,
+};
 use argus_maven::{
     fetch_and_scan_maven, HttpTransport as MavenHttpTransport, MavenFetchOptions, MavenRef,
 };
@@ -31,9 +35,10 @@ use argus_pypi::{
 use argus_rubygems::{
     fetch_and_scan_gems, GemFetchOptions, GemRef, HttpTransport as GemsHttpTransport,
 };
-use argus_rules::{scan_lockfile, scan_package_dir};
+use argus_rules::scan_package_dir;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -53,11 +58,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Scan a package directory or an npm lockfile.
+    /// Scan a package directory or one supported dependency lockfile.
     Scan {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        /// Explicit lockfile format, validated together with the basename.
+        #[arg(long, value_enum)]
+        lockfile_format: Option<LockfileFormatArg>,
+        /// Additional exact DNS host accepted for HTTPS/SSH lockfile sources.
+        #[arg(long = "allow-registry-host", value_name = "HOST")]
+        allow_registry_host: Vec<String>,
         #[command(flatten)]
         intel: intel::ScanIntelArgs,
     },
@@ -309,6 +320,35 @@ enum Format {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum LockfileFormatArg {
+    PackageLock,
+    Yarn,
+    Pnpm,
+    Poetry,
+    Uv,
+    Cargo,
+    GoSum,
+    Bundler,
+    Composer,
+}
+
+impl From<LockfileFormatArg> for FormatHint {
+    fn from(value: LockfileFormatArg) -> Self {
+        match value {
+            LockfileFormatArg::PackageLock => Self::PackageLock,
+            LockfileFormatArg::Yarn => Self::Yarn,
+            LockfileFormatArg::Pnpm => Self::Pnpm,
+            LockfileFormatArg::Poetry => Self::Poetry,
+            LockfileFormatArg::Uv => Self::Uv,
+            LockfileFormatArg::Cargo => Self::Cargo,
+            LockfileFormatArg::GoSum => Self::GoSum,
+            LockfileFormatArg::Bundler => Self::Bundler,
+            LockfileFormatArg::Composer => Self::Composer,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum EvaluationFormat {
     Text,
     Json,
@@ -331,8 +371,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Scan {
             path,
             format,
+            lockfile_format,
+            allow_registry_host,
             intel,
-        } => cmd_scan(&path, format, intel, scan_started_at),
+        } => cmd_scan(
+            &path,
+            format,
+            lockfile_format,
+            &allow_registry_host,
+            intel,
+            scan_started_at,
+        ),
         Cmd::Intel { op } => intel::cmd_intel(op),
         Cmd::Fetch {
             pkg,
@@ -448,10 +497,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
 fn cmd_scan(
     path: &Path,
     format: Format,
+    lockfile_format: Option<LockfileFormatArg>,
+    allow_registry_hosts: &[String],
     intel: intel::ScanIntelArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
-    let report = scan_path(path)?;
+    let report = scan_path(path, lockfile_format, allow_registry_hosts)?;
     finish_scan(report, format, intel, scan_started_at)
 }
 
@@ -652,12 +703,60 @@ fn finish_scan(
     emit_report(&report, format)
 }
 
-fn scan_path(path: &Path) -> Result<ScanReport> {
+fn scan_path(
+    path: &Path,
+    lockfile_format: Option<LockfileFormatArg>,
+    allow_registry_hosts: &[String],
+) -> Result<ScanReport> {
     if path.is_dir() {
+        if lockfile_format.is_some() || !allow_registry_hosts.is_empty() {
+            bail!(
+                "--lockfile-format and --allow-registry-host are valid only when scanning one lockfile"
+            );
+        }
         scan_package_dir(path).with_context(|| format!("scan dir {}", path.display()))
     } else if path.is_file() {
-        scan_lockfile(path).with_context(|| format!("scan lockfile {}", path.display()))
+        scan_lockfile_path(
+            path,
+            lockfile_format.map(FormatHint::from),
+            allow_registry_hosts,
+        )
     } else {
         bail!("path is neither a directory nor a file: {}", path.display());
     }
+}
+
+pub(crate) fn scan_lockfile_path(
+    path: &Path,
+    explicit_format: Option<FormatHint>,
+    allow_registry_hosts: &[String],
+) -> Result<ScanReport> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open lockfile {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_INPUT_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read lockfile {}", path.display()))?;
+    let path_label = path.to_string_lossy();
+    let input = BoundedInput::new(&bytes, &path_label)
+        .with_context(|| format!("bound lockfile {}", path.display()))?;
+    let basename = path.file_name().and_then(|name| name.to_str());
+    if basename.is_none() && explicit_format.is_none() {
+        bail!(
+            "lockfile basename is not UTF-8; pass --lockfile-format for {}",
+            path.display()
+        );
+    }
+    let parsed = parse_lockfile(
+        &input,
+        DetectionRequest {
+            basename,
+            explicit_format,
+        },
+    )
+    .with_context(|| format!("parse lockfile {}", path.display()))?;
+    let policy = PolicyOptions::new(allow_registry_hosts)
+        .with_context(|| format!("validate lockfile host policy for {}", path.display()))?;
+    evaluate_lockfile(&parsed, path, &policy)
+        .with_context(|| format!("evaluate lockfile {}", path.display()))
 }

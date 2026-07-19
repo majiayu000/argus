@@ -4,7 +4,8 @@ use crate::{corpus_path, EvaluationFormat};
 use anyhow::{bail, ensure, Context, Result};
 use argus_agent::scan_agent_surface;
 use argus_core::ScanReport;
-use argus_rules::{scan_lockfile, scan_package_dir};
+use argus_lockfile::FormatHint;
+use argus_rules::scan_package_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -290,7 +291,10 @@ fn scan_case(index_root: &Path, index: &CorpusIndex, case: &CorpusCase) -> Resul
             scan_package_dir(&case_path)
         }
     } else {
-        scan_lockfile(&case_path)
+        // The frozen corpus schema predates multi-format scans: its
+        // `kind=lockfile` contract explicitly means package-lock. Future
+        // lockfile corpus kinds need an explicit schema field.
+        crate::scan_lockfile_path(&case_path, Some(FormatHint::PackageLock), &[])
     }
     .context("scan corpus case")
 }

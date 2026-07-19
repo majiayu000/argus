@@ -65,12 +65,20 @@ const INFO_ONLY_RULES: &[&str] = &[
     // missing evidence into a verdict.
     "npm-version-shape-unassessed",
     "npm-rapid-publish-unassessed",
+    // Lockfile formats such as go.sum or older Bundler lockfiles do not
+    // carry a registry artifact hash. This is explicit uncertainty, not a
+    // verdict on its own.
+    "lockfile-integrity-unavailable",
 ];
 
 /// Bounded npm metadata anomalies require explicit human approval when they
 /// are the only policy-weighted findings. They never downgrade an unrelated
 /// blocking finding.
-const APPROVAL_ONLY_RULES: &[&str] = &["version-shape-anomaly", "rapid-publish-window"];
+const APPROVAL_ONLY_RULES: &[&str] = &[
+    "version-shape-anomaly",
+    "rapid-publish-window",
+    "lockfile-integrity-weak",
+];
 
 /// Rules that, when paired with `known-native-build-pattern`, drop the
 /// decision from Block to AllowWithApproval.
@@ -249,5 +257,32 @@ mod tests {
             Finding::new("rapid-publish-window", Severity::Medium, ""),
         ];
         assert_eq!(derive_from_findings(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn lockfile_info_and_weak_decisions_match_policy_contract() {
+        assert_eq!(
+            derive_from_findings(&[Finding::new(
+                "lockfile-integrity-unavailable",
+                Severity::Info,
+                ""
+            )]),
+            Decision::Allow
+        );
+        assert_eq!(
+            derive_from_findings(&[Finding::new(
+                "lockfile-integrity-weak",
+                Severity::Medium,
+                ""
+            )]),
+            Decision::AllowWithApproval
+        );
+        assert_eq!(
+            derive_from_findings(&[
+                Finding::new("lockfile-integrity-weak", Severity::Medium, ""),
+                Finding::new("lockfile-integrity-invalid", Severity::Critical, "")
+            ]),
+            Decision::Block
+        );
     }
 }
