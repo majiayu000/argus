@@ -83,7 +83,7 @@ symlink、目标不是 regular file、rename/fsync 失败时返回错误；旧 s
 | CratesIo | `crates.io` | ASCII lowercase，`-` 与 `_` 保持不同 | SemVer；只接受 `SEMVER` range | `cargo` |
 | Go | `Go` | proxy 解码后的 module path，case-sensitive | Go semantic version（比较时规范化前导 `v`）；只接受 `SEMVER` range | `golang` |
 | NuGet | `NuGet` | registry package ID 的 ASCII lowercase | NuGetVersion；只接受 `ECOSYSTEM` range | `nuget` |
-| Maven | `Maven` | case-sensitive `group_id:artifact_id` | Maven ComparableVersion；只接受 `ECOSYSTEM` range | `maven` |
+| Maven | `Maven` | case-sensitive `group_id:artifact_id` | Maven 3.9.x ComparableVersion；只接受 `ECOSYSTEM` range | `maven` |
 | RubyGems | `RubyGems` | registry canonical name，case-sensitive | Gem::Version；只接受 `ECOSYSTEM` range | `gem` |
 | Packagist | `Packagist` | lowercase `vendor/package` | Composer normalized version；只接受 `ECOSYSTEM` range | `composer` |
 
@@ -126,7 +126,7 @@ vulnerability 使用独立数据库参数、rule family 和文案。
 ## Planned Changes Manifest
 
 <!-- specrail-planned-changes
-{"version":1,"issue":90,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","crates/argus-cli/Cargo.toml","crates/argus-cli/src/intel.rs","crates/argus-cli/src/main.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/tests/intel_cli.rs","crates/argus-composer/src/lib.rs","crates/argus-core/src/lib.rs","crates/argus-crates/src/lib.rs","crates/argus-fetch/src/lib.rs","crates/argus-go/src/lib.rs","crates/argus-intel/Cargo.toml","crates/argus-intel/src/import.rs","crates/argus-intel/src/lib.rs","crates/argus-intel/src/matcher.rs","crates/argus-intel/src/normalize.rs","crates/argus-intel/src/osv.rs","crates/argus-intel/src/snapshot.rs","crates/argus-intel/tests/fixtures.rs","crates/argus-intel/tests/import.rs","crates/argus-intel/tests/matcher.rs","crates/argus-maven/src/lib.rs","crates/argus-nuget/src/lib.rs","crates/argus-pypi/src/lib.rs","crates/argus-rubygems/src/lib.rs","docs/supply-chain-attacks.md","specs/GH90/product.md","specs/GH90/tasks.md","specs/GH90/tech.md"],"spec_refs":["specs/GH90/product.md","specs/GH90/tasks.md","specs/GH90/tech.md"]}
+{"version":1,"issue":90,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","crates/argus-agent/src/judge.rs","crates/argus-agent/src/lib.rs","crates/argus-cli/Cargo.toml","crates/argus-cli/src/agent.rs","crates/argus-cli/src/intel.rs","crates/argus-cli/src/main.rs","crates/argus-cli/src/report.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/tests/intel_cli.rs","crates/argus-composer/src/lib.rs","crates/argus-composer/src/scan.rs","crates/argus-core/Cargo.toml","crates/argus-core/src/lib.rs","crates/argus-crates/src/lib.rs","crates/argus-crates/src/scan.rs","crates/argus-crates/tests/integration.rs","crates/argus-fetch/src/lib.rs","crates/argus-fetch/tests/integration.rs","crates/argus-go/src/lib.rs","crates/argus-intel/Cargo.toml","crates/argus-intel/src/atomic_unix.rs","crates/argus-intel/src/gem_version.rs","crates/argus-intel/src/go_version.rs","crates/argus-intel/src/import.rs","crates/argus-intel/src/lib.rs","crates/argus-intel/src/matcher.rs","crates/argus-intel/src/maven_version.rs","crates/argus-intel/src/normalize.rs","crates/argus-intel/src/osv.rs","crates/argus-intel/src/osv_profile.rs","crates/argus-intel/src/snapshot.rs","crates/argus-intel/src/version_number.rs","crates/argus-intel/tests/comparators.rs","crates/argus-intel/tests/fixtures.rs","crates/argus-intel/tests/import.rs","crates/argus-intel/tests/matcher.rs","crates/argus-intel/tests/osv_schema.rs","crates/argus-intel/tests/security.rs","crates/argus-maven/src/lib.rs","crates/argus-nuget/src/lib.rs","crates/argus-pypi/src/lib.rs","crates/argus-pypi/tests/integration.rs","crates/argus-rubygems/src/lib.rs","crates/argus-rules/src/lib.rs","crates/argus-rules/src/lockfile.rs","docs/supply-chain-attacks.md","specs/GH90/tasks.md","specs/GH90/tech.md"],"spec_refs":["specs/GH90/product.md","specs/GH90/tasks.md","specs/GH90/tech.md"]}
 -->
 
 ## Product-to-Test Mapping
@@ -135,7 +135,7 @@ vulnerability 使用独立数据库参数、rule family 和文案。
 | --- | --- | --- |
 | B-001 | OSV importer + snapshot envelope | `cargo test -p argus-intel import_source_contract` |
 | B-002 | normalized sorting + record digest | `cargo test -p argus-intel deterministic_snapshot` |
-| B-003 | core coordinate + normalizer | `cargo test -p argus-intel ecosystem_name_matrix` |
+| B-003 | core coordinate + normalizer | `cargo test -p argus-core coordinate_matrix` |
 | B-004 | matcher range/withdrawn logic | `cargo test -p argus-intel osv_match_matrix` |
 | B-005 | finding builder + decision merge | `cargo test -p argus-intel malicious_finding` |
 | B-006 | status/report metadata | `cargo test -p argus-cli --test intel_cli no_match_scope` |

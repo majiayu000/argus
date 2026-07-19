@@ -25,7 +25,7 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url};
-use argus_core::{ArtifactKind, Finding, ScanReport};
+use argus_core::{ArtifactKind, Ecosystem, Finding, PackageCoordinate, ScanReport};
 use std::path::PathBuf;
 
 pub mod dirhash;
@@ -154,6 +154,9 @@ pub fn fetch_and_scan_go(
             }
         }
     };
+    let coordinate =
+        PackageCoordinate::new(Ecosystem::Go, pkg.module_path.clone(), version.clone())
+            .context("normalize Go proxy coordinate")?;
     let esc_ver = escape_module_path(&version);
 
     // 2. Build + validate the zip and ziphash URLs (host allowlist).
@@ -245,6 +248,8 @@ pub fn fetch_and_scan_go(
         package_version: Some(version),
         decision,
         findings: all_findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
     })
 }
 

@@ -23,7 +23,7 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
-use argus_core::{Finding, ScanReport, Severity};
+use argus_core::{Ecosystem, Finding, PackageCoordinate, ScanReport, Severity};
 use std::path::PathBuf;
 
 mod metadata;
@@ -120,6 +120,8 @@ pub fn fetch_and_scan_gems(
     let resolved = resolve_version(&versions, &pkg.name, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
     let version = resolved.number.clone();
+    let coordinate = PackageCoordinate::new(Ecosystem::RubyGems, pkg.name.clone(), version.clone())
+        .context("normalize RubyGems registry coordinate")?;
 
     // 2. Build + validate the download URL. RubyGems names the artifact
     //    `NAME-VERSION.gem` for the default pure-Ruby (`ruby`/empty) platform,
@@ -179,6 +181,8 @@ pub fn fetch_and_scan_gems(
         package_version: scanned.version.or(Some(version)),
         decision,
         findings: all_findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
     })
 }
 

@@ -7,7 +7,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url};
-use argus_core::{Finding, ScanReport, Severity};
+use argus_core::{
+    canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity,
+};
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 
@@ -179,10 +181,24 @@ pub fn fetch_and_scan(
         .with_context(|| format!("fetch packument {packument_url}"))?;
     let packument: Packument = serde_json::from_slice(&packument_bytes)
         .with_context(|| format!("parse packument {packument_url}"))?;
+    let requested_name = canonicalize_package_name(Ecosystem::Npm, &pkg.name)
+        .context("normalize requested npm package name")?;
+    let registry_name = canonicalize_package_name(Ecosystem::Npm, &packument.name)
+        .context("normalize npm registry metadata package name")?;
+    if requested_name != registry_name {
+        bail!(
+            "npm registry package identity mismatch: requested `{}` but metadata names `{}`",
+            pkg.name,
+            packument.name
+        );
+    }
 
     // 2. Resolve version.
     let version = resolve_version(&packument, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let coordinate =
+        PackageCoordinate::new(Ecosystem::Npm, packument.name.clone(), version.clone())
+            .context("normalize npm registry coordinate")?;
     let metadata_findings = if opts.metadata_anomaly {
         anomaly::metadata_findings(
             &packument,
@@ -280,6 +296,7 @@ pub fn fetch_and_scan(
     report.path = PathBuf::from(format!("{}@{version}", pkg.name));
     report.package_name = Some(pkg.name.clone());
     report.package_version = Some(version);
+    report.coordinate = Some(coordinate);
 
     Ok(report)
 }

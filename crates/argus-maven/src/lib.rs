@@ -30,7 +30,7 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
-use argus_core::{Finding, ScanReport, Severity};
+use argus_core::{Ecosystem, Finding, PackageCoordinate, ScanReport, Severity};
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 
@@ -110,6 +110,12 @@ pub fn fetch_and_scan_maven(
                 .with_context(|| format!("resolve latest version for {}", pkg.artifact))?
         }
     };
+    let coordinate = PackageCoordinate::new(
+        Ecosystem::Maven,
+        format!("{}:{}", pkg.group, pkg.artifact),
+        version.clone(),
+    )
+    .context("normalize Maven registry coordinate")?;
 
     let base = format!(
         "{registry}/{group_path}/{}/{version}/{}-{version}",
@@ -213,6 +219,8 @@ pub fn fetch_and_scan_maven(
         package_version: Some(version),
         decision,
         findings: all_findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
     })
 }
 

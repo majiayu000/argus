@@ -166,6 +166,8 @@ pub fn scan_composer_zip(
         package_version: version,
         decision,
         findings,
+        coordinate: None,
+        intelligence: None,
     })
 }
 

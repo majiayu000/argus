@@ -17,7 +17,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
-use argus_core::{Finding, ScanReport, Severity};
+use argus_core::{
+    canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity,
+};
 use std::path::{Path, PathBuf};
 
 mod metadata;
@@ -122,10 +124,27 @@ pub fn fetch_and_scan_pypi(
         .with_context(|| format!("fetch PyPI packument {packument_url}"))?;
     let packument: PypiPackument = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse PyPI packument {packument_url}"))?;
+    let requested_name = canonicalize_package_name(Ecosystem::PyPi, &pkg.name)
+        .context("normalize requested PyPI package name")?;
+    let registry_name = canonicalize_package_name(Ecosystem::PyPi, &packument.info.name)
+        .context("normalize PyPI registry metadata package name")?;
+    if requested_name != registry_name {
+        bail!(
+            "PyPI registry package identity mismatch: requested `{}` but metadata names `{}`",
+            pkg.name,
+            packument.info.name
+        );
+    }
 
     // 2. Resolve version.
     let version = resolve_version(&packument, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let coordinate = PackageCoordinate::new(
+        Ecosystem::PyPi,
+        packument.info.name.clone(),
+        version.clone(),
+    )
+    .context("normalize PyPI registry coordinate")?;
     let urls = packument.releases.get(&version).ok_or_else(|| {
         anyhow!(
             "version `{version}` not present in PyPI packument for {}",
@@ -242,6 +261,8 @@ pub fn fetch_and_scan_pypi(
         package_version: last_version.or(Some(version)),
         decision,
         findings: all_findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
     })
 }
 

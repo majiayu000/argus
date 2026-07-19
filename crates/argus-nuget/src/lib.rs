@@ -34,7 +34,7 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::url::{host_of, validate_artifact_url};
-use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
+use argus_core::{ArtifactKind, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity};
 use std::path::PathBuf;
 
 mod metadata;
@@ -132,6 +132,8 @@ pub fn fetch_and_scan_nuget(
     // 2. Resolve version.
     let version = resolve_version(&index, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let coordinate = PackageCoordinate::new(Ecosystem::NuGet, pkg.name.clone(), version.clone())
+        .context("normalize NuGet registry coordinate")?;
     let lower_version = normalize_version(&version);
 
     // 3. Construct + validate the download URL (predictable, built locally).
@@ -221,6 +223,8 @@ pub fn fetch_and_scan_nuget(
         package_version: scan.version.or(Some(version)),
         decision,
         findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
     })
 }
 

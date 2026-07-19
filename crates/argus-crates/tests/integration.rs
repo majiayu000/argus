@@ -45,6 +45,30 @@ fn packument(name: &str, version: &str, checksum: &str) -> String {
 }
 
 #[test]
+fn crates_registry_metadata_name_mismatch_fails_closed() {
+    let registry = "https://mock.registry";
+    let pack = packument("other-crate", "1.0.0", &"a".repeat(64));
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/requested-crate"),
+        pack.into_bytes(),
+    );
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("requested-crate").unwrap();
+
+    let error = fetch_and_scan_crate(&pkg, &opts, &transport)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("registry package identity mismatch"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn crates_build_rs_subprocess_blocks() {
     let registry = "https://mock.registry";
     let cargo_toml = b"[package]\nname = \"evil-crate\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";

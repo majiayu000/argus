@@ -77,6 +77,41 @@ fn fetch_and_scan_allow_path() {
 }
 
 #[test]
+fn npm_registry_metadata_name_mismatch_fails_closed() {
+    let registry = "https://mock.registry";
+    let packument = r#"{
+      "name": "other-package",
+      "dist-tags": {"latest": "1.0.0"},
+      "versions": {
+        "1.0.0": {
+          "dist": {
+            "tarball": "https://mock.registry/other-package/-/other-package-1.0.0.tgz",
+            "integrity": "sha512-AAAA"
+          }
+        }
+      }
+    }"#;
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/argus-demo"),
+        packument.as_bytes().to_vec(),
+    );
+    let opts = FetchOptions {
+        registry: registry.to_string(),
+        ..FetchOptions::default()
+    };
+    let pkg = PackageRef::parse("argus-demo").unwrap();
+
+    let error = fetch_and_scan(&pkg, &opts, &transport)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("registry package identity mismatch"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn fetch_rejects_tampered_tarball() {
     let cache = tempfile::tempdir().unwrap();
     let registry = "https://mock.registry";
