@@ -106,11 +106,14 @@ impl Intent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapabilityHit {
     capability: &'static str,
+    network_correlatable: bool,
     rel: String,
     line: usize,
     detail: String,
     resolved_host: Option<String>,
 }
+
+type CapabilityHitKey = (String, usize, &'static str, String, Option<String>, bool);
 
 impl CapabilityHit {
     fn evidence(&self) -> Vec<String> {
@@ -236,8 +239,8 @@ fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
             );
         }
 
-        if let Some(sensitive) = sensitive_read(&fact) {
-            push_hit(
+        if let Some((sensitive, network_correlatable)) = sensitive_read(&fact) {
+            push_hit_with_network_correlation(
                 &mut hits,
                 &mut seen,
                 "sensitive_read",
@@ -248,6 +251,7 @@ fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
                     snippet(&sensitive)
                 ),
                 None,
+                network_correlatable,
             );
         }
 
@@ -322,7 +326,7 @@ fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Find
     let high_sensitive: Vec<&CapabilityHit> = sensitive
         .iter()
         .copied()
-        .filter(|hit| is_high_sensitivity(&hit.detail))
+        .filter(|hit| hit.network_correlatable && is_high_sensitivity(&hit.detail))
         .collect();
     let agent_config = hits_for(hits, "agent_config_write");
     let persistence = hits_for(hits, "persistence");
@@ -433,12 +437,35 @@ fn emit_findings(intent: Intent, hits: &[CapabilityHit], findings: &mut Vec<Find
 
 fn push_hit(
     hits: &mut Vec<CapabilityHit>,
-    seen: &mut BTreeSet<(String, usize, &'static str, String, Option<String>)>,
+    seen: &mut BTreeSet<CapabilityHitKey>,
     capability: &'static str,
     file: &SurfaceFile,
     line: usize,
     detail: impl Into<String>,
     resolved_host: Option<String>,
+) {
+    push_hit_with_network_correlation(
+        hits,
+        seen,
+        capability,
+        file,
+        line,
+        detail,
+        resolved_host,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_hit_with_network_correlation(
+    hits: &mut Vec<CapabilityHit>,
+    seen: &mut BTreeSet<CapabilityHitKey>,
+    capability: &'static str,
+    file: &SurfaceFile,
+    line: usize,
+    detail: impl Into<String>,
+    resolved_host: Option<String>,
+    network_correlatable: bool,
 ) {
     let detail = detail.into();
     let key = (
@@ -447,12 +474,14 @@ fn push_hit(
         capability,
         detail.clone(),
         resolved_host.clone(),
+        network_correlatable,
     );
     if !seen.insert(key) {
         return;
     }
     hits.push(CapabilityHit {
         capability,
+        network_correlatable,
         rel: file.rel.clone(),
         line,
         detail,

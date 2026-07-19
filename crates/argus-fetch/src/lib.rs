@@ -11,6 +11,7 @@ use argus_core::{Finding, ScanReport, Severity};
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 
+mod anomaly;
 mod extract;
 mod integrity;
 mod packument;
@@ -106,6 +107,12 @@ pub struct FetchOptions {
     /// fresh private temp dir (mode 0700 on Unix), eliminating the multi-user
     /// race the review called out (M-3). Cache reuse arrives in M2.
     pub cache_dir: Option<PathBuf>,
+    /// Opt in to bounded npm metadata anomaly evaluation. Disabled by
+    /// default, so ordinary fetches make no npm search request.
+    pub metadata_anomaly: bool,
+    /// Optional persistent cache for bounded npm search responses. This is
+    /// separate from `cache_dir`, which controls extraction scratch space.
+    pub metadata_cache_dir: Option<PathBuf>,
     /// Hard cap on the downloaded tarball size in bytes. Default 100 MiB.
     pub max_tarball_bytes: u64,
     /// Hard cap on the total uncompressed extracted size. Default 500 MiB.
@@ -138,6 +145,8 @@ impl Default for FetchOptions {
         Self {
             registry: "https://registry.npmjs.org".to_string(),
             cache_dir: None,
+            metadata_anomaly: false,
+            metadata_cache_dir: None,
             max_tarball_bytes: 100 * 1024 * 1024,
             max_extracted_bytes: 500 * 1024 * 1024,
             tarball_host_allowlist: Vec::new(),
@@ -174,6 +183,18 @@ pub fn fetch_and_scan(
     // 2. Resolve version.
     let version = resolve_version(&packument, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {}", pkg.name))?;
+    let metadata_findings = if opts.metadata_anomaly {
+        anomaly::metadata_findings(
+            &packument,
+            &version,
+            &opts.registry,
+            opts.metadata_cache_dir.as_deref(),
+            transport,
+        )
+        .with_context(|| format!("evaluate npm metadata anomalies for {}@{version}", pkg.name))?
+    } else {
+        Vec::new()
+    };
     let dist = packument
         .versions
         .get(&version)
@@ -250,7 +271,15 @@ pub fn fetch_and_scan(
         opts,
     );
     report.findings.extend(provenance_findings);
+    report.findings.extend(metadata_findings);
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+    // The registry coordinate is the identity the caller selected and whose
+    // tarball integrity was verified. Never let an attacker-controlled
+    // package.json relabel the report, and never leak the random extraction
+    // TempDir into text/JSON/SARIF paths or fingerprints.
+    report.path = PathBuf::from(format!("{}@{version}", pkg.name));
+    report.package_name = Some(pkg.name.clone());
+    report.package_version = Some(version);
 
     Ok(report)
 }

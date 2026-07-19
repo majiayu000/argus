@@ -18,7 +18,7 @@ All rows describe code implemented on `main`, not a released binary contract.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
-| npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, and text/binary content rules | Static rules can miss obfuscated or dynamic behavior; Sigstore plumbing is opt-in and real npm v0.2 bundles cannot yet reach a Verified verdict because of the documented upstream `intoto/0.0.2` gap |
+| npm | `fetch` | Registry `dist.integrity` SRI digest | Tarball; lifecycle scripts, package metadata, text/binary content rules, and opt-in bounded metadata-anomaly checks | Static rules can miss obfuscated or dynamic behavior; npm search supplies candidates rather than complete publisher history; Sigstore plumbing is opt-in and real npm v0.2 bundles cannot yet reach a Verified verdict because of the documented upstream `intoto/0.0.2` gap |
 | PyPI | `pypi-fetch` | PyPI JSON `digests.sha256` | sdist/wheel; `setup.py`, import-time Python surfaces, and package content | Does not execute Python or prove runtime behavior |
 | crates.io | `crates-fetch` | crates.io API SHA-256 `checksum` | `.crate`; `build.rs`, Rust source, and proc-macro structure | Does not compile code or execute procedural macros |
 | Go modules | `go-fetch` | GOPROXY `.ziphash` `h1:` directory hash when available | Module ZIP; `init`, package initializers, process and network calls | Missing/unusable `.ziphash` is reported as `go-integrity-unverified` Info and can still allow; source detection is regex-based and `sum.golang.org` transparency is not verified |
@@ -30,7 +30,7 @@ All rows describe code implemented on `main`, not a released binary contract.
 ## Decisions
 
 - **block** — at least one high-risk rule fired.
-- **allow-with-approval** — only a known native-build pattern fired; require explicit approval.
+- **allow-with-approval** — only a known native-build pattern or bounded npm metadata anomaly fired; require explicit approval.
 - **allow** — no rule fired.
 
 ## Usage
@@ -43,6 +43,12 @@ cargo run -p argus-cli -- scan corpus/fixtures/lifecycle-curl-sh
 # extract -> scan. No lifecycle script ever runs.
 cargo run -p argus-cli -- fetch chalk@5.3.0
 cargo run -p argus-cli -- fetch '@types/node@20.10.0' --format json
+
+# Opt in to bounded npm metadata-anomaly checks. The separate cache stores
+# npm search responses for at most 15 minutes.
+cargo run -p argus-cli -- fetch chalk@5.3.0 \
+  --metadata-anomaly \
+  --metadata-cache-dir ~/.cache/argus/npm-metadata
 
 # Fetch a real PyPI package: JSON API -> sdist/wheel -> SHA-256 verify -> safe
 # extract -> scan. setup.py never runs.
@@ -97,6 +103,37 @@ cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 
 The compiled binary is named `argus` and exits non-zero on `block`.
 
+### Opt-in npm metadata anomalies
+
+`fetch --metadata-anomaly` enables policy `npm-anomaly-v1`; without this flag
+Argus makes no npm search request and emits no inferred metadata status. The
+policy produces two approval-only Medium findings:
+
+- `version-shape-anomaly`: the target has at least six earlier stable SemVer
+  releases spanning at least 30 days, lands within 72 hours of its direct
+  predecessor, jumps by at least two major versions or ten minor versions
+  within the same major, and that jump class did not occur in the preceding
+  five transitions.
+- `rapid-publish-window`: the target version's exact `_npmUser.name` appears
+  on at least five distinct package names in the bounded npm search candidates
+  published during the preceding 24 hours.
+
+Insufficient valid history becomes the Info findings
+`npm-version-shape-unassessed` or `npm-rapid-publish-unassessed`; these do not
+change an otherwise-allow decision. Missing required target metadata,
+malformed/truncated responses, more than 250 search objects, bodies over 2 MiB,
+cache corruption, redirect-policy failures, and transport failures are
+operational errors: Argus exits `2` before emitting any report.
+
+npm search is used only for candidate discovery and exposes current package
+versions, not a complete publisher activity ledger. Argus therefore exact
+matches `publisher.username`, never treats fewer than five observed packages
+as clean, and makes at most one search request per publisher per scan. The
+optional `--metadata-cache-dir` is keyed by the normalized full registry base
+URL (including base path), publisher, target publication time, and policy. A
+cache entry is reusable for 15 minutes only when it was fetched no earlier than
+the target publication time.
+
 ### SARIF and GitHub Code Scanning
 
 `--format sarif` is available on package/lockfile scans, every ecosystem fetch
@@ -136,6 +173,7 @@ SARIF run. A successful SARIF report retains the normal decision exit codes:
 | name      | `typosquatting`, `low-reputation`, `dependency-confusion`, `public-registry-internal-name`, `known-native-build-pattern` |
 | lockfile  | `lockfile-http-resolved`, `untrusted-registry-host` |
 | provenance | `missing-provenance` (info), `provenance-verified-subject` (info), `provenance-subject-mismatch` (block), `provenance-fetch-blocked` / `provenance-fetch-failed` / `provenance-parse-failed` (operational errors) |
+| npm metadata | `version-shape-anomaly`, `rapid-publish-window` (approval); `npm-version-shape-unassessed`, `npm-rapid-publish-unassessed` (info) |
 | ai-context | `ai-context-poisoning` — writes to `.cursorrules`, `CLAUDE.md`, `.claude/*`, `AGENTS.md`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, `.windsurfrules`. Pioneered at scale by the TrapDoor campaign (Socket.dev 2026-05-24). |
 
 ## Agent-surface rule coverage (GH-57)
