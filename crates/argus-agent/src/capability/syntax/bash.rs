@@ -386,7 +386,7 @@ fn opaque_expansion_text(statement: Node<'_>, source: &[u8]) -> Result<String> {
             .get(cursor..relative_start)
             .ok_or_else(|| anyhow!("expansion span is not a UTF-8 boundary"))?;
         scan_text.push_str(unchanged);
-        scan_text.push_str("__argus-expansion__");
+        scan_text.push_str("$__argus_expansion__");
         cursor = relative_end;
     }
     scan_text.push_str(

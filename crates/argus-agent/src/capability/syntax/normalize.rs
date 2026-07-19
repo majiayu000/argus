@@ -225,10 +225,39 @@ fn token_static_values(tokens: &[String]) -> Vec<StaticValue> {
         .collect()
 }
 
+pub(super) enum BoundedShellWord {
+    Static(String),
+    Dynamic,
+}
+
+struct BoundedShellToken {
+    text: String,
+    dynamic: bool,
+}
+
+pub(super) fn bounded_shell_word(value: &str) -> Option<BoundedShellWord> {
+    let mut tokens = lex_bounded_shell_tokens(value)?;
+    if tokens.len() != 1 {
+        return None;
+    }
+    let token = tokens.pop()?;
+    if token.dynamic {
+        Some(BoundedShellWord::Dynamic)
+    } else {
+        Some(BoundedShellWord::Static(token.text))
+    }
+}
+
 fn bounded_shell_tokens(value: &str) -> Option<Vec<String>> {
+    lex_bounded_shell_tokens(value)
+        .map(|tokens| tokens.into_iter().map(|token| token.text).collect())
+}
+
+fn lex_bounded_shell_tokens(value: &str) -> Option<Vec<BoundedShellToken>> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut token_started = false;
+    let mut token_dynamic = false;
     let mut quote = None;
     let mut characters = value.chars().peekable();
     while let Some(character) = characters.next() {
@@ -254,6 +283,7 @@ fn bounded_shell_tokens(value: &str) -> Option<Vec<String>> {
             (Some('"'), current) => {
                 token.push(current);
                 token_started = true;
+                token_dynamic |= matches!(current, '$' | '`');
             }
             (Some(_), current) => {
                 token.push(current);
@@ -274,13 +304,18 @@ fn bounded_shell_tokens(value: &str) -> Option<Vec<String>> {
             (None, '\n' | '\r') => return None,
             (None, ' ' | '\t') => {
                 if token_started {
-                    tokens.push(std::mem::take(&mut token));
+                    tokens.push(BoundedShellToken {
+                        text: std::mem::take(&mut token),
+                        dynamic: token_dynamic,
+                    });
                     token_started = false;
+                    token_dynamic = false;
                 }
             }
             (None, current) => {
                 token.push(current);
                 token_started = true;
+                token_dynamic |= matches!(current, '$' | '`');
             }
         }
     }
@@ -288,7 +323,10 @@ fn bounded_shell_tokens(value: &str) -> Option<Vec<String>> {
         return None;
     }
     if token_started {
-        tokens.push(token);
+        tokens.push(BoundedShellToken {
+            text: token,
+            dynamic: token_dynamic,
+        });
     }
     Some(tokens)
 }

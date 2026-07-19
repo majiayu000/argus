@@ -325,7 +325,7 @@ fn gh102_pipeline_scan_text_uses_ast_expansion_spans() {
         .expect("outer pipeline fact");
     assert_eq!(
         pipeline.pipeline_scan_text.as_deref(),
-        Some("curl __argus-expansion__ 2>/dev/null | sh")
+        Some("curl $__argus_expansion__ 2>/dev/null | sh")
     );
     assert!(pipeline.text.contains("case x in x)"));
 }
