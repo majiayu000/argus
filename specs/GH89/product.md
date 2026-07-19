@@ -73,9 +73,11 @@ Argus 的 npm 安装前扫描会校验制品并扫描源码，但尚未利用 pa
    `-/v1/search`，最终 URL 必须保持同 origin 且不能逃出该 base path；必须复用
    HTTPS、host allowlist、redirect 校验、2 MiB body cap 和可注入 transport；
    单次 scan 每个 publisher 最多一页、一次网络请求。
-   可选持久缓存以 `(normalized full registry base URL,publisher,npm-anomaly-v1)`
-   为键、TTL 15 分钟；base path 必须参与身份，命中后仍执行同一 schema 与上限
-   校验。
+   可选持久缓存以
+   `(normalized full registry base URL,publisher,target_published_at,npm-anomaly-v1)`
+   为键、TTL 15 分钟；base path 与目标发布时间必须参与身份。只有缓存
+   `fetched_at >= target_published_at` 时才可命中，否则必须重新请求；命中后仍
+   执行同一 schema 与上限校验。
 10. B-010 text、JSON 与 SARIF 必须保留稳定 rule ID、证据与 package 坐标；相同
     fixture 重复运行产生相同 decision 和审计字段。
 

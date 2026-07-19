@@ -58,10 +58,12 @@ clean。
 每次 scan 对同一 publisher 最多发出一次 search 请求。`FetchOptions` 增加显式
 metadata anomaly 开关和可选 metadata cache 目录；CLI 对应参数默认关闭，因此默认
 路径不增加网络。持久缓存 key 为规范化
-`(full registry base URL,publisher,npm-anomaly-v1)` 的 SHA-256；base URL 身份
-包含 scheme、规范化 host/port 与已校验的 base path，并拒绝 query/fragment，因此
-同 origin 的 `/npm/private/` 与 `/npm/public/` 永不别名。TTL 固定 15 分钟，内容
-包含抓取时间与原始响应。
+`(full registry base URL,publisher,target_published_at,npm-anomaly-v1)` 的
+SHA-256；base URL 身份包含 scheme、规范化 host/port 与已校验的 base path，并
+拒绝 query/fragment，因此同 origin 的 `/npm/private/` 与 `/npm/public/` 永不
+别名。TTL 固定 15 分钟，内容包含 `fetched_at` 与原始响应；仅当
+`fetched_at >= target_published_at` 且 TTL 未过期时可复用，否则绕过旧 entry
+重新请求。
 缓存读写使用原子替换且拒绝 symlink；命中缓存后仍走相同 JSON schema、250 对象与
 2 MiB body 校验。无缓存目录时只做单次调用内去重，不写磁盘。
 
@@ -127,7 +129,8 @@ report 输出前向上传播。
 
 - [ ] Unit：SemVer/time 规范化、72h/delta/五转换与 24h/五包边界矩阵。
 - [ ] Integration：search schema、publisher 精确匹配、去重、250/2MiB 上限、
-  完整 base URL cache 隔离、15 分钟 TTL、redirect 与错误传播。
+  完整 base URL/目标发布时间 cache 隔离、`fetched_at` 新鲜度、15 分钟 TTL、
+  redirect 与错误传播。
 - [ ] Decision：两个 anomaly 单独/组合/native-build 组合均 approval，两个
   unassessed 单独 allow，任一既有 blocking rule 与 anomaly 组合仍 block。
 - [ ] CLI：text/JSON/SARIF 证据及退出码。
