@@ -186,7 +186,7 @@ cache path。
 ## Planned Changes Manifest
 
 <!-- specrail-planned-changes
-{"version":1,"issue":94,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","crates/argus-cli/Cargo.toml","crates/argus-cli/src/main.rs","crates/argus-cli/src/router.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/src/sarif_vulns.rs","crates/argus-cli/src/vulns.rs","crates/argus-cli/tests/vulns_cli.rs","crates/argus-core/src/lib.rs","crates/argus-intel/Cargo.toml","crates/argus-intel/src/lib.rs","crates/argus-intel/src/osv.rs","crates/argus-intel/tests/fixtures.rs","crates/argus-osv/Cargo.toml","crates/argus-osv/src/cache.rs","crates/argus-osv/src/client.rs","crates/argus-osv/src/lib.rs","crates/argus-osv/src/model.rs","crates/argus-osv/src/normalize.rs","crates/argus-osv/src/report.rs","crates/argus-osv/src/resolver.rs","crates/argus-osv/src/severity.rs","crates/argus-osv/tests/cache.rs","crates/argus-osv/tests/client.rs","crates/argus-osv/tests/resolver.rs","docs/supply-chain-attacks.md","specs/GH94/product.md","specs/GH94/tasks.md","specs/GH94/tech.md"],"spec_refs":["specs/GH94/product.md","specs/GH94/tasks.md","specs/GH94/tech.md"]}
+{"version":1,"issue":94,"complete":true,"paths":["Cargo.lock","Cargo.toml","README.md","crates/argus-cli/Cargo.toml","crates/argus-cli/src/main.rs","crates/argus-cli/src/router.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/src/sarif_vulns.rs","crates/argus-cli/src/vulns.rs","crates/argus-cli/tests/vulns_cli.rs","crates/argus-core/src/lib.rs","crates/argus-intel/src/lib.rs","crates/argus-intel/src/osv.rs","crates/argus-intel/src/osv_profile.rs","crates/argus-intel/tests/osv_schema.rs","crates/argus-osv/Cargo.toml","crates/argus-osv/src/cache.rs","crates/argus-osv/src/client.rs","crates/argus-osv/src/lib.rs","crates/argus-osv/src/model.rs","crates/argus-osv/src/normalize.rs","crates/argus-osv/src/report.rs","crates/argus-osv/src/resolver.rs","crates/argus-osv/src/severity.rs","crates/argus-osv/tests/cache.rs","crates/argus-osv/tests/client.rs","crates/argus-osv/tests/resolver.rs","docs/supply-chain-attacks.md","specs/GH94/tasks.md","specs/GH94/tech.md"],"spec_refs":["specs/GH94/product.md","specs/GH94/tasks.md","specs/GH94/tech.md"]}
 -->
 
 ## Product-to-Test Mapping
@@ -233,11 +233,11 @@ SP94-T1，不允许 stacked 临时副本。GH-94 将共享 parser 增补 schema 
 
 ## 测试计划
 
-- [ ] Unit：coordinate、batch alignment、OSV normalize、cache state。
-- [ ] Integration：mock server 的分页、detail hydration、race、部分失败、超限、
+- [x] Unit：coordinate、batch alignment、OSV normalize、cache state。
+- [x] Integration：mock server 的分页、detail hydration、race、部分失败、超限、
   重定向和 response-body streaming 矩阵。
-- [ ] CLI：package/九格式 lockfile、offline/stale、三种 renderer 与退出码。
-- [ ] Repository：workspace check/test、corpus 与 SpecRail workflow check。
+- [x] CLI：package/九格式 lockfile、offline/stale、三种 renderer 与退出码。
+- [x] Repository：workspace check/test、corpus 与 SpecRail workflow check。
 
 ## 回滚方案
 
