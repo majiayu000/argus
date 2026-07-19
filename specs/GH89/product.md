@@ -33,7 +33,7 @@ Argus 的 npm 安装前扫描会校验制品并扫描源码，但尚未利用 pa
 ## Behavior Invariants
 
 1. B-001 仅当请求解析到一个无 prerelease 的有效 SemVer 版本，且 packument
-   提供目标版本时间、至少 5 个更早的稳定版本及不少于 30 天的历史跨度时，才
+   提供目标版本时间、至少 6 个更早的稳定版本及不少于 30 天的历史跨度时，才
    评估版本形状。结构完整但历史量不足时必须输出稳定 rule ID
    `npm-version-shape-unassessed` 的 Info finding，列出缺少的前置条件；该 finding
    不改变 decision，也不能伪装成 evaluated-clean。
@@ -64,7 +64,7 @@ Argus 的 npm 安装前扫描会校验制品并扫描源码，但尚未利用 pa
 8. B-008 显式启用元数据检测后，缺失或损坏的 `time`、目标版本
    `_npmUser.name`、search 响应必需字段、`total > 250`、body 超限、缓存损坏与
    transport 失败都必须以 operational error 失败；不得 warning 后按“无异常”
-   继续。仅“字段均合法但不足 B-001 的 5 个前驱/30 天跨度”以及“合法的有界
+   继续。仅“字段均合法但不足 B-001 的 6 个前驱/30 天跨度”以及“合法的有界
    search 候选不足 5 个”属于可继续的 unassessed，不属于错误。
 9. B-009 附加请求只能在已批准 registry base URL 下解析
    `-/v1/search`，最终 URL 必须保持同 origin 且不能逃出该 base path；必须复用
