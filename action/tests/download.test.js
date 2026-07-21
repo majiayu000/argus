@@ -5,7 +5,7 @@ const { EventEmitter } = require("node:events");
 const https = require("node:https");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
-const { downloadVerifiedAsset, fetchRelease, parseJson, requestBytes, sha256, uniqueAsset, verifyAttestation } = require("../src/download");
+const { downloadVerifiedAsset, fetchRelease, fetchTagCommit, parseJson, requestBytes, sha256, uniqueAsset, verifyAttestation } = require("../src/download");
 const { runBounded } = require("../src/run");
 
 test("sha256 and JSON parsing are deterministic", () => {
@@ -14,9 +14,10 @@ test("sha256 and JSON parsing are deterministic", () => {
   assert.throws(() => parseJson(Buffer.from([0xff]), "fixture"), /UTF-8/);
 });
 
-function mockGet(responses) {
+function mockGet(responses, requests = []) {
   const original = https.get;
-  https.get = (_url, _options, callback) => {
+  https.get = (url, options, callback) => {
+    requests.push({ url: String(url), options });
     const request = new EventEmitter();
     request.destroy = (error) => request.emit("error", error);
     const fixture = responses.shift();
@@ -33,11 +34,16 @@ function mockGet(responses) {
 }
 
 test("bounded GitHub request accepts one approved redirect", async () => {
+  const requests = [];
   const restore = mockGet([
     { status: 302, headers: { location: "https://release-assets.githubusercontent.com/file" } },
     { status: 200, headers: { "content-length": "2" }, body: Buffer.from("ok") },
-  ]);
-  try { assert.equal((await requestBytes("https://api.github.com/assets/1", 2)).toString(), "ok"); }
+  ], requests);
+  try {
+    assert.equal((await requestBytes("https://api.github.com/assets/1", 2, 0, "application/octet-stream")).toString(), "ok");
+    assert.equal(requests[0].options.headers.Accept, "application/octet-stream");
+    assert.equal(requests[1].options.headers.Accept, "application/octet-stream");
+  }
   finally { restore(); }
 });
 
@@ -50,17 +56,33 @@ test("bounded GitHub request rejects origins, status, and declared oversize", as
 });
 
 test("release and asset metadata stay immutable and digest-bound", async () => {
-  const release = { draft: false, prerelease: false, immutable: true, tag_name: "v0.1.0", target_commitish: "a".repeat(40), assets: [] };
-  let restore = mockGet([{ status: 200, body: Buffer.from(JSON.stringify(release)) }]);
+  const release = { draft: false, prerelease: false, immutable: true, tag_name: "v0.1.0", target_commitish: "main", assets: [] };
+  let restore = mockGet([{ status: 200, headers: { "content-type": "application/json; charset=utf-8" }, body: Buffer.from(JSON.stringify(release)) }]);
   try { assert.deepEqual(await fetchRelease("0.1.0"), release); } finally { restore(); }
   await assert.rejects((async () => {
-    restore = mockGet([{ status: 200, body: Buffer.from(JSON.stringify({ ...release, immutable: false })) }]);
+    restore = mockGet([{ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ...release, immutable: false })) }]);
     try { await fetchRelease("0.1.0"); } finally { restore(); }
   })(), /not immutable/);
   const body = Buffer.from("asset");
   const asset = { name: "asset", digest: `sha256:${sha256(body)}`, url: "https://api.github.com/assets/1", size: body.length };
-  restore = mockGet([{ status: 200, headers: { "content-length": String(body.length) }, body }]);
-  try { assert.deepEqual(await downloadVerifiedAsset({ assets: [asset] }, "asset", 10), body); } finally { restore(); }
+  const requests = [];
+  restore = mockGet([{ status: 200, headers: { "content-length": String(body.length) }, body }], requests);
+  try {
+    assert.deepEqual(await downloadVerifiedAsset({ assets: [asset] }, "asset", 10), body);
+    assert.equal(requests[0].options.headers.Accept, "application/octet-stream");
+  } finally { restore(); }
+});
+
+test("release metadata requires JSON and tag refs resolve to commit identity", async () => {
+  let restore = mockGet([{ status: 200, headers: { "content-type": "text/plain" }, body: Buffer.from("{}") }]);
+  try { await assert.rejects(fetchRelease("0.1.0"), /content type/); } finally { restore(); }
+  restore = mockGet([{ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.1.0", object: { type: "commit", sha: "a".repeat(40) } })) }]);
+  try { assert.equal(await fetchTagCommit("0.1.0"), "a".repeat(40)); } finally { restore(); }
+  restore = mockGet([
+    { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.1.0", object: { type: "tag", sha: "b".repeat(40) } })) },
+    { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ sha: "b".repeat(40), object: { type: "commit", sha: "c".repeat(40) } })) },
+  ]);
+  try { assert.equal(await fetchTagCommit("0.1.0"), "c".repeat(40)); } finally { restore(); }
 });
 
 test("attestation verifier requires flags and one JSON result", async () => {
