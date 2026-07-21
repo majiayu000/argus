@@ -1,0 +1,38 @@
+name: action-dogfood
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Already-published immutable Argus version.
+        required: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify requested version matches committed Action contract
+        shell: bash
+        run: test '${{ inputs.version }}' = "$(node -p "require('./action/release.json').defaultBinaryVersion")"
+      - name: Scan local package fixture through the committed Action
+        id: package
+        uses: ./
+        with:
+          scanType: package
+          path: corpus/fixtures/clean
+          format: sarif
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - if: runner.os == 'Linux'
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a
+        with:
+          sarif_file: ${{ steps.package.outputs.sarifFile }}
+          category: argus-action-dogfood

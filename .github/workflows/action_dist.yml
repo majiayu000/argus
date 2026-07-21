@@ -1,0 +1,26 @@
+name: action-dist
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.4.1"
+          cache: npm
+          cache-dependency-path: action/package-lock.json
+      - run: npm ci --prefix action
+      - run: npm test --prefix action
+      - run: npm run package --prefix action
+      - name: Require committed bundle to match source
+        run: git diff --exit-code -- action/dist/index.js

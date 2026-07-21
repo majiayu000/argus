@@ -12,6 +12,12 @@ with ecosystem-specific static rules; neither a matching digest nor a clean
 static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
+Release automation and the repository-root GitHub Action are implemented but
+are not yet a public installation contract. Until an immutable release and the
+protected `v1` branch are published, do not reference `majiayu000/argus@v1` or
+assume that `v0.1.0` assets exist. The operator sequence and verification
+boundary are documented in [`docs/releasing.md`](docs/releasing.md).
+
 ## Ecosystem capability matrix
 
 All rows describe code implemented on `main`, not a released binary contract.

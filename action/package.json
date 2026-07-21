@@ -1,0 +1,13 @@
+{
+  "name": "argus-action",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test --experimental-test-coverage tests/*.test.js",
+    "package": "ncc build src/main.js -o dist --minify"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.38.4"
+  }
+}

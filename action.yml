@@ -1,0 +1,37 @@
+name: Argus supply-chain scan
+description: Download a verified Argus release and scan a package, lockfile, or agent surface.
+inputs:
+  scanType:
+    description: One of package, lockfile, or agent.
+    required: true
+  path:
+    description: Workspace-relative package directory, lockfile, or agent surface.
+    required: true
+  format:
+    description: One of text, json, or sarif.
+    required: false
+    default: text
+  argusVersion:
+    description: Exact tested Argus version (X.Y.Z).
+    required: false
+  failOn:
+    description: Fail on block, or on block and approval.
+    required: false
+    default: block
+outputs:
+  decision:
+    description: Validated Argus decision; blank on operational failure.
+  exitCode:
+    description: Argus process exit code; blank before the scan starts.
+  reportPath:
+    description: Validated report path; blank on operational failure.
+  sarifFile:
+    description: SARIF path when format is sarif; otherwise blank.
+  argusVersion:
+    description: Validated requested binary version.
+runs:
+  using: node24
+  main: action/dist/index.js
+branding:
+  icon: shield
+  color: purple
