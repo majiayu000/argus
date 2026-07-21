@@ -406,3 +406,5 @@ fn gh101_pathlib_write_bytes_is_config_write() {
 mod gh102;
 #[path = "tests/gh102_curl.rs"]
 mod gh102_curl;
+#[path = "tests/gh112.rs"]
+mod gh112;

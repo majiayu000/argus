@@ -6,6 +6,7 @@ use tree_sitter::{Language, Node, Parser};
 mod bash;
 mod normalize;
 mod receiver;
+mod redirect;
 mod reference;
 mod shell;
 
@@ -13,6 +14,7 @@ pub(super) use normalize::{
     bounded_command_invocation, effective_command_token, is_exec_wrapper, is_shell_wrapper,
     shell_wrapper_invocation,
 };
+pub(super) use redirect::Redirect;
 pub(super) use shell::bounded_shell_pipeline;
 
 use bash::{bash_argument_value, bash_command_fact, bash_pipeline_fact, bash_redirect_fact};
@@ -85,7 +87,7 @@ pub(super) struct Fact {
     pub pipeline_sources: Vec<PipelineStage>,
     pub pipeline_sink_arguments: Vec<StaticValue>,
     pub pipeline_scan_text: Option<String>,
-    pub redirect: Option<StaticValue>,
+    pub redirect: Option<Redirect>,
     pub text: String,
 }
 
