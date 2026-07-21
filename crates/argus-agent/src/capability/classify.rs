@@ -148,8 +148,8 @@ pub(super) fn sensitive_read(fact: &Fact) -> Option<(String, bool)> {
     };
     let network_correlatable = network_fact
         || fact.kind == FactKind::Pipeline
-        || !matches!(fact.kind, FactKind::Assignment)
-            && !(fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
+        || !(matches!(fact.kind, FactKind::Assignment)
+            || fact.kind == FactKind::Command && matches!(callee.as_str(), "echo" | "printf"));
     sensitive.map(|matched| (matched, network_correlatable))
 }
 

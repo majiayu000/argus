@@ -137,9 +137,9 @@ fn validate_root_metadata(root: &Table) -> Result<(), LockfileError> {
         }
     }
     if let Some(requires_python) = root.get("requires-python") {
-        if !requires_python
+        if requires_python
             .as_str()
-            .is_some_and(|value| !value.is_empty())
+            .is_none_or(|value| value.is_empty())
         {
             return Err(parse_error(
                 "root.requires-python must be a non-empty string",
@@ -289,7 +289,7 @@ fn validate_dependency_array(
         string_field(dependency, "name", &format!("{context}[{index}]"))?;
         for key in ["version", "specifier", "marker", "extra"] {
             if let Some(value) = dependency.get(key) {
-                if !value.as_str().is_some_and(|value| !value.is_empty()) {
+                if value.as_str().is_none_or(|value| value.is_empty()) {
                     return Err(parse_error(format!(
                         "{context}[{index}].{key} must be a non-empty string"
                     )));
@@ -428,7 +428,7 @@ fn parse_artifacts(
         deny_unknown(artifact, &["url", "hash", "size"], &artifact_locator)?;
         let url = string_field(artifact, "url", &artifact_locator)?;
         if let Some(size) = artifact.get("size") {
-            if !size.as_integer().is_some_and(|size| size >= 0) {
+            if size.as_integer().is_none_or(|size| size < 0) {
                 return Err(parse_error(format!(
                     "{artifact_locator}.size must be a non-negative integer"
                 )));
