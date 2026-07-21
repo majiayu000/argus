@@ -254,7 +254,7 @@ fn traverse_dependencies(
                 .as_array()
                 .ok_or_else(|| parse_error(format!("{locator}.extras.{name} must be an array")))?;
             for (index, value) in values.iter().enumerate() {
-                if !value.as_str().is_some_and(|value| !value.is_empty()) {
+                if value.as_str().is_none_or(|value| value.is_empty()) {
                     return Err(parse_error(format!(
                         "{locator}.extras.{name}[{index}] must be a non-empty string"
                     )));

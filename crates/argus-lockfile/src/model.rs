@@ -86,10 +86,10 @@ impl NormalizedSource {
                     ),
                 });
             }
-        } else if !self
+        } else if self
             .location
             .as_deref()
-            .is_some_and(|value| !value.is_empty())
+            .is_none_or(|value| value.is_empty())
         {
             return Err(LockfileError::InvalidModel {
                 detail: format!(
