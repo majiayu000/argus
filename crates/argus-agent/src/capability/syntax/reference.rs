@@ -135,20 +135,18 @@ fn collect(
                                 &format!("{callee}("),
                             );
                         }
-                    } else if language == ScriptLanguage::Python
-                        && (lower == "open" || lower.ends_with(".open"))
+                    } else if let Some(path) =
+                        file_read_path(node, function, &lower, language, source)?
                     {
-                        if let Some(path) = literal_first_argument(node, source)? {
-                            append(
-                                output,
-                                fragments,
-                                node,
-                                root_start,
-                                raw,
-                                &format!("open({path})"),
-                            );
-                            return Ok(());
-                        }
+                        append(
+                            output,
+                            fragments,
+                            node,
+                            root_start,
+                            raw,
+                            &format!("open({path})"),
+                        );
+                        return Ok(());
                     }
                 }
             }
@@ -182,17 +180,60 @@ fn is_environment_subscript(raw: &str) -> bool {
     compact.starts_with("process.env[") || compact.starts_with("os.environ[")
 }
 
-fn literal_first_argument(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
-    let Some(arguments) = node.child_by_field_name("arguments") else {
+/// Resolve the literal path of a call that yields file *content*, so a nested
+/// read keeps provenance when it appears inside a network argument.
+///
+/// Two shapes carry the path differently: `open(path)` / `readFileSync(path)`
+/// take it as the first argument, while `Path(path).read_text()` holds it on
+/// the receiver. Both are canonicalized to the same `open(<path>)` provenance
+/// so classification has one representation to consume.
+fn file_read_path<'a>(
+    node: Node<'a>,
+    function: Node<'a>,
+    lower_callee: &str,
+    language: ScriptLanguage,
+    source: &[u8],
+) -> Result<Option<String>> {
+    let argument_reader = match language {
+        ScriptLanguage::Python => lower_callee == "open" || lower_callee.ends_with(".open"),
+        _ => lower_callee.ends_with(".readfilesync") || lower_callee.ends_with(".readfile"),
+    };
+    if argument_reader {
+        return literal_first_argument(node, source);
+    }
+    let receiver_reader = language == ScriptLanguage::Python
+        && (lower_callee.ends_with(".read_text") || lower_callee.ends_with(".read_bytes"));
+    if !receiver_reader {
+        return Ok(None);
+    }
+    let Some(receiver) = function.child_by_field_name("object") else {
         return Ok(None);
     };
-    let mut cursor = arguments.walk();
-    let Some(argument) = arguments.named_children(&mut cursor).next() else {
-        return Ok(None);
-    };
-    let raw = argument
+    // `Path("...")` / `pathlib.Path("...")` wrap the path in a constructor call;
+    // a bare literal receiver carries it directly.
+    match receiver.kind() {
+        "call" => {
+            let Some(constructor) = receiver.child_by_field_name("function") else {
+                return Ok(None);
+            };
+            let name = constructor
+                .utf8_text(source)
+                .context("read file-read receiver constructor")?
+                .to_ascii_lowercase();
+            if name != "path" && !name.ends_with(".path") {
+                return Ok(None);
+            }
+            literal_first_argument(receiver, source)
+        }
+        "string" => Ok(literal_text(receiver, source)?),
+        _ => Ok(None),
+    }
+}
+
+fn literal_text(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
+    let raw = node
         .utf8_text(source)
-        .context("read literal call argument syntax node")?
+        .context("read literal syntax node")?
         .trim();
     if raw.len() < 2 {
         return Ok(None);
@@ -203,6 +244,17 @@ fn literal_first_argument(node: Node<'_>, source: &[u8]) -> Result<Option<String
         return Ok(Some(raw[1..raw.len() - 1].to_string()));
     }
     Ok(None)
+}
+
+fn literal_first_argument(node: Node<'_>, source: &[u8]) -> Result<Option<String>> {
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return Ok(None);
+    };
+    let mut cursor = arguments.walk();
+    let Some(argument) = arguments.named_children(&mut cursor).next() else {
+        return Ok(None);
+    };
+    literal_text(argument, source)
 }
 
 fn append(

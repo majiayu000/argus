@@ -51,8 +51,18 @@ fn network_invocation(fact: &Fact) -> Option<(String, Vec<StaticValue>)> {
     if is_exec_wrapper(&callee) {
         let (client, arguments) = match fact.argument_shape {
             ArgumentShape::Argv => {
-                let client = fact.arguments.first().and_then(static_value_text)?;
-                (executable_basename(client), fact.arguments[1..].to_vec())
+                let token = fact.arguments.first().and_then(static_value_text)?;
+                let command = executable_basename(token);
+                let operands = &fact.arguments[1..];
+                if is_shell_wrapper(&command) {
+                    // `["env", "-S", "curl ..."]` and `["sudo", "curl", ...]` execute the
+                    // wrapped client, so argv must go through the same bounded decoder the
+                    // command-string shape uses instead of stopping at argv token 0.
+                    let (client, arguments) = shell_wrapper_invocation(operands, &command)?;
+                    (executable_basename(&client), arguments)
+                } else {
+                    (command, operands.to_vec())
+                }
             }
             ArgumentShape::CommandString => {
                 let command = fact.arguments.first()?.resolved.as_deref()?;
@@ -164,9 +174,15 @@ fn pipeline_sink_is_network(fact: &Fact) -> bool {
     if !is_network_client_token(sink) {
         return false;
     }
-    match executable_basename(sink).as_str() {
-        "nc" => !nc_zero_io(&fact.pipeline_sink_arguments),
-        "curl" => curl_argument_inputs(&fact.pipeline_sink_arguments)
+    client_consumes_stdin(&executable_basename(sink), &fact.pipeline_sink_arguments)
+}
+
+/// Whether the client's own semantics read the payload from stdin. A pipeline
+/// and an input redirection both feed fd0, so they share this test.
+fn client_consumes_stdin(client: &str, arguments: &[StaticValue]) -> bool {
+    match client {
+        "nc" => !nc_zero_io(arguments),
+        "curl" => curl_argument_inputs(arguments)
             .iter()
             .any(|input| input.reads_stdin()),
         _ => false,
@@ -197,6 +213,25 @@ fn network_sensitive_match(fact: &Fact) -> Option<String> {
         if let Some(input) = curl_inputs.as_ref().and_then(|inputs| inputs.get(index)) {
             for source in input.file_sources() {
                 collect(source, true);
+            }
+        }
+    }
+    // `curl --data-binary @- ... < ~/.aws/credentials` never names the file as
+    // an operand: the content arrives on fd0. Correlate the redirected file
+    // only when the client actually consumes stdin.
+    if let Some(redirect) = fact
+        .redirect
+        .as_ref()
+        .filter(|redirect| redirect.is_stdin_input() && client_consumes_stdin(&client, &arguments))
+    {
+        let target = &redirect.target;
+        for candidate in [
+            target.raw.as_str(),
+            target.resolved.as_deref().unwrap_or(""),
+            target.executable_reference.as_deref().unwrap_or(""),
+        ] {
+            for matched in sensitive_read_re().find_iter(candidate) {
+                matches.push(matched.as_str().to_string());
             }
         }
     }
@@ -306,7 +341,12 @@ fn is_sensitive_path(value: &str) -> bool {
 }
 
 pub(super) fn writes_agent_config(fact: &Fact) -> bool {
-    if fact.redirect.iter().any(static_value_is_agent_config) {
+    // Only an output redirection writes its target; `cmd < config` reads it.
+    if fact
+        .redirect
+        .iter()
+        .any(|redirect| redirect.is_write() && static_value_is_agent_config(&redirect.target))
+    {
         return true;
     }
     write_targets(fact)

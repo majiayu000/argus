@@ -1,3 +1,4 @@
+use super::redirect::{redirect_direction, redirect_fd, Redirect};
 use super::{
     canonical_callee, command_argument_shape, is_shell_wrapper, line, shell_wrapper_invocation,
     static_value, text, ArgumentShape, Bindings, Fact, FactKind, PipelineStage, ScriptLanguage,
@@ -460,13 +461,8 @@ pub(super) fn bash_command_fact(
                 arguments.push(static_value(child, source, bindings, ScriptLanguage::Bash)?)
             }
             Some("redirect") => {
-                if let Some(destination) = child.child_by_field_name("destination") {
-                    redirect = Some(static_value(
-                        destination,
-                        source,
-                        bindings,
-                        ScriptLanguage::Bash,
-                    )?);
+                if let Some(typed) = typed_redirect(child, source, bindings)? {
+                    redirect = Some(typed);
                 }
             }
             _ => {}
@@ -487,6 +483,40 @@ pub(super) fn bash_command_fact(
         redirect,
         text: text(node, source)?.to_string(),
     })
+}
+
+/// Build typed provenance for one redirection node.
+///
+/// The operator token carries both the direction and any explicit descriptor,
+/// and tree-sitter keeps it as an anonymous child next to the `destination`
+/// field. A redirection whose destination is absent yields `None` so an
+/// unmodeled shape never masquerades as a resolved target.
+fn typed_redirect(node: Node<'_>, source: &[u8], bindings: &Bindings) -> Result<Option<Redirect>> {
+    let Some(destination) = node.child_by_field_name("destination") else {
+        return Ok(None);
+    };
+    let mut operator = None;
+    for index in 0..node.child_count() {
+        let Some(child) = node.child(index) else {
+            continue;
+        };
+        if child.is_named() || child.id() == destination.id() {
+            continue;
+        }
+        operator = Some(text(child, source)?.to_string());
+        break;
+    }
+    let operator = operator.unwrap_or_default();
+    let explicit_fd = redirect_fd(&operator).or_else(|| {
+        node.child_by_field_name("descriptor")
+            .and_then(|child| text(child, source).ok())
+            .and_then(|value| value.trim().parse().ok())
+    });
+    Ok(Some(Redirect {
+        fd: explicit_fd,
+        direction: redirect_direction(&operator),
+        target: static_value(destination, source, bindings, ScriptLanguage::Bash)?,
+    }))
 }
 
 pub(super) fn bash_redirect_fact(
@@ -518,13 +548,8 @@ pub(super) fn bash_redirect_fact(
             continue;
         };
         if node.field_name_for_child(index as u32) == Some("redirect") {
-            if let Some(destination) = child.child_by_field_name("destination") {
-                fact.redirect = Some(static_value(
-                    destination,
-                    source,
-                    bindings,
-                    ScriptLanguage::Bash,
-                )?);
+            if let Some(typed) = typed_redirect(child, source, bindings)? {
+                fact.redirect = Some(typed);
                 break;
             }
         }
