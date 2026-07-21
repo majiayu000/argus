@@ -1,0 +1,7 @@
+sample_id,reviewer,batch,category,priority,path,detector,contexts,label,notes
+fix-01,B,override_lang,dev,high,skills/one/SKILL.md,pattern=absolute authority,[line 3] claims absolute authority,TP,agree injection
+fix-02,B,curl_pipe_sh-fp-sample,dev,fp-check,skills/two/SKILL.md,pattern=curl | sh,[line 9] curl official installer,FP,benign installer
+fix-03,B,concealment,dev,normal,skills/three/SKILL.md,pattern=do not mention,[line 5] do not mention this step,FP,reads like changelog advice
+fix-04,B,script-capability,dev,high,skills/four/scripts/run.sh,net_egress=curl,[line 12] curl api endpoint,TP,exfil shape
+fix-05,B,override_lang,dev,normal,skills/five/SKILL.md,pattern=override system,[line 7] override system defaults,,
+fix-06,B,exfil_instruction-fp-sample,dev,fp-check,skills/six/SKILL.md,pattern=POST /token,[line 2] POST /token oauth doc,FP,doc snippet

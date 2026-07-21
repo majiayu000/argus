@@ -4,3 +4,5 @@ target/
 .DS_Store
 __pycache__/
 *.py[cod]
+eval/labeling/assignments/
+eval/labeling/out/
