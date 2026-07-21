@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/majiayu000/argus/releases/manifest.schema.json",
+  "title": "Argus release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "binaryVersion", "tag", "commit", "assets"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "binaryVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "tag": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "target", "runner", "kind", "size", "sha256"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "target": { "type": ["string", "null"], "enum": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", null] },
+          "runner": { "type": ["string", "null"], "enum": ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-2025", null] },
+          "kind": { "enum": ["binary", "archive", "documentation"] },
+          "size": { "type": "integer", "minimum": 1, "maximum": 134217728 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

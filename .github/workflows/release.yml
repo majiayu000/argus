@@ -1,0 +1,300 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Candidate performs every local check without attestations, releases, tags, or ref changes.
+        required: true
+        type: choice
+        options: [candidate]
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+concurrency:
+  group: argus-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_VERSION: "0.1.0"
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.contract.outputs.version }}
+      commit: ${{ steps.contract.outputs.commit }}
+      publish: ${{ steps.contract.outputs.publish }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - id: contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          action_version=$(node -p "require('./action/release.json').defaultBinaryVersion")
+          test "$cargo_version" = "$RELEASE_VERSION"
+          test "$action_version" = "$RELEASE_VERSION"
+          publish=false
+          if [[ "$GITHUB_REF_TYPE" = tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION"
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+            publish=true
+          else
+            test "${{ inputs.mode }}" = candidate
+          fi
+          {
+            echo "version=$RELEASE_VERSION"
+            echo "commit=$GITHUB_SHA"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+      - name: Quality gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --all-targets
+          cargo run -q -p argus-cli -- corpus test --corpus corpus
+          npm ci --prefix action
+          npm test --prefix action
+          npm run package --prefix action
+          git diff --exit-code -- action/dist/index.js
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            binary: target/x86_64-unknown-linux-gnu/release/argus
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            binary: target/aarch64-unknown-linux-gnu/release/argus
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: target/x86_64-apple-darwin/release/argus
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            binary: target/aarch64-apple-darwin/release/argus
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            binary: target/x86_64-pc-windows-msvc/release/argus.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install pinned release target
+        shell: bash
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build and smoke native binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "${{ matrix.target }}" -p argus-cli
+          "${{ matrix.binary }}" --version | grep -Fx "argus ${{ needs.preflight.outputs.version }}"
+          python3 scripts/package_release.py package --binary "${{ matrix.binary }}" --target "${{ matrix.target }}" --version "${{ needs.preflight.outputs.version }}" --output-dir release-assets
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  attest:
+    if: needs.preflight.outputs.publish == 'true'
+    needs: [preflight, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets
+      - id: attest-target
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: release-assets/*
+      - name: Preserve target bundle
+        shell: bash
+        run: |
+          mkdir provenance
+          cp '${{ steps.attest-target.outputs.bundle-path }}' 'provenance/${{ matrix.target }}.sigstore.json'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: provenance-${{ matrix.target }}
+          path: provenance/*.sigstore.json
+          if-no-files-found: error
+          retention-days: 1
+
+  candidate:
+    if: needs.preflight.outputs.publish != 'true'
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Build and verify candidate manifest without external mutation
+        run: |
+          python3 scripts/package_release.py manifest --asset-dir release-assets --version "${{ needs.preflight.outputs.version }}" --commit "${{ needs.preflight.outputs.commit }}" --license LICENSE --readme README.md
+          python3 scripts/verify_release_assets.py --asset-dir release-assets
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("release-assets/release_manifest.json").read_text())
+          plan = {
+              "schemaVersion": 1,
+              "tag": manifest["tag"],
+              "commit": manifest["commit"],
+              "subjects": ["release_manifest.json", "SHA256SUMS", *[item["name"] for item in manifest["assets"] if item["kind"] in {"binary", "archive"}]],
+          }
+          Path("attestation-plan.json").write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          test "$GITHUB_REF_TYPE" != tag
+
+  publish:
+    if: needs.preflight.outputs.publish == 'true'
+    needs: [preflight, build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: provenance-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify protected repository release controls
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.immutable_releases')" = true
+          gh api "repos/$GITHUB_REPOSITORY/environments/release" --jq '.protection_rules | length > 0 and any(.type == "required_reviewers" and .prevent_self_review == true)' | grep -Fx true
+          env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/release")
+          jq -e '.protection_rules | any(.type == "required_reviewers" and .prevent_self_review == true and (.reviewers | length > 0))' <<<"$env_json" >/dev/null
+          jq -e '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' <<<"$env_json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/environments/release/deployment-branch-policies" --paginate --jq '.branch_policies | any(.type == "tag" and .name == "v*.*.*")' | grep -Fx true
+          ruleset_dir=$(mktemp -d)
+          gh api "repos/$GITHUB_REPOSITORY/rulesets" --paginate --jq '.[] | select(.enforcement == "active") | .id' > "$ruleset_dir/ids"
+          test -s "$ruleset_dir/ids"
+          while read -r id; do gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" > "$ruleset_dir/$id.json"; done < "$ruleset_dir/ids"
+          jq -s -e 'any(.[]; .target == "tag" and (.conditions.ref_name.include | index("refs/tags/v*.*.*")) and ([.rules[].type] | contains(["creation", "update", "deletion"])))' "$ruleset_dir"/*.json >/dev/null
+          jq -s -e 'any(.[]; .target == "branch" and (.conditions.ref_name.include | index("refs/heads/v1")) and ([.rules[].type] | contains(["creation", "update", "deletion", "non_fast_forward"])))' "$ruleset_dir"/*.json >/dev/null
+      - name: Build canonical manifest
+        run: python3 scripts/package_release.py manifest --asset-dir release-assets --version "${{ needs.preflight.outputs.version }}" --commit "${{ needs.preflight.outputs.commit }}" --license LICENSE --readme README.md
+      - id: attest-manifest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: release-assets/release_manifest.json
+      - name: Preserve manifest bundle
+        run: cp '${{ steps.attest-manifest.outputs.bundle-path }}' release-assets/release_manifest.sigstore.json
+      - id: attest-checksums
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: release-assets/SHA256SUMS
+      - name: Preserve checksum bundle
+        run: cp '${{ steps.attest-checksums.outputs.bundle-path }}' release-assets/SHA256SUMS.sigstore.json
+      - name: Verify complete release set
+        run: python3 scripts/verify_release_assets.py --asset-dir release-assets --require-bundles
+      - name: Reconcile immutable draft and publish only after verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.preflight.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$tag" --verify-tag --draft --title "$tag" --notes-file CHANGELOG.md
+          fi
+          remote_dir=$(mktemp -d)
+          mapfile -t remote_names < <(gh release view "$tag" --json assets --jq '.assets[].name')
+          for name in "${remote_names[@]}"; do
+            test -f "release-assets/$name" || { echo "unexpected draft asset: $name" >&2; exit 1; }
+            test "$(printf '%s\n' "${remote_names[@]}" | grep -Fxc "$name")" = 1
+            gh release download "$tag" --pattern "$name" --dir "$remote_dir"
+            if [[ "$name" = *.sigstore.json ]]; then
+              if [[ "$name" = release_manifest.sigstore.json ]]; then
+                subjects=(release_manifest.json)
+              elif [[ "$name" = SHA256SUMS.sigstore.json ]]; then
+                subjects=(SHA256SUMS)
+              else
+                target=${name%.sigstore.json}
+                mapfile -t subjects < <(jq -r --arg target "$target" '.assets[] | select(.target == $target and (.kind == "binary" or .kind == "archive")) | .name' release-assets/release_manifest.json)
+                test "${#subjects[@]}" = 2
+              fi
+              for subject in "${subjects[@]}"; do
+                gh attestation verify "release-assets/$subject" --bundle "$remote_dir/$name" --repo "$GITHUB_REPOSITORY" --cert-oidc-issuer https://token.actions.githubusercontent.com --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "$GITHUB_REF" --source-digest "${{ needs.preflight.outputs.commit }}" --deny-self-hosted-runners --format json >/dev/null
+              done
+              cp "$remote_dir/$name" "release-assets/$name"
+            else
+              cmp --silent "release-assets/$name" "$remote_dir/$name" || { echo "draft asset conflict: $name" >&2; exit 1; }
+            fi
+          done
+          for path in release-assets/*; do
+            name=${path##*/}
+            if ! printf '%s\n' "${remote_names[@]}" | grep -Fqx "$name"; then
+              gh release upload "$tag" "$path"
+            fi
+          done
+          audit_dir=$(mktemp -d)
+          gh release download "$tag" --dir "$audit_dir"
+          python3 scripts/verify_release_assets.py --asset-dir "$audit_dir" --require-bundles
+          gh release edit "$tag" --draft=false --latest
+          gh release verify "$tag" --format json >/dev/null
+          for path in "$audit_dir"/*; do gh release verify-asset "$tag" "$path" --format json >/dev/null; done
+      - name: Emit read-only v1 promotion plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          old=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/v1" --jq .object.sha 2>/dev/null || true)
+          new='${{ needs.preflight.outputs.commit }}'
+          if [[ -n "$old" ]]; then git merge-base --is-ancestor "$old" "$new"; fi
+          printf 'v1 promotion requires a separate maintainer action: old=%s new=%s\n' "$old" "$new"

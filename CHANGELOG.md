@@ -12,6 +12,11 @@ items below into a versioned section.
 
 ### Added
 
+- Candidate-safe binary release automation and a repository-root GitHub Action
+  contract. The implementation does not make `v0.1.0` or `@v1` available;
+  publication remains behind the documented administrator and release gates
+  ([#92](https://github.com/majiayu000/argus/issues/92)).
+
 - `argus agent scan` — static scanner for agent supply-chain surfaces:
   MCP configs, skills, hooks, and `AGENTS.md`/`CLAUDE.md`. Rules AGT-01
   (injection/override language, EN+ZH), AGT-03 (remote-exec pipe,
