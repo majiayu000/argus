@@ -17,7 +17,10 @@ function writeOutputs(values, env = process.env) {
   for (const name of ["decision", "exitCode", "reportPath", "sarifFile", "argusVersion"]) appendOutput(name, values[name] || "", env);
 }
 
-async function main(env = process.env) {
+async function main(env = process.env, dependencies = {}) {
+  const materialize = dependencies.materializeRelease || materializeRelease;
+  const run = dependencies.runBounded || runBounded;
+  const selectTarget = dependencies.targetFor || targetFor;
   const outputs = { decision: "", exitCode: "", reportPath: "", sarifFile: "", argusVersion: "" };
   let tempDir;
   let outputsWritten = false;
@@ -25,13 +28,13 @@ async function main(env = process.env) {
     const inputs = readInputs(env, releaseConfig);
     outputs.argusVersion = inputs.version;
     const scanPath = resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.inputPath, inputs.scanType);
-    const target = targetFor();
+    const target = selectTarget();
     tempDir = fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), "argus-action-"));
-    const binary = await materializeRelease(inputs.version, target, tempDir, validateManifest);
-    const versionResult = await runBounded(binary, ["--version"], { timeoutMs: 30_000, stdoutLimit: 1024, stderrLimit: 1024 });
+    const binary = await materialize(inputs.version, target, tempDir, validateManifest);
+    const versionResult = await run(binary, ["--version"], { timeoutMs: 30_000, stdoutLimit: 1024, stderrLimit: 1024 });
     if (versionResult.code !== 0 || versionResult.stdout !== `argus ${inputs.version}\n` || versionResult.stderr !== "") throw new Error("downloaded binary failed exact version self-check");
     const args = inputs.scanType === "agent" ? ["agent", "scan", scanPath, "--format", inputs.format] : ["scan", scanPath, "--format", inputs.format];
-    const result = await runBounded(binary, args, { timeoutMs: 180_000 });
+    const result = await run(binary, args, { timeoutMs: 180_000 });
     outputs.exitCode = String(result.code);
     if (result.stderr !== "") throw new Error("argus wrote stderr while producing a report");
     const decision = validateReport(inputs.format, result.stdout, result.code, inputs.version);

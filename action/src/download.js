@@ -29,6 +29,7 @@ function requestBytes(url, limit, redirects = 0, accept = API_ACCEPT, expectedCo
         return reject(new Error(`GitHub response has unexpected content type; expected ${expectedContentType}`));
       }
       const declared = Number(response.headers["content-length"] || 0);
+      if (!Number.isSafeInteger(declared) || declared < 0) { response.resume(); return reject(new Error("GitHub response has invalid content length")); }
       if (declared > limit) { response.resume(); return reject(new Error("GitHub response exceeds size limit")); }
       const chunks = [];
       let size = 0;
@@ -68,7 +69,7 @@ function uniqueAsset(release, name) {
   const matches = release.assets.filter((item) => item?.name === name);
   if (matches.length !== 1) throw new Error(`release must contain exactly one ${name}`);
   const asset = matches[0];
-  if (!/^sha256:[0-9a-f]{64}$/.test(asset.digest || "") || typeof asset.url !== "string" || !Number.isSafeInteger(asset.size) || asset.size < 1) throw new Error(`release asset metadata is incomplete: ${name}`);
+  if (!/^sha256:[0-9a-f]{64}$/.test(asset.digest || "") || !/^https:\/\/api\.github\.com\/repos\/majiayu000\/argus\/releases\/assets\/[1-9][0-9]*$/.test(asset.url || "") || !Number.isSafeInteger(asset.size) || asset.size < 1) throw new Error(`release asset metadata is incomplete: ${name}`);
   return asset;
 }
 
@@ -82,37 +83,52 @@ async function downloadVerifiedAsset(release, name, limit) {
 
 async function verifyAttestation(subject, bundle, version, commit, runner = runBounded) {
   const help = await runner("gh", ["attestation", "verify", "--help"], { timeoutMs: 15_000, stdoutLimit: 1024 * 1024 });
-  if (help.code !== 0 || !["--bundle", "--signer-workflow", "--source-ref", "--source-digest", "--deny-self-hosted-runners", "--format"].every((flag) => help.stdout.includes(flag))) throw new Error("installed gh lacks required attestation verification flags");
-  const result = await runner("gh", ["attestation", "verify", subject, "--bundle", bundle, "--repo", "majiayu000/argus", "--signer-workflow", "majiayu000/argus/.github/workflows/release.yml", "--source-ref", `refs/tags/v${version}`, "--source-digest", commit, "--deny-self-hosted-runners", "--format", "json"], { timeoutMs: 180_000, stdoutLimit: 4 * 1024 * 1024 });
+  if (help.code !== 0 || !["--bundle", "--cert-oidc-issuer", "--signer-workflow", "--source-ref", "--source-digest", "--deny-self-hosted-runners", "--format"].every((flag) => help.stdout.includes(flag))) throw new Error("installed gh lacks required attestation verification flags");
+  const ref = `refs/tags/v${version}`;
+  const workflow = "majiayu000/argus/.github/workflows/release.yml";
+  const result = await runner("gh", ["attestation", "verify", subject, "--bundle", bundle, "--repo", "majiayu000/argus", "--cert-oidc-issuer", "https://token.actions.githubusercontent.com", "--signer-workflow", workflow, "--source-ref", ref, "--source-digest", commit, "--deny-self-hosted-runners", "--format", "json"], { timeoutMs: 180_000, stdoutLimit: 4 * 1024 * 1024 });
   if (result.code !== 0 || result.stderr) throw new Error("GitHub attestation verification failed");
   const verified = parseJson(Buffer.from(result.stdout), "gh attestation output");
   const entries = Array.isArray(verified) ? verified : [verified];
   if (entries.length !== 1 || !entries[0] || typeof entries[0] !== "object") throw new Error("gh attestation output must contain one verified attestation");
+  const verification = entries[0].verificationResult;
+  const certificate = verification?.signature?.certificate;
+  const statement = verification?.statement;
+  const subjects = Array.isArray(statement?.subject) ? statement.subject : [];
+  const expectedDigest = sha256(fs.readFileSync(subject));
+  const matchingSubjects = subjects.filter((item) => item && item.digest?.sha256 === expectedDigest);
+  if (statement?.predicateType !== "https://slsa.dev/provenance/v1" || matchingSubjects.length !== 1 || !Array.isArray(verification?.verifiedTimestamps) || verification.verifiedTimestamps.length < 1) throw new Error("attestation statement or subject is invalid");
+  const expectedWorkflowUri = `https://github.com/${workflow}@${ref}`;
+  if (!certificate || certificate.issuer !== "https://token.actions.githubusercontent.com" || certificate.runnerEnvironment !== "github-hosted" || certificate.sourceRepositoryURI !== "https://github.com/majiayu000/argus" || certificate.sourceRepositoryDigest !== commit || certificate.sourceRepositoryRef !== ref || certificate.buildConfigURI !== expectedWorkflowUri || certificate.buildSignerURI !== expectedWorkflowUri) throw new Error("attestation certificate identity is invalid");
 }
 
-async function materializeRelease(version, target, tempDir, validateManifest) {
-  const [release, commit] = await Promise.all([fetchRelease(version), fetchTagCommit(version)]);
-  const manifestBytes = await downloadVerifiedAsset(release, "release_manifest.json", 1024 * 1024);
-  const manifestBundle = await downloadVerifiedAsset(release, "release_manifest.sigstore.json", 4 * 1024 * 1024);
+async function materializeRelease(version, target, tempDir, validateManifest, dependencies = {}) {
+  const fetchReleaseFn = dependencies.fetchRelease || fetchRelease;
+  const fetchTagCommitFn = dependencies.fetchTagCommit || fetchTagCommit;
+  const downloadFn = dependencies.downloadVerifiedAsset || downloadVerifiedAsset;
+  const verifyFn = dependencies.verifyAttestation || verifyAttestation;
+  const [release, commit] = await Promise.all([fetchReleaseFn(version), fetchTagCommitFn(version)]);
+  const manifestBytes = await downloadFn(release, "release_manifest.json", 1024 * 1024);
+  const manifestBundle = await downloadFn(release, "release_manifest.sigstore.json", 4 * 1024 * 1024);
   const manifestPath = path.join(tempDir, "release_manifest.json");
   const manifestBundlePath = path.join(tempDir, "release_manifest.sigstore.json");
   fs.writeFileSync(manifestPath, manifestBytes, { flag: "wx" });
   fs.writeFileSync(manifestBundlePath, manifestBundle, { flag: "wx" });
-  await verifyAttestation(manifestPath, manifestBundlePath, version, commit);
+  await verifyFn(manifestPath, manifestBundlePath, version, commit);
   const manifest = validateManifest(parseJson(manifestBytes, "release manifest"), version, commit);
   const suffix = target.endsWith("windows-msvc") ? ".exe" : "";
-  const binaryName = `argus-${version}-${target}${suffix}`;
+  const binaryName = `argus-v${version}-${target}${suffix}`;
   const entry = manifest.assets.find((item) => item.name === binaryName && item.target === target && item.kind === "binary");
   if (!entry) throw new Error(`manifest lacks binary for ${target}`);
-  const binary = await downloadVerifiedAsset(release, binaryName, 128 * 1024 * 1024);
+  const binary = await downloadFn(release, binaryName, 128 * 1024 * 1024);
   if (binary.length !== entry.size || sha256(binary) !== entry.sha256) throw new Error("binary does not match release manifest");
-  const bundleName = `${binaryName}.sigstore.json`;
-  const bundle = await downloadVerifiedAsset(release, bundleName, 4 * 1024 * 1024);
+  const bundleName = `${target}.sigstore.json`;
+  const bundle = await downloadFn(release, bundleName, 4 * 1024 * 1024);
   const binaryPath = path.join(tempDir, suffix ? "argus.exe" : "argus");
   const bundlePath = path.join(tempDir, bundleName);
   fs.writeFileSync(binaryPath, binary, { flag: "wx", mode: 0o755 });
   fs.writeFileSync(bundlePath, bundle, { flag: "wx" });
-  await verifyAttestation(binaryPath, bundlePath, version, commit);
+  await verifyFn(binaryPath, bundlePath, version, commit);
   return binaryPath;
 }
 

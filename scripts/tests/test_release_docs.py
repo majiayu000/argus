@@ -18,6 +18,9 @@ class ReleaseDocsTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("prevent self-review", docs)
         self.assertIn("operational error 永远失败", docs)
+        self.assertIn("byte-for-byte", docs)
+        self.assertIn("gh release verify", docs)
+        self.assertIn("SHA256SUMS", docs)
 
     def test_no_unsafe_install_or_automatic_promotion_contract(self) -> None:
         combined = "\n".join((ROOT / path).read_text() for path in ["README.md", "SECURITY.md", "docs/releasing.md"])

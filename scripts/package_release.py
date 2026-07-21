@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -15,11 +16,11 @@ import zipfile
 from pathlib import Path
 
 TARGETS = {
-    "x86_64-unknown-linux-gnu": ("argus", "tar.gz"),
-    "aarch64-unknown-linux-gnu": ("argus", "tar.gz"),
-    "x86_64-apple-darwin": ("argus", "tar.gz"),
-    "aarch64-apple-darwin": ("argus", "tar.gz"),
-    "x86_64-pc-windows-msvc": ("argus.exe", "zip"),
+    "x86_64-unknown-linux-gnu": ("argus", "tar.gz", "ubuntu-24.04"),
+    "aarch64-unknown-linux-gnu": ("argus", "tar.gz", "ubuntu-24.04-arm"),
+    "x86_64-apple-darwin": ("argus", "tar.gz", "macos-15-intel"),
+    "aarch64-apple-darwin": ("argus", "tar.gz", "macos-15"),
+    "x86_64-pc-windows-msvc": ("argus.exe", "zip", "windows-2025"),
 }
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -47,7 +48,7 @@ def checked_file(path: Path) -> None:
 
 
 def write_archive(binary: Path, target: str, output: Path) -> None:
-    binary_name, archive_kind = TARGETS[target]
+    binary_name, archive_kind, _runner = TARGETS[target]
     payload = binary.read_bytes()
     if archive_kind == "zip":
         info = zipfile.ZipInfo(binary_name, (1980, 1, 1, 0, 0, 0))
@@ -64,8 +65,9 @@ def write_archive(binary: Path, target: str, output: Path) -> None:
     metadata.uid = metadata.gid = 0
     metadata.uname = metadata.gname = ""
     with output.open("wb") as raw:
-        with tarfile.open(fileobj=raw, mode="w:gz", compresslevel=9, format=tarfile.PAX_FORMAT) as archive:
-            archive.addfile(metadata, io.BytesIO(payload))
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                archive.addfile(metadata, io.BytesIO(payload))
 
 
 def package(binary: Path, target: str, version: str, output_dir: Path) -> list[Path]:
@@ -75,9 +77,9 @@ def package(binary: Path, target: str, version: str, output_dir: Path) -> list[P
         raise ValueError("version must be canonical X.Y.Z")
     checked_file(binary)
     output_dir.mkdir(parents=True, exist_ok=True)
-    binary_name, archive_kind = TARGETS[target]
-    raw_name = f"argus-{version}-{target}{'.exe' if binary_name.endswith('.exe') else ''}"
-    archive_name = f"argus-{version}-{target}.{'zip' if archive_kind == 'zip' else 'tar.gz'}"
+    binary_name, archive_kind, _runner = TARGETS[target]
+    raw_name = f"argus-v{version}-{target}{'.exe' if binary_name.endswith('.exe') else ''}"
+    archive_name = f"argus-v{version}-{target}.{'zip' if archive_kind == 'zip' else 'tar.gz'}"
     raw = output_dir / raw_name
     raw.write_bytes(binary.read_bytes())
     raw.chmod(0o755)
@@ -87,11 +89,11 @@ def package(binary: Path, target: str, version: str, output_dir: Path) -> list[P
 
 
 def parse_asset_name(name: str, version: str) -> tuple[str, str]:
-    prefix = f"argus-{version}-"
+    prefix = f"argus-v{version}-"
     if not name.startswith(prefix):
         raise ValueError(f"unexpected release asset name: {name}")
     remainder = name[len(prefix):]
-    for target, (binary_name, archive_kind) in TARGETS.items():
+    for target, (binary_name, archive_kind, _runner) in TARGETS.items():
         raw_suffix = target + (".exe" if binary_name.endswith(".exe") else "")
         archive_suffix = target + (".zip" if archive_kind == "zip" else ".tar.gz")
         if remainder == raw_suffix:
@@ -99,6 +101,16 @@ def parse_asset_name(name: str, version: str) -> tuple[str, str]:
         if remainder == archive_suffix:
             return target, "archive"
     raise ValueError(f"unexpected release asset name: {name}")
+
+
+def copy_document(source: Path, destination: Path) -> None:
+    checked_file(source)
+    payload = source.read_bytes()
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"release document must be UTF-8: {source}") from exc
+    destination.write_bytes(payload)
 
 
 def make_manifest(asset_dir: Path, version: str, commit: str) -> dict[str, object]:
@@ -109,7 +121,7 @@ def make_manifest(asset_dir: Path, version: str, commit: str) -> dict[str, objec
     assets: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for path in sorted(asset_dir.iterdir(), key=lambda item: item.name):
-        if path.name in {"release_manifest.json", "SHA256SUMS"} or path.name.endswith(".sigstore.json"):
+        if path.name in {"release_manifest.json", "SHA256SUMS", "LICENSE", "README.md"} or path.name.endswith(".sigstore.json"):
             continue
         checked_file(path)
         target, kind = parse_asset_name(path.name, version)
@@ -117,15 +129,22 @@ def make_manifest(asset_dir: Path, version: str, commit: str) -> dict[str, objec
         if key in seen:
             raise ValueError(f"duplicate release asset for {target}/{kind}")
         seen.add(key)
-        assets.append({"name": path.name, "target": target, "kind": kind, "size": path.stat().st_size, "sha256": digest(path)})
+        assets.append({"name": path.name, "target": target, "runner": TARGETS[target][2], "kind": kind, "size": path.stat().st_size, "sha256": digest(path)})
     expected = {(target, kind) for target in TARGETS for kind in ("binary", "archive")}
     if seen != expected:
         missing = sorted(f"{target}/{kind}" for target, kind in expected - seen)
         raise ValueError("release asset set is incomplete: " + ", ".join(missing))
-    return {"schemaVersion": 1, "version": version, "commit": commit, "assets": assets}
+    for name in ("LICENSE", "README.md"):
+        path = asset_dir / name
+        checked_file(path)
+        assets.append({"name": name, "target": None, "runner": None, "kind": "documentation", "size": path.stat().st_size, "sha256": digest(path)})
+    assets.sort(key=lambda item: str(item["name"]))
+    return {"schemaVersion": 1, "binaryVersion": version, "tag": f"v{version}", "commit": commit, "assets": assets}
 
 
-def write_manifest(asset_dir: Path, version: str, commit: str) -> None:
+def write_manifest(asset_dir: Path, version: str, commit: str, license_path: Path, readme_path: Path) -> None:
+    copy_document(license_path, asset_dir / "LICENSE")
+    copy_document(readme_path, asset_dir / "README.md")
     manifest = make_manifest(asset_dir, version, commit)
     manifest_path = asset_dir / "release_manifest.json"
     manifest_path.write_bytes(canonical_json(manifest))
@@ -146,12 +165,14 @@ def main() -> int:
     manifest_parser.add_argument("--asset-dir", type=Path, required=True)
     manifest_parser.add_argument("--version", required=True)
     manifest_parser.add_argument("--commit", required=True)
+    manifest_parser.add_argument("--license", type=Path, required=True)
+    manifest_parser.add_argument("--readme", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "package":
             package(args.binary, args.target, args.version, args.output_dir)
         else:
-            write_manifest(args.asset_dir, args.version, args.commit)
+            write_manifest(args.asset_dir, args.version, args.commit, args.license, args.readme)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     return 0

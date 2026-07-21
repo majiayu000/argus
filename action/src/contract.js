@@ -64,17 +64,36 @@ function resolveWorkspacePath(workspace, requested, scanType) {
 
 function validateManifest(value, version, commit) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("release manifest must be an object");
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["assets", "commit", "schemaVersion", "version"])) throw new Error("release manifest keys do not match schema v1");
-  if (value.schemaVersion !== 1 || value.version !== version || value.commit !== commit || !Array.isArray(value.assets)) throw new Error("release manifest identity does not match release");
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["assets", "binaryVersion", "commit", "schemaVersion", "tag"])) throw new Error("release manifest keys do not match schema v1");
+  if (value.schemaVersion !== 1 || value.binaryVersion !== version || value.tag !== `v${version}` || value.commit !== commit || !Array.isArray(value.assets)) throw new Error("release manifest identity does not match release");
   const names = new Set();
+  const pairs = new Set();
   for (const item of value.assets) {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("manifest asset entry must be an object");
-    if (JSON.stringify(Object.keys(item).sort()) !== JSON.stringify(["kind", "name", "sha256", "size", "target"])) throw new Error("manifest asset keys do not match schema v1");
+    if (JSON.stringify(Object.keys(item).sort()) !== JSON.stringify(["kind", "name", "runner", "sha256", "size", "target"])) throw new Error("manifest asset keys do not match schema v1");
     if (typeof item.name !== "string" || path.basename(item.name) !== item.name || names.has(item.name)) throw new Error("manifest asset name is invalid or duplicated");
-    if (!Object.values(TARGETS).includes(item.target) || !["binary", "archive"].includes(item.kind)) throw new Error("manifest target or kind is invalid");
+    if (item.kind === "documentation") {
+      if (!["LICENSE", "README.md"].includes(item.name) || item.target !== null || item.runner !== null) throw new Error("manifest documentation identity is invalid");
+    } else {
+      const expectedRunners = {
+        "x86_64-unknown-linux-gnu": "ubuntu-24.04",
+        "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+        "x86_64-apple-darwin": "macos-15-intel",
+        "aarch64-apple-darwin": "macos-15",
+        "x86_64-pc-windows-msvc": "windows-2025",
+      };
+      const pair = `${item.target}/${item.kind}`;
+      if (!Object.values(TARGETS).includes(item.target) || expectedRunners[item.target] !== item.runner || !["binary", "archive"].includes(item.kind) || pairs.has(pair)) throw new Error("manifest target, runner, or kind is invalid or duplicated");
+      const windowsSuffix = item.target.endsWith("windows-msvc") ? ".exe" : "";
+      const expectedName = item.kind === "binary" ? `argus-v${version}-${item.target}${windowsSuffix}` : `argus-v${version}-${item.target}.${windowsSuffix ? "zip" : "tar.gz"}`;
+      if (item.name !== expectedName) throw new Error("manifest asset name differs from target/kind identity");
+      pairs.add(pair);
+    }
     if (!Number.isSafeInteger(item.size) || item.size < 1 || item.size > 128 * 1024 * 1024 || !SHA256_RE.test(item.sha256)) throw new Error("manifest asset size or digest is invalid");
     names.add(item.name);
   }
+  const expectedPairs = new Set(Object.values(TARGETS).flatMap((target) => ["binary", "archive"].map((kind) => `${target}/${kind}`)));
+  if (pairs.size !== expectedPairs.size || [...expectedPairs].some((pair) => !pairs.has(pair)) || !names.has("LICENSE") || !names.has("README.md")) throw new Error("manifest asset matrix is incomplete");
   return value;
 }
 
@@ -89,12 +108,16 @@ function validateReport(format, text, code, version) {
   const decision = decisionForExit(code);
   if (!text || Buffer.byteLength(text) > 64 * 1024 * 1024) throw new Error("argus report is empty or oversized");
   if (format === "text") {
-    const match = /^decision: (allow|block|allow-with-approval)\s+/u.exec(text);
-    if (!match || match[1] !== decision) throw new Error("text report decision does not match exit code");
+    const match = /^decision: (allow|block|allow-with-approval)  package: .+\npath: .+\n(?:[\s\S]*\n)?findings:(?: none|\n[\s\S]+)\n$/u.exec(text);
+    if (!match || match[1] !== decision) throw new Error("text report contract does not match exit code");
   } else if (format === "json") {
     let report;
     try { report = JSON.parse(text); } catch (error) { throw new Error("JSON report is malformed", { cause: error }); }
-    if (!report || typeof report !== "object" || report.decision !== decision || !Array.isArray(report.findings)) throw new Error("JSON report contract does not match exit code");
+    const required = ["artifact", "decision", "findings", "package_name", "package_version", "path"];
+    const allowed = new Set([...required, "coordinate", "intelligence"]);
+    const keys = report && typeof report === "object" && !Array.isArray(report) ? Object.keys(report) : [];
+    if (required.some((key) => !keys.includes(key)) || keys.some((key) => !allowed.has(key)) || report.decision !== decision || !Array.isArray(report.findings) || typeof report.artifact !== "string" || typeof report.path !== "string") throw new Error("JSON report contract does not match exit code");
+    if ((decision === "allow") !== (report.findings.length === 0)) throw new Error("JSON report findings do not match decision");
   } else {
     let report;
     try { report = JSON.parse(text); } catch (error) { throw new Error("SARIF report is malformed", { cause: error }); }
@@ -102,6 +125,7 @@ function validateReport(format, text, code, version) {
     if (!run || run.tool?.driver?.name !== "argus" || run.tool.driver.version !== version || run.invocations?.[0]?.executionSuccessful !== true || !Array.isArray(run.results)) throw new Error("SARIF report contract is incomplete");
     if (decision === "allow" && run.results.length !== 0) throw new Error("clean SARIF contains findings");
     if (decision !== "allow" && run.results.length === 0) throw new Error("non-clean SARIF contains no findings");
+    if (run.results.some((result) => result?.properties?.decision !== decision)) throw new Error("SARIF result decision does not match exit code");
   }
   return decision;
 }

@@ -14,8 +14,9 @@ SemVer tag 才能作为受支持的二进制来源：
 
 - tag 指向 `main` 的已验证 commit，且 Cargo、CLI 与 Action 默认版本一致；
 - GitHub Release 已 immutable publish；
-- asset 同时通过 GitHub REST digest、`release_manifest.json` SHA-256 和 GitHub
-  artifact attestation 验证；
+- raw binary/archives 同时通过 GitHub REST digest、已 attested
+  `release_manifest.json` SHA-256 和绑定 repo/workflow/tag/commit/GitHub-hosted
+  runner 的 artifact attestation 验证；
 - `v1` 仅由受保护的人工 fast-forward 指向该 release commit。
 
 Action 不接受任意下载 URL、repository override、浮动 `latest` 或任意命令参数。它不

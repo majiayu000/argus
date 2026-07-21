@@ -21,12 +21,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
         candidate = text.split("\n  candidate:", 1)[1].split("\n  publish:", 1)[0]
         self.assertNotRegex(candidate, r"attest-build-provenance|gh release|git push|update-ref|contents: write")
         self.assertIn("verify_release_assets.py", candidate)
+        self.assertIn("attestation-plan.json", candidate)
+        self.assertIn("--license LICENSE --readme README.md", candidate)
 
     def test_publish_is_human_gated_and_never_moves_v1(self) -> None:
         text = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("environment: release", text)
         self.assertIn("immutable_releases", text)
         self.assertIn("prevent_self_review", text)
+        self.assertIn("refs/tags/v*.*.*", text)
+        self.assertIn("refs/heads/v1", text)
+        self.assertIn("artifact-metadata: write", text)
+        self.assertIn("cmp --silent", text)
+        self.assertIn("gh release verify", text)
+        self.assertIn("gh release verify-asset", text)
+        self.assertIn("--cert-oidc-issuer", text)
         self.assertNotRegex(text, r"--clobber|force.push|delete.*tag|update-ref")
         promotion = text.split("Emit read-only v1 promotion plan", 1)[1]
         self.assertNotRegex(promotion, r"gh api.*--method|git push")
@@ -36,6 +45,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("workflow_dispatch:", text)
         self.assertNotIn("pull_request:", text)
         self.assertNotRegex(text, r"\npush:")
+        for scan_type in ["package", "lockfile", "agent"]:
+            self.assertIn(f"scanType: {scan_type}", text)
+        self.assertIn("format: sarif", text)
 
 
 if __name__ == "__main__":

@@ -22,17 +22,48 @@ jobs:
       - name: Verify requested version matches committed Action contract
         shell: bash
         run: test '${{ inputs.version }}' = "$(node -p "require('./action/release.json').defaultBinaryVersion")"
-      - name: Scan local package fixture through the committed Action
+      - name: Scan package fixture through the committed Action
         id: package
         uses: ./
         with:
           scanType: package
-          path: corpus/fixtures/clean
+          path: corpus/fixtures/benign-esbuild-like
+          format: json
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - name: Confirm package approval contract
+        shell: bash
+        run: test '${{ steps.package.outputs.decision }}' = allow-with-approval
+      - name: Scan hostile lockfile through the committed Action
+        id: lockfile
+        continue-on-error: true
+        uses: ./
+        with:
+          scanType: lockfile
+          path: corpus/lockfiles/http-resolved/package-lock.json
+          format: text
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - name: Confirm lockfile blocking contract
+        shell: bash
+        run: |
+          test '${{ steps.lockfile.outcome }}' = failure
+          test '${{ steps.lockfile.outputs.decision }}' = block
+          test '${{ steps.lockfile.outputs.exitCode }}' = 1
+      - name: Scan benign agent fixture through the committed Action
+        id: agent
+        uses: ./
+        with:
+          scanType: agent
+          path: corpus/agent/fixtures/skill-benign-installer
           format: sarif
           argusVersion: ${{ inputs.version }}
           failOn: block
+      - name: Confirm agent allow contract
+        shell: bash
+        run: test '${{ steps.agent.outputs.decision }}' = allow
       - if: runner.os == 'Linux'
         uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a
         with:
-          sarif_file: ${{ steps.package.outputs.sarifFile }}
+          sarif_file: ${{ steps.agent.outputs.sarifFile }}
           category: argus-action-dogfood
