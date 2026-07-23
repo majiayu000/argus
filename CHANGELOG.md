@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-This is the pre-launch history. The first tagged release will graduate the
-items below into a versioned section.
+## [0.1.0] - 2026-07-23
+
+First tagged release. Graduates the pre-launch history below into a versioned
+section.
 
 ### Added
 
-- Candidate-safe binary release automation and a repository-root GitHub Action
-  contract. The implementation does not make `v0.1.0` or `@v1` available;
-  publication remains behind the documented administrator and release gates
+- Binary release automation and a repository-root GitHub Action contract.
+  `v0.1.0` publishes verified prebuilt binaries with checksums and Sigstore
+  attestations, gated by the documented administrator and release controls
   ([#92](https://github.com/majiayu000/argus/issues/92)).
 
 - `argus agent scan` — static scanner for agent supply-chain surfaces:
@@ -96,4 +98,5 @@ items below into a versioned section.
 - See [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md) for the
   attack-catalog argus is designed against.
 
-[Unreleased]: https://github.com/majiayu000/argus/commits/main
+[Unreleased]: https://github.com/majiayu000/argus/compare/v0.1.0...main
+[0.1.0]: https://github.com/majiayu000/argus/releases/tag/v0.1.0
