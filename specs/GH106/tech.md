@@ -12,141 +12,635 @@ Link to `product.md`.
 
 | Area | Files | Current behavior | Why relevant |
 | --- | --- | --- | --- |
-| surface 分类 | `crates/argus-agent/src/surface.rs:21` | `classify` 按文件名与目录形状返回 `Instruction` / `McpConfig` / `Script` | AGT-04 的路径集合必须复用同一分类，不另立清单 |
-| AGT-02 baseline 结构 | `crates/argus-agent/src/baseline.rs:43` | `Baseline { version, entries: BTreeMap<String,String> }`，键为 `"<rel>#<locator>"` 的描述条目 | 版本化 + 确定性排序的既有范式，但键粒度是描述条目而非文件 |
-| baseline 读取 | `crates/argus-agent/src/baseline.rs:60` | `load` 对缺失或损坏返回 `Err`，由调用方转成 finding | AGT-04 的失败语义必须比这更严格：不得降级为 clean |
-| baseline 原子写入 | `crates/argus-agent/src/baseline.rs:72` | 写临时文件 → `write_all` / `flush` / `sync_all` → `persist` 原子替换，每个失败阶段都清理临时文件 | AGT-04 的 update 直接复用该写入范式 |
-| 描述条目抽取 | `crates/argus-agent/src/baseline.rs:134` | `extract_entries` 从 `SurfaceFile` 抽取描述类条目 | AGT-04 需要的是文件级 digest，与之并列而非替换 |
-| 漂移比较 | `crates/argus-agent/src/baseline.rs:155` | `check_drift` 只比较条目 hash，缺失条目不产生新增/删除语义 | AGT-04 需要集合差异（增/删/类型/symlink），是新逻辑 |
-| CLI baseline 模式 | `crates/argus-cli/src/agent.rs:35` | `BaselineMode::{Check,Update,None}`，check/update 互斥，且 baseline 模式拒绝多路径 | AGT-04 的模式开关与多路径约束沿用同一形状 |
-| 多路径守卫 | `crates/argus-cli/src/agent.rs:45` | baseline 模式下 `paths.len() > 1` 直接报错，避免静默丢失保护 | snapshot 同样是“单一已批准树”，必须复用该守卫 |
+| surface 分类 | `crates/argus-agent/src/surface.rs:21` | `classify` 是语义扫描的路径形状入口；当前覆盖 instruction、MCP config 与 hook/skill script，但不覆盖 `.cursorrules` 或任意 `.claude/**` 条目 | AGT-04 membership 必须复用并扩展这个入口，不能在 snapshot 模块维护第二名单 |
+| 收集顺序与 symlink | `crates/argus-agent/src/lib.rs:152`, `crates/argus-agent/src/lib.rs:255` | `collect_surface_files` 先收集再分类；受保护 surface 为 symlink 时在 `classify_candidates` hard error | snapshot 必须在不 follow symlink 的前提下先完成 inventory，随后仍保留语义 hard error，且不能丢已生成 diff |
+| AGT-02 schema/hash | `crates/argus-agent/src/baseline.rs:41`, `crates/argus-agent/src/baseline.rs:133` | baseline 是版本号加排序 map；描述 SHA-256 hash，不保存明文 | 可复用确定性与隐私范式，但 AGT-04 粒度是完整成员而不是 description locator |
+| enum exhaustive consumers | `crates/argus-agent/src/baseline.rs:137`, `crates/argus-agent/src/injection.rs:38` | 两处对 `SurfaceKind` 做 exhaustive match；新增 variant 必须显式 no-op 才能编译并保持语义 | planned changes 必须包含这两处；`capability.rs`、`config.rs`、`judge.rs` 经搜索均为 equality filter，不需修改 |
+| AGT-02 原子写入 | `crates/argus-agent/src/baseline.rs:68` | 同目录 tempfile → write → flush → `sync_all` → persist；目前只为 `Baseline` 服务，失败注入覆盖不完整 | AGT-04 与 AGT-02 应共享原子字节写入器，五阶段注入仅放在 writer 私有 unit tests |
+| agent scan 编排 | `crates/argus-agent/src/lib.rs:94` | 收集失败直接返回 `Err`；成功后依次运行 injection、capability、config、baseline，再 derive decision | 需要在默认路径不变的前提下表达“已完成 inventory finding + 后续 operational error” |
+| Clap 参数 | `crates/argus-cli/src/main.rs:278`, `crates/argus-cli/src/main.rs:479` | `AgentOp::Scan` 定义并转发 `--baseline/--update-baseline`，没有 AGT-04 参数 | 新 flag 必须在 `main.rs` 声明并接入 `agent.rs`，不能只改 handler |
+| CLI 守卫/退出 | `crates/argus-cli/src/agent.rs:32`, `crates/argus-cli/src/agent.rs:45` | baseline flag 互斥且只允许一个 path；update 强制 exit 0 | snapshot 使用相同单树守卫，但 update 不得压掉同次语义 finding |
+| 决策 | `crates/argus-agent/src/decision.rs:7` | Medium → `allow-with-approval`，High/Critical → block | 五类 AGT-04 finding 固定为 Medium 即可进入批准流 |
+| SARIF | `crates/argus-cli/src/sarif.rs:14`, `crates/argus-cli/src/sarif.rs:57` | 任意 AGT rule 可泛化渲染，但 invocation 总写 `executionSuccessful: true` | partial finding + operational error 时需保留 results 并标记执行失败 |
+| 高上下文证据 | `README.md:329`, `docs/supply-chain-attacks.md:28` | 现有规则/文档列出 `.cursorrules`、`.claude/*`、`.aider.conf.yml`、`.continuerules`、`.codexrules`、`.windsurfrules`；GH-106 明确要求 `.claude/**` | 这些是扩展 `surface::classify` 的有仓库证据路径，不是 snapshot 私有猜测 |
 
 ## 设计方案
 
-### 1. snapshot 数据结构
+### 1. 严格 snapshot schema
 
-新增 `crates/argus-agent/src/snapshot.rs`，与 `baseline.rs` 并列而不是改写它
-（AGT-02 的键粒度是描述条目，AGT-04 的键粒度是文件，二者不可合并）。
+新增 `crates/argus-agent/src/snapshot.rs`。持久格式固定为 JSON version 1，
+尾部一个换行，`entries` 为按逻辑路径排序的 map：
 
-```
-Snapshot {
-    version: u32,                      // 版本化 schema，见 B-002
-    entries: BTreeMap<String, Entry>,  // 逻辑相对路径 → 条目，确定性排序
+```json
+{
+  "version": 1,
+  "entries": {
+    ".claude/settings.json": {
+      "kind": "file",
+      "digest": "64-lowercase-hex"
+    },
+    "AGENTS.md": {
+      "kind": "symlink",
+      "link_target_digest": "64-lowercase-hex"
+    },
+    ".claude/rules": {
+      "kind": "directory"
+    }
+  }
 }
+```
 
-Entry {
-    kind: EntryKind,                   // File | Directory | Symlink
-    digest: Option<String>,            // 内容 digest；仅 File 有
-    link_target: Option<String>,       // 仅 Symlink 有
+root 与 entry 均 `deny_unknown_fields`，并在 deserialize 后做完整 validation：
+
+- `version` 必须恰为 `1`；`entries: {}` 是合法且可 round-trip 的完整空
+  inventory；
+- key 必须是非空 UTF-8、相对、forward-slash 路径；禁止 `\`、空 segment、
+  `.`、`..`、root/prefix component 与尾随 `/`；
+- `kind` 是 `file | directory | symlink` 闭集；
+- file 仅接受且必须有 `digest`，directory 两种 digest 都禁止，symlink 仅接受
+  且必须有 `link_target_digest`；
+- digest 必须是恰好 64 个小写十六进制字符。
+
+不使用 `#[serde(default)]` 修复缺字段，不允许 unknown field 被忽略。合法旧
+version 只有 v1；未来 schema 变更必须提升 version 并显式迁移，不能宽松读取。
+`entries` 不能直接 derive 成普通 `BTreeMap`/`HashMap`，也不能先经过
+`serde_json::Value`：`snapshot.rs` 必须为该字段实现 token-stream
+`Deserialize`/`Visitor::visit_map`，逐个读取 decoded key，在插入排序 map 前用
+seen set 检查重复并立即返回 `de::Error`。因此字面相同 key，以及
+`"AGENTS.md"` 与 `"\u0041GENTS.md"` 这类 JSON escape 后 decoded-equivalent
+key，都必须拒绝，不允许 first/last-wins。duplicate 检查通过后才执行路径和
+entry shape validation；serializer 仍从排序 map 产生唯一、确定性 key。
+
+### 2. inventory、路径与全字节 hash
+
+discovery 按 `SnapshotMode` 分流。`None`（包括无 snapshot flag 与任意
+AGT-02-only 模式）原样调用 legacy collector，继续用现有 `filter_entry` prune
+`.git`/`node_modules`，不得为了 AGT-04 改变其 reachability、error 或输出。
+只有 `Check/Update` 使用 complete inventory walker：沿用 root symlink 拒绝与
+`follow_links(false)`，但不按 `.git`、`node_modules` 或其他 ancestor basename
+剪掉 subtree，遍历每个非 symlink directory。
+
+complete discovery 的内部记录冻结为正交字段：
+
+```text
+DiscoveredEntry {
+  logical_path: String,
+  absolute_path: PathBuf,
+  entry_type: File | Directory | Symlink,
+  surface_kind: Option<SurfaceKind>,
 }
 ```
 
-`BTreeMap` 保证序列化顺序确定；`version` 在读取时严格校验，未知版本直接
-`Err`，不按当前版本解释（B-002）。`Entry` 只含路径、类型、digest 与
-symlink 目标，不含正文（B-008）。
+`entry_type` 只来自 `symlink_metadata`，`surface_kind` 只来自
+`surface::classify`；两者不得互相推断或合并成一个 enum。对 complete discovery
+看到的每个 entry：
 
-### 2. 路径集合来自既有 surface 分类
+1. 用严格 UTF-8 conversion 生成 `/` 分隔的逻辑相对路径；禁止
+   `to_string_lossy`。无法转换时 operational error。
+2. 将路径和完整 discovery 得到的 `skill_dirs` 交给唯一 membership API
+   `surface::classify(SnapshotRootAware(&root_context), logical_path, skill_dirs)`，
+   把结果写入 `surface_kind`。snapshot 模块不出现文件名、扩展名、root-name、
+   prefix 或目录形状常量。
+3. `surface_kind == Some(_)` 的 directory 按 filesystem `entry_type` 记录
+   `kind=directory`；classified file 用固定大小 buffer 循环
+   `read` 到 EOF，把每个返回字节喂给 SHA-256，不复用语义扫描的
+   `TEXT_MAX_BYTES`、UTF-8 或 binary 限制。
+4. classified symlink 调用 `read_link`，只 hash 未经 string conversion 的目标表示：
+   Unix 使用 `OsStrExt::as_bytes()`；Windows 使用 `encode_wide()` 的 u16 序列
+   按 little-endian 字节序列化。只保留 `link_target_digest`，error/debug 信息
+   也不得打印 target。
+5. classified entry hash/read 前后各取 `symlink_metadata`；若 kind、length、mtime 或可用的
+   file identity 变化，或 walker/read 任一步失败，整个 inventory
+   operational failure，不能提交 partial snapshot。
 
-snapshot 的成员由 `surface::classify` 决定，加上 issue 明确列出的
-`.cursorrules` 等高上下文路径。新增路径形状必须扩展 `surface.rs` 的分类，
-不得在 AGT-04 内维护第二份清单（B-010）。
+完整遍历得到空 inventory 时，update 原子写入合法的 `entries: {}`。check 的
+集合比较不把空集合当错误，但继续执行下节 symlink-first 优先级：
 
-### 3. 三种模式
+- empty approved → current file/directory：`AGT-04-entry-added`；
+- empty approved → current symlink：`AGT-04-symlink-changed`；
+- approved file/directory → empty current：`AGT-04-entry-removed`；
+- approved symlink → empty current：`AGT-04-symlink-changed`。
 
-- `snapshot`：遍历目标树，生成条目集合，原子写入。
-- `check`：读取 snapshot，与当前树比较，产生 finding。严格只读（B-004、B-007）。
-- `update`：等价于 snapshot，但语义上表示“人工批准当前状态”（B-007、B-009）。
+empty ↔ empty 为 clean。只有无法证明遍历完整、snapshot 缺失/损坏或
+schema/path 非法才 fail closed。
 
-check 与 update 互斥，且沿用 `agent.rs:45` 的多路径守卫：snapshot 表达单一
-已批准树，多路径会让后写覆盖先写，静默丢失保护。
+`--check-snapshot/--update-snapshot` 的 self-exclusion 必须经过 fail-closed
+preflight：
 
-### 4. 集合比较产生五类变化
+1. 规范化 root 与 snapshot parent identity（不 follow 最终 snapshot symlink），
+   用 path component 判断 snapshot target 是否位于 root 内。
+2. 先完成不排除 snapshot target 的 complete discovery 与 `skill_dirs` 计算。
+   若 target 在 root 内，以同一个 `ScanRootContext`、严格 UTF-8 logical
+   relative path 和 skill dirs 调用
+   `surface::classify(SnapshotRootAware(...))`；即使 update target 尚不存在也
+   按其计划路径分类。
+3. `classify == Some(_)`（含 `InventoryOnly`）时，check/update 在 snapshot load、
+   inventory/semantic exclusion、stdout render 与 write 前返回 operational error；
+   不得覆盖或隐藏该 surface。
+4. 只有 target 在 root 外或 root 内且 `classify == None` 时，才把声明的 exact
+   path 从 inventory 与 semantic collector 排除。不同 symlink alias 仍不排除。
 
-比较是 snapshot 条目集合与当前条目集合的双向差集：
+### 3. canonical membership 只有 `surface::classify`
 
-| 情况 | 变化类型 |
+`surface.rs` 在同一个 enum 增加唯一类别 `SurfaceKind::InventoryOnly`；不得
+另建 snapshot allowlist。对原 walker 可到达且已有语义分析的 shape，原有更具体
+kind 优先；仅为 inventory 新纳入或位于 legacy-pruned ancestor（任一祖先
+segment 为 `.git`/`node_modules`）后的受支持成员返回 `InventoryOnly`，从而
+默认 semantic scan 不扩张而 AGT-04 仍完整覆盖。`classify` 的完整受支持形状
+冻结为：
+
+- 任意层级 basename `AGENTS.md`、`CLAUDE.md`、`SKILL.md`；
+- `.mcp.json`、`mcp.json`、`.claude.json`；
+- 任意名为 `.claude` 的 path segment 及其全部后代 entry（包括 directory、
+  无扩展名、binary 与 symlink）；其中 markdown、settings JSON、hook script
+  仍返回原有更具体 kind；
+- root `hooks/`、`.claude/**/hooks/` 和带 `SKILL.md` tree 中现有支持扩展名的
+  scripts；
+- 任意层级 basename `.cursorrules`、`.aider.conf.yml`、`.continuerules`、
+  `.codexrules`、`.windsurfrules`。
+
+唯一 membership API 复用同一 rule set，但显式接收 coordinate policy：
+
+```text
+CoordinatePolicy =
+  LegacyRootRelative
+  | SnapshotRootAware(ScanRootContext)
+
+surface::classify(policy, logical_path, logical_skill_dirs)
+  -> { classification_path, surface_kind }
+```
+
+`logical_path` 始终是非空、UTF-8、`/` 分隔的 scan-root-relative path，用于
+snapshot key、finding、evidence 和所有用户输出；`classification_path` 只在
+`surface.rs` 内构造并用于 membership，不得泄露为 report path。
+
+`LegacyRootRelative` 只供 `SnapshotMode::None`（包括无 snapshot 与
+AGT-02-only）使用：`classification_path == logical_path`，`logical_skill_dirs`
+也逐字保持当前 root-relative coordinate；不得 canonicalize root 后补
+`.claude`/`hooks` prefix。因此现有 `agent scan ~/.claude` 对
+`settings.json` 的 classification 必须保持 `None`，且 finding/error 必须逐字
+保持；single-file `~/.claude/settings.json` 同样是
+`LegacyRootRelative("settings.json") -> None`。
+
+`SnapshotRootAware` 只供 Check/Update 使用。它先由
+`ScanRootContext::from_canonical_scan_root(root_path, root_entry_type)` 构造
+context，再按以下规则产生 prefix：
+
+- directory PATH 位于名为 `.claude` 的 canonical segment 内时，prefix 是从最后
+  一个 `.claude` segment 到该 directory 的 suffix；`~/.claude` 下
+  `settings.json` 因而分类为 `.claude/settings.json`，
+  `~/.claude/rules` 下 `policy.md` 分类为 `.claude/rules/policy.md`；
+- single-file PATH 位于 `.claude` 下时使用同一 ancestor suffix，例如
+  `~/.claude/settings.json` 的 logical path 是 `settings.json`，classification
+  path 是 `.claude/settings.json`；
+- 若没有 `.claude` anchor，但 directory PATH 本身或 single-file PATH 的
+  ancestor suffix 从 `hooks` 开始，则保留 `hooks/` prefix；扫描
+  `<root>/hooks` 下或单独扫描 `<root>/hooks/pre.sh` 时，`pre.sh` 分类为
+  `hooks/pre.sh`；
+- 其他 root 不加 prefix；`AGENTS.md`、`.cursorrules` 等 basename shape 仍按
+  root-relative coordinate 分类。skill-tree membership 只使用扫描 root 内
+  discovery 得到的 `logical_skill_dirs`，并由同一 snapshot context 同步
+  qualify；不得向 PATH 外探测 `SKILL.md`。
+
+directory scan root 本身是 traversal container，不生成空/`.` logical entry。
+root context 只由 `surface.rs` 根据 canonical root components 与 entry type
+构造；`snapshot.rs`、target guard 或调用者不得复制 `.claude`/`hooks` root-name
+规则。legacy collector 调用同一 API 时必须选择 `LegacyRootRelative`，不得
+构造 root context；complete inventory、snapshot semantic projection 和
+inside-root snapshot target（包括尚不存在的 update target）必须选择
+`SnapshotRootAware`，并共享同一个 `ScanRootContext`、root-relative logical
+path 与 skill dirs。
+
+AGT-04 inventory 对 complete discovery 中所有
+`surface_kind == Some(_)` 的 file、directory、symlink 按正交
+`entry_type` 做 kind/digest 收集。`SnapshotMode::None` 不构造 complete
+`DiscoveredEntry` 集合，继续走 legacy pruned collector；该 collector 在现有
+classification 阶段遇到 `InventoryOnly` 时须在 state/body/symlink validation
+前 no-op，但不改变 traversal 或其他 legacy 行为。
+
+`Check/Update` 的 semantic projection 固定按以下顺序处理同一
+`DiscoveredEntry` 集合：
+
+1. `entry_type == Directory`：先跳过，不创建 `SurfaceFile`，无论
+   `surface_kind` 为何；
+2. file/symlink 且 `surface_kind == Some(InventoryOnly)`：在
+   `read_limited`、正文读取、binary/UTF-8/size validation 与 symlink hard-error
+   前跳过；
+3. file/symlink 且 `surface_kind == None`：跳过；
+4. symlink 且为既有 semantic kind：保留现有 protected symlink hard error；
+5. file 且为既有 semantic kind：执行现有读取、validation 与 rule。
+
+这样 `.claude/**`、`.cursorrules` 等仅为 AGT-04 新纳入的 binary、oversized、
+symlink 不扩大 semantic 行为，原有 `Instruction/McpConfig/Script` file/symlink
+语义不变。complete discovery 对 `.git`/`node_modules` 下钻，分类完成后才让
+inventory 丢弃 `None`。因此
+`.claude/node_modules/**`、`.claude/.git/**`、`node_modules/pkg/AGENTS.md`
+等 protected descendants 可进入 AGT-04；普通 `.git/config`、package source 等
+`classify == None` 的 entry 不进入 inventory。任何 descendant walk error 仍使
+Check/Update inventory fail closed。`SnapshotMode::None` 仍在 legacy prune
+处停止，不观察这些 descendant 或其 walk error。
+
+`baseline.rs` 与 `injection.rs` 的 exhaustive match 显式增加
+`SurfaceKind::InventoryOnly => {}`；`capability.rs`、`config.rs`、`judge.rs`
+现有 equality filter 自然跳过该类别，搜索确认无需代码改动。以后扩展 path shape
+只能改 `surface::classify` 及其 tests，snapshot 立即继承。
+
+### 4. 五类 rule、优先级与 evidence
+
+固定常量与 Medium severity：
+
+| Rule ID | `change=` 字面值 | 触发 |
+| --- | --- | --- |
+| `AGT-04-symlink-changed` | `symlink_changed` | 任一侧 kind 为 symlink，且另一侧缺失或 kind/digest 不同 |
+| `AGT-04-entry-added` | `entry_added` | 非 symlink entry 仅在 current |
+| `AGT-04-entry-removed` | `entry_removed` | 非 symlink entry 仅在 approved |
+| `AGT-04-entry-type-changed` | `entry_type_changed` | 两侧均非 symlink，file/directory 不同 |
+| `AGT-04-content-modified` | `content_modified` | 两侧均为 file 且 digest 不同 |
+
+比较先按 path 排序；同 path 只产生一个 rule，按表中优先级判定。`Finding.location`
+是逻辑路径，`evidence` 固定为一个不含空格、无需 escaping 的分号 grammar：
+
+```text
+change=<kind>;old_kind=<kind|null>;new_kind=<kind|null>;old_digest=<hex|null>;new_digest=<hex|null>
+```
+
+`change` 只能是表中五个 snake_case 字面值，并与同一行 rule 一一映射；
+`old_kind/new_kind` 是 `file|directory|symlink|null`，digest 是 64 位小写 hex
+或 `null`。因此值中不允许分号、等号、空白或自定义字符串，也不存在 escaping
+分支。symlink 的 `old_digest/new_digest` 填 link-target digest。detail 只复述
+变化类型，不含正文或 target。这样 text、JSON、SARIF 复用既有 Finding，无需
+修改 `argus-core` schema。
+
+### 5. CLI flag 与 AGT-02 组合矩阵
+
+在现有 `AgentOp::Scan` 增加两个 `Option<PathBuf>`：
+
+- `--check-snapshot <FILE>`：AGT-04 Check；
+- `--update-snapshot <FILE>`：AGT-04 Create/Update，missing 时创建、existing 时
+  原子替换并表示显式批准。
+
+Clap 与 handler 同时防御非法组合，避免只靠 parser 的内部调用绕过：
+
+| 组合 | 结果 |
 | --- | --- |
-| 仅在当前树 | `added` |
-| 仅在 snapshot | `removed` |
-| 两侧均有，`kind` 不同 | `type-changed` |
-| 两侧均为 Symlink，`link_target` 不同 | `symlink-target-changed` |
-| 两侧均为 File，`digest` 不同 | `modified` |
+| `--check-snapshot S` | 允许，单个 PATH |
+| `--update-snapshot S` | 允许，单个 PATH |
+| `--baseline B --check-snapshot S` | 允许；两个只读比较合并到同一 report |
+| snapshot check + snapshot update | Clap 拒绝 |
+| 任一 update flag + 另外三个 persistence flag | Clap 拒绝 |
+| 任一 persistence flag + 多个 PATH | handler operational error |
+| 无 persistence flag | 完全保持当前行为 |
 
-每类产生独立 rule id，finding 携带逻辑路径、变化类型与旧/新 digest。
-symlink 变化必须与内容修改区分：把 `AGENTS.md` 替换为指向他处的 symlink
-不改变“读到的内容”，但改变了信任边界。
+snapshot check/update 可与 `--llm-judge` 成对 flags 共存；judge operational
+error 遵循下节 partial outcome。update 只有在 inventory、语义扫描与 judge
+都完整执行后才写文件；写成功后 stderr 固定输出
+`snapshot written: <N> entries`，但最终 exit 仍由同次语义 findings 派生，不能
+像当前 AGT-02 update 一样无条件改成 0。
 
-### 5. 失败必须显式，不得降级为 clean
+### 6. inventory 与语义扫描的顺序、partial outcome
 
-以下每一项都产生 operational error 结论而非 clean（B-005）：
+新增内部 `SnapshotMode::{None, Check, Update}` 与不序列化的
+`AgentScanOutcome { report, operational_error }`。`SnapshotMode::None` 无论
+`BaselineMode` 为何都直接复用 legacy `.git`/`node_modules` pruning collector，
+所有 classification 都显式使用 `LegacyRootRelative`；不构造
+`ScanRootContext`，不执行 complete discovery、inventory 或 snapshot semantic
+projection。
 
-- snapshot 文件缺失
-- snapshot 解析失败
-- snapshot 版本不受支持
-- 目标路径不可读（含遍历中任一条目不可读）
-- 遍历未能完整覆盖声明范围
+启用 snapshot 的 `Check/Update` 顺序固定：
 
-这比 `baseline.rs:60` 现有语义更严格：AGT-02 把缺失 baseline 转成 info
-finding 是可接受的，因为它是可选增强；AGT-04 的整个价值就是“这次安装改了
-什么”，一次不完整的比较等价于没有答案，报告 clean 会构成静默降级。
+1. 规范化 root/snapshot identity，由 `surface.rs` 构造一次
+   `ScanRootContext`；执行不按 ancestor basename 剪枝的 complete discovery，
+   计算 `skill_dirs`，生成正交
+   `DiscoveredEntry { entry_type, surface_kind, ... }`，并对 root 内 snapshot
+   target 执行 canonical membership guard。discovery、guard 与后续 semantic
+   projection 都使用 `SnapshotRootAware(&same_context)`；classified target
+   立即 operational reject。
+2. check load + validate approved snapshot；完整构建 current inventory，只排除
+   preflight 已证明在 root 外或 `classify == None` 的 exact snapshot path。
+3. check 立即完成 compare 并保留排序后的 AGT-04 findings；update 暂存待写
+   snapshot，但此时不写。此处立即构造持有 AGT-04 findings 的 base
+   `AgentScanOutcome`，后续阶段不得通过裸 `?` 绕过它。
+4. 从同一 discovery 按 directory → InventoryOnly file/symlink → unclassified
+   → legacy semantic symlink/file 的固定顺序执行 collect/projection，再运行
+   injection → capability → config → AGT-02/baseline → judge；
+   现有语义 finding 顺序不变，成功时把 AGT-04 findings 追加在其后，并只在
+   内存构建 report/normal decision。整个 Step 4 由单一 post-inventory error
+   barrier 包裹：当前或未来任一子阶段只要返回 `Err`，都把已累积 report 与该
+   error 转成同一 incomplete outcome。
+5. check 可进入正常 renderer；update 必须先执行原子 persist。persist 成功后
+   才调用正常 text/JSON/SARIF renderer、输出 `snapshot written` 并返回 normal
+   decision。normal output/exit 不得先于 persist。
 
-### 6. update 的原子性
+若步骤 1-3 失败，比较没有完成，返回现有风格 operational error：stdout 空，
+stderr diagnostic，不能渲染 clean report。步骤 3 完成后，Step 4 的
+collect/projection、injection、capability、config、AGT-02/baseline、judge 中
+任一实际可失败边界（以及以后加入该 pipeline 的任一 `Result` stage）返回
+`Err`，或步骤 5 的 CreateTemp/Write/Flush/FileSync/Persist 任一阶段失败，都
+统一进入 AGT-04 partial operational path：
 
-update 直接复用 `baseline::save` 的写入范式：临时文件 → `write_all` →
-`flush` → `sync_all` → `persist` 原子替换，任一阶段失败都清理临时文件并
-返回错误，原 snapshot 保持不变（B-006）。
+- outcome 保留全部已完成 finding（check 的 AGT-04 diff 与 update 的既有语义
+  finding），`report.decision` 强制为 `block`，
+  不伪装成 allow/clean；
+- text stdout 使用专用 partial renderer，固定含 `execution: incomplete` 与
+  `decision: block`，保留 findings，但不得调用会输出 clean/allow 的正常
+  renderer；stderr 输出 `argus: error: agent scan incomplete: ...`；进程使用
+  现有 operational error exit code 2；
+- JSON stdout 只在这个 partial case 使用以下专用 camelCase envelope，字段
+  不可增删、改名或输出 `null` 替代对象；`message` 是不含正文/symlink target
+  的 sanitized 单行字符串，`report` 是未改 schema 的既有 `ScanReport`：
 
-## 影响面
+```json
+{
+  "schemaVersion": 1,
+  "executionSuccessful": false,
+  "operationalError": {
+    "kind": "agent_scan_incomplete",
+    "message": "<sanitized>"
+  },
+  "report": "<existing ScanReport with decision=block and retained findings>"
+}
+```
 
-- `crates/argus-agent/src/snapshot.rs`：新增数据结构、load/save、比较逻辑。
-- `crates/argus-agent/src/lib.rs`：模式入口与扫描集成。
-- `crates/argus-agent/src/surface.rs`：扩展高上下文路径形状。
-- `crates/argus-cli/src/agent.rs`：CLI 模式开关与多路径守卫。
-- `crates/argus-cli/src/sarif.rs`：AGT-04 finding 的 SARIF 映射。
-- `README.md`：审批边界、推荐流程与限制。
+- 完整 snapshot check/update 与无 snapshot scan 的 JSON stdout 仍直接序列化
+  bare `ScanReport`（多 path 时仍是既有 report array），不使用 envelope；
+- SARIF 保留 results，设置
+  `runs[0].invocations[0].executionSuccessful=false`，并加入不含敏感内容的
+  `toolExecutionNotifications` array；该 array 至少包含一个 sanitized error
+  notification object
+  `{"level":"error","message":{"text":"<sanitized>"}}`；result decision 为
+  `block`；
+- finding 只渲染一次，不能先打印后因 `?` 丢失或再跑一次比较。
+
+无 snapshot flag 的 error/output 继续走现有路径；这套 partial 语义覆盖
+AGT-04 inventory/compare 已完成后的全部 post-inventory/persist operational
+error，而不是 symlink/judge 特例。update persist failure 时 report 即使没有
+finding 也必须在 partial text/JSON/SARIF 中标为 incomplete/block，不能退回
+bare clean/allow report。
+
+### 7. update persist-before-render 状态机
+
+CLI handler 不得先调用现有 renderer 再执行 save。状态机固定为：
+
+```text
+inventory complete
+  → every post-inventory stage complete
+  → report + normal decision ready in memory
+  → atomic persist attempt
+      ├─ success → normal render → "snapshot written" → normal exit
+      └─ error   → force report decision=block → partial render
+                   → sanitized stderr → exit 2
+```
+
+CLI integration test 不注入 writer/scan seam。它通过
+`env!("CARGO_BIN_EXE_argus")` 启动 production binary，把扫描 root 外一个含
+sentinel file 的 non-empty directory 作为 `--update-snapshot` destination；
+同目录 tempfile 的 production `Persist` 必须因不能替换 non-empty directory
+而失败。text/JSON/SARIF 各自断言 exit 2、partial output、无 normal
+clean/allow/report、无 `snapshot written`、sanitized stderr，且 sentinel
+bytes/mtime 与目录内容不变。另用 root 外普通 file destination 做 success
+control，证明 persist 成功后才出现 bare normal report 与成功消息。
+
+不得为 CLI 测试增加 Cargo feature、公开或隐藏 fault API、隐藏 CLI flag、测试
+环境变量或任何 production bypass。
+
+### 8. shared atomic persistence 与故障注入
+
+新增 `crates/argus-agent/src/atomic_write.rs`，接收最终序列化 bytes，并让
+`baseline.rs` 与 `snapshot.rs` 共同调用。production 实现维持同目录 tempfile
+流程；仅该 module 内部的私有 `#[cfg(test)]` writer/fault enum 精确覆盖：
+
+`CreateTemp`、`Write`、`Flush`、`FileSync`、`Persist`。
+
+每个 fault point 的测试都先写入 sentinel snapshot，记录 bytes/mtime，注入单点
+失败后断言 error、旧 bytes/mtime 相同且无 `.argus-*-` 临时文件。不存在旧文件
+时同样断言 destination 不存在。AGT-02 baseline 的既有序列化与行为不变，并有
+回归测试证明 refactor 未改变 bytes。fault enum/seam 不得导出 crate，不得供
+`argus-cli` 使用，也不得通过 feature、flag 或 env 暴露。
+
+## 影响面与计划变更清单
+
+- `crates/argus-agent/src/atomic_write.rs`：共享原子 byte writer；五阶段 fault
+  seam 只存在于 module 私有 unit tests。
+- `crates/argus-agent/src/baseline.rs`：改用共享 writer，并为 exhaustive match
+  增加 InventoryOnly no-op，不改变 AGT-02 契约。
+- `crates/argus-agent/src/injection.rs`：exhaustive match 增加 InventoryOnly
+  no-op，不扩大 AGT-01 内容扫描。
+- `crates/argus-agent/src/snapshot.rs`：custom duplicate-key-rejecting v1
+  deserializer、inventory/hash、compare/rules。
+- `crates/argus-agent/src/surface.rs`：唯一 membership rule/API、
+  `CoordinatePolicy::{LegacyRootRelative, SnapshotRootAware}`、
+  `ScanRootContext` 与 inventory-only kind。
+- `crates/argus-agent/src/lib.rs`：SnapshotMode 分流、legacy collector 的
+  `LegacyRootRelative`/InventoryOnly no-op、snapshot-only root context、
+  complete `DiscoveredEntry`
+  inventory/semantic projection、post-inventory error barrier、
+  persist-before-render 顺序与 partial outcome。
+- `crates/argus-cli/src/main.rs`：Clap flags、conflict 矩阵及参数转发。
+- `crates/argus-cli/src/agent.rs`：单路径守卫、partial JSON envelope、
+  输出/exit/update 编排。
+- `crates/argus-cli/src/sarif.rs`：incomplete invocation 的 SARIF 表达。
+- `crates/argus-agent/tests/gh106_snapshot.rs` 与固定 fixture：schema、hash、
+  duplicate keys、root-context coordinates、mode-split discovery、正交
+  projection、post-inventory error matrix、InventoryOnly 默认行为、五类 rule
+  与 fail-closed；atomic 五阶段矩阵留在 writer module unit tests。
+- `crates/argus-cli/tests/agent_snapshot_cli.rs`：help/互斥、共存、三种输出、
+  production directory-destination Persist failure、ordering、sentinel、
+  partial envelope 与完整 JSON 回归。
+- `README.md`：AGT-04 workflow、rule、批准边界与限制。
 
 <!-- specrail-planned-changes
-{"version":1,"issue":106,"complete":true,"paths":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md","crates/argus-agent/src/snapshot.rs","crates/argus-agent/src/lib.rs","crates/argus-agent/src/surface.rs","crates/argus-cli/src/agent.rs","crates/argus-cli/src/sarif.rs","README.md"],"spec_refs":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md"]}
+{"version":1,"issue":106,"complete":true,"paths":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md","crates/argus-agent/src/atomic_write.rs","crates/argus-agent/src/baseline.rs","crates/argus-agent/src/injection.rs","crates/argus-agent/src/snapshot.rs","crates/argus-agent/src/surface.rs","crates/argus-agent/src/lib.rs","crates/argus-agent/tests/gh106_snapshot.rs","crates/argus-agent/tests/fixtures/agt04-snapshot-base/AGENTS.md","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/settings.json","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/rules/policy.txt","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.cursorrules","crates/argus-cli/src/main.rs","crates/argus-cli/src/agent.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/tests/agent_snapshot_cli.rs","README.md"],"spec_refs":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md"]}
 -->
+
+现有 manifest 已包含实现专用 envelope 所需的 `main.rs`（flag/参数转发）、
+`agent.rs`（JSON serialization/exit）与 `agent_snapshot_cli.rs`（shape 与兼容
+回归）；因为 envelope 嵌入现有 `ScanReport` 而不改其 schema，不新增
+`argus-core` 路径。
+本轮 duplicate visitor 留在 `snapshot.rs`、root context 留在 `surface.rs`、
+barrier 留在 `lib.rs`，对应 matrix 留在既有 GH106 test files；因此 planned
+changes manifest 仍 exhaustive，无需新增路径。
 
 ## Product-to-Test Mapping
 
 | Behavior invariant | Implementation area | Verification |
 | --- | --- | --- |
-| B-001 | `snapshot.rs` 条目生成与确定性序列化 | `cargo test -p argus-agent snapshot_deterministic` |
-| B-002 | `snapshot::load` 版本校验 | `cargo test -p argus-agent snapshot_version` |
-| B-003 | 集合比较的五类变化 | `cargo test -p argus-agent snapshot_change_kinds` |
-| B-004 | check 模式只读与幂等 | `cargo test -p argus-agent snapshot_check_readonly` |
-| B-005 | 失败路径显式化 | `cargo test -p argus-agent snapshot_fail_closed` |
-| B-006 | 原子替换与失败保留 | `cargo test -p argus-agent snapshot_atomic_update` |
-| B-007 | check/update 分离 | `cargo test -p argus-cli agt04` |
-| B-008 | 输出不含明文 | `cargo test -p argus-agent snapshot_no_plaintext` |
-| B-009 | 批准边界 | `cargo test -p argus-cli agt04_approval` |
-| B-010 | 复用 surface 分类 | `cargo test -p argus-agent surface` |
+| B-001 | inventory、streaming SHA-256、排序与 guarded self-exclusion | `cargo test -p argus-agent --test gh106_snapshot snapshot_path_membership_guard` |
+| B-002 | strict v1 token visitor、duplicate key 与 shape validation | `cargo test -p argus-agent --test gh106_snapshot duplicate_entry_keys_are_rejected` |
+| B-003 | compare 优先级、五个 rule 常量与 canonical evidence | `cargo test -p argus-agent --test gh106_snapshot five_change_rules_are_medium` |
+| B-004 | `lib.rs` post-inventory error barrier、CLI partial output | `cargo test -p argus-agent --test gh106_snapshot post_inventory_error_matrix && cargo test -p argus-cli --test agent_snapshot_cli partial_json_envelope_is_exact_and_complete_json_is_unchanged` |
+| B-005 | path/UTF-8/race/read/hash、classified snapshot target fail-closed 与空集合 transition | `cargo test -p argus-agent --test gh106_snapshot snapshot_path_membership_guard` |
+| B-006 | 私有 atomic unit fault matrix + production CLI persist-before-render failure | `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-cli --test agent_snapshot_cli production_persist_failure_is_partial` |
+| B-007 | `main.rs` Clap contract + `agent.rs` defensive guard | `cargo test -p argus-cli --test agent_snapshot_cli flag_contract_matrix` |
+| B-008 | symlink raw-byte digest 与 all-format leak negatives | `cargo test -p argus-cli --test agent_snapshot_cli symlink_digest_never_leaks_target` |
+| B-009 | Medium decision、update approval、finding/exit preservation | `cargo test -p argus-cli --test agent_snapshot_cli approval_and_update_exit_contract` |
+| B-010 | coordinate policy、mode split 与正交 projection | `cargo test -p argus-agent --test gh106_snapshot coordinate_policy_classification_matrix` |
+
+## 数据流
+
+共同前缀只有 `PATH + SnapshotMode + BaselineMode` → strict identity/path
+validation，随后按 mode 分流：
+
+```text
+SnapshotMode::None (including AGT-02-only)
+  → legacy .git/node_modules-pruned collector
+  → classify(LegacyRootRelative, logical_path, logical_skill_dirs)
+  → InventoryOnly no-op before legacy validation
+  → existing semantic rules/AGT-02/judge
+  → existing report/output/error path
+
+SnapshotMode::Check | Update
+  → surface.rs constructs one ScanRootContext
+  → complete non-pruning discovery + skill_dirs
+  → DiscoveredEntry(entry_type, surface_kind)
+  → classify(SnapshotRootAware(same context), ...)
+      shared by target guard / inventory / semantic projection
+  → permitted exact self-exclusion
+  → check: load and validate approved v1 snapshot
+  → inventory projection of every classified file/directory/symlink
+  → check: compare approved/current and retain sorted findings
+  → semantic projection: directory → InventoryOnly → unclassified
+                         → legacy semantic symlink/file
+  → post-inventory barrier:
+      collect/projection → injection → capability → config
+      → AGT-02/baseline → judge
+  → report/decision ready in memory
+```
+
+classified snapshot target 在 snapshot guard 处直接 operational failure，不进入
+exclusion/load/render/write。snapshot report ready 后只能进入以下互斥分支：
+
+```text
+check success
+  → report in memory
+  → normal text/JSON/SARIF renderer
+  → normal exit
+
+update success
+  → report in memory
+  → atomic snapshot persist success
+  → normal text/JSON/SARIF renderer
+  → "snapshot written"
+  → normal exit
+
+any post-inventory stage / persist error after inventory completion
+  → retained in-memory report with decision=block
+  → partial operational text/JSON/SARIF renderer
+  → sanitized stderr
+  → exit 2
+```
+
+error 分支绝不调用 normal renderer，persist error 也不得在失败前输出 bare
+report、`snapshot written` 或 normal exit。
+
+没有网络调用、子进程或被扫描代码执行；仅显式 LLM judge 保持现有 opt-in 行为。
+
+## 备选方案
+
+- 在 `snapshot.rs` 维护独立高上下文文件名列表：拒绝，会与 AGT-01/03/05
+  coverage 漂移，违反 B-010。
+- 在 snapshot/target guard 中按 root basename 私自补 `.claude/` 或 `hooks/`
+  prefix：拒绝；root context 与 classification coordinate 只能由 `surface.rs`
+  的 canonical API 构造，logical report path 不得被改写。
+- 对 `SnapshotMode::None`/AGT-02-only 使用 `SnapshotRootAware`：拒绝，会把
+  legacy root-relative coordinate 改写并扩大现有 semantic surface；
+  legacy 必须显式选择 `LegacyRootRelative`。
+- 在 AGT-04 Check/Update classification 前 prune `.git`/`node_modules`：拒绝，
+  会遗漏受支持 high-context descendant；snapshot mode 必须先遍历/分类。
+  反向把 complete discovery 用于 `SnapshotMode::None` 也拒绝；legacy pruning
+  是默认 scan 与 AGT-02-only 的兼容契约。
+- 无条件排除 snapshot path：拒绝，classified target 可借此绕过 inventory 与
+  AGT-01/05。只有 canonical classifier 返回 `None` 才允许 root 内 self-exclusion。
+- 保存 symlink target 字符串：拒绝，会泄露用户目录、秘密挂载名或注入文本。
+- 复用语义 collector 的 `SurfaceFile.content` 做 digest：拒绝，其 UTF-8、
+  binary 与 size 限制无法证明“全部原始字节”。
+- 仅对 symlink/judge 特判 partial，或让其他 post-inventory `Err` 用裸 `?`
+  丢弃已完成 diff：拒绝；所有 Step 4 fallible stage 必须经过同一 barrier。
+  将 partial report 标记为成功同样拒绝。
+- 同一命令同时 update AGT-02 与 AGT-04：拒绝，两个文件无法组成一个原子批准
+  transaction；保留 check+check 是最小且安全的共存面。
 
 ## 风险
 
-- Security: snapshot 本身成为信任锚点。若 snapshot 可被安装脚本写入，
-  保护失效；因此 update 必须是显式人工动作，且文档需说明 snapshot 应存放
-  在被扫描树之外或受保护位置。
-- Security: digest 算法选择需与既有 baseline 一致，避免出现两套强度不同的
-  完整性保证。
-- Compatibility: 不带 AGT-04 参数的扫描行为完全不变。
-- Performance: 一次遍历 + digest 计算，与现有 surface 扫描同数量级。
-- Maintenance: 路径集合必须单一来源（`surface.rs`），否则 AGT-01 与 AGT-04
-  会随时间漂移出不同的覆盖面。
+- Security: snapshot 是信任锚点；README 必须要求放在安装脚本不可写位置或由
+  独立版本控制保护。仅 preflight 允许的 exact self-exclusion 不能扩展成 alias
+  排除；classified target 永不排除。
+- Security: error、debug、SARIF notification 同样不得包含正文或 symlink target。
+- Compatibility: 默认 scan 与 AGT-02-only 行为不变；snapshot schema v1 严格，
+  跨平台搬迁可能因 symlink 原始表示不同而需要在目标平台显式 update。
+- Performance: file hash 读取全部字节且无语义 size cap；固定 buffer 保持 O(1)
+  额外内存，walker 和 compare 为 O(n log n)。只有 Check/Update 为发现
+  protected descendants 而不 prune `.git`/`node_modules`；只 hash classified
+  entries，但大型 tree 的 metadata walk 成本必须由 benchmark/文档如实说明。
+  None/AGT-02-only 保留 legacy pruning，不承担该新增成本。
+- Concurrency: snapshot 是观察到的稳定 inventory，不是 filesystem transaction；
+  前后 metadata 变化会 fail closed，但不可观察的同 metadata 并发写仍是文件系统
+  固有限制，需在 README 说明安装过程结束后再 check。
+- Maintenance: `surface.rs`、`agent.rs` 已较大；snapshot/atomic/tests 使用新文件，
+  不把 `integration.rs` 推过 800 行 hard ceiling。
 
 ## 测试计划
 
-- [ ] Unit tests: 版本校验、确定性序列化、五类变化、原子写入失败路径。
-- [ ] Integration tests: 离线 fixture 覆盖创建、无变化、增、删、改、
-      类型变化、symlink 变化。
-- [ ] Fail-closed tests: 缺失、损坏、版本不支持、不可读、不完整遍历。
-- [ ] Regression: `cargo test --workspace --all-targets`。
-- [ ] Repository checks: `python3 checks/check_workflow.py --repo . --spec-dir specs/GH106`。
+- [ ] Unit/integration: strict schema 全字段组合、规范路径、未知 version/field、
+      合法空 snapshot round-trip、非 UTF-8 member path；重复 literal key 与
+      decoded-equivalent escaped key 在 token visitor 层拒绝，不能 last-wins。
+- [ ] Hash/privacy: multi-chunk binary file、尾块变化、guarded snapshot
+  self-exclusion、
+      非 UTF-8 symlink target、明文负断言。
+- [ ] Snapshot path guard: root 内 existing/missing `AGENTS.md`、
+      `.claude/settings.json`、`.cursorrules` 与 skill script 在 check/update 都于
+      exclusion/load/render/write 前失败且 bytes/mtime 不变；root 内
+      `classify == None` 与 root 外 target 成功，symlink alias 仍纳入 inventory。
+- [ ] Diff/decision: clean + 五类 rule/优先级/Medium/稳定顺序；空集合四项矩阵
+      分别断言 file/directory added、symlink added→symlink-changed、
+      file/directory removed、symlink removed→symlink-changed；empty↔empty
+      clean。
+- [ ] Atomic: 五个 fault point，existing/missing destination，bytes/mtime/temp cleanup；
+      AGT-02 serialized bytes 回归；fault seam 保持 `argus-agent` module 私有。
+- [ ] Persist ordering: `CARGO_BIN_EXE_argus` 以 root 外 non-empty directory
+      destination 触发真实 production Persist failure，断言 normal renderer/exit
+      未调用、JSON/SARIF/text 走 partial、stderr sanitized、exit 2、sentinel
+      bytes/mtime 不变；普通 file destination success control 断言 persist
+      happens-before normal render。无 feature、公开/隐藏 API、hidden flag/env。
+- [ ] CLI: help、conflict 矩阵、单路径、baseline check + snapshot check、update 不压
+      finding/exit、check bytes/mtime。
+- [ ] Mode compatibility: SnapshotMode None 的无 snapshot 与 AGT-02-only
+      check/update 都保持 legacy `.git`/`node_modules` pruning、finding/error 与
+      输出，并以 `LegacyRootRelative` 逐字分类；`~/.claude/settings.json`
+      directory/single-file 均断言 `settings.json → None`，不得被自动补 prefix。
+      Check/Update 才
+      complete-discover 相同 tree 并使用 `SnapshotRootAware`。
+- [ ] Projection/completeness: `DiscoveredEntry.entry_type` 与 `surface_kind`
+      正交；Check/Update 中 classified file/directory/symlink 全部进入 inventory，
+      semantic projection 依次跳过 directory、InventoryOnly file/symlink、
+      unclassified，并保留既有 semantic symlink hard error 与 file validation。
+      `.claude/node_modules/**`、`.claude/.git/**`、
+      `node_modules/pkg/AGENTS.md` 与 `.git/**/.cursorrules` 仅在 snapshot
+      complete discovery 到达 classifier；普通 unclassified descendant 不进入
+      inventory，深层 walk error fail closed。
+- [ ] Coordinate policy: 先锁定 `LegacyRootRelative` 的
+      `~/.claude/settings.json` directory/single-file
+      `settings.json → None` classification；
+      再对 `SnapshotRootAware` 锁定 `~/.claude/settings.json` directory/single-file、
+      `~/.claude/rules/policy.md` nested-root 与 `<root>/hooks/pre.sh`
+      directory/single-file matrix 逐项断言 classification coordinate 保留
+      `.claude/`/`hooks/`，inventory/report path 保持 root-relative；target
+      guard、inventory、semantic 三者 classification 相同；`.claude` root 内
+      `snapshot.json` 因 root-aware InventoryOnly classification 被 guard 拒绝，
+      普通 root 的 `snapshot.json`/`settings.json` negative 不被误分类。
+- [ ] Post-inventory barrier: compare 后对每个实际可失败的
+      collect/projection、injection、capability、config、AGT-02/baseline、judge
+      boundary 触发 error，逐项断言 AGT-04 finding/report 不丢、decision block、
+      text/JSON/SARIF partial 且 exit 2；步骤 1-3 error 仍为空 stdout。
+- [ ] Output: partial JSON 精确 camelCase envelope 与 sanitized error；完整
+      snapshot/无 snapshot JSON 保持 bare report；SARIF
+      `executionSuccessful=false`、findings 不丢不重复、stderr 无敏感内容。
+- [ ] Repository: fmt/check/clippy/workspace tests、agent corpus、SpecRail targeted/all。
+- [ ] Coverage: `cargo llvm-cov -p argus-agent -p argus-cli --summary-only` 新代码行
+      至少 80%，schema/hash/atomic/fail-closed 关键分支 100%。
 
 ## 回滚方案
 
-AGT-04 是新增的可选模式，默认不启用。回滚实现 PR 即可完全恢复现有行为，
-不涉及数据迁移。已生成的 snapshot 文件在回滚后不再被读取，可安全保留或
-删除。禁止以“放宽失败语义为 clean”作为回滚或降噪手段。
+AGT-04 是 opt-in。回滚实现 commit 即恢复默认行为，无数据库迁移；已生成 v1
+snapshot 不再读取，可由用户保留。不得以放宽 schema、跳过 unreadable member、
+截断 hash、把 operational failure 改为 clean 或保存 target 明文作为回滚。
+若只回滚 shared writer，必须先证明 AGT-02 baseline bytes 与原子失败语义未退化。

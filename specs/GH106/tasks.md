@@ -11,40 +11,194 @@ GH-106
 
 ## 实现任务
 
-- [ ] `SP106-T1` 新增 `crates/argus-agent/src/snapshot.rs`：定义版本化 `Snapshot` / `Entry` / `EntryKind`，实现确定性序列化与严格版本校验的 `load`，并复用 `baseline::save` 的临时文件 → flush → sync → 原子 persist 写入范式。Covers: B-001, B-002, B-006, B-008. Owner: implementation worker. Dependencies: none. Done when: 同一输入重复序列化逐字节一致；未知版本 `load` 返回错误而非按当前版本解释；写入任一阶段失败保留旧 snapshot 且清理临时文件；序列化结果不含文件正文。Verify: `cargo test -p argus-agent snapshot_deterministic && cargo test -p argus-agent snapshot_version && cargo test -p argus-agent snapshot_atomic_update && cargo test -p argus-agent snapshot_no_plaintext`.
-- [ ] `SP106-T2` 实现集合比较，产生新增、删除、内容修改、条目类型变化与 symlink 变化五类 finding，各带逻辑路径、变化类型与旧/新 digest。Covers: B-003, B-008. Owner: implementation worker. Dependencies: SP106-T1. Done when: 离线 fixture 覆盖五类变化及“无变化”，symlink 目标变化与内容修改产生不同 rule id，输出仅含路径/digest/类型。Verify: `cargo test -p argus-agent snapshot_change_kinds`.
-- [ ] `SP106-T3` 实现 fail-closed 语义：snapshot 缺失、解析失败、版本不受支持、目标不可读、遍历不完整均产生显式 operational error 结论，不得报告 clean。Covers: B-005, B-002. Owner: implementation worker. Dependencies: SP106-T1. Done when: 五类失败各有测试，且断言结论不是 clean、不是“无变化”。Verify: `cargo test -p argus-agent snapshot_fail_closed`.
-- [ ] `SP106-T4` 扩展 `surface.rs` 的高上下文路径形状以覆盖 `.cursorrules` 等 issue 列出的输入，并让 AGT-04 的成员集合完全由该分类决定。Covers: B-010. Owner: implementation worker. Dependencies: none. Done when: AGT-04 内不存在第二份路径清单；新增路径形状同时对既有 AGT-01 生效或显式说明为何不生效。Verify: `cargo test -p argus-agent surface`.
-- [ ] `SP106-T5` 接入 CLI：新增 snapshot / check / update 模式开关，模式互斥，沿用既有 baseline 多路径守卫；check 严格只读，update 为显式批准动作。Covers: B-004, B-007, B-009. Owner: implementation worker. Dependencies: SP106-T1, SP106-T2, SP106-T3. Done when: check 后 snapshot 文件 mtime 与内容不变；多路径在 AGT-04 模式下被拒绝；check 与 update 不能同时指定。Verify: `cargo test -p argus-cli agt04 && cargo test -p argus-cli agt04_approval`.
-- [ ] `SP106-T6` 接入 JSON / text / SARIF 输出并更新 README：文档化审批边界、推荐的“安装前 snapshot → 安装 → 安装后 check”流程、snapshot 存放位置建议与能力限制。Covers: B-003, B-008, B-009. Owner: implementation worker. Dependencies: SP106-T2, SP106-T5. Done when: 三种输出都保留变化类型与旧/新 digest 且不含正文；README 说明 snapshot 本身是信任锚点。Verify: `cargo test -p argus-cli sarif && cargo test --workspace --all-targets`.
-- [ ] `SP106-T7` 运行完整验证。Covers: B-001, B-004, B-005, B-010. Owner: verification owner. Dependencies: SP106-T1, SP106-T2, SP106-T3, SP106-T4, SP106-T5, SP106-T6. Done when: 工作区测试、corpus 门禁与工作流检查全部通过，既有 AGT-01/02/03/05 行为无回归。Verify: `cargo test --workspace --all-targets && cargo clippy --workspace --all-targets && python3 checks/check_workflow.py --repo . --spec-dir specs/GH106`.
+- [ ] `SP106-T1` 只抽取 shared atomic byte writer，并让 AGT-02 baseline 改用它。Covers: B-006. Owner: persistence worker. Dependencies: none. Done when: 新 module 已在 crate root 注册，五阶段故障均保留旧 destination，AGT-02 bytes 不变，且本任务不引入 `SurfaceKind::InventoryOnly`。Verify: `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-agent baseline`.
+  File ownership:
+  `crates/argus-agent/src/atomic_write.rs`,
+  `crates/argus-agent/src/baseline.rs`,
+  `crates/argus-agent/src/lib.rs`. `lib.rs` 仅增加
+  `atomic_write` module declaration；production 路径保持
+  tempfile → write → flush → file sync → persist；`atomic_write.rs` module
+  内部私有 `#[cfg(test)]`
+  `CreateTemp/Write/Flush/FileSync/Persist` 故障矩阵逐项证明旧 destination
+  bytes/mtime 不变、missing destination 不产生半文件、无 tempfile 泄漏；AGT-02
+  序列化 bytes 与现状相同。fault enum/seam 不导出 crate，也不增加 Cargo
+  feature、hidden flag/env。完成后将 `baseline.rs` 串行移交 T2，并将
+  `lib.rs` 串行移交 T2；不得并行编辑这些共享路径。
+
+- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory core、全字节 hash、五类 Medium rule 与唯一 coordinate-policy surface classifier。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: snapshot module 已注册；entries custom visitor 拒绝 literal/decoded-equivalent duplicate key；`CoordinatePolicy::{LegacyRootRelative, SnapshotRootAware}`、`ScanRootContext` 与双 policy classifier unit matrix 通过；InventoryOnly/legacy-pruned path 分类、baseline/injection exhaustive no-op、合法空 snapshot、双向 transition、全字节/隐私/schema/core fail-closed/rule matrix 通过；不要求尚由 T3 实现的 walker、target guard、projection 或 post-inventory barrier。Verify: `cargo test -p argus-agent snapshot && cargo test -p argus-agent surface && cargo test -p argus-agent baseline && cargo test -p argus-agent injection`.
+  File ownership:
+  `crates/argus-agent/src/baseline.rs`,
+  `crates/argus-agent/src/injection.rs`,
+  `crates/argus-agent/src/lib.rs`,
+  `crates/argus-agent/src/snapshot.rs`,
+  `crates/argus-agent/src/surface.rs`.
+  `lib.rs` 只注册 `snapshot` module 并暴露 T3 所需的 crate API。
+  Snapshot 模块不含高上下文路径或 root-name/prefix 名单；所有 membership 来自
+  `surface::classify(CoordinatePolicy, ...)` 的单一 rule set，root prefix 只能由
+  `surface.rs` 的 `SnapshotRootAware(ScanRootContext)` 构造；multi-chunk
+  binary file hash 到
+  EOF；symlink 仅存 raw-target SHA-256；严格 schema/path/hash/race 错误全部
+  fail closed；`entries` 用 token-stream custom map visitor 在插入 map 前拒绝
+  duplicate decoded logical key，禁止普通 map/Value last-wins；合法
+  `entries: {}` round-trip；
+  空集合 transition 四项分别为 file/directory added、symlink
+  symlink-changed、file/directory removed、symlink symlink-changed；同 path
+  按 symlink → add/remove → type → content 优先级只产生一个固定 rule；
+  evidence 逐字节匹配 B-003 无空格分号 grammar，`change=` 只允许
+  `entry_added|entry_removed|content_modified|entry_type_changed|symlink_changed`
+  并与五个 rule 一一映射，且所有值无 escaping。`surface::classify` 新 shape
+  只返回 `InventoryOnly`，既有 shape 保持原 kind。policy unit matrix 先证明
+  `LegacyRootRelative` 对 `.claude` directory/single-file 不补 prefix且
+  `settings.json → None`，再固定 `SnapshotRootAware` 的 `.claude`
+  directory/nested-directory/single-file 与 `hooks` directory/single-file
+  coordinate，同时 logical path 保持 root-relative；inventory core 记录 discovery
+  交给它的全部 classified `Some`，
+  baseline extraction 与 injection exhaustive match 都对 InventoryOnly 显式
+  no-op。传入的 logical path 位于 `.git`/`node_modules` ancestor 后时仍可分类为
+  InventoryOnly。`baseline.rs` 与 `lib.rs` 只能在 T1 完成并移交后修改；T2
+  完成后再将 `lib.rs` 串行移交 T3。
+
+- [ ] `SP106-T3` 接入 mode-split discovery、coordinate policy、snapshot membership guard、正交 `DiscoveredEntry`、semantic projection 与统一 post-inventory barrier。Covers: B-001, B-003, B-004, B-005, B-007, B-009, B-010. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: None/AGT-02-only 完全保留 legacy pruning 并只用 `LegacyRootRelative`；Check/Update 才构造 root context、complete-discover 所有 descendant，并让 target guard/inventory/semantic 共用 `SnapshotRootAware`；entry_type/surface_kind 正交；projection 先跳过 directory、再跳过 InventoryOnly file/symlink，并保留既有 semantic symlink hard error；compare 后任一实际可失败 stage 或 persist error 保留 AGT-04 report 并返回同一 partial outcome。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
+  File ownership:
+  `crates/argus-agent/src/lib.rs`,
+  `crates/argus-agent/tests/gh106_snapshot.rs`,
+  `crates/argus-agent/tests/fixtures/agt04-snapshot-base/AGENTS.md`,
+  `crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/settings.json`,
+  `crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/rules/policy.txt`,
+  `crates/argus-agent/tests/fixtures/agt04-snapshot-base/.cursorrules`.
+  `SnapshotMode::None`（含无 snapshot 与 AGT-02-only check/update）原样调用
+  legacy `.git`/`node_modules` pruning collector，并仅在现有 classification
+  阶段用 `LegacyRootRelative` 分类，让 InventoryOnly 在
+  state/body/symlink validation 前 no-op；不得构造 `ScanRootContext`。只有
+  Check/Update 执行
+  complete non-pruning discovery，生成 filesystem
+  `entry_type=file|directory|symlink` 与 `surface_kind=Option<SurfaceKind>` 正交的
+  `DiscoveredEntry`，并从 canonical PATH 构造一次 `ScanRootContext`；complete
+  discovery、root 内 snapshot target guard 与 snapshot semantic projection 都
+  以 `SnapshotRootAware(&same_context)` 调用同一 classifier，禁止在
+  snapshot/guard 补 root-name prefix。target 若 classify Some，在 exact
+  exclusion/load/render/write 前 operational reject。inventory 收集全部
+  classified entry；semantic projection 先跳过 directory，再在任何正文/
+  binary/UTF-8/size/symlink validation 前跳过 InventoryOnly file/symlink，然后
+  跳过 unclassified，最后让既有 semantic symlink/file 走原 hard error/
+  validation。integration regression 分别锁定 legacy mode pruning 与 snapshot
+  mode complete discovery/projection，并锁定 `agent scan ~/.claude`、nested
+  `.claude` root、single-file 与 hooks-root coordinate matrix。check 完成 compare
+  后先建立 base outcome，再由单一 barrier 运行 collect/projection、injection、
+  capability、config、AGT-02/baseline、judge；任何实际 `Err` 都返回携带已完成
+  report/findings 的 incomplete outcome，不得裸 `?`。update report/decision
+  只存内存，atomic persist 成功后才能交给 normal renderer。
+
+- [ ] `SP106-T4` 为任一 post-inventory/persist incomplete outcome 增加 SARIF 失败 invocation，保留 results 且不泄露敏感内容。Covers: B-004, B-006, B-008. Owner: SARIF worker. Dependencies: SP106-T3. Done when: 不论 error 来自哪个 Step 4 fallible stage，所有 partial invocation 为 false、finding 不丢不重复且 notification 无敏感内容。Verify: `cargo test -p argus-cli sarif_snapshot_incomplete && cargo test -p argus-cli sarif`.
+  File ownership: `crates/argus-cli/src/sarif.rs`. Complete report 仍为
+  `executionSuccessful=true`；partial report 为
+  `false` 并有 sanitized error notification；AGT-04 results 只出现一次，
+  decision 为 block，target/plaintext 不出现在 document。T4 只提供并冻结
+  pure SARIF renderer API 与 unit tests，不修改 CLI call site；T5 负责接线。
+
+- [ ] `SP106-T5` 接入精确 Clap/handler、snapshot target rejection、persist-before-render 与 text/JSON/SARIF/exit 行为。Covers: B-001, B-004, B-005, B-006, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: handler 对 incomplete outcome 不按 error source 分支，任一 post-inventory error 都走相同三种 partial 输出；classified target 的 check/update 均在 load/render/write 前失败；`CARGO_BIN_EXE` production persist failure 从未调用 normal renderer/exit；success control、flags/readonly/既有 CLI 行为兼容均通过，且无跨 crate fault seam。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
+  File ownership:
+  `crates/argus-cli/src/main.rs`,
+  `crates/argus-cli/src/agent.rs`,
+  `crates/argus-cli/tests/agent_snapshot_cli.rs`. Help 只新增
+  `--check-snapshot <FILE>` 与
+  `--update-snapshot <FILE>`；check+check (`--baseline` + `--check-snapshot`)
+  成功，其余 update/persistence 组合由 Clap 和 handler 双重拒绝；所有
+  persistence mode 拒绝多 PATH；check 前后 snapshot bytes/mtime 相同；
+  partial JSON 精确为
+  `{schemaVersion:1,executionSuccessful:false,operationalError:
+  {kind:"agent_scan_incomplete",message:<sanitized>},report:<ScanReport>}`，
+  report decision=block 且保留 finding；完整 snapshot/无 snapshot JSON 继续
+  输出 bare report。partial text/SARIF 保留 finding、stderr 报 operational
+  error、exit 2；
+  update report 先留内存。CLI test 用 `env!("CARGO_BIN_EXE_argus")` 启动
+  production binary，以 root 外含 sentinel 的 non-empty directory 作为
+  destination 触发真实 Persist failure；text/JSON/SARIF 均断言 sentinel
+  bytes/mtime/目录内容不变、no normal render/exit、no `snapshot written`、
+  partial output、sanitized stderr/exit 2。普通 file destination success
+  control 证明 persist 后才输出 normal report 与固定 entry count，且不把
+  semantic block/approval 强制改为 exit 0。不得添加 Cargo feature、公开/隐藏
+  API、hidden flag/env。
+  Root 内 existing/missing `AGENTS.md`、`.claude/settings.json`、`.cursorrules`
+  与 skill script target 均断言 stdout 空、sanitized operational error、exit 2、
+  bytes/mtime 不变；unclassified root 内 target 与 root 外 target 为正例。
+
+- [ ] `SP106-T6` 更新 AGT-04 用户文档。Covers: B-001, B-004, B-005, B-006, B-007, B-008, B-009, B-010. Owner: docs worker. Dependencies: SP106-T5. Done when: workflow/rules/共存、仅 snapshot mode 的 `~/.claude` root-aware coverage、None/AGT-02-only root-relative compatibility、snapshot target 禁止形状、snapshot-only complete discovery、批准/存放/persist-before-render/InventoryOnly projection/全 post-inventory partial 限制完整且移除 follow-up 表述。Verify: `rg -n "check-snapshot|update-snapshot|AGT-04-(entry|content|symlink)" README.md && cargo test -p argus-cli --test agent_snapshot_cli`.
+  File ownership: `README.md`. 文档给出安装前
+  `--update-snapshot` → 安装 → 安装后
+  `--check-snapshot` 示例、AGT-02 共存矩阵、五个 rule/Medium 决策、snapshot
+  外置/版本控制建议、schema/platform 与并发限制、partial operational
+  semantics；移除“AGT-04 remains follow-up”。
+
+- [ ] `SP106-T7` 执行 fresh 全量门禁并提交实现证据。Covers: B-001, B-002, B-003, B-004, B-005, B-006, B-007, B-008, B-009, B-010. Owner: verification owner. Dependencies: SP106-T1, SP106-T2, SP106-T3, SP106-T4, SP106-T5, SP106-T6. Done when: 最终 HEAD 的 targeted/all-spec/Rust/corpus/coverage/diff 全绿且 coverage 达标；review 证明单一 classifier 的 coordinate policy 不交叉（None/AGT-02-only=`LegacyRootRelative`，Check/Update=`SnapshotRootAware`）、duplicate entries 在 token visitor 层拒绝、所有 post-inventory `Err` 经过统一 barrier、CLI persist failure 来自 production filesystem，且无新增 feature/公开或隐藏 fault API/flag/env。Verify: `python3 checks/check_workflow.py --repo . --spec-dir specs/GH106 && python3 checks/check_workflow.py --repo . --all-specs && cargo fmt --all -- --check && cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --all-targets && cargo run --quiet -p argus-cli -- corpus test --corpus corpus && cargo llvm-cov -p argus-agent -p argus-cli --summary-only && git diff --check origin/main...HEAD`.
+  File ownership: none（只读验证；不得与 Cargo 写入任务并发）.
+  Targeted/all-spec、fmt/check/clippy/workspace tests、agent corpus、
+  coverage 与 diff hygiene 均以最终 HEAD fresh 通过；新代码行 ≥80%，
+  schema/hash/atomic/fail-closed 关键路径 100%；product ID 集合与 `Covers:`
+  并集均为 B-001..B-010。
 
 ## 并行拆分
 
-- SP106-T1 独占 `crates/argus-agent/src/snapshot.rs`。
-- SP106-T2 与 SP106-T3 都在 `snapshot.rs` 内实现，与 SP106-T1 文件重叠，
-  必须串行提交。
-- SP106-T4 独占 `crates/argus-agent/src/surface.rs`，可与 T1 并行。
-- SP106-T5 独占 `crates/argus-cli/src/agent.rs`；SP106-T6 独占
-  `crates/argus-cli/src/sarif.rs` 与 `README.md`，二者文件不重叠。
-- SP106-T7 为串行 verification owner，不与写入任务并发运行 Cargo。
+- SP106-T1 与任何其他写入任务不并行：它先独占
+  `atomic_write.rs`、`baseline.rs`、`lib.rs` 完成 shared writer 抽取与 module
+  registration；完成并通过 targeted tests 后，`baseline.rs` ownership 串行
+  移交 T2，`lib.rs` ownership 也串行移交 T2。
+- SP106-T2 依赖 T1，接管 `baseline.rs`/`lib.rs`，注册 snapshot core，并与
+  `injection.rs` 一起补齐 `InventoryOnly` exhaustive no-op；core unit tests
+  通过后，`lib.rs` ownership 串行移交 T3，`baseline.rs` 不再修改。T3 再独占
+  `lib.rs` 与 `gh106_snapshot.rs`/fixtures 接入 collector 和 compatibility
+  regression。这些 ownership transfer 不是并行共享写。
+- SP106-T4 独占 `sarif.rs` 并冻结 renderer API；完成后 SP106-T5 才在
+  `main.rs`/`agent.rs` 与单独 integration test 接线，不回写 `sarif.rs`。
+- SP106-T6 仅写 README，可在 T5 通过 targeted CLI tests 后执行。
+- SP106-T7 是唯一 verification owner，不修改文件，也不与写入任务或其他 Cargo
+  进程并发。若实际实现需要 manifest 外路径，先停止并修订/批准 spec，不能越界。
 
 ## 验证
 
 Product invariant 集合
-`{B-001,B-002,B-003,B-004,B-005,B-006,B-007,B-008,B-009,B-010}` 必须与任务
-`Covers:` 并集一致。运行
-`python3 checks/check_workflow.py --repo . --spec-dir specs/GH106`、
-`cargo test --workspace --all-targets` 与 `cargo clippy --workspace --all-targets`。
+`{B-001,B-002,B-003,B-004,B-005,B-006,B-007,B-008,B-009,B-010}` 与任务
+`Covers:` 并集必须完全一致。实现完成后按 SP106-T7 的顺序运行 fresh 命令，
+并记录最终 HEAD；不得复用旧输出，不得通过削弱断言绕过 failure fixture。
 
 ## Handoff Notes
 
-- 本规格为 spec-only。Issue #106 尚未设置 readiness 标签，实现开始前
-  维护者需先选择 `ready_to_spec` / `ready_to_implement` 等路由状态。
-- snapshot 本身是信任锚点：若它可被安装脚本写入则保护失效。实现必须在
-  README 中给出存放位置建议，维护者需确认这一威胁模型表述是否足够。
-- AGT-04 的失败语义严格于 AGT-02：AGT-02 把缺失 baseline 转为 info finding
-  是可接受的，AGT-04 缺失 snapshot 必须是显式失败。若维护者希望二者一致，
-  必须先修订 B-005，而不是在实现中放宽。
-- digest 算法需与既有 baseline 保持一致，避免两套强度不同的完整性保证；
-  具体算法在实现前确认。
+- GH-106 当前为 open 且带 `ready_to_implement` label；SpecRail implement gate
+  仍要求维护者确认本次修订后的 spec approval 与 duplicate evidence，不能把
+  label 当作自动批准。
+- CLI 选择两个最小且明确的新 flag：`--check-snapshot` 与
+  `--update-snapshot`。初次创建也是显式 update；不再引入第三个 create flag。
+- 唯一允许的 AGT-02/04 组合是两个只读 check。任一 update 与其他 persistence
+  flag 冲突，因为两个 trust artifact 不能在一个命令中原子批准。
+- snapshot inventory 先于语义扫描是刻意的：既保留当前 protected symlink
+  hard error，又保证任何 post-inventory stage error 都不丢已完成 AGT-04 report。
+- update 的 normal renderer/exit 必须严格 happens-after atomic persist；任一
+  persist fault 都复用 partial envelope/SARIF/text，不能先打印 bare clean。
+- `SurfaceKind::InventoryOnly` 是单一 membership 闭集内的 no-semantic 类别；
+  `baseline.rs`/`injection.rs` 显式 no-op，`lib.rs` 在任何正文与 validation 前
+  跳过。无 snapshot 默认扫描的 binary/oversized/symlink regression 必须锁定。
+- Discovery 按 mode 分流：None/AGT-02-only 必须保留 legacy
+  `.git`/`node_modules` pruning；Check/Update 才 complete-discover。snapshot
+  inventory 按正交 entry_type/surface_kind 收集全部 classified entry，semantic
+  projection 按 directory → InventoryOnly → unclassified → legacy semantic
+  symlink/file。classified snapshot target 不是合法 self-exclusion：root 内
+  Some 一律在 load/render/write 前拒绝。
+- Membership rule/classifier 只有一份，但 coordinate policy 不得交叉：
+  None/AGT-02-only 用 `LegacyRootRelative` 且不构造 context；Check/Update 才由
+  `surface.rs` 构造 canonical `ScanRootContext`，让 `.claude`/hooks
+  root、single-file、target guard、inventory、snapshot semantic 共用
+  `SnapshotRootAware`。classification coordinate 不得替换 root-relative
+  report path。
+- Strict v1 `entries` 必须 token-stream 拒绝 decoded duplicate key；禁止普通
+  map/Value last-wins。Step 4 任一实际可失败 stage 都经过统一 barrier，禁止只
+  对 symlink/judge 特判。
+- 五阶段 fault injection 只存在于 `argus-agent` 私有 unit tests；CLI 只能用
+  root 外 non-empty directory destination 触发 production Persist failure，
+  禁止 feature、公开/隐藏 API、hidden flag/env。
+- 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须锁定四项
+  transition：empty→file/directory 为 added，empty→symlink 为
+  symlink-changed，file/directory→empty 为 removed，symlink→empty 为
+  symlink-changed。只有 missing、malformed 或 incomplete traversal 才
+  operational failure。
+- `crates/argus-agent/tests/integration.rs` 已超过 750 行，因此 GH-106 使用新的
+  `gh106_snapshot.rs`，不得继续把 heavy-tier matrix 塞入旧文件。
