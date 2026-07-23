@@ -41,9 +41,11 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    规范化的 UTF-8 逻辑相对路径与闭集类型 `file | directory | symlink`；
    file digest 是对文件从首字节到 EOF 的全部原始字节计算的 SHA-256，不能
    因文件较大、为 binary 或不是 UTF-8 而截断、跳过或改写。snapshot 文件
-   自身是唯一的显式成员排除项。条目按路径确定性排序；同一输入重复生成必须
-   逐字节一致。完整遍历后没有任何受支持成员是合法的空 inventory，必须能
-   确定性保存为合法空 snapshot。
+   只有在位于扫描 root 外，或位于 root 内但被同一高上下文分类器判定为
+   “非成员”时，才可作为唯一的显式成员排除项；若 snapshot path 自身是受支持
+   agent surface，命令必须拒绝，不能通过 self-exclusion 绕过保护。条目按路径
+   确定性排序；同一输入重复生成必须逐字节一致。完整遍历后没有任何受支持成员
+   是合法的空 inventory，必须能确定性保存为合法空 snapshot。
 2. B-002 snapshot 使用严格的版本化 schema。未知版本、未知字段、未知类型、
    非 64 位小写十六进制 digest，以及类型与字段的非法组合都必须拒绝：
    file 必须且只能有 `digest`，directory 不得有 digest，symlink 必须且只能有
@@ -88,7 +90,10 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    产生 `AGT-04-symlink-changed`；approved file/directory 到空 current 产生
    `AGT-04-entry-removed`，approved symlink 到空 current 产生
    `AGT-04-symlink-changed`。两侧都合法为空才是 clean；空集合 transition
-   不得覆盖 B-003 的 symlink 优先级。
+   不得覆盖 B-003 的 symlink 优先级。若声明的 snapshot path 位于扫描 root
+   内且本身被高上下文分类器识别（包括语义类别或 inventory-only 类别），check
+   与 update 都必须在任何 self-exclusion、snapshot load、stdout render 或写入
+   前返回 operational failure；不得覆盖该 surface 或隐藏其 finding。
 6. B-006 `--update-snapshot` 采用同目录原子替换。创建临时文件、写入、flush、
    文件 sync 或 replace 任一阶段失败时，命令返回 operational failure，旧
    snapshot 的 bytes/mtime 保持不变，临时文件被清理；不存在旧 snapshot 时
@@ -124,7 +129,10 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
     必须在同一版本同时看到它。此前已有语义分析的路径继续使用原语义类别与
     validation；仅为 inventory 新纳入、此前不受语义分析的路径不得因 binary、
     非 UTF-8、超限或 symlink 在无 snapshot flag 的普通 scan 中新增 finding
-    或 operational error。AGT-04 inventory 仍必须记录并比较这些成员。
+    或 operational error。AGT-04 inventory 仍必须记录并比较这些成员。walker
+    不得在分类前仅凭任一祖先 basename（包括 `.git`、`node_modules`）剪掉
+    subtree；受支持高上下文 root 内的全部后代，以及 legacy-pruned ancestor
+    后发现的受支持成员，都必须到达同一个分类器并进入 inventory。
 
 ## 验收标准
 
@@ -138,7 +146,12 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
       `AGT-04-symlink-changed`；approved file/directory → empty-current 为
       `AGT-04-entry-removed`；approved symlink → empty-current 为
       `AGT-04-symlink-changed`。
-- [ ] file digest 流式覆盖全部字节；snapshot 自身不进入 inventory。
+- [ ] file digest 流式覆盖全部字节；仅 preflight 允许的 snapshot 自身不进入
+      inventory，classified snapshot target 必须拒绝。
+- [ ] snapshot target 在 root 内分别命名为 `AGENTS.md`、
+      `.claude/settings.json`、`.cursorrules` 与 skill-tree script 时，check/update
+      都在排除/load/render/write 前失败且不改 bytes/mtime；非 classified 的
+      root 内 snapshot 与 root 外 snapshot 仍可使用。
 - [ ] check 不改变 snapshot 的 bytes/mtime；原子写入各阶段可故障注入并证明
       失败保留旧 bytes/mtime、无临时文件泄漏。
 - [ ] `--update-snapshot` 的 FileSync、Persist 及其余原子阶段故障注入均证明：
@@ -152,6 +165,9 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 - [ ] 无 snapshot flag 时，新增 inventory-only binary、oversized 与 symlink
       fixture 的普通 scan 结果与引入 AGT-04 前一致；启用 snapshot 时三者均进入
       inventory。
+- [ ] `.claude/node_modules/**`、`.claude/.git/**` 以及 legacy-pruned ancestor
+      下的 classified surface fixture 均进入 AGT-04 inventory；普通未分类
+      descendant 不进入 inventory，且 walker error 仍 fail closed。
 - [ ] README 文档化审批边界、推荐流程、五个 rule ID、存放建议与限制。
 - [ ] `cargo test --workspace --all-targets`、agent corpus 与 SpecRail 门禁通过；
       新代码行覆盖率至少 80%，schema/hash/atomic/fail-closed 关键路径 100%。
@@ -160,7 +176,7 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 
 | 类别 | 判定（covered: B-xxx / N/A + 原因） |
 | --- | --- |
-| 空/缺失输入 | covered: B-001, B-003, B-005；合法空 snapshot 可保存，file/directory 用 added/removed，任一侧 symlink 仍用 symlink-changed，缺失 snapshot 失败 |
+| 空/缺失输入 | covered: B-001, B-003, B-005；合法空 snapshot 可保存，file/directory 用 added/removed，任一侧 symlink 仍用 symlink-changed，缺失或 classified snapshot target 失败 |
 | 错误与失败路径 | covered: B-002, B-004, B-005, B-006 |
 | 授权/权限 | covered: B-007, B-009；check 与 update 的授权边界及组合已闭合 |
 | 并发/竞态 | covered: B-005, B-006；扫描期变化失败，写入失败保留旧 snapshot |

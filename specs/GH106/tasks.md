@@ -21,7 +21,7 @@ GH-106
   序列化 bytes 与现状相同；`SurfaceKind::InventoryOnly` 在 baseline extraction
   中显式 no-op。
 
-- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: InventoryOnly 单一类别、默认扫描兼容、合法空 snapshot、双向 transition、全字节/隐私/schema/fail-closed/rule 矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
+- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: InventoryOnly/legacy-pruned descendant 分类、guarded self-exclusion、默认兼容、合法空 snapshot、双向 transition、全字节/隐私/schema/fail-closed/rule 矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
   File ownership:
   `crates/argus-agent/src/injection.rs`,
   `crates/argus-agent/src/snapshot.rs`,
@@ -33,7 +33,8 @@ GH-106
   `crates/argus-agent/tests/fixtures/agt04-snapshot-base/.cursorrules`.
   Snapshot 模块不含高上下文路径名单；所有
   membership 来自扩展后的 `surface::classify`；multi-chunk binary file hash 到
-  EOF，snapshot 自身排除；symlink 仅存 raw-target SHA-256；严格 schema/path/
+  EOF；仅 preflight 允许的 unclassified snapshot 自身排除，classified target
+  拒绝；symlink 仅存 raw-target SHA-256；严格 schema/path/
   UTF-8/race/incomplete 错误全部 fail closed；合法 `entries: {}` round-trip；
   空集合 transition 四项分别为 file/directory added、symlink
   symlink-changed、file/directory removed、symlink symlink-changed；同 path
@@ -42,12 +43,17 @@ GH-106
   `entry_added|entry_removed|content_modified|entry_type_changed|symlink_changed`
   并与五个 rule 一一映射，且所有值无 escaping。`surface::classify` 新 shape
   只返回 `InventoryOnly`，既有 shape 保持原 kind；AGT-04 收集所有 Some，
-  injection exhaustive match 对 InventoryOnly 显式 no-op。
+  injection exhaustive match 对 InventoryOnly 显式 no-op。受支持成员位于
+  `.git`/`node_modules` ancestor 后时分类为 InventoryOnly 而非消失；snapshot
+  target 的 logical path 使用同一 classifier，Some 必须拒绝、None 才可排除。
 
-- [ ] `SP106-T3` 接入两阶段 semantic collector、SnapshotMode 与 persist-before-render outcome。Covers: B-003, B-004, B-005, B-007, B-009, B-010. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: InventoryOnly 在正文/validation 前跳过，report 留内存直至 persist，semantic/judge/persist error 均返回 partial outcome。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
+- [ ] `SP106-T3` 接入 non-pruning discovery、snapshot membership guard、两阶段 semantic collector、SnapshotMode 与 persist-before-render outcome。Covers: B-001, B-003, B-004, B-005, B-007, B-009, B-010. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: 所有 descendant 先分类、classified snapshot target 在排除/load/write 前拒绝、InventoryOnly 在正文/validation 前跳过，semantic/judge/persist error 返回 partial outcome。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
   File ownership: `crates/argus-agent/src/lib.rs`.
-  Metadata-only discovery/classify 后在任何正文/binary/UTF-8/size/symlink
-  validation 前跳过 InventoryOnly；既有 semantic kinds 的行为不变。check 完成
+  Metadata-only discovery 不按 `.git`/`node_modules` ancestor 剪枝，先计算
+  skill dirs 并分类全部 descendant；root 内 snapshot target 若 classify Some，
+  在 exact exclusion/load/render/write 前 operational reject。随后在任何正文/
+  binary/UTF-8/size/symlink validation 前跳过 InventoryOnly；既有 semantic kinds
+  的行为不变。check 完成
   compare 后才跑 injection/capability/config/AGT-02/judge；update report/decision
   只存内存，atomic persist 成功后才能交给 normal renderer；semantic/judge/
   persist error 返回携带内存 report/findings 的 incomplete outcome。
@@ -58,7 +64,7 @@ GH-106
   `false` 并有 sanitized error notification；AGT-04 results 只出现一次，
   decision 为 block，target/plaintext 不出现在 document。
 
-- [ ] `SP106-T5` 接入精确 Clap/handler、persist-before-render 与 text/JSON/SARIF/exit 行为。Covers: B-004, B-006, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: fault-injected persist failure 从未调用 normal renderer/exit，三种 partial 输出与成功顺序、flags/readonly/兼容均通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
+- [ ] `SP106-T5` 接入精确 Clap/handler、snapshot target rejection、persist-before-render 与 text/JSON/SARIF/exit 行为。Covers: B-001, B-004, B-005, B-006, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: classified target 的 check/update 均在 load/render/write 前失败；persist fault 从未调用 normal renderer/exit；三种 partial 输出与成功顺序、flags/readonly/兼容均通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
   File ownership:
   `crates/argus-cli/src/main.rs`,
   `crates/argus-cli/src/agent.rs`,
@@ -77,8 +83,11 @@ GH-106
   均断言 old bytes/mtime、no normal render/exit、partial outputs、sanitized
   stderr/exit 2。仅 persist 成功后输出 normal report 与固定 entry count，且不把
   semantic block/approval 强制改为 exit 0。
+  Root 内 existing/missing `AGENTS.md`、`.claude/settings.json`、`.cursorrules`
+  与 skill script target 均断言 stdout 空、sanitized operational error、exit 2、
+  bytes/mtime 不变；unclassified root 内 target 与 root 外 target 为正例。
 
-- [ ] `SP106-T6` 更新 AGT-04 用户文档。Covers: B-004, B-006, B-007, B-008, B-009, B-010. Owner: docs worker. Dependencies: SP106-T5. Done when: workflow/rules/共存/批准/存放/persist-before-render/InventoryOnly 默认兼容/partial 限制完整且移除 follow-up 表述。Verify: `rg -n "check-snapshot|update-snapshot|AGT-04-(entry|content|symlink)" README.md && cargo test -p argus-cli --test agent_snapshot_cli`.
+- [ ] `SP106-T6` 更新 AGT-04 用户文档。Covers: B-001, B-004, B-005, B-006, B-007, B-008, B-009, B-010. Owner: docs worker. Dependencies: SP106-T5. Done when: workflow/rules/共存、snapshot target 禁止形状、non-pruning completeness、批准/存放/persist-before-render/InventoryOnly 默认兼容/partial 限制完整且移除 follow-up 表述。Verify: `rg -n "check-snapshot|update-snapshot|AGT-04-(entry|content|symlink)" README.md && cargo test -p argus-cli --test agent_snapshot_cli`.
   File ownership: `README.md`. 文档给出安装前
   `--update-snapshot` → 安装 → 安装后
   `--check-snapshot` 示例、AGT-02 共存矩阵、五个 rule/Medium 决策、snapshot
@@ -124,6 +133,9 @@ Product invariant 集合
 - `SurfaceKind::InventoryOnly` 是单一 membership 闭集内的 no-semantic 类别；
   `baseline.rs`/`injection.rs` 显式 no-op，`lib.rs` 在任何正文与 validation 前
   跳过。无 snapshot 默认扫描的 binary/oversized/symlink regression 必须锁定。
+- Discovery 不得按 `.git`/`node_modules` ancestor 预剪枝；先遍历/分类，后丢弃
+  None 或 semantic-skip InventoryOnly。classified snapshot target 不是合法的
+  self-exclusion：root 内 Some 一律在 load/render/write 前拒绝。
 - 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须锁定四项
   transition：empty→file/directory 为 added，empty→symlink 为
   symlink-changed，file/directory→empty 为 removed，symlink→empty 为
