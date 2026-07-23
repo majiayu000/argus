@@ -139,13 +139,13 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
         .take(path.split('/').count().saturating_sub(1))
         .any(|segment| matches!(segment, ".git" | "node_modules"));
 
-    let semantic_kind = if matches!(lower.as_str(), "agents.md" | "claude.md" | "skill.md") {
+    let semantic_kind = if matches!(lower.as_str(), "agents.md" | "claude.md" | "skill.md")
+        || (in_claude_dir(path) && lower.ends_with(".md"))
+    {
         Some(SurfaceKind::Instruction)
-    } else if in_claude_dir(path) && lower.ends_with(".md") {
-        Some(SurfaceKind::Instruction)
-    } else if matches!(lower.as_str(), ".mcp.json" | "mcp.json" | ".claude.json") {
-        Some(SurfaceKind::McpConfig)
-    } else if in_claude_dir(path) && lower.starts_with("settings") && lower.ends_with(".json") {
+    } else if matches!(lower.as_str(), ".mcp.json" | "mcp.json" | ".claude.json")
+        || (in_claude_dir(path) && lower.starts_with("settings") && lower.ends_with(".json"))
+    {
         Some(SurfaceKind::McpConfig)
     } else if SCRIPT_EXTS
         .iter()

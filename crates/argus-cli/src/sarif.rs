@@ -58,6 +58,8 @@ fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -
     ))
 }
 
+// `intel_cli` includes this module without the sibling `sarif_vulns` caller.
+#[allow(dead_code)]
 pub(crate) fn render_document(
     rules: Vec<Value>,
     results: Vec<Value>,

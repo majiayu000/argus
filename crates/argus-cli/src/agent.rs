@@ -29,6 +29,7 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// - `--baseline <file>`: compare against the approved baseline; drift is a
 ///   medium AGT-02 finding → allow-with-approval (does not force exit non-zero
 ///   on its own).
+#[allow(clippy::too_many_arguments)] // Mirrors the flat, handler-validated Clap contract.
 pub fn cmd_agent_scan(
     paths: &[PathBuf],
     format: Format,
@@ -147,7 +148,7 @@ fn emit_reports(reports: &[ScanReport], format: Format) -> Result<()> {
         }
         Format::Sarif => println!(
             "{}",
-            serde_json::to_string_pretty(&sarif::render_reports(&reports)?)?
+            serde_json::to_string_pretty(&sarif::render_reports(reports)?)?
         ),
         Format::Text => {
             for report in reports {
