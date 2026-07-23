@@ -21,10 +21,11 @@ mod config;
 mod decision;
 mod injection;
 mod judge;
+mod snapshot;
 mod surface;
 
 pub use judge::{LlmJudge, LlmJudgeRequest, LlmJudgeResponse};
-pub use surface::{classify, SurfaceKind};
+pub use surface::{classify, CoordinatePolicy, ScanRootContext, ScanRootEntryType, SurfaceKind};
 
 /// One text file collected from the scanned tree, with its surface class.
 pub struct SurfaceFile {
@@ -271,7 +272,7 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
 
     let mut files = Vec::new();
     for Candidate { rel, state } in candidates {
-        let kind = classify(&rel, &skill_dirs);
+        let kind = classify(CoordinatePolicy::LegacyRootRelative, &rel, &skill_dirs);
         if kind.is_none()
             && matches!(&state, CandidateState::SymlinkTargetError(_))
             && is_protected_tree_path(&rel, &skill_dirs)

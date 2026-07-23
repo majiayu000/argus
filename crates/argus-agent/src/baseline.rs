@@ -88,6 +88,7 @@ pub fn extract_entries(files: &[SurfaceFile]) -> Vec<DescEntry> {
                 }
             }
             SurfaceKind::Script => {}
+            SurfaceKind::InventoryOnly => {}
         }
     }
     entries
