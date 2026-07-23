@@ -71,6 +71,12 @@ impl ScanRootContext {
             .iter()
             .map(|directory| {
                 let directory = directory.strip_suffix('/').unwrap_or(directory);
+                if directory.is_empty() {
+                    return self
+                        .prefix
+                        .as_ref()
+                        .map_or_else(String::new, |prefix| format!("{prefix}/"));
+                }
                 let qualified = self.qualify(directory);
                 format!("{qualified}/")
             })
@@ -336,6 +342,18 @@ mod tests {
                 CoordinatePolicy::SnapshotRootAware(&context),
                 "tool/run.py",
                 &["tool/".to_string()],
+            ),
+            Some(SurfaceKind::Script)
+        );
+
+        let ordinary = sandbox.path().join("ordinary");
+        let ordinary_context =
+            ScanRootContext::from_canonical_scan_root(&ordinary, ScanRootEntryType::Directory);
+        assert_eq!(
+            classify(
+                CoordinatePolicy::SnapshotRootAware(&ordinary_context),
+                "tool/run.py",
+                &["".to_string()],
             ),
             Some(SurfaceKind::Script)
         );
