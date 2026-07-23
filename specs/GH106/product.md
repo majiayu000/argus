@@ -101,7 +101,12 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    `report ready → atomic persist attempt → normal render/normal exit`；只有
    persist 成功后才能输出 bare 正常 report、`snapshot written` 成功消息或依据
    report 返回正常 exit。任一 persist 阶段失败必须走 B-004 partial output，
-   绝不能先输出 clean/allow 再报写入错误。
+   绝不能先输出 clean/allow 再报写入错误。五个原子阶段由 `argus-agent`
+   内部私有 unit fault matrix 验证；CLI 黑盒测试必须运行 production binary，
+   通过 root 外 non-empty directory destination 触发真实 persist failure，
+   验证统一 partial output、未调用 normal renderer、目录内 sentinel 不变，并
+   保留成功写入 control。不得为测试增加 Cargo feature、公开/隐藏 API、隐藏
+   flag 或环境变量。
 7. B-007 CLI 契约固定为
    `argus agent scan <PATH> --check-snapshot <FILE>`（读取并比较）与
    `argus agent scan <PATH> --update-snapshot <FILE>`（不存在则创建，存在则
@@ -126,13 +131,20 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
     并扩展到 issue 声明的全部 `.claude/**` 以及现有攻击规则/文档列出的
     `.cursorrules`、`.aider.conf.yml`、`.continuerules`、`.codexrules`、
     `.windsurfrules`；新增一种受支持路径形状时，普通扫描与 snapshot inventory
-    必须在同一版本同时看到它。此前已有语义分析的路径继续使用原语义类别与
-    validation；仅为 inventory 新纳入、此前不受语义分析的路径不得因 binary、
-    非 UTF-8、超限或 symlink 在无 snapshot flag 的普通 scan 中新增 finding
-    或 operational error。AGT-04 inventory 仍必须记录并比较这些成员。walker
-    不得在分类前仅凭任一祖先 basename（包括 `.git`、`node_modules`）剪掉
-    subtree；受支持高上下文 root 内的全部后代，以及 legacy-pruned ancestor
-    后发现的受支持成员，都必须到达同一个分类器并进入 inventory。
+    必须在同一版本复用同一 classifier，但 discovery reachability 按 mode 固定：
+    `SnapshotMode::None`（包括无 snapshot flag 与 AGT-02-only check/update）
+    完全保留 legacy `.git`/`node_modules` subtree pruning；只有 AGT-04
+    `Check/Update` 使用不按这些 ancestor basename 剪枝的 complete discovery。
+    legacy collector 到达的 `InventoryOnly` entry 仍须在正文或 symlink
+    validation 前 no-op，确保 classifier 扩展不改变默认 semantic 结果。
+    complete discovery 的每项都同时保存正交的 filesystem
+    `entry_type = file | directory | symlink` 与
+    `surface_kind = Option<SurfaceKind>`；不得用 surface kind 推断 filesystem
+    类型。AGT-04 inventory 记录所有 classified file/directory/symlink。
+    snapshot mode 的 semantic projection 必须先跳过 directory，再跳过
+    `InventoryOnly` file/symlink；既有 semantic kind 的 symlink 仍保持 hard
+    error，既有 semantic file 继续原 validation。仅为 inventory 新纳入的
+    binary、非 UTF-8、超限或 symlink 不得改变 semantic finding/error。
 
 ## 验收标准
 
@@ -152,22 +164,27 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
       `.claude/settings.json`、`.cursorrules` 与 skill-tree script 时，check/update
       都在排除/load/render/write 前失败且不改 bytes/mtime；非 classified 的
       root 内 snapshot 与 root 外 snapshot 仍可使用。
-- [ ] check 不改变 snapshot 的 bytes/mtime；原子写入各阶段可故障注入并证明
-      失败保留旧 bytes/mtime、无临时文件泄漏。
-- [ ] `--update-snapshot` 的 FileSync、Persist 及其余原子阶段故障注入均证明：
-      失败前未调用正常 renderer/exit；JSON 为 B-004 envelope、SARIF invocation
-      false、text 无 clean/allow、stderr sanitized、exit 2。
+- [ ] check 不改变 snapshot 的 bytes/mtime；`argus-agent` 私有 unit fault
+      matrix 覆盖全部五个原子阶段，证明失败保留旧 bytes/mtime、无临时文件泄漏。
+- [ ] `CARGO_BIN_EXE` CLI 黑盒测试把 root 外 non-empty directory 作为 update
+      destination，触发真实 production persist failure；证明失败前未调用正常
+      renderer/exit，JSON 为 B-004 envelope、SARIF invocation false、text 无
+      clean/allow、stderr sanitized、exit 2，目录 sentinel 不变；正常 file
+      destination success control 证明 persist happens-before normal render。
 - [ ] 语义扫描成功时，既有 finding 之后追加按逻辑路径稳定排序的 AGT-04
       finding；语义 symlink hard error 时仍输出已完成的 AGT-04 finding，并将
       text/JSON/SARIF 标为执行失败；partial JSON 精确匹配 B-004 envelope，
       普通/完整 JSON 仍是 bare `ScanReport`。
 - [ ] CLI help、互斥矩阵、单路径守卫、AGT-02 check 与 AGT-04 check 共存均有测试。
-- [ ] 无 snapshot flag 时，新增 inventory-only binary、oversized 与 symlink
-      fixture 的普通 scan 结果与引入 AGT-04 前一致；启用 snapshot 时三者均进入
-      inventory。
-- [ ] `.claude/node_modules/**`、`.claude/.git/**` 以及 legacy-pruned ancestor
-      下的 classified surface fixture 均进入 AGT-04 inventory；普通未分类
-      descendant 不进入 inventory，且 walker error 仍 fail closed。
+- [ ] `SnapshotMode::None` 的无 snapshot scan 与 AGT-02-only check/update
+      均继续 prune `.git`/`node_modules`，结果与引入 AGT-04 前一致；snapshot
+      Check/Update 对相同 tree 才运行 complete discovery。
+- [ ] snapshot Check/Update 中，inventory-only binary、oversized、file、
+      directory 与 symlink 以及 `.claude/node_modules/**`、`.claude/.git/**`
+      和 legacy-pruned ancestor 下的 classified surface 均进入 inventory；
+      semantic projection 按 directory → InventoryOnly → legacy semantic
+      validation 顺序执行，普通未分类 descendant 不进入 inventory，complete
+      discovery 的 walker error 仍 fail closed。
 - [ ] README 文档化审批边界、推荐流程、五个 rule ID、存放建议与限制。
 - [ ] `cargo test --workspace --all-targets`、agent corpus 与 SpecRail 门禁通过；
       新代码行覆盖率至少 80%，schema/hash/atomic/fail-closed 关键路径 100%。
