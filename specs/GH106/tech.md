@@ -317,11 +317,33 @@ normal renderer 和 normal exit 尚未调用、sentinel 不变、临时文件清
 
 ## 数据流
 
-`PATH + SnapshotMode + BaselineMode` → strict identity/path validation →
-non-following inventory walker → full-byte/file-or-link hash → optional v1 snapshot
-load/compare → sorted AGT-04 findings → existing semantic rules/AGT-02/judge →
-merged report or retained partial report → text/JSON/SARIF renderer → optional
-atomic snapshot persist（仅 update 且前序完整）。
+共同前缀为 `PATH + SnapshotMode + BaselineMode` → strict identity/path
+validation → non-following inventory walker → full-byte/file-or-link hash →
+optional v1 snapshot load/compare → sorted AGT-04 findings → existing semantic
+rules/AGT-02/judge → report/decision ready in memory。此后只能进入以下互斥分支：
+
+```text
+check success
+  → report in memory
+  → normal text/JSON/SARIF renderer
+  → normal exit
+
+update success
+  → report in memory
+  → atomic snapshot persist success
+  → normal text/JSON/SARIF renderer
+  → "snapshot written"
+  → normal exit
+
+semantic / judge / persist error after inventory completion
+  → retained in-memory report with decision=block
+  → partial operational text/JSON/SARIF renderer
+  → sanitized stderr
+  → exit 2
+```
+
+error 分支绝不调用 normal renderer，persist error 也不得在失败前输出 bare
+report、`snapshot written` 或 normal exit。
 
 没有网络调用、子进程或被扫描代码执行；仅显式 LLM judge 保持现有 opt-in 行为。
 
