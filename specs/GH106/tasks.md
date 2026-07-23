@@ -32,10 +32,13 @@ GH-106
   Snapshot 模块不含高上下文路径名单；所有
   membership 来自扩展后的 `surface::classify`；multi-chunk binary file hash 到
   EOF，snapshot 自身排除；symlink 仅存 raw-target SHA-256；严格 schema/path/
-  UTF-8/race/incomplete 错误全部 fail closed；合法 `entries: {}` round-trip，
-  empty-approved→nonempty-current 全部为 added，反向全部为 removed；
-  同 path 按 symlink → add/remove → type → content 优先级只产生一个固定 rule；
-  evidence 逐字节匹配 B-003 无空格分号 grammar，且值域无 escaping。
+  UTF-8/race/incomplete 错误全部 fail closed；合法 `entries: {}` round-trip；
+  空集合 transition 四项分别为 file/directory added、symlink
+  symlink-changed、file/directory removed、symlink symlink-changed；同 path
+  按 symlink → add/remove → type → content 优先级只产生一个固定 rule；
+  evidence 逐字节匹配 B-003 无空格分号 grammar，`change=` 只允许
+  `entry_added|entry_removed|content_modified|entry_type_changed|symlink_changed`
+  并与五个 rule 一一映射，且所有值无 escaping。
 
 - [ ] `SP106-T3` 在 agent crate 接入 SnapshotMode、冻结 inventory → semantic → optional persist 顺序，并保留 partial finding。Covers: B-003, B-004, B-005, B-007, B-009. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: 成功顺序固定，hard error 保留 diff，失败 update 不写且 decision 不降级。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
   File ownership: `crates/argus-agent/src/lib.rs`.
@@ -109,8 +112,10 @@ Product invariant 集合
   flag 冲突，因为两个 trust artifact 不能在一个命令中原子批准。
 - snapshot inventory 先于语义扫描是刻意的：既保留当前 protected symlink
   hard error，又保证 symlink diff 不因后续 `Err` 被静默丢弃。
-- 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须分别锁定
-  empty-approved→nonempty-current 的 added 与反向 removed，只有 missing、
-  malformed 或 incomplete traversal 才 operational failure。
+- 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须锁定四项
+  transition：empty→file/directory 为 added，empty→symlink 为
+  symlink-changed，file/directory→empty 为 removed，symlink→empty 为
+  symlink-changed。只有 missing、malformed 或 incomplete traversal 才
+  operational failure。
 - `crates/argus-agent/tests/integration.rs` 已超过 750 行，因此 GH-106 使用新的
   `gh106_snapshot.rs`，不得继续把 heavy-tier matrix 塞入旧文件。

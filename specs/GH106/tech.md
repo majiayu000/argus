@@ -84,10 +84,15 @@ inventory walker 沿用现有 root 规则：root symlink 拒绝，`follow_links(
    operational failure，不能提交 partial snapshot。
 
 完整遍历得到空 inventory 时，update 原子写入合法的 `entries: {}`。check 的
-集合比较不把空集合当错误：empty approved → nonempty current 对每个成员产生
-`AGT-04-entry-added`；nonempty approved → empty current 对每个旧成员产生
-`AGT-04-entry-removed`；empty ↔ empty 为 clean。只有无法证明遍历完整、snapshot
-缺失/损坏或 schema/path 非法才 fail closed。
+集合比较不把空集合当错误，但继续执行下节 symlink-first 优先级：
+
+- empty approved → current file/directory：`AGT-04-entry-added`；
+- empty approved → current symlink：`AGT-04-symlink-changed`；
+- approved file/directory → empty current：`AGT-04-entry-removed`；
+- approved symlink → empty current：`AGT-04-symlink-changed`。
+
+empty ↔ empty 为 clean。只有无法证明遍历完整、snapshot 缺失/损坏或
+schema/path 非法才 fail closed。
 `--check-snapshot/--update-snapshot` 指定的 snapshot 路径先做规范化 identity，
 并从 walker 与语义 collector 都排除；只排除这个显式路径，不排除指向它的其他
 symlink alias。
@@ -116,13 +121,13 @@ symlink alias。
 
 固定常量与 Medium severity：
 
-| Rule ID | 触发 |
-| --- | --- |
-| `AGT-04-symlink-changed` | 任一侧 kind 为 symlink，且另一侧缺失或 kind/digest 不同 |
-| `AGT-04-entry-added` | 非 symlink entry 仅在 current |
-| `AGT-04-entry-removed` | 非 symlink entry 仅在 approved |
-| `AGT-04-entry-type-changed` | 两侧均非 symlink，file/directory 不同 |
-| `AGT-04-content-modified` | 两侧均为 file 且 digest 不同 |
+| Rule ID | `change=` 字面值 | 触发 |
+| --- | --- | --- |
+| `AGT-04-symlink-changed` | `symlink_changed` | 任一侧 kind 为 symlink，且另一侧缺失或 kind/digest 不同 |
+| `AGT-04-entry-added` | `entry_added` | 非 symlink entry 仅在 current |
+| `AGT-04-entry-removed` | `entry_removed` | 非 symlink entry 仅在 approved |
+| `AGT-04-entry-type-changed` | `entry_type_changed` | 两侧均非 symlink，file/directory 不同 |
+| `AGT-04-content-modified` | `content_modified` | 两侧均为 file 且 digest 不同 |
 
 比较先按 path 排序；同 path 只产生一个 rule，按表中优先级判定。`Finding.location`
 是逻辑路径，`evidence` 固定为一个不含空格、无需 escaping 的分号 grammar：
@@ -131,12 +136,12 @@ symlink alias。
 change=<kind>;old_kind=<kind|null>;new_kind=<kind|null>;old_digest=<hex|null>;new_digest=<hex|null>
 ```
 
-`change` 是五种 change kind 闭集，`old_kind/new_kind` 是
-`file|directory|symlink|null`，digest 是 64 位小写 hex 或 `null`；因此值中
-不允许分号、等号、空白或自定义字符串，也不存在 escaping 分支。symlink 的
-`old_digest/new_digest` 填 link-target digest。detail 只复述变化类型，不含
-正文或 target。这样 text、JSON、SARIF 复用既有 Finding，无需修改
-`argus-core` schema。
+`change` 只能是表中五个 snake_case 字面值，并与同一行 rule 一一映射；
+`old_kind/new_kind` 是 `file|directory|symlink|null`，digest 是 64 位小写 hex
+或 `null`。因此值中不允许分号、等号、空白或自定义字符串，也不存在 escaping
+分支。symlink 的 `old_digest/new_digest` 填 link-target digest。detail 只复述
+变化类型，不含正文或 target。这样 text、JSON、SARIF 复用既有 Finding，无需
+修改 `argus-core` schema。
 
 ### 5. CLI flag 与 AGT-02 组合矩阵
 
@@ -309,9 +314,10 @@ atomic snapshot persist（仅 update 且前序完整）。
       合法空 snapshot round-trip、非 UTF-8 member path。
 - [ ] Hash/privacy: multi-chunk binary file、尾块变化、snapshot self-exclusion、
       非 UTF-8 symlink target、明文负断言。
-- [ ] Diff/decision: clean + 五类 rule/优先级/Medium/稳定顺序；
-      empty-approved→nonempty-current 全 added、nonempty-approved→empty-current
-      全 removed、empty↔empty clean。
+- [ ] Diff/decision: clean + 五类 rule/优先级/Medium/稳定顺序；空集合四项矩阵
+      分别断言 file/directory added、symlink added→symlink-changed、
+      file/directory removed、symlink removed→symlink-changed；empty↔empty
+      clean。
 - [ ] Atomic: 五个 fault point，existing/missing destination，bytes/mtime/temp cleanup；
       AGT-02 serialized bytes 回归。
 - [ ] CLI: help、conflict 矩阵、单路径、baseline check + snapshot check、update 不压

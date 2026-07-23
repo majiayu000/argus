@@ -58,7 +58,13 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    适用的旧/新 digest；缺失侧或 directory digest 明确为 `null`。evidence
    精确为无空格分号 grammar
    `change=<kind>;old_kind=<kind|null>;new_kind=<kind|null>;old_digest=<hex|null>;new_digest=<hex|null>`；
-   所有值只能来自已声明闭集、64 位小写 hex 或 `null`，不允许 escaping。
+   `change` 的 snake_case 闭集与 rule 一一映射：
+   `entry_added` ↔ `AGT-04-entry-added`、`entry_removed` ↔
+   `AGT-04-entry-removed`、`content_modified` ↔
+   `AGT-04-content-modified`、`entry_type_changed` ↔
+   `AGT-04-entry-type-changed`、`symlink_changed` ↔
+   `AGT-04-symlink-changed`。其余值只能来自已声明闭集、64 位小写 hex 或
+   `null`，不允许 escaping。
 4. B-004 check 是只读且幂等：不得改变 snapshot 或被扫描树的 bytes/mtime，
    输入不变时 finding 的内容与顺序相同。inventory 比较完成后才运行既有语义
    扫描；语义扫描的 operational error（包括受保护 symlink hard error）
@@ -74,9 +80,11 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    为空/绝对/含 `.` 或 `..`/含反斜线、路径非 UTF-8、目标或成员不可读、遍历
    或 hash 未覆盖全部字节、或扫描期间观察到成员变化时，必须返回 operational
    failure，不得报告 clean，也不得把未覆盖部分当作“无变化”。合法空 snapshot
-   与非空 current 比较时，每个新增成员产生 `AGT-04-entry-added`；合法非空
-   snapshot 与空 current 比较时，每个旧成员产生 `AGT-04-entry-removed`；
-   两侧都合法为空才是 clean。
+   到 current file/directory 产生 `AGT-04-entry-added`，到 current symlink
+   产生 `AGT-04-symlink-changed`；approved file/directory 到空 current 产生
+   `AGT-04-entry-removed`，approved symlink 到空 current 产生
+   `AGT-04-symlink-changed`。两侧都合法为空才是 clean；空集合 transition
+   不得覆盖 B-003 的 symlink 优先级。
 6. B-006 `--update-snapshot` 采用同目录原子替换。创建临时文件、写入、flush、
    文件 sync 或 replace 任一阶段失败时，命令返回 operational failure，旧
    snapshot 的 bytes/mtime 保持不变，临时文件被清理；不存在旧 snapshot 时
@@ -114,8 +122,11 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 - [ ] 五类 finding 的 evidence 逐字节匹配 B-003 分号 grammar，值域无 escaping。
 - [ ] schema 严格拒绝未知字段/非法字段组合/非规范或非 UTF-8 路径；合法
       `entries: {}` 可 round-trip。
-- [ ] `empty approved → nonempty current` 逐项产生 `AGT-04-entry-added`；
-      `nonempty approved → empty current` 逐项产生 `AGT-04-entry-removed`。
+- [ ] transition fixture 分别锁定四项：empty-approved → current
+      file/directory 为 `AGT-04-entry-added`；→ current symlink 为
+      `AGT-04-symlink-changed`；approved file/directory → empty-current 为
+      `AGT-04-entry-removed`；approved symlink → empty-current 为
+      `AGT-04-symlink-changed`。
 - [ ] file digest 流式覆盖全部字节；snapshot 自身不进入 inventory。
 - [ ] check 不改变 snapshot 的 bytes/mtime；原子写入各阶段可故障注入并证明
       失败保留旧 bytes/mtime、无临时文件泄漏。
@@ -132,7 +143,7 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 
 | 类别 | 判定（covered: B-xxx / N/A + 原因） |
 | --- | --- |
-| 空/缺失输入 | covered: B-001, B-005；合法空 snapshot 可保存，empty→nonempty 为 added，nonempty→empty 为 removed，缺失 snapshot 仍失败 |
+| 空/缺失输入 | covered: B-001, B-003, B-005；合法空 snapshot 可保存，file/directory 用 added/removed，任一侧 symlink 仍用 symlink-changed，缺失 snapshot 失败 |
 | 错误与失败路径 | covered: B-002, B-004, B-005, B-006 |
 | 授权/权限 | covered: B-007, B-009；check 与 update 的授权边界及组合已闭合 |
 | 并发/竞态 | covered: B-005, B-006；扫描期变化失败，写入失败保留旧 snapshot |
