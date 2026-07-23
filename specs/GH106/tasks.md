@@ -20,7 +20,7 @@ GH-106
   bytes/mtime 不变、missing destination 不产生半文件、无 tempfile 泄漏；AGT-02
   序列化 bytes 与现状相同。
 
-- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: membership 单一来源、全字节/隐私/schema/fail-closed/rule 优先级矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
+- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: membership 单一来源、合法空 snapshot、empty/nonempty 双向 transition、全字节/隐私/schema/fail-closed/rule 优先级矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
   File ownership:
   `crates/argus-agent/src/snapshot.rs`,
   `crates/argus-agent/src/surface.rs`,
@@ -32,8 +32,10 @@ GH-106
   Snapshot 模块不含高上下文路径名单；所有
   membership 来自扩展后的 `surface::classify`；multi-chunk binary file hash 到
   EOF，snapshot 自身排除；symlink 仅存 raw-target SHA-256；严格 schema/path/
-  UTF-8/empty/race 错误全部 fail closed；同 path 按 symlink → add/remove →
-  type → content 优先级只产生一个固定 rule。
+  UTF-8/race/incomplete 错误全部 fail closed；合法 `entries: {}` round-trip，
+  empty-approved→nonempty-current 全部为 added，反向全部为 removed；
+  同 path 按 symlink → add/remove → type → content 优先级只产生一个固定 rule；
+  evidence 逐字节匹配 B-003 无空格分号 grammar，且值域无 escaping。
 
 - [ ] `SP106-T3` 在 agent crate 接入 SnapshotMode、冻结 inventory → semantic → optional persist 顺序，并保留 partial finding。Covers: B-003, B-004, B-005, B-007, B-009. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: 成功顺序固定，hard error 保留 diff，失败 update 不写且 decision 不降级。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
   File ownership: `crates/argus-agent/src/lib.rs`.
@@ -48,7 +50,7 @@ GH-106
   `false` 并有 sanitized error notification；AGT-04 results 只出现一次，
   decision 为 block，target/plaintext 不出现在 document。
 
-- [ ] `SP106-T5` 接入精确 Clap/handler 契约与 text/JSON/SARIF/exit 行为。Covers: B-004, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: help/互斥/单路径/AGT-02 check 共存、readonly、partial 与 update exit 契约全部通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
+- [ ] `SP106-T5` 接入精确 Clap/handler 契约与 text/JSON/SARIF/exit 行为。Covers: B-004, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: help/互斥/单路径/AGT-02 check 共存、readonly、精确 partial JSON envelope、普通/完整 JSON 兼容与 update exit 契约全部通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
   File ownership:
   `crates/argus-cli/src/main.rs`,
   `crates/argus-cli/src/agent.rs`,
@@ -57,7 +59,12 @@ GH-106
   `--update-snapshot <FILE>`；check+check (`--baseline` + `--check-snapshot`)
   成功，其余 update/persistence 组合由 Clap 和 handler 双重拒绝；所有
   persistence mode 拒绝多 PATH；check 前后 snapshot bytes/mtime 相同；
-  partial text/JSON/SARIF 保留 finding、stderr 报 operational error、exit 2；
+  partial JSON 精确为
+  `{schemaVersion:1,executionSuccessful:false,operationalError:
+  {kind:"agent_scan_incomplete",message:<sanitized>},report:<ScanReport>}`，
+  report decision=block 且保留 finding；完整 snapshot/无 snapshot JSON 继续
+  输出 bare report。partial text/SARIF 保留 finding、stderr 报 operational
+  error、exit 2；
   update 写成功打印固定 entry count，但不把 semantic block/approval 强制改为
   exit 0。
 
@@ -102,5 +109,8 @@ Product invariant 集合
   flag 冲突，因为两个 trust artifact 不能在一个命令中原子批准。
 - snapshot inventory 先于语义扫描是刻意的：既保留当前 protected symlink
   hard error，又保证 symlink diff 不因后续 `Err` 被静默丢弃。
+- 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须分别锁定
+  empty-approved→nonempty-current 的 added 与反向 removed，只有 missing、
+  malformed 或 incomplete traversal 才 operational failure。
 - `crates/argus-agent/tests/integration.rs` 已超过 750 行，因此 GH-106 使用新的
   `gh106_snapshot.rs`，不得继续把 heavy-tier matrix 塞入旧文件。

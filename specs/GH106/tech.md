@@ -51,7 +51,8 @@ Link to `product.md`.
 
 root 与 entry 均 `deny_unknown_fields`，并在 deserialize 后做完整 validation：
 
-- `version` 必须恰为 `1`，`entries` 不得为空；
+- `version` 必须恰为 `1`；`entries: {}` 是合法且可 round-trip 的完整空
+  inventory；
 - key 必须是非空 UTF-8、相对、forward-slash 路径；禁止 `\`、空 segment、
   `.`、`..`、root/prefix component 与尾随 `/`；
 - `kind` 是 `file | directory | symlink` 闭集；
@@ -82,10 +83,14 @@ inventory walker 沿用现有 root 规则：root symlink 拒绝，`follow_links(
    file identity 变化，或 walker/read 任一步失败，整个 inventory
    operational failure，不能提交 partial snapshot。
 
-当前 inventory 为空在 update 时拒绝；check 时若 snapshot 合法非空而 current
-为空，比较器仍产生每个 removed finding。`--check-snapshot/--update-snapshot`
-指定的 snapshot 路径先做规范化 identity，并从 walker 与语义 collector 都排除；
-只排除这个显式路径，不排除指向它的其他 symlink alias。
+完整遍历得到空 inventory 时，update 原子写入合法的 `entries: {}`。check 的
+集合比较不把空集合当错误：empty approved → nonempty current 对每个成员产生
+`AGT-04-entry-added`；nonempty approved → empty current 对每个旧成员产生
+`AGT-04-entry-removed`；empty ↔ empty 为 clean。只有无法证明遍历完整、snapshot
+缺失/损坏或 schema/path 非法才 fail closed。
+`--check-snapshot/--update-snapshot` 指定的 snapshot 路径先做规范化 identity，
+并从 walker 与语义 collector 都排除；只排除这个显式路径，不排除指向它的其他
+symlink alias。
 
 ### 3. canonical membership 只有 `surface::classify`
 
@@ -120,14 +125,17 @@ inventory walker 沿用现有 root 规则：root symlink 拒绝，`follow_links(
 | `AGT-04-content-modified` | 两侧均为 file 且 digest 不同 |
 
 比较先按 path 排序；同 path 只产生一个 rule，按表中优先级判定。`Finding.location`
-是逻辑路径，`evidence` 固定为一个不含空格的字符串：
+是逻辑路径，`evidence` 固定为一个不含空格、无需 escaping 的分号 grammar：
 
 ```text
-change=<kind> old_kind=<kind|null> new_kind=<kind|null> old_digest=<hex|null> new_digest=<hex|null>
+change=<kind>;old_kind=<kind|null>;new_kind=<kind|null>;old_digest=<hex|null>;new_digest=<hex|null>
 ```
 
-symlink 的 `old_digest/new_digest` 填 link-target digest。detail 只复述变化类型，
-不含正文或 target。这样 text、JSON、SARIF 复用既有 Finding，无需修改
+`change` 是五种 change kind 闭集，`old_kind/new_kind` 是
+`file|directory|symlink|null`，digest 是 64 位小写 hex 或 `null`；因此值中
+不允许分号、等号、空白或自定义字符串，也不存在 escaping 分支。symlink 的
+`old_digest/new_digest` 填 link-target digest。detail 只复述变化类型，不含
+正文或 target。这样 text、JSON、SARIF 复用既有 Finding，无需修改
 `argus-core` schema。
 
 ### 5. CLI flag 与 AGT-02 组合矩阵
@@ -175,9 +183,27 @@ stderr diagnostic，不能渲染 clean report。若步骤 3 已得到 finding、
 
 - outcome 保留全部已完成 AGT-04 finding，`report.decision` 强制为 `block`，
   不伪装成 allow/clean；
-- text/JSON stdout 使用现有 report 结构渲染这些 finding；stderr 输出
-  `argus: error: agent scan incomplete: ...`；进程使用现有 operational
-  error exit code 2；
+- text stdout 使用现有 report renderer；stderr 输出
+  `argus: error: agent scan incomplete: ...`；进程使用现有 operational error
+  exit code 2；
+- JSON stdout 只在这个 partial case 使用以下专用 camelCase envelope，字段
+  不可增删、改名或输出 `null` 替代对象；`message` 是不含正文/symlink target
+  的 sanitized 单行字符串，`report` 是未改 schema 的既有 `ScanReport`：
+
+```json
+{
+  "schemaVersion": 1,
+  "executionSuccessful": false,
+  "operationalError": {
+    "kind": "agent_scan_incomplete",
+    "message": "<sanitized>"
+  },
+  "report": "<existing ScanReport with decision=block and retained findings>"
+}
+```
+
+- 完整 snapshot check/update 与无 snapshot scan 的 JSON stdout 仍直接序列化
+  bare `ScanReport`（多 path 时仍是既有 report array），不使用 envelope；
 - SARIF 保留 results，设置
   `runs[0].invocations[0].executionSuccessful=false`，并加入不含敏感内容的
   error `toolExecutionNotification`；result decision 为 `block`；
@@ -207,17 +233,23 @@ AGT-04 已完成证据与后续 hard error 的组合边界。
 - `crates/argus-agent/src/surface.rs`：唯一 membership 扩展与 inventory-only kind。
 - `crates/argus-agent/src/lib.rs`：SnapshotMode、顺序编排与 partial outcome。
 - `crates/argus-cli/src/main.rs`：Clap flags、conflict 矩阵及参数转发。
-- `crates/argus-cli/src/agent.rs`：单路径守卫、输出/exit/update 编排。
+- `crates/argus-cli/src/agent.rs`：单路径守卫、partial JSON envelope、
+  输出/exit/update 编排。
 - `crates/argus-cli/src/sarif.rs`：incomplete invocation 的 SARIF 表达。
 - `crates/argus-agent/tests/gh106_snapshot.rs` 与固定 fixture：schema、hash、
   membership、五类 rule、atomic/fail-closed。
 - `crates/argus-cli/tests/agent_snapshot_cli.rs`：help/互斥、共存、三种输出、
-  bytes/mtime 与 partial hard-error。
+  bytes/mtime、partial envelope 与完整 JSON 回归。
 - `README.md`：AGT-04 workflow、rule、批准边界与限制。
 
 <!-- specrail-planned-changes
 {"version":1,"issue":106,"complete":true,"paths":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md","crates/argus-agent/src/atomic_write.rs","crates/argus-agent/src/baseline.rs","crates/argus-agent/src/snapshot.rs","crates/argus-agent/src/surface.rs","crates/argus-agent/src/lib.rs","crates/argus-agent/tests/gh106_snapshot.rs","crates/argus-agent/tests/fixtures/agt04-snapshot-base/AGENTS.md","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/settings.json","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.claude/rules/policy.txt","crates/argus-agent/tests/fixtures/agt04-snapshot-base/.cursorrules","crates/argus-cli/src/main.rs","crates/argus-cli/src/agent.rs","crates/argus-cli/src/sarif.rs","crates/argus-cli/tests/agent_snapshot_cli.rs","README.md"],"spec_refs":["specs/GH106/product.md","specs/GH106/tech.md","specs/GH106/tasks.md"]}
 -->
+
+现有 manifest 已包含实现专用 envelope 所需的 `main.rs`（flag/参数转发）、
+`agent.rs`（JSON serialization/exit）与 `agent_snapshot_cli.rs`（shape 与兼容
+回归）；因为 envelope 嵌入现有 `ScanReport` 而不改其 schema，不新增
+`argus-core` 路径。
 
 ## Product-to-Test Mapping
 
@@ -226,8 +258,8 @@ AGT-04 已完成证据与后续 hard error 的组合边界。
 | B-001 | `snapshot.rs` inventory、streaming SHA-256、排序与 self-exclusion | `cargo test -p argus-agent --test gh106_snapshot deterministic_full_byte_inventory` |
 | B-002 | strict v1 deserialize/validation | `cargo test -p argus-agent --test gh106_snapshot strict_schema_matrix` |
 | B-003 | compare 优先级、五个 rule 常量与 canonical evidence | `cargo test -p argus-agent --test gh106_snapshot five_change_rules_are_medium` |
-| B-004 | `lib.rs` 顺序/partial outcome 与 CLI bytes/mtime | `cargo test -p argus-cli --test agent_snapshot_cli check_is_readonly_and_partial_error_keeps_findings` |
-| B-005 | path/UTF-8/empty/race/read/hash fail-closed matrix | `cargo test -p argus-agent --test gh106_snapshot fail_closed_matrix` |
+| B-004 | `lib.rs` 顺序/partial outcome、CLI bytes/mtime 与专用 JSON envelope | `cargo test -p argus-cli --test agent_snapshot_cli partial_json_envelope_is_exact_and_complete_json_is_unchanged` |
+| B-005 | path/UTF-8/race/read/hash fail-closed 与合法空集合 transition | `cargo test -p argus-agent --test gh106_snapshot empty_inventory_transition_matrix` |
 | B-006 | `atomic_write.rs` fault enum + sentinel assertions | `cargo test -p argus-agent atomic_write_fault_matrix` |
 | B-007 | `main.rs` Clap contract + `agent.rs` defensive guard | `cargo test -p argus-cli --test agent_snapshot_cli flag_contract_matrix` |
 | B-008 | symlink raw-byte digest 与 all-format leak negatives | `cargo test -p argus-cli --test agent_snapshot_cli symlink_digest_never_leaks_target` |
@@ -274,15 +306,18 @@ atomic snapshot persist（仅 update 且前序完整）。
 ## 测试计划
 
 - [ ] Unit/integration: strict schema 全字段组合、规范路径、未知 version/field、
-      空 snapshot、非 UTF-8 member path。
+      合法空 snapshot round-trip、非 UTF-8 member path。
 - [ ] Hash/privacy: multi-chunk binary file、尾块变化、snapshot self-exclusion、
       非 UTF-8 symlink target、明文负断言。
-- [ ] Diff/decision: clean + 五类 rule/优先级/Medium/稳定顺序、empty current removed。
+- [ ] Diff/decision: clean + 五类 rule/优先级/Medium/稳定顺序；
+      empty-approved→nonempty-current 全 added、nonempty-approved→empty-current
+      全 removed、empty↔empty clean。
 - [ ] Atomic: 五个 fault point，existing/missing destination，bytes/mtime/temp cleanup；
       AGT-02 serialized bytes 回归。
 - [ ] CLI: help、conflict 矩阵、单路径、baseline check + snapshot check、update 不压
       finding/exit、check bytes/mtime。
-- [ ] Output: text/JSON/SARIF 的完整与 partial cases；SARIF
+- [ ] Output: partial JSON 精确 camelCase envelope 与 sanitized error；完整
+      snapshot/无 snapshot JSON 保持 bare report；SARIF
       `executionSuccessful=false`、findings 不丢不重复、stderr 无敏感内容。
 - [ ] Repository: fmt/check/clippy/workspace tests、agent corpus、SpecRail targeted/all。
 - [ ] Coverage: `cargo llvm-cov -p argus-agent -p argus-cli --summary-only` 新代码行

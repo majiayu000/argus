@@ -42,7 +42,8 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    file digest 是对文件从首字节到 EOF 的全部原始字节计算的 SHA-256，不能
    因文件较大、为 binary 或不是 UTF-8 而截断、跳过或改写。snapshot 文件
    自身是唯一的显式成员排除项。条目按路径确定性排序；同一输入重复生成必须
-   逐字节一致。
+   逐字节一致。完整遍历后没有任何受支持成员是合法的空 inventory，必须能
+   确定性保存为合法空 snapshot。
 2. B-002 snapshot 使用严格的版本化 schema。未知版本、未知字段、未知类型、
    非 64 位小写十六进制 digest，以及类型与字段的非法组合都必须拒绝：
    file 必须且只能有 `digest`，directory 不得有 digest，symlink 必须且只能有
@@ -54,18 +55,28 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    `AGT-04-symlink-changed`（含 symlink 新增、移除、目标变化及与
    file/directory 互换）；其余依次按单侧存在、file/directory 类型互换、
    file digest 变化判定。每个 finding 携带逻辑路径、变化类型、旧/新类型与
-   适用的旧/新 digest；缺失侧或 directory digest 明确为 `null`。
+   适用的旧/新 digest；缺失侧或 directory digest 明确为 `null`。evidence
+   精确为无空格分号 grammar
+   `change=<kind>;old_kind=<kind|null>;new_kind=<kind|null>;old_digest=<hex|null>;new_digest=<hex|null>`；
+   所有值只能来自已声明闭集、64 位小写 hex 或 `null`，不允许 escaping。
 4. B-004 check 是只读且幂等：不得改变 snapshot 或被扫描树的 bytes/mtime，
    输入不变时 finding 的内容与顺序相同。inventory 比较完成后才运行既有语义
    扫描；语义扫描的 operational error（包括受保护 symlink hard error）
    不得丢弃已完成的 AGT-04 finding。此时输出保留这些 finding、明确标为未完整
-   执行并返回 operational failure，绝不输出 clean/allow 结论。
+   执行并返回 operational failure，绝不输出 clean/allow 结论。仅在这一
+   partial 情形，JSON stdout 使用 camelCase envelope
+   `{schemaVersion:1, executionSuccessful:false, operationalError:
+   {kind:"agent_scan_incomplete", message:<sanitized>}, report:<existing
+   ScanReport>}`；内嵌 report 的 decision 为 `block`。完整 snapshot check、
+   update、普通无 snapshot scan 的 JSON 继续直接输出既有 `ScanReport`，不得
+   加 envelope 或改字段。
 5. B-005 snapshot 缺失、损坏、版本不支持、schema 字段组合非法、条目路径
-   为空/绝对/含 `.` 或 `..`/含反斜线、路径非 UTF-8、snapshot 条目集合为空、
-   目标或成员不可读、遍历或 hash 未覆盖全部字节、或扫描期间观察到成员变化时，
-   必须返回 operational failure，不得报告 clean，也不得把未覆盖部分当作
-   “无变化”。合法的非空 snapshot 与当前空 inventory 比较时，必须报告所有
-   已删除成员，不能把“当前为空”误判为无效 snapshot。
+   为空/绝对/含 `.` 或 `..`/含反斜线、路径非 UTF-8、目标或成员不可读、遍历
+   或 hash 未覆盖全部字节、或扫描期间观察到成员变化时，必须返回 operational
+   failure，不得报告 clean，也不得把未覆盖部分当作“无变化”。合法空 snapshot
+   与非空 current 比较时，每个新增成员产生 `AGT-04-entry-added`；合法非空
+   snapshot 与空 current 比较时，每个旧成员产生 `AGT-04-entry-removed`；
+   两侧都合法为空才是 clean。
 6. B-006 `--update-snapshot` 采用同目录原子替换。创建临时文件、写入、flush、
    文件 sync 或 replace 任一阶段失败时，命令返回 operational failure，旧
    snapshot 的 bytes/mtime 保持不变，临时文件被清理；不存在旧 snapshot 时
@@ -100,13 +111,18 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 
 - [ ] 固定离线 fixture 覆盖 snapshot 创建、无变化、五类 rule、空 current
       inventory，以及 symlink target 原始字节 digest。
-- [ ] schema 严格拒绝未知字段/非法字段组合/非规范或非 UTF-8 路径/空 snapshot。
+- [ ] 五类 finding 的 evidence 逐字节匹配 B-003 分号 grammar，值域无 escaping。
+- [ ] schema 严格拒绝未知字段/非法字段组合/非规范或非 UTF-8 路径；合法
+      `entries: {}` 可 round-trip。
+- [ ] `empty approved → nonempty current` 逐项产生 `AGT-04-entry-added`；
+      `nonempty approved → empty current` 逐项产生 `AGT-04-entry-removed`。
 - [ ] file digest 流式覆盖全部字节；snapshot 自身不进入 inventory。
 - [ ] check 不改变 snapshot 的 bytes/mtime；原子写入各阶段可故障注入并证明
       失败保留旧 bytes/mtime、无临时文件泄漏。
 - [ ] 语义扫描成功时，既有 finding 之后追加按逻辑路径稳定排序的 AGT-04
       finding；语义 symlink hard error 时仍输出已完成的 AGT-04 finding，并将
-      text/JSON/SARIF 标为执行失败。
+      text/JSON/SARIF 标为执行失败；partial JSON 精确匹配 B-004 envelope，
+      普通/完整 JSON 仍是 bare `ScanReport`。
 - [ ] CLI help、互斥矩阵、单路径守卫、AGT-02 check 与 AGT-04 check 共存均有测试。
 - [ ] README 文档化审批边界、推荐流程、五个 rule ID、存放建议与限制。
 - [ ] `cargo test --workspace --all-targets`、agent corpus 与 SpecRail 门禁通过；
@@ -116,7 +132,7 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 
 | 类别 | 判定（covered: B-xxx / N/A + 原因） |
 | --- | --- |
-| 空/缺失输入 | covered: B-005；空 snapshot 非法，非空 snapshot 对空 current 产生删除 finding |
+| 空/缺失输入 | covered: B-001, B-005；合法空 snapshot 可保存，empty→nonempty 为 added，nonempty→empty 为 removed，缺失 snapshot 仍失败 |
 | 错误与失败路径 | covered: B-002, B-004, B-005, B-006 |
 | 授权/权限 | covered: B-007, B-009；check 与 update 的授权边界及组合已闭合 |
 | 并发/竞态 | covered: B-005, B-006；扫描期变化失败，写入失败保留旧 snapshot |
