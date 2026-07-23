@@ -75,7 +75,11 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    {kind:"agent_scan_incomplete", message:<sanitized>}, report:<existing
    ScanReport>}`；内嵌 report 的 decision 为 `block`。完整 snapshot check、
    update、普通无 snapshot scan 的 JSON 继续直接输出既有 `ScanReport`，不得
-   加 envelope 或改字段。
+   加 envelope 或改字段。`--update-snapshot` 的原子 persist failure 也属于
+   AGT-04 partial operational failure：不得在失败前调用普通 stdout renderer
+   或返回正常 decision；JSON 使用同一 envelope，SARIF 标记 invocation 失败，
+   text 明确输出 incomplete 且不得出现 clean/allow，stderr 仅含 sanitized
+   error，exit 为 2。
 5. B-005 snapshot 缺失、损坏、版本不支持、schema 字段组合非法、条目路径
    为空/绝对/含 `.` 或 `..`/含反斜线、路径非 UTF-8、目标或成员不可读、遍历
    或 hash 未覆盖全部字节、或扫描期间观察到成员变化时，必须返回 operational
@@ -88,7 +92,11 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 6. B-006 `--update-snapshot` 采用同目录原子替换。创建临时文件、写入、flush、
    文件 sync 或 replace 任一阶段失败时，命令返回 operational failure，旧
    snapshot 的 bytes/mtime 保持不变，临时文件被清理；不存在旧 snapshot 时
-   不得留下半成品。
+   不得留下半成品。完整 scan report 必须先只保存在内存中，顺序固定为
+   `report ready → atomic persist attempt → normal render/normal exit`；只有
+   persist 成功后才能输出 bare 正常 report、`snapshot written` 成功消息或依据
+   report 返回正常 exit。任一 persist 阶段失败必须走 B-004 partial output，
+   绝不能先输出 clean/allow 再报写入错误。
 7. B-007 CLI 契约固定为
    `argus agent scan <PATH> --check-snapshot <FILE>`（读取并比较）与
    `argus agent scan <PATH> --update-snapshot <FILE>`（不存在则创建，存在则
@@ -113,7 +121,10 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
     并扩展到 issue 声明的全部 `.claude/**` 以及现有攻击规则/文档列出的
     `.cursorrules`、`.aider.conf.yml`、`.continuerules`、`.codexrules`、
     `.windsurfrules`；新增一种受支持路径形状时，普通扫描与 snapshot inventory
-    必须在同一版本同时看到它。
+    必须在同一版本同时看到它。此前已有语义分析的路径继续使用原语义类别与
+    validation；仅为 inventory 新纳入、此前不受语义分析的路径不得因 binary、
+    非 UTF-8、超限或 symlink 在无 snapshot flag 的普通 scan 中新增 finding
+    或 operational error。AGT-04 inventory 仍必须记录并比较这些成员。
 
 ## 验收标准
 
@@ -130,11 +141,17 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 - [ ] file digest 流式覆盖全部字节；snapshot 自身不进入 inventory。
 - [ ] check 不改变 snapshot 的 bytes/mtime；原子写入各阶段可故障注入并证明
       失败保留旧 bytes/mtime、无临时文件泄漏。
+- [ ] `--update-snapshot` 的 FileSync、Persist 及其余原子阶段故障注入均证明：
+      失败前未调用正常 renderer/exit；JSON 为 B-004 envelope、SARIF invocation
+      false、text 无 clean/allow、stderr sanitized、exit 2。
 - [ ] 语义扫描成功时，既有 finding 之后追加按逻辑路径稳定排序的 AGT-04
       finding；语义 symlink hard error 时仍输出已完成的 AGT-04 finding，并将
       text/JSON/SARIF 标为执行失败；partial JSON 精确匹配 B-004 envelope，
       普通/完整 JSON 仍是 bare `ScanReport`。
 - [ ] CLI help、互斥矩阵、单路径守卫、AGT-02 check 与 AGT-04 check 共存均有测试。
+- [ ] 无 snapshot flag 时，新增 inventory-only binary、oversized 与 symlink
+      fixture 的普通 scan 结果与引入 AGT-04 前一致；启用 snapshot 时三者均进入
+      inventory。
 - [ ] README 文档化审批边界、推荐流程、五个 rule ID、存放建议与限制。
 - [ ] `cargo test --workspace --all-targets`、agent corpus 与 SpecRail 门禁通过；
       新代码行覆盖率至少 80%，schema/hash/atomic/fail-closed 关键路径 100%。
@@ -150,7 +167,7 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 | 重试/幂等 | covered: B-001, B-004, B-006 |
 | 非法状态转换 | covered: B-002, B-007, B-009；非法 schema/flag 组合及失败 update 不得变为批准 |
 | 兼容/迁移 | covered: B-007, B-010；默认行为与 AGT-02 check-only 组合保持兼容 |
-| 降级/回退 | covered: B-004, B-005；partial 或语义 hard error 不能伪装成 clean |
+| 降级/回退 | covered: B-004, B-005, B-006；semantic/judge/persist partial 都不能先渲染或伪装成 clean |
 | 证据与审计完整性 | covered: B-003, B-008；规则、优先级、digest 与隐私字段均冻结 |
 | 取消/中断 | covered: B-006；中断等同写入阶段失败，旧 snapshot 保持不变 |
 

@@ -11,17 +11,19 @@ GH-106
 
 ## 实现任务
 
-- [ ] `SP106-T1` 抽取 shared atomic byte writer，并让 AGT-02 baseline 改用它。Covers: B-006. Owner: persistence worker. Dependencies: none. Done when: 五阶段故障均保留旧 destination 且 AGT-02 bytes 不变。Verify: `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-agent baseline`.
+- [ ] `SP106-T1` 抽取 shared atomic byte writer，并让 AGT-02 baseline 改用它。Covers: B-006, B-010. Owner: persistence worker. Dependencies: none. Done when: 五阶段故障均保留旧 destination，AGT-02 bytes 不变，baseline exhaustive match 显式忽略 InventoryOnly。Verify: `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-agent baseline`.
   File ownership:
   `crates/argus-agent/src/atomic_write.rs`,
   `crates/argus-agent/src/baseline.rs`. Production 路径保持
   tempfile → write → flush → file sync → persist；test-only
   `CreateTemp/Write/Flush/FileSync/Persist` 故障矩阵逐项证明旧 destination
   bytes/mtime 不变、missing destination 不产生半文件、无 tempfile 泄漏；AGT-02
-  序列化 bytes 与现状相同。
+  序列化 bytes 与现状相同；`SurfaceKind::InventoryOnly` 在 baseline extraction
+  中显式 no-op。
 
-- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: membership 单一来源、合法空 snapshot、empty/nonempty 双向 transition、全字节/隐私/schema/fail-closed/rule 优先级矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
+- [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: InventoryOnly 单一类别、默认扫描兼容、合法空 snapshot、双向 transition、全字节/隐私/schema/fail-closed/rule 矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
   File ownership:
+  `crates/argus-agent/src/injection.rs`,
   `crates/argus-agent/src/snapshot.rs`,
   `crates/argus-agent/src/surface.rs`,
   `crates/argus-agent/tests/gh106_snapshot.rs`,
@@ -38,22 +40,25 @@ GH-106
   按 symlink → add/remove → type → content 优先级只产生一个固定 rule；
   evidence 逐字节匹配 B-003 无空格分号 grammar，`change=` 只允许
   `entry_added|entry_removed|content_modified|entry_type_changed|symlink_changed`
-  并与五个 rule 一一映射，且所有值无 escaping。
+  并与五个 rule 一一映射，且所有值无 escaping。`surface::classify` 新 shape
+  只返回 `InventoryOnly`，既有 shape 保持原 kind；AGT-04 收集所有 Some，
+  injection exhaustive match 对 InventoryOnly 显式 no-op。
 
-- [ ] `SP106-T3` 在 agent crate 接入 SnapshotMode、冻结 inventory → semantic → optional persist 顺序，并保留 partial finding。Covers: B-003, B-004, B-005, B-007, B-009. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: 成功顺序固定，hard error 保留 diff，失败 update 不写且 decision 不降级。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
+- [ ] `SP106-T3` 接入两阶段 semantic collector、SnapshotMode 与 persist-before-render outcome。Covers: B-003, B-004, B-005, B-007, B-009, B-010. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: InventoryOnly 在正文/validation 前跳过，report 留内存直至 persist，semantic/judge/persist error 均返回 partial outcome。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
   File ownership: `crates/argus-agent/src/lib.rs`.
-  check 完成 compare 后才跑 injection/capability/config/AGT-02/judge；成功时既有
-  finding 顺序不变、AGT-04 按路径追加；protected symlink/judge hard error
-  返回携带已完成 AGT-04 finding 的 incomplete outcome；update 仅在所有扫描
-  完整后调用 atomic writer，且不压低已有 decision。
+  Metadata-only discovery/classify 后在任何正文/binary/UTF-8/size/symlink
+  validation 前跳过 InventoryOnly；既有 semantic kinds 的行为不变。check 完成
+  compare 后才跑 injection/capability/config/AGT-02/judge；update report/decision
+  只存内存，atomic persist 成功后才能交给 normal renderer；semantic/judge/
+  persist error 返回携带内存 report/findings 的 incomplete outcome。
 
-- [ ] `SP106-T4` 为 incomplete snapshot outcome 增加 SARIF 失败 invocation，保留 results 且不泄露敏感内容。Covers: B-004, B-008. Owner: SARIF worker. Dependencies: SP106-T3. Done when: partial invocation 为 false、finding 不丢不重复且 notification 无敏感内容。Verify: `cargo test -p argus-cli sarif_snapshot_incomplete && cargo test -p argus-cli sarif`.
+- [ ] `SP106-T4` 为 semantic/judge/persist incomplete outcome 增加 SARIF 失败 invocation，保留 results 且不泄露敏感内容。Covers: B-004, B-006, B-008. Owner: SARIF worker. Dependencies: SP106-T3. Done when: 所有 partial invocation 为 false、finding 不丢不重复且 notification 无敏感内容。Verify: `cargo test -p argus-cli sarif_snapshot_incomplete && cargo test -p argus-cli sarif`.
   File ownership: `crates/argus-cli/src/sarif.rs`. Complete report 仍为
   `executionSuccessful=true`；partial report 为
   `false` 并有 sanitized error notification；AGT-04 results 只出现一次，
   decision 为 block，target/plaintext 不出现在 document。
 
-- [ ] `SP106-T5` 接入精确 Clap/handler 契约与 text/JSON/SARIF/exit 行为。Covers: B-004, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: help/互斥/单路径/AGT-02 check 共存、readonly、精确 partial JSON envelope、普通/完整 JSON 兼容与 update exit 契约全部通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
+- [ ] `SP106-T5` 接入精确 Clap/handler、persist-before-render 与 text/JSON/SARIF/exit 行为。Covers: B-004, B-006, B-007, B-008, B-009. Owner: CLI worker. Dependencies: SP106-T3, SP106-T4. Done when: fault-injected persist failure 从未调用 normal renderer/exit，三种 partial 输出与成功顺序、flags/readonly/兼容均通过。Verify: `cargo test -p argus-cli --test agent_snapshot_cli`.
   File ownership:
   `crates/argus-cli/src/main.rs`,
   `crates/argus-cli/src/agent.rs`,
@@ -68,10 +73,12 @@ GH-106
   report decision=block 且保留 finding；完整 snapshot/无 snapshot JSON 继续
   输出 bare report。partial text/SARIF 保留 finding、stderr 报 operational
   error、exit 2；
-  update 写成功打印固定 entry count，但不把 semantic block/approval 强制改为
-  exit 0。
+  update report 先留内存；CreateTemp/Write/Flush/FileSync/Persist fault-injection
+  均断言 old bytes/mtime、no normal render/exit、partial outputs、sanitized
+  stderr/exit 2。仅 persist 成功后输出 normal report 与固定 entry count，且不把
+  semantic block/approval 强制改为 exit 0。
 
-- [ ] `SP106-T6` 更新 AGT-04 用户文档。Covers: B-007, B-008, B-009, B-010. Owner: docs worker. Dependencies: SP106-T5. Done when: workflow/rules/共存/批准/存放/partial 限制完整且移除 follow-up 表述。Verify: `rg -n "check-snapshot|update-snapshot|AGT-04-(entry|content|symlink)" README.md && cargo test -p argus-cli --test agent_snapshot_cli`.
+- [ ] `SP106-T6` 更新 AGT-04 用户文档。Covers: B-004, B-006, B-007, B-008, B-009, B-010. Owner: docs worker. Dependencies: SP106-T5. Done when: workflow/rules/共存/批准/存放/persist-before-render/InventoryOnly 默认兼容/partial 限制完整且移除 follow-up 表述。Verify: `rg -n "check-snapshot|update-snapshot|AGT-04-(entry|content|symlink)" README.md && cargo test -p argus-cli --test agent_snapshot_cli`.
   File ownership: `README.md`. 文档给出安装前
   `--update-snapshot` → 安装 → 安装后
   `--check-snapshot` 示例、AGT-02 共存矩阵、五个 rule/Medium 决策、snapshot
@@ -112,6 +119,11 @@ Product invariant 集合
   flag 冲突，因为两个 trust artifact 不能在一个命令中原子批准。
 - snapshot inventory 先于语义扫描是刻意的：既保留当前 protected symlink
   hard error，又保证 symlink diff 不因后续 `Err` 被静默丢弃。
+- update 的 normal renderer/exit 必须严格 happens-after atomic persist；任一
+  persist fault 都复用 partial envelope/SARIF/text，不能先打印 bare clean。
+- `SurfaceKind::InventoryOnly` 是单一 membership 闭集内的 no-semantic 类别；
+  `baseline.rs`/`injection.rs` 显式 no-op，`lib.rs` 在任何正文与 validation 前
+  跳过。无 snapshot 默认扫描的 binary/oversized/symlink regression 必须锁定。
 - 空 inventory 是合法且完整的状态，不是 fail-closed 错误；实现必须锁定四项
   transition：empty→file/directory 为 added，empty→symlink 为
   symlink-changed，file/directory→empty 为 removed，symlink→empty 为
