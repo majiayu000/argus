@@ -3,10 +3,10 @@
 use crate::{print_report_text, sarif, Format};
 use anyhow::{bail, Context, Result};
 use argus_agent::{
-    scan_agent_surface_with_baseline, scan_agent_surface_with_judge, BaselineMode, LlmJudge,
-    LlmJudgeRequest, LlmJudgeResponse,
+    scan_agent_surface_with_snapshot, BaselineMode, LlmJudge, LlmJudgeRequest, LlmJudgeResponse,
+    SnapshotMode,
 };
-use argus_core::Decision;
+use argus_core::{Decision, ScanReport};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -34,21 +34,18 @@ pub fn cmd_agent_scan(
     format: Format,
     baseline: Option<&Path>,
     update_baseline: Option<&Path>,
+    check_snapshot: Option<&Path>,
+    update_snapshot: Option<&Path>,
     llm_judge: bool,
     llm_judge_command: Option<&Path>,
 ) -> Result<ExitCode> {
-    // A baseline is a single approved surface tree. Running update/check once
-    // per path against one shared file would let each path overwrite the
-    // previous one (update) or report the other paths' entries as missing
-    // (check) — silent loss of protection. Reject multiple paths in baseline
-    // modes rather than degrade quietly.
-    if (baseline.is_some() || update_baseline.is_some()) && paths.len() > 1 {
-        bail!(
-            "baseline modes (--baseline / --update-baseline) operate on a single \
-             surface tree; pass exactly one path (got {})",
-            paths.len()
-        );
-    }
+    validate_persistence_flags(
+        paths,
+        baseline,
+        update_baseline,
+        check_snapshot,
+        update_snapshot,
+    )?;
 
     let judge = match (llm_judge, llm_judge_command) {
         (true, Some(command)) => Some(CommandLlmJudge::new(command)),
@@ -56,26 +53,90 @@ pub fn cmd_agent_scan(
         (false, Some(_)) => bail!("--llm-judge-command requires --llm-judge"),
         (false, None) => None,
     };
+    let baseline_mode = match (baseline, update_baseline) {
+        (Some(path), None) => BaselineMode::Check(path),
+        (None, Some(path)) => BaselineMode::Update(path),
+        _ => BaselineMode::None,
+    };
+    let snapshot_mode = match (check_snapshot, update_snapshot) {
+        (Some(path), None) => SnapshotMode::Check(path),
+        (None, Some(path)) => SnapshotMode::Update(path),
+        _ => SnapshotMode::None,
+    };
 
     let mut reports = Vec::with_capacity(paths.len());
+    let mut snapshot_entry_count = None;
     for path in paths {
         if !path.exists() {
             bail!("path does not exist: {}", path.display());
         }
-        let mode = match (baseline, update_baseline) {
-            (Some(b), _) => BaselineMode::Check(b),
-            (_, Some(u)) => BaselineMode::Update(u),
-            _ => BaselineMode::None,
-        };
-        let report = if let Some(judge) = &judge {
-            scan_agent_surface_with_judge(path, mode, judge)
-        } else {
-            scan_agent_surface_with_baseline(path, mode)
-        }
+        let outcome = scan_agent_surface_with_snapshot(
+            path,
+            baseline_mode,
+            snapshot_mode,
+            judge.as_ref().map(|judge| judge as &dyn LlmJudge),
+        )
         .with_context(|| format!("agent scan {}", path.display()))?;
-        reports.push(report);
+        if outcome.operational_error.is_some() {
+            emit_incomplete_report(&outcome.report, format)?;
+            eprintln!("argus: error: agent scan incomplete: operational stage failed");
+            return Ok(ExitCode::from(2));
+        }
+        snapshot_entry_count = outcome.snapshot_entry_count;
+        reports.push(outcome.report);
     }
 
+    emit_reports(&reports, format)?;
+
+    if let Some(target) = update_baseline {
+        let count = baseline_entry_count(target)
+            .with_context(|| format!("count baseline entries {}", target.display()))?;
+        eprintln!("baseline written: {count} entries");
+        return Ok(ExitCode::from(0));
+    }
+    if update_snapshot.is_some() {
+        eprintln!(
+            "snapshot written: {} entries",
+            snapshot_entry_count.unwrap_or(0)
+        );
+    }
+    Ok(decision_exit(&reports))
+}
+
+fn validate_persistence_flags(
+    paths: &[PathBuf],
+    baseline: Option<&Path>,
+    update_baseline: Option<&Path>,
+    check_snapshot: Option<&Path>,
+    update_snapshot: Option<&Path>,
+) -> Result<()> {
+    let persistence_count = [
+        baseline.is_some(),
+        update_baseline.is_some(),
+        check_snapshot.is_some(),
+        update_snapshot.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    let update_count =
+        usize::from(update_baseline.is_some()) + usize::from(update_snapshot.is_some());
+    if update_count > 0 && persistence_count > 1 {
+        bail!("update persistence modes conflict with all other baseline/snapshot modes");
+    }
+    if check_snapshot.is_some() && update_snapshot.is_some() {
+        bail!("--check-snapshot conflicts with --update-snapshot");
+    }
+    if persistence_count > 0 && paths.len() != 1 {
+        bail!(
+            "baseline/snapshot modes operate on a single surface tree; pass exactly one path (got {})",
+            paths.len()
+        );
+    }
+    Ok(())
+}
+
+fn emit_reports(reports: &[ScanReport], format: Format) -> Result<()> {
     match format {
         Format::Json => {
             if reports.len() == 1 {
@@ -89,21 +150,41 @@ pub fn cmd_agent_scan(
             serde_json::to_string_pretty(&sarif::render_reports(&reports)?)?
         ),
         Format::Text => {
-            for report in &reports {
+            for report in reports {
                 print_report_text(report);
             }
         }
     }
+    Ok(())
+}
 
-    // Update mode is a trust action, not a gate: report the entry count and
-    // exit 0 regardless of the other rules' decision.
-    if let Some(target) = update_baseline {
-        let count = baseline_entry_count(target)
-            .with_context(|| format!("count baseline entries {}", target.display()))?;
-        eprintln!("baseline written: {count} entries");
-        return Ok(ExitCode::from(0));
+fn emit_incomplete_report(report: &ScanReport, format: Format) -> Result<()> {
+    match format {
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "executionSuccessful": false,
+                "operationalError": {
+                    "kind": "agent_scan_incomplete",
+                    "message": "operational stage failed"
+                },
+                "report": report
+            }))?
+        ),
+        Format::Sarif => println!(
+            "{}",
+            serde_json::to_string_pretty(&sarif::render_incomplete_agent_report(report)?)?
+        ),
+        Format::Text => print!(
+            "execution: incomplete\n{}",
+            crate::report::render_report_text(report)
+        ),
     }
+    Ok(())
+}
 
+fn decision_exit(reports: &[ScanReport]) -> ExitCode {
     let worst = reports
         .iter()
         .map(|r| match r.decision {
@@ -117,7 +198,7 @@ pub fn cmd_agent_scan(
             _ => 0,
         })
         .unwrap_or(0);
-    Ok(ExitCode::from(worst))
+    ExitCode::from(worst)
 }
 
 struct CommandLlmJudge {
@@ -423,6 +504,8 @@ mod tests {
             Format::Text,
             None,
             Some(Path::new("/tmp/b.json")),
+            None,
+            None,
             false,
             None,
         )
@@ -437,6 +520,8 @@ mod tests {
             Format::Text,
             Some(Path::new("/tmp/b.json")),
             None,
+            None,
+            None,
             false,
             None,
         )
@@ -449,13 +534,40 @@ mod tests {
         // Without a baseline flag the guard must NOT fire; the call proceeds to
         // the existence check and fails there instead (proving the guard is
         // scoped to baseline modes only).
-        let err = cmd_agent_scan(&two_paths(), Format::Text, None, None, false, None).unwrap_err();
+        let err = cmd_agent_scan(
+            &two_paths(),
+            Format::Text,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
     #[test]
+    fn handler_defensively_enforces_snapshot_flag_contract() {
+        let one = vec![PathBuf::from("/nonexistent/a")];
+        let file = Path::new("/tmp/snapshot.json");
+        assert!(validate_persistence_flags(&one, Some(file), None, Some(file), None).is_ok());
+        for flags in [
+            (Some(file), None, None, Some(file)),
+            (None, Some(file), Some(file), None),
+            (None, Some(file), None, Some(file)),
+            (None, None, Some(file), Some(file)),
+        ] {
+            assert!(validate_persistence_flags(&one, flags.0, flags.1, flags.2, flags.3).is_err());
+        }
+        assert!(validate_persistence_flags(&two_paths(), None, None, Some(file), None).is_err());
+    }
+
+    #[test]
     fn llm_judge_requires_an_explicit_command() {
-        let err = cmd_agent_scan(&[], Format::Text, None, None, true, None).unwrap_err();
+        let err =
+            cmd_agent_scan(&[], Format::Text, None, None, None, None, true, None).unwrap_err();
         assert!(err.to_string().contains("requires --llm-judge-command"));
     }
 
@@ -464,6 +576,8 @@ mod tests {
         let err = cmd_agent_scan(
             &[],
             Format::Text,
+            None,
+            None,
             None,
             None,
             false,
@@ -486,6 +600,8 @@ mod tests {
             Format::Text,
             None,
             None,
+            None,
+            None,
             false,
             None,
         )
@@ -493,6 +609,8 @@ mod tests {
         cmd_agent_scan(
             &[agent_fixture("skill-benign-net-tool")],
             Format::Json,
+            None,
+            None,
             None,
             None,
             false,
@@ -512,6 +630,8 @@ mod tests {
             Format::Text,
             None,
             Some(&baseline),
+            None,
+            None,
             false,
             None,
         )
@@ -588,6 +708,8 @@ mod tests {
         cmd_agent_scan(
             &[agent_fixture("skill-benign-installer")],
             Format::Json,
+            None,
+            None,
             None,
             None,
             true,
