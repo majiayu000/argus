@@ -11,18 +11,21 @@ GH-106
 
 ## 实现任务
 
-- [ ] `SP106-T1` 抽取 shared atomic byte writer，并让 AGT-02 baseline 改用它。Covers: B-006, B-010. Owner: persistence worker. Dependencies: none. Done when: 五阶段故障均保留旧 destination，AGT-02 bytes 不变，baseline exhaustive match 显式忽略 InventoryOnly。Verify: `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-agent baseline`.
+- [ ] `SP106-T1` 只抽取 shared atomic byte writer，并让 AGT-02 baseline 改用它。Covers: B-006. Owner: persistence worker. Dependencies: none. Done when: 新 module 已在 crate root 注册，五阶段故障均保留旧 destination，AGT-02 bytes 不变，且本任务不引入 `SurfaceKind::InventoryOnly`。Verify: `cargo test -p argus-agent atomic_write_fault_matrix && cargo test -p argus-agent baseline`.
   File ownership:
   `crates/argus-agent/src/atomic_write.rs`,
-  `crates/argus-agent/src/baseline.rs`. Production 路径保持
+  `crates/argus-agent/src/baseline.rs`,
+  `crates/argus-agent/src/lib.rs`. `lib.rs` 仅增加
+  `atomic_write` module declaration；production 路径保持
   tempfile → write → flush → file sync → persist；test-only
   `CreateTemp/Write/Flush/FileSync/Persist` 故障矩阵逐项证明旧 destination
   bytes/mtime 不变、missing destination 不产生半文件、无 tempfile 泄漏；AGT-02
-  序列化 bytes 与现状相同；`SurfaceKind::InventoryOnly` 在 baseline extraction
-  中显式 no-op。
+  序列化 bytes 与现状相同。完成后将 `baseline.rs` 串行移交 T2，并将
+  `lib.rs` 串行移交 T3；不得并行编辑这些共享路径。
 
 - [ ] `SP106-T2` 实现 strict v1 schema、canonical inventory、全字节 hash、五类 Medium rule 与单一 surface membership。Covers: B-001, B-002, B-003, B-005, B-008, B-010. Owner: inventory worker. Dependencies: SP106-T1. Done when: InventoryOnly/legacy-pruned descendant 分类、guarded self-exclusion、默认兼容、合法空 snapshot、双向 transition、全字节/隐私/schema/fail-closed/rule 矩阵通过。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent surface`.
   File ownership:
+  `crates/argus-agent/src/baseline.rs`,
   `crates/argus-agent/src/injection.rs`,
   `crates/argus-agent/src/snapshot.rs`,
   `crates/argus-agent/src/surface.rs`,
@@ -43,9 +46,11 @@ GH-106
   `entry_added|entry_removed|content_modified|entry_type_changed|symlink_changed`
   并与五个 rule 一一映射，且所有值无 escaping。`surface::classify` 新 shape
   只返回 `InventoryOnly`，既有 shape 保持原 kind；AGT-04 收集所有 Some，
-  injection exhaustive match 对 InventoryOnly 显式 no-op。受支持成员位于
+  baseline extraction 与 injection exhaustive match 都对 InventoryOnly 显式
+  no-op。受支持成员位于
   `.git`/`node_modules` ancestor 后时分类为 InventoryOnly 而非消失；snapshot
   target 的 logical path 使用同一 classifier，Some 必须拒绝、None 才可排除。
+  `baseline.rs` 只能在 T1 完成并移交后修改。
 
 - [ ] `SP106-T3` 接入 non-pruning discovery、snapshot membership guard、两阶段 semantic collector、SnapshotMode 与 persist-before-render outcome。Covers: B-001, B-003, B-004, B-005, B-007, B-009, B-010. Owner: agent orchestration worker. Dependencies: SP106-T1, SP106-T2. Done when: 所有 descendant 先分类、classified snapshot target 在排除/load/write 前拒绝、InventoryOnly 在正文/validation 前跳过，semantic/judge/persist error 返回 partial outcome。Verify: `cargo test -p argus-agent --test gh106_snapshot && cargo test -p argus-agent`.
   File ownership: `crates/argus-agent/src/lib.rs`.
@@ -103,8 +108,13 @@ GH-106
 
 ## 并行拆分
 
-- SP106-T1 与任何其他写入任务不并行：T2/T3 都依赖 shared writer 契约。
-- SP106-T2 完成后，SP106-T3 串行接入；二者文件不重叠，但 T3 依赖已冻结 API。
+- SP106-T1 与任何其他写入任务不并行：它先独占
+  `atomic_write.rs`、`baseline.rs`、`lib.rs` 完成 shared writer 抽取与 module
+  registration；完成并通过 targeted tests 后，`baseline.rs` ownership 串行
+  移交 T2，`lib.rs` ownership 串行移交 T3。
+- SP106-T2 依赖 T1，接管 `baseline.rs` 后与 `injection.rs` 一起补齐
+  `InventoryOnly` exhaustive no-op；完成后，SP106-T3 才串行接入已冻结 API。
+  这些 ownership transfer 不是并行共享写。
 - SP106-T4 独占 `sarif.rs`；完成后 SP106-T5 才写 CLI 与单独 integration test。
 - SP106-T6 仅写 README，可在 T5 通过 targeted CLI tests 后执行。
 - SP106-T7 是唯一 verification owner，不修改文件，也不与写入任务或其他 Cargo
