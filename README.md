@@ -309,10 +309,13 @@ steps:
       sarif_file: argus.sarif
 ```
 
-Argus writes SARIF only after a complete scan report exists. Invalid input,
-parser failures, network failures, and other operational errors still write an
-error to stderr, exit `2`, and leave stdout empty instead of emitting a clean
-SARIF run. A successful SARIF report retains the normal decision exit codes:
+Argus writes normal SARIF only after a complete scan report exists. Invalid
+input, parser failures, network failures, and agent-snapshot failures before
+inventory comparison write an error to stderr, exit `2`, and leave stdout
+empty instead of emitting a clean run. An agent-snapshot failure after
+comparison retains its completed results in a partial SARIF run whose
+invocation has `executionSuccessful=false` and a sanitized error notification.
+A successful SARIF report retains the normal decision exit codes:
 `allow` = 0, `block` = 1, and `allow-with-approval` = 2.
 
 ## Rule coverage (Milestone 0)
@@ -352,8 +355,97 @@ executing anything.
 | `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
 | `AGT-02-baseline-entry-missing` | info | a baselined description is no longer present on the scanned surface |
 | `AGT-02-baseline-unreadable` | info | `--baseline` file could not be read/parsed (scan continues; not treated as "no drift") |
+| `AGT-04-entry-added` | medium → approval | a non-symlink high-context file or directory was added after approval |
+| `AGT-04-entry-removed` | medium → approval | a non-symlink high-context file or directory was removed after approval |
+| `AGT-04-entry-type-changed` | medium → approval | a high-context path changed between file and directory |
+| `AGT-04-content-modified` | medium → approval | the complete bytes of a high-context file changed |
+| `AGT-04-symlink-changed` | medium → approval | a symlink was added, removed, retargeted, or changed to/from another entry type |
 
-AGT-04 (install-time high-context file diff) remains follow-up work — see issue #57.
+### AGT-04 install-time high-context snapshot
+
+AGT-04 provides an explicit before/after approval workflow for agent
+installations. Keep the snapshot outside the tree an installer can modify,
+preferably in separately protected version control:
+
+```bash
+# 1. Before installation: approve the complete high-context inventory.
+argus agent scan path/to/agent \
+  --update-snapshot /protected/argus/agent.snapshot.json
+
+# 2. Run the installer using your normal, separately reviewed process.
+your-installer path/to/agent
+
+# 3. After installation: compare without approving the changes.
+argus agent scan path/to/agent \
+  --check-snapshot /protected/argus/agent.snapshot.json
+
+# 4. Review every finding; approve a new state only with an explicit update.
+argus agent scan path/to/agent \
+  --update-snapshot /protected/argus/agent.snapshot.json
+```
+
+All five AGT-04 changes are Medium and therefore
+`allow-with-approval` unless another rule blocks. Check mode never records
+approval. Update mode records approval only after discovery, semantic rules,
+optional judge, and atomic persistence all succeed; it does not erase existing
+AGT-01/02/03/05/judge findings or force their exit code to zero. The normal
+report and `snapshot written: N entries` message are emitted only after the
+snapshot has been persisted.
+
+Snapshot mode performs a complete, non-following walk without pruning
+`.git` or `node_modules`. Its canonical membership includes the existing
+instruction, MCP, hook, and skill-script surfaces; all `.claude/**` entries;
+and `.cursorrules`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, and
+`.windsurfrules`. It inventories classified files, directories, and symlinks.
+New inventory-only shapes are hashed but skipped before text, UTF-8, size,
+binary, and semantic symlink validation; existing semantic surfaces retain
+their fail-closed validation.
+
+Root-aware classification exists only in snapshot check/update mode. For
+example, scanning `~/.claude`, `~/.claude/rules`, or
+`~/.claude/settings.json` preserves the `.claude/` classification context
+while report and snapshot keys remain scan-root-relative. With no snapshot
+flag—including AGT-02-only check/update—the legacy root-relative classifier
+and `.git`/`node_modules` pruning remain unchanged; `settings.json` at a
+`~/.claude` scan root is not silently promoted into a new semantic surface.
+
+The snapshot target cannot hide a protected entry. If a target inside the
+scan root classifies as any supported surface, check and update reject it
+before exclusion, loading, rendering, or writing, even when the future update
+target does not exist. An unclassified target can be inside the root, but an
+external protected location is recommended.
+
+The persisted schema is strict version 1 with sorted relative UTF-8 paths.
+Files store SHA-256 of all bytes; directories store no digest; symlinks store
+only SHA-256 of the raw link-target representation (Unix bytes, or Windows
+UTF-16 code units encoded little-endian), never target plaintext. Unknown
+fields, duplicate decoded JSON keys, invalid paths, invalid digests, traversal
+errors, and entries that change while being captured fail closed. Because
+symlink representation is platform-specific, approve and check such snapshots
+on the same platform.
+
+Updates use a same-directory temporary file, write, flush, file sync, then
+atomic replace. A failed stage preserves the previous destination and cleans
+the temporary file. Argus does not coordinate concurrent snapshot writers;
+serialize approval operations and treat the snapshot as a trust artifact.
+
+The persistence combinations are deliberately narrow:
+
+| Flags | Allowed |
+|---|---|
+| no baseline/snapshot flag | yes; legacy multi-path behavior |
+| `--check-snapshot` | yes; exactly one scan path |
+| `--update-snapshot` | yes; exactly one scan path |
+| `--baseline` + `--check-snapshot` | yes; two read-only checks on one path |
+| any update flag plus another baseline/snapshot flag | no |
+
+Failures before inventory comparison produce the ordinary operational
+contract: stderr, exit `2`, and empty stdout. Once inventory comparison is
+complete, any later collection/projection, semantic rule, AGT-02, judge, or
+snapshot-persistence failure retains completed findings in a blocked partial
+report: text starts with `execution: incomplete`, JSON uses the
+`agent_scan_incomplete` envelope, SARIF sets
+`executionSuccessful=false`, stderr is sanitized, and the exit code is `2`.
 
 ### Optional external semantic judge
 
