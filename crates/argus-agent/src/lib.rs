@@ -14,6 +14,7 @@ use argus_core::{ArtifactKind, Finding, ScanReport};
 use std::io::Read;
 use std::path::Path;
 
+mod atomic_write;
 mod baseline;
 mod capability;
 mod config;

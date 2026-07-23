@@ -11,16 +11,14 @@
 //! shows only the first 12 hex chars of the old/new hashes, never the
 //! description plaintext (which may itself carry injection language).
 
-use crate::{SurfaceFile, SurfaceKind};
-use anyhow::{bail, Context, Result};
+use crate::{atomic_write, SurfaceFile, SurfaceKind};
+use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
-use tempfile::{Builder, NamedTempFile};
 
 /// Drift of an approved description → medium (allow-with-approval).
 pub const RULE_DRIFT: &str = "AGT-02";
@@ -73,61 +71,8 @@ pub fn save(path: &Path, baseline: &Baseline) -> Result<()> {
     let mut text = serde_json::to_string_pretty(baseline)
         .with_context(|| format!("serialize baseline {}", path.display()))?;
     text.push('\n');
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut temporary = Builder::new()
-        .prefix(".argus-baseline-")
-        .tempfile_in(parent)
-        .with_context(|| format!("create temporary baseline next to {}", path.display()))?;
-    if let Err(error) = temporary.write_all(text.as_bytes()) {
-        return close_after_io_error(temporary, "write", path, error);
-    }
-    if let Err(error) = temporary.flush() {
-        return close_after_io_error(temporary, "flush", path, error);
-    }
-    if let Err(error) = temporary.as_file().sync_all() {
-        return close_after_io_error(temporary, "sync", path, error);
-    }
-    match temporary.persist(path) {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            let tempfile::PersistError {
-                error: persist_error,
-                file,
-            } = error;
-            let temporary_path = file.path().to_path_buf();
-            match file.close() {
-                Ok(()) => Err(persist_error)
-                    .with_context(|| format!("replace baseline {}", path.display())),
-                Err(cleanup_error) => bail!(
-                    "replace baseline {}: {persist_error}; cleanup temporary baseline {}: \
-                     {cleanup_error}",
-                    path.display(),
-                    temporary_path.display()
-                ),
-            }
-        }
-    }
-}
-
-fn close_after_io_error(
-    temporary: NamedTempFile,
-    operation: &str,
-    destination: &Path,
-    operation_error: std::io::Error,
-) -> Result<()> {
-    let temporary_path = temporary.path().to_path_buf();
-    match temporary.close() {
-        Ok(()) => Err(operation_error)
-            .with_context(|| format!("{operation} temporary baseline for {}", destination.display())),
-        Err(cleanup_error) => bail!(
-            "{operation} temporary baseline for {}: {operation_error}; cleanup temporary baseline {}: {cleanup_error}",
-            destination.display(),
-            temporary_path.display()
-        ),
-    }
+    atomic_write::write_bytes(path, text.as_bytes(), ".argus-baseline-")
+        .with_context(|| format!("write baseline {}", path.display()))
 }
 
 /// Extract every description-class entry from the collected surface files.
@@ -478,40 +423,6 @@ mod tests {
             leftovers.is_empty(),
             "temporary files leaked: {leftovers:?}"
         );
-    }
-
-    #[test]
-    fn io_failure_closes_temporary_file_and_preserves_operation_error() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!(
-            "argus-baseline-io-failure-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        std::fs::create_dir_all(&dir)?;
-        let destination = dir.join("baseline.json");
-        let temporary = Builder::new()
-            .prefix(".argus-baseline-")
-            .tempfile_in(&dir)?;
-        let temporary_path = temporary.path().to_path_buf();
-
-        let result = close_after_io_error(
-            temporary,
-            "write",
-            &destination,
-            std::io::Error::other("synthetic write failure"),
-        );
-        let error = match result {
-            Ok(()) => bail!("synthetic write failure was accepted"),
-            Err(error) => error,
-        };
-
-        assert!(format!("{error:#}").contains("synthetic write failure"));
-        assert!(!temporary_path.exists(), "temporary file was not removed");
-        std::fs::remove_dir_all(&dir)?;
-        Ok(())
     }
 
     #[test]
