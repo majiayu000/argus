@@ -49,7 +49,9 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 2. B-002 snapshot 使用严格的版本化 schema。未知版本、未知字段、未知类型、
    非 64 位小写十六进制 digest，以及类型与字段的非法组合都必须拒绝：
    file 必须且只能有 `digest`，directory 不得有 digest，symlink 必须且只能有
-   `link_target_digest`。不得猜测、补默认值或忽略越界字段。
+   `link_target_digest`。`entries` 中重复的 decoded logical-path key 必须在
+   JSON token stream/custom map visitor 阶段拒绝；不得先读入普通 map 或
+   `serde_json::Value` 后接受 last-wins。不得猜测、补默认值或忽略越界字段。
 3. B-003 完整 check 只产生以下五个 AGT-04 rule ID，severity 均为
    `Medium`：`AGT-04-entry-added`、`AGT-04-entry-removed`、
    `AGT-04-content-modified`、`AGT-04-entry-type-changed`、
@@ -68,10 +70,13 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
    `AGT-04-symlink-changed`。其余值只能来自已声明闭集、64 位小写 hex 或
    `null`，不允许 escaping。
 4. B-004 check 是只读且幂等：不得改变 snapshot 或被扫描树的 bytes/mtime，
-   输入不变时 finding 的内容与顺序相同。inventory 比较完成后才运行既有语义
-   扫描；语义扫描的 operational error（包括受保护 symlink hard error）
-   不得丢弃已完成的 AGT-04 finding。此时输出保留这些 finding、明确标为未完整
-   执行并返回 operational failure，绝不输出 clean/allow 结论。仅在这一
+   输入不变时 finding 的内容与顺序相同。inventory/compare 完成后才运行后续
+   collector/projection 与既有规则。此后任一实际可失败阶段（包括
+   collect/projection、injection、capability、config、AGT-02/baseline、judge
+   及未来加入同一 post-inventory pipeline 的阶段）返回 operational error 时，
+   都不得因 `?`/early return 丢弃已完成的 AGT-04 finding/report；必须进入同一
+   partial outcome。输出保留这些 finding、明确标为未完整执行并返回 operational
+   failure，绝不输出 clean/allow 结论。仅在这一
    partial 情形，JSON stdout 使用 camelCase envelope
    `{schemaVersion:1, executionSuccessful:false, operationalError:
    {kind:"agent_scan_incomplete", message:<sanitized>}, report:<existing
@@ -137,6 +142,14 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
     `Check/Update` 使用不按这些 ancestor basename 剪枝的 complete discovery。
     legacy collector 到达的 `InventoryOnly` entry 仍须在正文或 symlink
     validation 前 no-op，确保 classifier 扩展不改变默认 semantic 结果。
+    唯一 membership API 必须接收由 canonical scan root 构造的 root context，
+    并把 root-relative `logical_path` 映射为仅供分类的 coordinate；inventory、
+    finding 与 evidence 仍只使用 root-relative path。当 PATH 本身是 `.claude`
+    或其子目录、是 `.claude`/`hooks` 下的单文件，或是 `hooks` directory 时，
+    classification coordinate 必须保留对应 `.claude/` 或 `hooks/` 前缀，确保
+    `agent scan ~/.claude` 不漏检。snapshot target guard、inventory 与 semantic
+    projection 必须调用同一个 root-aware API；snapshot 模块不得维护 root-name
+    或 prefix 名单。
     complete discovery 的每项都同时保存正交的 filesystem
     `entry_type = file | directory | symlink` 与
     `surface_kind = Option<SurfaceKind>`；不得用 surface kind 推断 filesystem
@@ -151,8 +164,10 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 - [ ] 固定离线 fixture 覆盖 snapshot 创建、无变化、五类 rule、空 current
       inventory，以及 symlink target 原始字节 digest。
 - [ ] 五类 finding 的 evidence 逐字节匹配 B-003 分号 grammar，值域无 escaping。
-- [ ] schema 严格拒绝未知字段/非法字段组合/非规范或非 UTF-8 路径；合法
-      `entries: {}` 可 round-trip。
+- [ ] schema 严格拒绝未知字段/非法字段组合/非规范或非 UTF-8 路径；`entries`
+      中 byte-identical 或 JSON escape 后 decoded-equivalent 的重复 logical-path
+      key 都在 token visitor 层失败而非 last-wins；合法 `entries: {}` 可
+      round-trip。
 - [ ] transition fixture 分别锁定四项：empty-approved → current
       file/directory 为 `AGT-04-entry-added`；→ current symlink 为
       `AGT-04-symlink-changed`；approved file/directory → empty-current 为
@@ -171,10 +186,12 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
       renderer/exit，JSON 为 B-004 envelope、SARIF invocation false、text 无
       clean/allow、stderr sanitized、exit 2，目录 sentinel 不变；正常 file
       destination success control 证明 persist happens-before normal render。
-- [ ] 语义扫描成功时，既有 finding 之后追加按逻辑路径稳定排序的 AGT-04
-      finding；语义 symlink hard error 时仍输出已完成的 AGT-04 finding，并将
-      text/JSON/SARIF 标为执行失败；partial JSON 精确匹配 B-004 envelope，
-      普通/完整 JSON 仍是 bare `ScanReport`。
+- [ ] 后续扫描成功时，既有 finding 之后追加按逻辑路径稳定排序的 AGT-04
+      finding；inventory/compare 后任一实际可失败的 collect/projection、
+      injection、capability、config、AGT-02/baseline 或 judge 边界返回 error
+      时，仍输出已完成的 AGT-04 finding/report，并将 text/JSON/SARIF 标为执行
+      失败；partial JSON 精确匹配 B-004 envelope，普通/完整 JSON 仍是 bare
+      `ScanReport`。
 - [ ] CLI help、互斥矩阵、单路径守卫、AGT-02 check 与 AGT-04 check 共存均有测试。
 - [ ] `SnapshotMode::None` 的无 snapshot scan 与 AGT-02-only check/update
       均继续 prune `.git`/`node_modules`，结果与引入 AGT-04 前一致；snapshot
@@ -185,6 +202,14 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
       semantic projection 按 directory → InventoryOnly → legacy semantic
       validation 顺序执行，普通未分类 descendant 不进入 inventory，complete
       discovery 的 walker error 仍 fail closed。
+- [ ] root-aware classifier fixture 固定以下映射，且 snapshot target guard、
+      inventory 与 semantic 结果一致：扫描 `~/.claude` 时
+      `settings.json → .claude/settings.json`，扫描 `~/.claude/rules` 时
+      `policy.md → .claude/rules/policy.md`，扫描单文件
+      `~/.claude/settings.json` 时仍得到 `.claude/settings.json`，扫描
+      `<root>/hooks` 或单文件 `<root>/hooks/pre.sh` 时得到 `hooks/pre.sh`；
+      inventory/report logical path 分别仍为 `settings.json`、`policy.md`、
+      `settings.json`、`pre.sh`。
 - [ ] README 文档化审批边界、推荐流程、五个 rule ID、存放建议与限制。
 - [ ] `cargo test --workspace --all-targets`、agent corpus 与 SpecRail 门禁通过；
       新代码行覆盖率至少 80%，schema/hash/atomic/fail-closed 关键路径 100%。
@@ -200,7 +225,7 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 | 重试/幂等 | covered: B-001, B-004, B-006 |
 | 非法状态转换 | covered: B-002, B-007, B-009；非法 schema/flag 组合及失败 update 不得变为批准 |
 | 兼容/迁移 | covered: B-007, B-010；默认行为与 AGT-02 check-only 组合保持兼容 |
-| 降级/回退 | covered: B-004, B-005, B-006；semantic/judge/persist partial 都不能先渲染或伪装成 clean |
+| 降级/回退 | covered: B-004, B-005, B-006；任一 post-inventory operational error 或 persist failure 都保留已完成 report，不能先渲染或伪装成 clean |
 | 证据与审计完整性 | covered: B-003, B-008；规则、优先级、digest 与隐私字段均冻结 |
 | 取消/中断 | covered: B-006；中断等同写入阶段失败，旧 snapshot 保持不变 |
 
