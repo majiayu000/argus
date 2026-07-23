@@ -228,7 +228,10 @@ Persist 任一阶段失败，统一进入 AGT-04 partial operational path：
   bare `ScanReport`（多 path 时仍是既有 report array），不使用 envelope；
 - SARIF 保留 results，设置
   `runs[0].invocations[0].executionSuccessful=false`，并加入不含敏感内容的
-  error `toolExecutionNotification`；result decision 为 `block`；
+  `toolExecutionNotifications` array；该 array 至少包含一个 sanitized error
+  notification object
+  `{"level":"error","message":{"text":"<sanitized>"}}`；result decision 为
+  `block`；
 - finding 只渲染一次，不能先打印后因 `?` 丢失或再跑一次比较。
 
 无 snapshot flag 的 error/output 继续走现有路径；这套 partial 语义只解决
