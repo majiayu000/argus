@@ -24,11 +24,13 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("attestation-plan.json", candidate)
         self.assertIn("--license LICENSE --readme README.md", candidate)
 
-    def test_publish_is_human_gated_and_never_moves_v1(self) -> None:
+    def test_publish_gating_and_never_moves_v1(self) -> None:
         text = (ROOT / ".github/workflows/release.yml").read_text()
+        security = (ROOT / "SECURITY.md").read_text()
+        # Publish stays pinned to the release environment and the immutability +
+        # ruleset gates that fail closed.
         self.assertIn("environment: release", text)
         self.assertIn("immutable_releases", text)
-        self.assertIn("prevent_self_review", text)
         self.assertIn("refs/tags/v*.*.*", text)
         self.assertIn("refs/heads/v1", text)
         self.assertIn("artifact-metadata: write", text)
@@ -36,6 +38,17 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("gh release verify", text)
         self.assertIn("gh release verify-asset", text)
         self.assertIn("--cert-oidc-issuer", text)
+        # The prevent-self-review assertion was deliberately removed for this
+        # single-maintainer, user-owned repo (GitHub prevent-self-review cannot
+        # be satisfied by one account). Require the removal to stay explicit and
+        # documented — the workflow must point at the record, and SECURITY.md
+        # must carry the accepted trade-off plus a restore condition — so it can
+        # be neither silently dropped nor forgotten.
+        self.assertNotIn("prevent_self_review", text)
+        self.assertIn("SECURITY.md", text)
+        self.assertIn("发布审批边界", security)
+        self.assertIn("恢复条件", security)
+        # v1 promotion never mutates a ref.
         self.assertNotRegex(text, r"--clobber|force.push|delete.*tag|update-ref")
         promotion = text.split("Emit read-only v1 promotion plan", 1)[1]
         self.assertNotRegex(promotion, r"gh api.*--method|git push")
