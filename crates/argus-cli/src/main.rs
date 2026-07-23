@@ -287,12 +287,36 @@ enum AgentOp {
         /// AGT-02 Check mode: compare descriptions against this approved
         /// baseline file and flag drift. Mutually exclusive with
         /// `--update-baseline`.
-        #[arg(long, value_name = "FILE", conflicts_with = "update_baseline")]
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["update_baseline", "update_snapshot"]
+        )]
         baseline: Option<PathBuf>,
         /// AGT-02 Update mode: (re)write this baseline from the current
         /// surface and mark it approved (a trust action; no drift finding).
-        #[arg(long, value_name = "FILE")]
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["baseline", "check_snapshot", "update_snapshot"]
+        )]
         update_baseline: Option<PathBuf>,
+        /// AGT-04 Check mode: compare the complete high-context inventory
+        /// against this approved snapshot.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["update_baseline", "update_snapshot"]
+        )]
+        check_snapshot: Option<PathBuf>,
+        /// AGT-04 Update mode: atomically approve the current complete
+        /// high-context inventory.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["baseline", "update_baseline", "check_snapshot"]
+        )]
+        update_snapshot: Option<PathBuf>,
         /// Enable the optional external semantic judge. Off by default.
         #[arg(long, requires = "llm_judge_command")]
         llm_judge: bool,
@@ -483,6 +507,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     format,
                     baseline,
                     update_baseline,
+                    check_snapshot,
+                    update_snapshot,
                     llm_judge,
                     llm_judge_command,
                 },
@@ -491,6 +517,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             baseline.as_deref(),
             update_baseline.as_deref(),
+            check_snapshot.as_deref(),
+            update_snapshot.as_deref(),
             llm_judge,
             llm_judge_command.as_deref(),
         ),
