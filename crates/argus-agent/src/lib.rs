@@ -334,7 +334,8 @@ fn discover_complete(path: &Path) -> Result<(ScanRootContext, Vec<DiscoveredEntr
         bail!("agent scan root is neither a file nor directory");
     };
     let canonical = std::fs::canonicalize(path)?;
-    let context = ScanRootContext::from_canonical_scan_root(&canonical, root_type);
+    let context = ScanRootContext::from_canonical_scan_root(&canonical, root_type)
+        .context("build strict UTF-8 scan root context")?;
     let mut raw = Vec::new();
     if root_type == ScanRootEntryType::File {
         raw.push((

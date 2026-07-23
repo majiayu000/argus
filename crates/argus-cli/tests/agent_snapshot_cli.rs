@@ -362,6 +362,68 @@ fn semantic_symlink_failure_retains_agt04_in_every_partial_format() {
 }
 
 #[test]
+fn capability_failure_retains_agt04_in_every_partial_format() {
+    let root = tempfile::tempdir().expect("root");
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n").expect("skill");
+    std::fs::create_dir(root.path().join("scripts")).expect("scripts");
+    let script = root.path().join("scripts/install.py");
+    std::fs::write(&script, "print('approved')\n").expect("approved script");
+    let storage = tempfile::tempdir().expect("storage");
+    let snapshot = storage.path().join("snapshot.json");
+    assert!(run(
+        root.path(),
+        &["--update-snapshot", snapshot.to_str().unwrap()]
+    )
+    .status
+    .success());
+    std::fs::write(&script, "def broken(:\n  pass\n").expect("malformed script");
+
+    for format in ["text", "json", "sarif"] {
+        let output = run(
+            root.path(),
+            &[
+                "--check-snapshot",
+                snapshot.to_str().unwrap(),
+                "--format",
+                format,
+            ],
+        );
+        assert_eq!(output.status.code(), Some(2), "{format}");
+        let stdout = text(&output.stdout);
+        let stderr = text(&output.stderr);
+        assert!(stdout.contains("AGT-04-content-modified"), "{format}");
+        assert!(stderr.contains("agent scan incomplete"), "{format}");
+        assert!(
+            !stderr.contains("incomplete Python syntax parse"),
+            "{format}"
+        );
+        match format {
+            "text" => {
+                assert!(stdout.contains("execution: incomplete"));
+                assert!(stdout.contains("decision: block"));
+            }
+            "json" => {
+                let document = json(&output);
+                assert_eq!(document["executionSuccessful"], false);
+                assert_eq!(document["report"]["decision"], "block");
+                assert_eq!(
+                    document["report"]["findings"][0]["rule_id"],
+                    "AGT-04-content-modified"
+                );
+            }
+            "sarif" => {
+                let document = json(&output);
+                let run = &document["runs"][0];
+                assert_eq!(run["invocations"][0]["executionSuccessful"], false);
+                assert_eq!(run["results"][0]["ruleId"], "AGT-04-content-modified");
+                assert_eq!(run["results"][0]["properties"]["decision"], "block");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn unclassified_inside_and_outside_targets_succeed() {
     let root = tempfile::tempdir().expect("root");
     std::fs::write(root.path().join("AGENTS.md"), "trusted").unwrap();

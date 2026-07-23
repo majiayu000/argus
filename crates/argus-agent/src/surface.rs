@@ -1,5 +1,6 @@
 //! Canonical agent-surface membership classifier.
 
+use anyhow::{anyhow, Result};
 use std::ffi::OsStr;
 use std::path::{Component, Path};
 
@@ -31,7 +32,7 @@ pub struct ScanRootContext {
 
 impl ScanRootContext {
     /// Build context from an already-canonicalized scan root.
-    pub fn from_canonical_scan_root(root: &Path, entry_type: ScanRootEntryType) -> Self {
+    pub fn from_canonical_scan_root(root: &Path, entry_type: ScanRootEntryType) -> Result<Self> {
         let classification_root = match entry_type {
             ScanRootEntryType::File => root.parent().unwrap_or_else(|| Path::new("")),
             ScanRootEntryType::Directory => root,
@@ -44,19 +45,22 @@ impl ScanRootContext {
             })
             .collect();
 
-        let prefix = components
+        let prefix_components = components
             .iter()
             .rposition(|component| *component == OsStr::new(".claude"))
-            .map(|index| join_components(&components[index..]))
+            .map(|index| &components[index..])
             .or_else(|| {
                 components
                     .iter()
                     .rposition(|component| *component == OsStr::new("hooks"))
-                    .map(|index| join_components(&components[index..]))
-            })
+                    .map(|index| &components[index..])
+            });
+        let prefix = prefix_components
+            .map(join_components)
+            .transpose()?
             .filter(|value| !value.is_empty());
 
-        Self { prefix }
+        Ok(Self { prefix })
     }
 
     fn qualify(&self, logical_path: &str) -> String {
@@ -84,12 +88,17 @@ impl ScanRootContext {
     }
 }
 
-fn join_components(components: &[&OsStr]) -> String {
+fn join_components(components: &[&OsStr]) -> Result<String> {
     components
         .iter()
-        .map(|component| component.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+        .map(|component| {
+            component
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("scan root coordinate contains a non-UTF-8 component"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 /// Coordinate interpretation for the single canonical membership rule set.
@@ -265,7 +274,8 @@ mod tests {
         assert_eq!(legacy("pre.sh", &[]), None);
 
         let claude_context =
-            ScanRootContext::from_canonical_scan_root(&claude, ScanRootEntryType::Directory);
+            ScanRootContext::from_canonical_scan_root(&claude, ScanRootEntryType::Directory)
+                .expect("claude context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&claude_context),
@@ -276,7 +286,8 @@ mod tests {
         );
 
         let rules_context =
-            ScanRootContext::from_canonical_scan_root(&rules, ScanRootEntryType::Directory);
+            ScanRootContext::from_canonical_scan_root(&rules, ScanRootEntryType::Directory)
+                .expect("rules context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&rules_context),
@@ -289,7 +300,8 @@ mod tests {
         let settings_context = ScanRootContext::from_canonical_scan_root(
             &claude.join("settings.json"),
             ScanRootEntryType::File,
-        );
+        )
+        .expect("settings context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&settings_context),
@@ -300,7 +312,8 @@ mod tests {
         );
 
         let hooks_context =
-            ScanRootContext::from_canonical_scan_root(&hooks, ScanRootEntryType::Directory);
+            ScanRootContext::from_canonical_scan_root(&hooks, ScanRootEntryType::Directory)
+                .expect("hooks context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&hooks_context),
@@ -312,7 +325,8 @@ mod tests {
         let hook_file_context = ScanRootContext::from_canonical_scan_root(
             &hooks.join("pre.sh"),
             ScanRootEntryType::File,
-        );
+        )
+        .expect("hook file context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&hook_file_context),
@@ -328,7 +342,8 @@ mod tests {
         let sandbox = tempfile::tempdir().expect("sandbox");
         let claude = sandbox.path().join(".claude");
         let context =
-            ScanRootContext::from_canonical_scan_root(&claude, ScanRootEntryType::Directory);
+            ScanRootContext::from_canonical_scan_root(&claude, ScanRootEntryType::Directory)
+                .expect("claude context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&context),
@@ -348,7 +363,8 @@ mod tests {
 
         let ordinary = sandbox.path().join("ordinary");
         let ordinary_context =
-            ScanRootContext::from_canonical_scan_root(&ordinary, ScanRootEntryType::Directory);
+            ScanRootContext::from_canonical_scan_root(&ordinary, ScanRootEntryType::Directory)
+                .expect("ordinary context");
         assert_eq!(
             classify(
                 CoordinatePolicy::SnapshotRootAware(&ordinary_context),

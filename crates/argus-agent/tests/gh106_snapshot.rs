@@ -1,7 +1,8 @@
 use anyhow::Result;
 use argus_agent::{
     scan_agent_surface, scan_agent_surface_with_baseline, scan_agent_surface_with_snapshot,
-    BaselineMode, LlmJudge, LlmJudgeRequest, LlmJudgeResponse, SnapshotMode,
+    BaselineMode, LlmJudge, LlmJudgeRequest, LlmJudgeResponse, ScanRootContext, ScanRootEntryType,
+    SnapshotMode,
 };
 use argus_core::Decision;
 use std::path::{Path, PathBuf};
@@ -275,6 +276,48 @@ fn snapshot_root_aware_coordinate_matrix_keeps_logical_keys() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn snapshot_root_context_rejects_non_utf8_marker_suffix() -> Result<()> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    for marker in [".claude", "hooks"] {
+        let root = PathBuf::from("/synthetic")
+            .join(marker)
+            .join(OsString::from_vec(vec![b'r', b'o', b'o', b't', 0xff]));
+        let error = ScanRootContext::from_canonical_scan_root(&root, ScanRootEntryType::Directory)
+            .expect_err("non-UTF-8 root coordinates must fail closed");
+        assert!(
+            format!("{error:#}").contains("UTF-8"),
+            "{marker}: {error:#}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_scan_propagates_non_utf8_root_context_error() -> Result<()> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let sandbox = tempfile::tempdir()?;
+    let root = sandbox
+        .path()
+        .join(".claude")
+        .join(OsString::from_vec(vec![b'r', b'o', b'o', b't', 0xff]));
+    std::fs::create_dir_all(&root)?;
+    std::fs::write(root.join("AGENTS.md"), "trusted")?;
+    let storage = tempfile::tempdir()?;
+    let snapshot = storage.path().join("approved.json");
+    let result = snapshot_update(&root, &snapshot);
+    assert!(result.is_err());
+    assert!(format!("{:#}", result.err().unwrap()).contains("UTF-8"));
+    assert!(!snapshot.exists());
+    Ok(())
+}
+
 #[test]
 fn snapshot_path_membership_guard_rejects_existing_and_future_surfaces() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -357,6 +400,80 @@ fn post_inventory_error_matrix_retains_agt04_findings() -> Result<()> {
             outcome.report.findings
         );
     }
+
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("scripts"))?;
+    let script = root.path().join("scripts/install.py");
+    std::fs::write(&script, "print('approved')\n")?;
+    let storage = tempfile::tempdir()?;
+    let snapshot = storage.path().join("approved.json");
+    snapshot_update(root.path(), &snapshot)?;
+    std::fs::write(&script, "def broken(:\n  pass\n")?;
+    let capability = snapshot_check(root.path(), &snapshot)?;
+    assert!(capability.operational_error.is_some());
+    assert_eq!(capability.report.decision, Decision::Block);
+    assert!(capability
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-04-content-modified"));
+
+    let root = tempfile::tempdir()?;
+    let config = root.path().join(".mcp.json");
+    std::fs::write(&config, "{}")?;
+    let storage = tempfile::tempdir()?;
+    let snapshot = storage.path().join("approved.json");
+    snapshot_update(root.path(), &snapshot)?;
+    std::fs::write(&config, "{invalid")?;
+    let config_outcome = snapshot_check(root.path(), &snapshot)?;
+    assert!(config_outcome.operational_error.is_none());
+    assert!(config_outcome
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-04-content-modified"));
+    assert!(config_outcome
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-05-config-unparseable"));
+
+    let missing_baseline = storage.path().join("missing-baseline.json");
+    let baseline_check = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::Check(&missing_baseline),
+        SnapshotMode::Check(&snapshot),
+        None,
+    )?;
+    assert!(baseline_check.operational_error.is_none());
+    assert!(baseline_check
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-04-content-modified"));
+    assert!(baseline_check
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-02-baseline-unreadable"));
+
+    let baseline_destination = storage.path().join("non-empty-baseline");
+    std::fs::create_dir(&baseline_destination)?;
+    std::fs::write(baseline_destination.join("sentinel"), "unchanged")?;
+    let baseline_update = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::Update(&baseline_destination),
+        SnapshotMode::Check(&snapshot),
+        None,
+    )?;
+    assert!(baseline_update.operational_error.is_some());
+    assert_eq!(baseline_update.report.decision, Decision::Block);
+    assert!(baseline_update
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "AGT-04-content-modified"));
     Ok(())
 }
 

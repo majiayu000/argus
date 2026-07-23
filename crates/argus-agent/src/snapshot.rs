@@ -283,7 +283,7 @@ fn validate_logical_path(path: &str) -> std::result::Result<(), &'static str> {
         return Err("snapshot path contains an invalid segment");
     }
     let first = path.split('/').next().unwrap_or(path);
-    if first.len() == 2 && first.as_bytes()[0].is_ascii_alphabetic() && first.as_bytes()[1] == b':'
+    if first.len() >= 2 && first.as_bytes()[0].is_ascii_alphabetic() && first.as_bytes()[1] == b':'
     {
         return Err("snapshot path must not contain a platform prefix");
     }
@@ -447,6 +447,8 @@ mod tests {
             format!(r#"{{"version":1,"entries":{{"":{{"kind":"file","digest":"{A}"}}}}}}"#),
             format!(r#"{{"version":1,"entries":{{"a/../b":{{"kind":"file","digest":"{A}"}}}}}}"#),
             format!(r#"{{"version":1,"entries":{{"a\\b":{{"kind":"file","digest":"{A}"}}}}}}"#),
+            format!(r#"{{"version":1,"entries":{{"C:foo":{{"kind":"file","digest":"{A}"}}}}}}"#),
+            format!(r#"{{"version":1,"entries":{{"z:bar":{{"kind":"file","digest":"{A}"}}}}}}"#),
             r#"{"version":1,"entries":{"x":{"kind":"file","digest":"ABC"}}}"#.to_string(),
             format!(r#"{{"version":1,"entries":{{"x":{{"kind":"directory","digest":"{A}"}}}}}}"#),
             format!(r#"{{"version":1,"entries":{{"x":{{"kind":"symlink","digest":"{A}"}}}}}}"#),
