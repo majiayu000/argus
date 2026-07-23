@@ -1,4 +1,4 @@
-//! Deterministic SARIF 2.1.0 rendering for completed scan reports.
+//! Deterministic SARIF 2.1.0 rendering for complete and partial scan reports.
 
 use anyhow::{anyhow, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
@@ -12,6 +12,24 @@ const AGENT_RULE_HELP_URI: &str =
     "https://github.com/majiayu000/argus#agent-surface-rule-coverage-gh-57";
 
 pub(crate) fn render_reports(reports: &[ScanReport]) -> Result<Value> {
+    render_reports_with_execution(reports, Execution::Complete)
+}
+
+/// Render a blocked report retained after an agent scan became incomplete.
+///
+/// The notification is deliberately fixed text: operational diagnostics may
+/// contain filesystem or symlink details and are not a SARIF data source.
+pub(crate) fn render_incomplete_agent_report(report: &ScanReport) -> Result<Value> {
+    render_reports_with_execution(std::slice::from_ref(report), Execution::Incomplete)
+}
+
+#[derive(Clone, Copy)]
+enum Execution {
+    Complete,
+    Incomplete,
+}
+
+fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -> Result<Value> {
     let rule_severities = collect_rule_severities(reports);
     let rule_indices: BTreeMap<&str, usize> = rule_severities
         .keys()
@@ -35,7 +53,9 @@ pub(crate) fn render_reports(reports: &[ScanReport]) -> Result<Value> {
 
     let properties =
         intelligence_status(reports)?.map(|status| json!({"argusIntelligence": status}));
-    Ok(render_document(rules, results, properties))
+    Ok(render_document_with_execution(
+        rules, results, properties, execution,
+    ))
 }
 
 pub(crate) fn render_document(
@@ -43,6 +63,26 @@ pub(crate) fn render_document(
     results: Vec<Value>,
     properties: Option<Value>,
 ) -> Value {
+    render_document_with_execution(rules, results, properties, Execution::Complete)
+}
+
+fn render_document_with_execution(
+    rules: Vec<Value>,
+    results: Vec<Value>,
+    properties: Option<Value>,
+    execution: Execution,
+) -> Value {
+    let invocation = match execution {
+        Execution::Complete => json!({"executionSuccessful": true}),
+        Execution::Incomplete => json!({
+            "executionSuccessful": false,
+            "toolExecutionNotifications": [{
+                "descriptor": {"id": "agent_scan_incomplete"},
+                "level": "error",
+                "message": {"text": "agent scan incomplete"}
+            }]
+        }),
+    };
     let mut run = json!({
         "tool": {
             "driver": {
@@ -54,7 +94,7 @@ pub(crate) fn render_document(
                 "rules": rules
             }
         },
-        "invocations": [{"executionSuccessful": true}],
+        "invocations": [invocation],
         "results": results
     });
     if let Some(properties) = properties {
@@ -526,6 +566,41 @@ mod tests {
         );
         assert_eq!(document["runs"][0]["tool"]["driver"]["rules"], json!([]));
         assert_eq!(document["runs"][0]["results"], json!([]));
+    }
+
+    #[test]
+    fn sarif_snapshot_incomplete_retains_results_once_and_sanitizes_notification() {
+        let mut blocked = report(
+            ArtifactKind::AgentSurface,
+            "/private/scan-root",
+            vec![Finding::new(
+                "AGT-04-content-modified",
+                Severity::Medium,
+                "agent surface inventory change: content_modified",
+            )
+            .at("AGENTS.md")],
+        );
+        blocked.decision = Decision::Block;
+
+        let document =
+            render_incomplete_agent_report(&blocked).expect("render incomplete agent SARIF");
+        let run = &document["runs"][0];
+        assert_eq!(run["invocations"][0]["executionSuccessful"], false);
+        assert_eq!(
+            run["invocations"][0]["toolExecutionNotifications"][0]["level"],
+            "error"
+        );
+        assert_eq!(
+            run["invocations"][0]["toolExecutionNotifications"][0]["message"]["text"],
+            "agent scan incomplete"
+        );
+        let results = run["results"].as_array().expect("SARIF results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "AGT-04-content-modified");
+        assert_eq!(results[0]["properties"]["decision"], "block");
+        let encoded = serde_json::to_string(&document).expect("serialize SARIF");
+        assert!(!encoded.contains("private-target-name"));
+        assert!(!encoded.contains("sensitive operational detail"));
     }
 
     #[test]
