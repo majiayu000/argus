@@ -142,14 +142,18 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
     `Check/Update` 使用不按这些 ancestor basename 剪枝的 complete discovery。
     legacy collector 到达的 `InventoryOnly` entry 仍须在正文或 symlink
     validation 前 no-op，确保 classifier 扩展不改变默认 semantic 结果。
-    唯一 membership API 必须接收由 canonical scan root 构造的 root context，
-    并把 root-relative `logical_path` 映射为仅供分类的 coordinate；inventory、
-    finding 与 evidence 仍只使用 root-relative path。当 PATH 本身是 `.claude`
-    或其子目录、是 `.claude`/`hooks` 下的单文件，或是 `hooks` directory 时，
-    classification coordinate 必须保留对应 `.claude/` 或 `hooks/` 前缀，确保
-    `agent scan ~/.claude` 不漏检。snapshot target guard、inventory 与 semantic
-    projection 必须调用同一个 root-aware API；snapshot 模块不得维护 root-name
-    或 prefix 名单。
+    唯一 membership API 必须显式接收 coordinate policy：
+    `LegacyRootRelative` 用于 `SnapshotMode::None`/AGT-02-only，逐字使用现有
+    root-relative coordinate，不构造或补任何 root prefix；`SnapshotRootAware`
+    只用于 Check/Update，由 canonical scan root context 把 root-relative
+    `logical_path` 映射为仅供分类的 coordinate。inventory、finding 与 evidence
+    仍只使用 root-relative path。当 snapshot PATH 本身是 `.claude` 或其子目录、
+    是 `.claude`/`hooks` 下的单文件，或是 `hooks` directory 时，root-aware
+    coordinate 必须保留对应 `.claude/` 或 `hooks/` 前缀。snapshot target guard、
+    inventory 与 snapshot semantic projection 必须复用同一个
+    `SnapshotRootAware` context；prefix 构造只能存在于 `surface.rs`，snapshot
+    模块不得维护 root-name/prefix 名单。两种 policy 只改变 coordinate，复用
+    完全相同的 membership rule set。
     complete discovery 的每项都同时保存正交的 filesystem
     `entry_type = file | directory | symlink` 与
     `surface_kind = Option<SurfaceKind>`；不得用 surface kind 推断 filesystem
@@ -195,15 +199,21 @@ symlink，而下一次普通扫描无法证明这次变更的边界。
 - [ ] CLI help、互斥矩阵、单路径守卫、AGT-02 check 与 AGT-04 check 共存均有测试。
 - [ ] `SnapshotMode::None` 的无 snapshot scan 与 AGT-02-only check/update
       均继续 prune `.git`/`node_modules`，结果与引入 AGT-04 前一致；snapshot
-      Check/Update 对相同 tree 才运行 complete discovery。
+      Check/Update 对相同 tree 才运行 complete discovery。特别是扫描
+      `~/.claude` 时，legacy mode 仍把 `settings.json` 原样作为 root-relative
+      coordinate，`surface_kind` 保持 `None` 且不新增 semantic finding/error；
+      不得因 root basename 自动变成 `.claude/settings.json`。
 - [ ] snapshot Check/Update 中，inventory-only binary、oversized、file、
       directory 与 symlink 以及 `.claude/node_modules/**`、`.claude/.git/**`
       和 legacy-pruned ancestor 下的 classified surface 均进入 inventory；
       semantic projection 按 directory → InventoryOnly → legacy semantic
       validation 顺序执行，普通未分类 descendant 不进入 inventory，complete
       discovery 的 walker error 仍 fail closed。
-- [ ] root-aware classifier fixture 固定以下映射，且 snapshot target guard、
-      inventory 与 semantic 结果一致：扫描 `~/.claude` 时
+- [ ] coordinate-policy fixture 先证明 `LegacyRootRelative` 对
+      `~/.claude/settings.json` directory/single-file 保持当前 root-relative
+      `settings.json → None` classification 结果；再固定 `SnapshotRootAware`
+      映射，且 snapshot target
+      guard、inventory 与 semantic 结果一致：扫描 `~/.claude` 时
       `settings.json → .claude/settings.json`，扫描 `~/.claude/rules` 时
       `policy.md → .claude/rules/policy.md`，扫描单文件
       `~/.claude/settings.json` 时仍得到 `.claude/settings.json`，扫描
