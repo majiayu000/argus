@@ -264,21 +264,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-core",
+ "argus-osv-schema",
  "argus-test-support",
  "chrono",
  "flate2",
  "hex",
- "pep440_rs",
- "regex",
  "rustix",
- "semver",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
  "sha2",
  "tar",
  "tempfile",
- "unicode_categories",
  "ureq",
  "url",
 ]
@@ -343,8 +340,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-core",
- "argus-intel",
  "argus-lockfile",
+ "argus-osv-schema",
  "chrono",
  "hex",
  "polycvss",
@@ -354,6 +351,22 @@ dependencies = [
  "serde_json_canonicalizer",
  "sha2",
  "ureq",
+ "url",
+]
+
+[[package]]
+name = "argus-osv-schema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "chrono",
+ "pep440_rs",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "unicode_categories",
  "url",
 ]
 

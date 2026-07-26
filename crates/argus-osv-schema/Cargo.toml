@@ -1,0 +1,20 @@
+[package]
+name = "argus-osv-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OSV schema parsing, validation, and per-ecosystem version comparison shared by argus-intel and argus-osv."
+
+[dependencies]
+argus-core = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+pep440_rs = { workspace = true }
+url = { workspace = true }
+unicode_categories = { workspace = true }

@@ -1,4 +1,4 @@
-use crate::osv_profile::{profile, SchemaProfile};
+use crate::profile::{profile, SchemaProfile};
 use anyhow::{bail, Context, Result};
 use argus_core::{canonicalize_package_name, Ecosystem, PackageCoordinate};
 use chrono::{DateTime, Utc};
@@ -156,7 +156,7 @@ pub fn parse_osv_record(bytes: &[u8]) -> Result<OsvRecord> {
     Ok(record)
 }
 
-pub(crate) fn parse_record(bytes: &[u8]) -> Result<OsvRecord> {
+pub fn parse_record(bytes: &[u8]) -> Result<OsvRecord> {
     parse_osv_record(bytes)
 }
 
@@ -167,8 +167,7 @@ pub fn match_osv_affected(
     validate_osv_coordinate(coordinate)?;
     let mut matches = Vec::new();
     for (affected_index, affected) in record.affected.iter().enumerate() {
-        let Some(ecosystem) = crate::normalize::ecosystem_from_osv(&affected.package.ecosystem)
-        else {
+        let Some(ecosystem) = crate::ecosystem_from_osv(&affected.package.ecosystem) else {
             continue;
         };
         if ecosystem != coordinate.ecosystem
@@ -179,7 +178,7 @@ pub fn match_osv_affected(
         }
         let mut exact_versions = Vec::new();
         for version in &affected.versions {
-            if crate::matcher::compare_versions(ecosystem, &coordinate.version, version)?
+            if crate::versions::compare_versions(ecosystem, &coordinate.version, version)?
                 == std::cmp::Ordering::Equal
             {
                 exact_versions.push(version.clone());
@@ -235,7 +234,7 @@ pub fn validate_osv_coordinate(coordinate: &PackageCoordinate) -> Result<()> {
         .validate()
         .context("validate package coordinate before OSV matching")?;
     validate_exact_version_shape(coordinate.ecosystem, &coordinate.version)?;
-    crate::matcher::parse_version(coordinate.ecosystem, &coordinate.version)
+    crate::versions::parse_version(coordinate.ecosystem, &coordinate.version)
         .context("validate queried package exact version")
 }
 
@@ -294,7 +293,7 @@ fn matching_intervals(
     }
     if let Some(start) = introduced {
         let after_start = start == "0"
-            || crate::matcher::compare_versions(ecosystem, candidate, start)?
+            || crate::versions::compare_versions(ecosystem, candidate, start)?
                 != std::cmp::Ordering::Less;
         if after_start {
             matches.push(OsvIntervalMatch {
@@ -315,7 +314,7 @@ fn interval_contains(
     closing: &OsvEvent,
 ) -> Result<bool> {
     let after_start = introduced == "0"
-        || crate::matcher::compare_versions(ecosystem, candidate, introduced)?
+        || crate::versions::compare_versions(ecosystem, candidate, introduced)?
             != std::cmp::Ordering::Less;
     let (end, inclusive) = if let Some(value) = closing.fixed.as_deref() {
         (value, false)
@@ -326,7 +325,7 @@ fn interval_contains(
     } else {
         bail!("OSV range closing event has no boundary");
     };
-    let order = crate::matcher::compare_versions(ecosystem, candidate, end)?;
+    let order = crate::versions::compare_versions(ecosystem, candidate, end)?;
     Ok(after_start && (order == std::cmp::Ordering::Less || (inclusive && order.is_eq())))
 }
 
@@ -776,7 +775,7 @@ fn parse_utc(raw: &str) -> Result<DateTime<Utc>> {
         .with_context(|| format!("parse OSV UTC timestamp `{raw}`"))
 }
 
-pub(crate) fn validate_text(label: &str, value: &str) -> Result<()> {
+pub fn validate_text(label: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{label} is empty");
     }

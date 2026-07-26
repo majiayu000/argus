@@ -9,6 +9,7 @@ description = "Bounded offline malicious-package intelligence import and matchin
 
 [dependencies]
 argus-core = { workspace = true }
+argus-osv-schema = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
@@ -21,10 +22,6 @@ hex = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
-semver = { workspace = true }
-pep440_rs = { workspace = true }
-regex = { workspace = true }
-unicode_categories = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }

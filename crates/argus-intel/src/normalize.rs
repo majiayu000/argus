@@ -1,8 +1,9 @@
-use crate::matcher::{compare_versions, parse_version};
-use crate::osv::{validate_text, OsvEvent, OsvRecord};
 use crate::snapshot::{SnapshotAffected, SnapshotEvent, SnapshotRange, SnapshotRecord};
 use anyhow::{bail, Context, Result};
 use argus_core::{canonicalize_package_name, Ecosystem};
+use argus_osv_schema::{
+    compare_versions, ecosystem_from_osv, parse_version, validate_text, OsvEvent, OsvRecord,
+};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -197,20 +198,6 @@ pub(crate) fn validate_normalized_records(records: &[SnapshotRecord]) -> Result<
         }
     }
     Ok(())
-}
-
-pub(crate) fn ecosystem_from_osv(value: &str) -> Option<Ecosystem> {
-    match value {
-        "npm" => Some(Ecosystem::Npm),
-        "PyPI" => Some(Ecosystem::PyPi),
-        "crates.io" => Some(Ecosystem::CratesIo),
-        "Go" => Some(Ecosystem::Go),
-        "NuGet" => Some(Ecosystem::NuGet),
-        "Maven" => Some(Ecosystem::Maven),
-        "RubyGems" => Some(Ecosystem::RubyGems),
-        "Packagist" => Some(Ecosystem::Packagist),
-        _ => None,
-    }
 }
 
 fn expected_range(ecosystem: Ecosystem) -> &'static str {

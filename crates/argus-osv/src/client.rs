@@ -3,7 +3,7 @@ use crate::model::{
     NormalizedAdvisory, OsvError, OsvErrorKind, MAX_ID_BYTES,
 };
 use crate::normalize::normalize_advisory;
-use argus_intel::parse_osv_record;
+use argus_osv_schema::parse_osv_record;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -325,7 +325,7 @@ impl<'a> OsvClient<'a> {
         ids: impl Iterator<Item = &'b String>,
         started: Instant,
         budget: &mut OperationBudget,
-    ) -> Result<BTreeMap<String, (argus_intel::OsvRecord, String)>, OsvError> {
+    ) -> Result<BTreeMap<String, (argus_osv_schema::OsvRecord, String)>, OsvError> {
         let ids = ids.cloned().collect::<Vec<_>>();
         let mut details = BTreeMap::new();
         for chunk in ids.chunks(MAX_DETAIL_CONCURRENCY) {
