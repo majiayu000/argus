@@ -9,6 +9,7 @@ description = "RubyGems ecosystem support for argus: fetch .gem, verify SHA-256,
 
 [dependencies]
 argus-core = { workspace = true }
+argus-pipeline = { workspace = true }
 argus-archive = { workspace = true }
 argus-transport = { workspace = true }
 argus-rules = { workspace = true }

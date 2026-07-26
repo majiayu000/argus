@@ -11,33 +11,22 @@ mod sarif_vulns;
 mod vulns;
 
 use anyhow::{bail, Context, Result};
-use argus_composer::{
-    fetch_and_scan_composer, ComposerFetchOptions, ComposerRef,
-    HttpTransport as ComposerHttpTransport,
-};
+use argus_composer::ComposerFetcher;
 use argus_core::ScanReport;
-use argus_crates::{
-    fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
-};
+use argus_crates::CratesFetcher;
 use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
-use argus_go::{fetch_and_scan_go, GoFetchOptions, GoModuleRef, HttpTransport as GoHttpTransport};
+use argus_go::GoFetcher;
 use argus_lockfile::{
     evaluate as evaluate_lockfile, parse_lockfile, BoundedInput, DetectionRequest, FormatHint,
     PolicyOptions, MAX_INPUT_BYTES,
 };
-use argus_maven::{
-    fetch_and_scan_maven, HttpTransport as MavenHttpTransport, MavenFetchOptions, MavenRef,
-};
-use argus_nuget::{
-    fetch_and_scan_nuget, HttpTransport as NugetHttpTransport, NugetFetchOptions, NugetRef,
-};
+use argus_maven::MavenFetcher;
+use argus_nuget::NugetFetcher;
+use argus_pipeline::{CommonFetchOptions, EcosystemFetcher};
 use argus_pypi::{
-    fetch_and_scan_pypi, HttpTransport as PypiHttpTransport,
-    PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
+    fetch_and_scan_pypi, PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef,
 };
-use argus_rubygems::{
-    fetch_and_scan_gems, GemFetchOptions, GemRef, HttpTransport as GemsHttpTransport,
-};
+use argus_rubygems::GemsFetcher;
 use argus_rules::scan_package_dir;
 use argus_transport::HttpTransport;
 use chrono::{DateTime, Utc};
@@ -162,101 +151,42 @@ enum Cmd {
         #[command(flatten)]
         intel: intel::ScanIntelArgs,
     },
-    /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources.
-    CratesFetch {
-        /// Crate spec: `<name>` or `<name>@<version>`.
-        pkg: String,
-        /// crates.io registry base URL.
-        #[arg(long, default_value = "https://crates.io")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
-    /// Fetch a Go module from a GOPROXY, verify the dirhash h1 checksum, safe-extract the zip, scan init/exec/network surfaces.
-    GoFetch {
-        /// Module spec: `<module-path>` or `<module-path>@<version>`.
-        pkg: String,
-        /// GOPROXY registry base URL.
-        #[arg(long, default_value = "https://proxy.golang.org")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
-    /// Fetch a package from NuGet, verify catalog SHA-512, safe-extract .nupkg, scan.
-    NugetFetch {
-        /// Package spec: `<id>` or `<id>@<version>`.
-        pkg: String,
-        /// NuGet registry base URL.
-        #[arg(long, default_value = "https://api.nuget.org")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
-    /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources.
-    MavenFetch {
-        /// Maven coordinate: `groupId:artifactId` or `groupId:artifactId:version`.
-        pkg: String,
-        /// Maven registry base URL.
-        #[arg(long, default_value = "https://repo1.maven.org/maven2")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
-    /// Fetch a gem from RubyGems, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources.
-    GemsFetch {
-        /// Gem spec: `<name>` or `<name>@<version>`.
-        pkg: String,
-        /// RubyGems registry base URL.
-        #[arg(long, default_value = "https://rubygems.org")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
-    /// Fetch a Composer package from Packagist, verify SHA-1, safe-extract, scan.
-    ComposerFetch {
-        /// Package spec: `vendor/package` or `vendor/package@version`.
-        pkg: String,
-        /// Packagist registry base URL.
-        #[arg(long, default_value = "https://repo.packagist.org")]
-        registry: String,
-        /// Persistent scratch parent. Omitted → private system temp dir.
-        #[arg(long)]
-        cache_dir: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = Format::Text)]
-        format: Format,
-        #[command(flatten)]
-        intel: intel::ScanIntelArgs,
-    },
+    /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources. Spec: `<name>` or `<name>@<version>`.
+    CratesFetch(EcosystemFetchArgs),
+    /// Fetch a Go module from a GOPROXY, verify the dirhash h1 checksum, safe-extract the zip, scan init/exec/network surfaces. Spec: `<module-path>` or `<module-path>@<version>`.
+    GoFetch(EcosystemFetchArgs),
+    /// Fetch a package from NuGet, verify catalog SHA-512, safe-extract .nupkg, scan. Spec: `<id>` or `<id>@<version>`.
+    NugetFetch(EcosystemFetchArgs),
+    /// Fetch a jar from Maven Central, verify checksum, safe-extract, scan pom.xml + resources. Spec: `groupId:artifactId` or `groupId:artifactId:version`.
+    MavenFetch(EcosystemFetchArgs),
+    /// Fetch a gem from RubyGems, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources. Spec: `<name>` or `<name>@<version>`.
+    GemsFetch(EcosystemFetchArgs),
+    /// Fetch a Composer package from Packagist, verify SHA-1, safe-extract, scan. Spec: `vendor/package` or `vendor/package@version`.
+    ComposerFetch(EcosystemFetchArgs),
     /// Regression-corpus operations.
     Corpus {
         #[command(subcommand)]
         op: CorpusOp,
     },
+}
+
+/// Arguments shared by every non-npm ecosystem fetch subcommand. npm's
+/// `fetch` keeps its own richer flag set (Sigstore, metadata anomaly);
+/// `pypi-fetch` adds `--prefer` on top of its own handler.
+#[derive(clap::Args, Debug)]
+struct EcosystemFetchArgs {
+    /// Package spec (see this subcommand's help for the exact syntax).
+    pkg: String,
+    /// Registry base URL. Defaults to the ecosystem's canonical registry.
+    #[arg(long)]
+    registry: Option<String>,
+    /// Persistent scratch parent. Omitted → private system temp dir.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    format: Format,
+    #[command(flatten)]
+    intel: intel::ScanIntelArgs,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -459,48 +389,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             scan_started_at,
         ),
-        Cmd::CratesFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_crates_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
-        Cmd::GoFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_go_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
-        Cmd::NugetFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_nuget_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
-        Cmd::MavenFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_maven_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
-        Cmd::GemsFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_gems_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
-        Cmd::ComposerFetch {
-            pkg,
-            registry,
-            cache_dir,
-            format,
-            intel,
-        } => cmd_composer_fetch(&pkg, registry, cache_dir, format, intel, scan_started_at),
+        Cmd::CratesFetch(args) => {
+            cmd_ecosystem_fetch(&CratesFetcher, "crates-fetch", args, scan_started_at)
+        }
+        Cmd::GoFetch(args) => cmd_ecosystem_fetch(&GoFetcher, "go-fetch", args, scan_started_at),
+        Cmd::NugetFetch(args) => {
+            cmd_ecosystem_fetch(&NugetFetcher, "nuget-fetch", args, scan_started_at)
+        }
+        Cmd::MavenFetch(args) => {
+            cmd_ecosystem_fetch(&MavenFetcher, "maven-fetch", args, scan_started_at)
+        }
+        Cmd::GemsFetch(args) => {
+            cmd_ecosystem_fetch(&GemsFetcher, "gems-fetch", args, scan_started_at)
+        }
+        Cmd::ComposerFetch(args) => {
+            cmd_ecosystem_fetch(&ComposerFetcher, "composer-fetch", args, scan_started_at)
+        }
         Cmd::Agent {
             op:
                 AgentOp::Scan {
@@ -544,127 +448,24 @@ fn cmd_scan(
     finish_scan(report, format, intel, scan_started_at)
 }
 
-fn cmd_crates_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
+fn cmd_ecosystem_fetch(
+    fetcher: &dyn EcosystemFetcher,
+    label: &str,
+    args: EcosystemFetchArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
-    let pkg_ref = CrateRef::parse(pkg).with_context(|| format!("parse crates.io spec `{pkg}`"))?;
-    let opts = CratesFetchOptions {
+    let registry = args
+        .registry
+        .unwrap_or_else(|| fetcher.default_registry().to_string());
+    let opts = CommonFetchOptions {
         registry,
-        cache_dir,
-        ..CratesFetchOptions::default()
+        cache_dir: args.cache_dir,
     };
-    let transport = CratesHttpTransport::new();
-    let report = fetch_and_scan_crate(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("crates-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
-}
-
-fn cmd_go_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
-    scan_started_at: DateTime<Utc>,
-) -> Result<ExitCode> {
-    let pkg_ref =
-        GoModuleRef::parse(pkg).with_context(|| format!("parse Go module spec `{pkg}`"))?;
-    let opts = GoFetchOptions {
-        registry,
-        cache_dir,
-        ..GoFetchOptions::default()
-    };
-    let transport = GoHttpTransport::new();
-    let report = fetch_and_scan_go(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("go-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
-}
-
-fn cmd_nuget_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
-    scan_started_at: DateTime<Utc>,
-) -> Result<ExitCode> {
-    let pkg_ref = NugetRef::parse(pkg).with_context(|| format!("parse NuGet spec `{pkg}`"))?;
-    let opts = NugetFetchOptions {
-        registry,
-        cache_dir,
-        ..NugetFetchOptions::default()
-    };
-    let transport = NugetHttpTransport::new();
-    let report = fetch_and_scan_nuget(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("nuget-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
-}
-
-fn cmd_maven_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
-    scan_started_at: DateTime<Utc>,
-) -> Result<ExitCode> {
-    let pkg_ref =
-        MavenRef::parse(pkg).with_context(|| format!("parse Maven coordinate `{pkg}`"))?;
-    let opts = MavenFetchOptions {
-        registry,
-        cache_dir,
-        ..MavenFetchOptions::default()
-    };
-    let transport = MavenHttpTransport::new();
-    let report = fetch_and_scan_maven(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("maven-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
-}
-
-fn cmd_gems_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
-    scan_started_at: DateTime<Utc>,
-) -> Result<ExitCode> {
-    let pkg_ref = GemRef::parse(pkg).with_context(|| format!("parse RubyGems spec `{pkg}`"))?;
-    let opts = GemFetchOptions {
-        registry,
-        cache_dir,
-        ..GemFetchOptions::default()
-    };
-    let transport = GemsHttpTransport::new();
-    let report = fetch_and_scan_gems(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("gems-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
-}
-
-fn cmd_composer_fetch(
-    pkg: &str,
-    registry: String,
-    cache_dir: Option<PathBuf>,
-    format: Format,
-    intel: intel::ScanIntelArgs,
-    scan_started_at: DateTime<Utc>,
-) -> Result<ExitCode> {
-    let pkg_ref =
-        ComposerRef::parse(pkg).with_context(|| format!("parse Composer spec `{pkg}`"))?;
-    let opts = ComposerFetchOptions {
-        registry,
-        cache_dir,
-        ..ComposerFetchOptions::default()
-    };
-    let transport = ComposerHttpTransport::new();
-    let report = fetch_and_scan_composer(&pkg_ref, &opts, &transport)
-        .with_context(|| format!("composer-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
+    let transport = HttpTransport::new();
+    let report = fetcher
+        .fetch_and_scan(&args.pkg, &opts, &transport)
+        .with_context(|| format!("{label} + scan {}", args.pkg))?;
+    finish_scan(report, args.format, args.intel, scan_started_at)
 }
 
 fn cmd_pypi_fetch(
@@ -684,7 +485,7 @@ fn cmd_pypi_fetch(
         prefer,
         ..PypiFetchOptions::default()
     };
-    let transport = PypiHttpTransport::new();
+    let transport = HttpTransport::new();
     let report = fetch_and_scan_pypi(&pkg_ref, &opts, &transport)
         .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
     finish_scan(report, format, intel, scan_started_at)

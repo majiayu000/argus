@@ -192,6 +192,34 @@ pub(crate) fn finding(rule: &str, sev: argus_core::Severity, detail: impl Into<S
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for crates.io.
+pub struct CratesFetcher;
+
+impl argus_pipeline::EcosystemFetcher for CratesFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::CratesIo
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://crates.io"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = CrateRef::parse(spec)?;
+        let opts = CratesFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..CratesFetchOptions::default()
+        };
+        fetch_and_scan_crate(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

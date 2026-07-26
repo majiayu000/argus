@@ -290,6 +290,34 @@ pub(crate) fn finding(rule: &str, sev: Severity, detail: impl Into<String>) -> F
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for PyPI.
+pub struct PypiFetcher;
+
+impl argus_pipeline::EcosystemFetcher for PypiFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::PyPi
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://pypi.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = PypiPackageRef::parse(spec)?;
+        let opts = PypiFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..PypiFetchOptions::default()
+        };
+        fetch_and_scan_pypi(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

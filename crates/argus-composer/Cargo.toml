@@ -9,6 +9,7 @@ description = "Packagist/Composer ecosystem scanner for argus."
 
 [dependencies]
 argus-core   = { workspace = true }
+argus-pipeline = { workspace = true }
 argus-archive = { workspace = true }
 argus-transport = { workspace = true }
 argus-rules  = { workspace = true }

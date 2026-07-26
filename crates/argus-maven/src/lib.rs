@@ -329,6 +329,34 @@ pub(crate) fn finding(rule: &str, sev: Severity, detail: impl Into<String>) -> F
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for Maven.
+pub struct MavenFetcher;
+
+impl argus_pipeline::EcosystemFetcher for MavenFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::Maven
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://repo1.maven.org/maven2"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = MavenRef::parse(spec)?;
+        let opts = MavenFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..MavenFetchOptions::default()
+        };
+        fetch_and_scan_maven(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

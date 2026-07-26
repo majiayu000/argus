@@ -9,6 +9,7 @@ description = "crates.io ecosystem support for argus: fetch .crate file, verify 
 
 [dependencies]
 argus-core = { workspace = true }
+argus-pipeline = { workspace = true }
 argus-archive = { workspace = true }
 argus-transport = { workspace = true }
 argus-rules = { workspace = true }

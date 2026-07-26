@@ -193,6 +193,34 @@ pub(crate) fn finding(rule: &str, sev: argus_core::Severity, detail: impl Into<S
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for Composer.
+pub struct ComposerFetcher;
+
+impl argus_pipeline::EcosystemFetcher for ComposerFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::Packagist
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://repo.packagist.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = ComposerRef::parse(spec)?;
+        let opts = ComposerFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..ComposerFetchOptions::default()
+        };
+        fetch_and_scan_composer(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

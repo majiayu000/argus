@@ -1,0 +1,13 @@
+[package]
+name = "argus-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "EcosystemFetcher trait: the shared fetch-verify-extract-scan entry point every argus ecosystem scanner implements."
+
+[dependencies]
+argus-core = { workspace = true }
+argus-transport = { workspace = true }
+anyhow = { workspace = true }

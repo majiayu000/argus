@@ -156,6 +156,7 @@ dependencies = [
  "argus-maven",
  "argus-nuget",
  "argus-osv",
+ "argus-pipeline",
  "argus-pypi",
  "argus-rubygems",
  "argus-rules",
@@ -174,6 +175,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -211,6 +213,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -259,6 +262,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -317,6 +321,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -337,6 +342,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -388,12 +394,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-core",
+ "argus-transport",
+]
+
+[[package]]
 name = "argus-pypi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -416,6 +432,7 @@ dependencies = [
  "anyhow",
  "argus-archive",
  "argus-core",
+ "argus-pipeline",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
