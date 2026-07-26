@@ -120,9 +120,9 @@ enum Cmd {
         allow_tarball_host: Vec<String>,
         /// Layer full Sigstore signature verification (Fulcio chain +
         /// Rekor inclusion + DSSE + OIDC identity allowlist) on top of
-        /// the always-on subject-digest check. Requires argus-fetch
-        /// built with `--features sigstore`; without that feature the
-        /// flag is parsed but only emits an informational finding.
+        /// the always-on subject-digest check. Requires `argus-fetch` built
+        /// with `--features sigstore`. Feature-off requests fail closed with a
+        /// hard error before network access; enabled verification requires at least one `--sigstore-identity`.
         #[arg(long = "verify-sigstore")]
         verify_sigstore: bool,
         /// OIDC issuer the leaf cert must carry when `--verify-sigstore`
