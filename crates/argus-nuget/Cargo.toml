@@ -2,6 +2,7 @@
 name = "argus-nuget"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "NuGet ecosystem support for argus: fetch .nupkg, verify catalog SHA-512, scan install/build hooks + .nuspec."

@@ -2,6 +2,7 @@
 name = "argus-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "argus command-line binary: scan packages and run the regression corpus."

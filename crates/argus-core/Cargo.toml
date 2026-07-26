@@ -2,6 +2,7 @@
 name = "argus-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core types and shared helpers for argus (Decision, Finding, ScanReport, URL + integrity checks)."

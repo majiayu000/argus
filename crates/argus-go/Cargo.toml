@@ -2,6 +2,7 @@
 name = "argus-go"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Go module ecosystem support for argus: fetch module .zip from the GOPROXY protocol, verify the dirhash h1: checksum, scan init/exec/network trigger surfaces."
