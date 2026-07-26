@@ -220,7 +220,7 @@ pub fn fetch_and_scan_nuget(
         artifact: ArtifactKind::PackageDir,
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints.
-        path: PathBuf::from(format!("{}@{version}", pkg.name)),
+        path: PathBuf::from(format!("{}@{version}", coordinate.canonical_name)),
         package_name: scan.name.or_else(|| Some(pkg.name.clone())),
         package_version: scan.version.or(Some(version)),
         decision,

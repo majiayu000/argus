@@ -262,6 +262,34 @@ fn clean_package_allows() {
     assert_eq!(report.path.to_string_lossy(), "vendor/clean@2.0.0");
 }
 
+#[test]
+fn name_alias_uses_canonical_metadata_key_and_report_path() {
+    let registry = "https://mock.packagist";
+    let dist_url = "https://codeload.github.com/vendor/clean/legacy.zip/refs/tags/2.0.0";
+    let zip = make_zip(&[(
+        "vendor-clean-abc/src/Helper.php",
+        b"<?php\nfunction hello() { return 'world'; }\n",
+    )]);
+    let meta = p2_json("vendor", "clean", "2.0.0", dist_url, &sha1_hex(&zip));
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/p2/vendor/clean.json"),
+        meta.into_bytes(),
+    );
+    transport.insert(dist_url, zip);
+    let pkg = ComposerRef::parse("Vendor/Clean@2.0.0").unwrap();
+
+    let report = fetch_and_scan_composer(&pkg, &default_opts(registry), &transport).unwrap();
+    let coordinate = report.coordinate.as_ref().expect("coordinate is set");
+
+    assert_eq!(report.package_name.as_deref(), Some("Vendor/Clean"));
+    assert_eq!(report.path.to_string_lossy(), "vendor/clean@2.0.0");
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!("{}@{}", coordinate.canonical_name, coordinate.version)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. autoload.files structural Info → does NOT force Block
 // ---------------------------------------------------------------------------

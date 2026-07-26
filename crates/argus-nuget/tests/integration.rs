@@ -202,8 +202,13 @@ fn clean_package_allows_and_parses_manifest() {
     assert_eq!(report.decision, Decision::Allow);
     assert_eq!(report.package_name.as_deref(), Some("Clean.Pkg"));
     assert_eq!(report.package_version.as_deref(), Some("3.4.5"));
+    let coordinate = report.coordinate.as_ref().expect("coordinate is set");
     // The report path is the registry coordinate, never the extraction TempDir.
-    assert_eq!(report.path.to_string_lossy(), "Clean.Pkg@3.4.5");
+    assert_eq!(report.path.to_string_lossy(), "clean.pkg@3.4.5");
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!("{}@{}", coordinate.canonical_name, coordinate.version)
+    );
 }
 
 #[test]
