@@ -64,6 +64,98 @@ pub fn policy(id: &str) -> RulePolicy {
     rule_def(id).map_or(RulePolicy::Blocking, |rule| rule.policy)
 }
 
+/// How findings are folded into a [`crate::Decision`].
+///
+/// The two profiles are the previously divergent aggregators from
+/// `argus-rules::decision` (packages) and `argus-agent::decision` (agent
+/// surfaces), now living behind one entry point so the divergence is
+/// explicit and maintained in one place. A genuinely severity-weighted
+/// scoring model (where the profiles converge) is future work gated on a
+/// labeled benchmark — see issues #145/#146.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregationProfile {
+    /// Package scans: policy-class driven. Any policy-weighted finding
+    /// blocks regardless of severity; `ApprovalOnly` findings alone yield
+    /// AllowWithApproval; `DowngradeSafe` findings paired with
+    /// `known-native-build-pattern` downgrade Block to AllowWithApproval.
+    PolicyDriven,
+    /// Agent-surface scans: severity driven. Critical/High block, Medium
+    /// requires approval, Low/Info carry no weight. There is no
+    /// native-build allowlist on this surface.
+    SeverityDriven,
+}
+
+/// Fold findings into a decision under the given profile.
+pub fn aggregate(findings: &[crate::Finding], profile: AggregationProfile) -> crate::Decision {
+    match profile {
+        AggregationProfile::PolicyDriven => aggregate_policy_driven(findings),
+        AggregationProfile::SeverityDriven => aggregate_severity_driven(findings),
+    }
+}
+
+fn aggregate_policy_driven(findings: &[crate::Finding]) -> crate::Decision {
+    use crate::{Decision, Severity};
+    use std::collections::BTreeSet;
+
+    if findings.is_empty() {
+        return Decision::Allow;
+    }
+
+    // Strip pure-info findings; the same rule id at a higher severity must
+    // still influence the decision. Unregistered ids fail closed to
+    // Blocking.
+    let decision_ids: BTreeSet<&str> = findings
+        .iter()
+        .filter(|finding| {
+            finding.severity != Severity::Info || policy(&finding.rule_id) != RulePolicy::InfoOnly
+        })
+        .map(|finding| finding.rule_id.as_str())
+        .collect();
+
+    if decision_ids.is_empty() {
+        return Decision::Allow;
+    }
+
+    let residual_ids: BTreeSet<&str> = decision_ids
+        .iter()
+        .copied()
+        .filter(|id| policy(id) != RulePolicy::ApprovalOnly)
+        .collect();
+
+    if residual_ids.is_empty() {
+        return Decision::AllowWithApproval;
+    }
+
+    let has_native_build = residual_ids.contains("known-native-build-pattern");
+    let has_high_risk = residual_ids
+        .iter()
+        .any(|id| policy(id) != RulePolicy::DowngradeSafe);
+
+    if has_native_build && !has_high_risk {
+        Decision::AllowWithApproval
+    } else {
+        Decision::Block
+    }
+}
+
+fn aggregate_severity_driven(findings: &[crate::Finding]) -> crate::Decision {
+    use crate::{Decision, Severity};
+
+    let mut has_medium = false;
+    for finding in findings {
+        match finding.severity {
+            Severity::Critical | Severity::High => return Decision::Block,
+            Severity::Medium => has_medium = true,
+            Severity::Low | Severity::Info => {}
+        }
+    }
+    if has_medium {
+        Decision::AllowWithApproval
+    } else {
+        Decision::Allow
+    }
+}
+
 use RulePolicy::{ApprovalOnly, Blocking, DowngradeSafe, InfoOnly};
 
 macro_rules! rule {

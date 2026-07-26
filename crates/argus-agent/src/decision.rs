@@ -1,28 +1,18 @@
-//! Decision derivation for agent-surface scans. Simpler than the package
-//! path: there is no native-build allowlist. Any critical or high finding
-//! blocks; medium requires approval; otherwise allow.
+//! Decision derivation for agent-surface scans. The actual fold lives in
+//! `argus_core::rules::aggregate` (SeverityDriven profile: no native-build
+//! allowlist; Critical/High block, Medium requires approval).
 
-use argus_core::{Decision, Finding, Severity};
+use argus_core::rules::{aggregate, AggregationProfile};
+use argus_core::{Decision, Finding};
 
 pub fn derive(findings: &[Finding]) -> Decision {
-    let mut has_medium = false;
-    for f in findings {
-        match f.severity {
-            Severity::Critical | Severity::High => return Decision::Block,
-            Severity::Medium => has_medium = true,
-            Severity::Low | Severity::Info => {}
-        }
-    }
-    if has_medium {
-        Decision::AllowWithApproval
-    } else {
-        Decision::Allow
-    }
+    aggregate(findings, AggregationProfile::SeverityDriven)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_core::Severity;
 
     #[test]
     fn severity_maps_to_decision() {
