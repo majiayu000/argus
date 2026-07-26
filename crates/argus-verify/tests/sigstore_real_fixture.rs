@@ -40,16 +40,16 @@ const GITHUB_ACTIONS_OIDC_ISSUER: &str = "https://token.actions.githubuserconten
 /// so the intoto/0.0.2 case falls into a gap and surfaces as
 /// `SignatureInvalid` with the diagnostic "V2 bundle requires RFC3161
 /// timestamp ...". cosign hit the same shape; see the design doc §10 honest
-/// gap. These tests pin the current observable contract so we notice the
-/// day upstream closes the gap (or we replace the verifier).
+/// gap. Until the verifier can prove these bundles valid, Argus must keep
+/// them fail-closed as `SignatureInvalid`.
 const INTOTO_V02_DIAGNOSTIC: &str = "V2 bundle requires RFC3161 timestamp";
 
 #[test]
-fn real_sigstore_bundle_currently_blocked_by_intoto_0_0_2_gap() {
+fn real_sigstore_bundle_is_invalid_inside_intoto_0_0_2_gap() {
     // This is the test that SHOULD say `Verified` once the upstream
-    // intoto/0.0.2 gap is closed. Today it pins the SignatureInvalid wall
-    // with the exact diagnostic, so a silent upstream fix flips this test
-    // red and we'll know.
+    // intoto/0.0.2 gap is closed. Until then, this verifier cannot
+    // distinguish a legitimate unsupported bundle from forged material,
+    // so the operational verdict remains fail-closed.
     let patterns = permissive_allowlist();
     let allowlist = IdentityAllowlist {
         issuer: GITHUB_ACTIONS_OIDC_ISSUER,
@@ -61,30 +61,21 @@ fn real_sigstore_bundle_currently_blocked_by_intoto_0_0_2_gap() {
         SigstoreVerdict::SignatureInvalid { reason } => {
             assert!(
                 reason.contains(INTOTO_V02_DIAGNOSTIC),
-                "expected the intoto/0.0.2 V2-fallback gap diagnostic, got: {reason}"
+                "expected the upstream intoto/0.0.2 diagnostic, got: {reason}"
             );
         }
         SigstoreVerdict::Verified { identity, issuer } => {
-            // Upstream fixed it. Update this test to assert Verified and
-            // delete the gap section in design doc §10.
             panic!(
                 "upstream fixed intoto/0.0.2 — flip this test to assert \
                  Verified. identity={identity}, issuer={issuer}"
             );
         }
-        other => panic!(
-            "expected SignatureInvalid with the upstream-gap diagnostic, \
-             got: {other:?}"
-        ),
+        other => panic!("expected SignatureInvalid for the intoto/0.0.2 gap, got: {other:?}"),
     }
 }
 
 #[test]
-fn tampered_artifact_still_rejected_inside_the_intoto_gap() {
-    // Even though the bundle hits the intoto/0.0.2 V2-gap before subject
-    // verification, a tampered artifact must continue to reach a
-    // non-Verified verdict — i.e. tampering must NEVER promote to Verified
-    // regardless of which internal layer rejects.
+fn tampered_artifact_is_invalid_inside_the_intoto_gap() {
     let mut tampered = REAL_TARBALL.to_vec();
     *tampered.last_mut().unwrap() ^= 0x01;
 
@@ -97,7 +88,25 @@ fn tampered_artifact_still_rejected_inside_the_intoto_gap() {
     let verdict = verify_bundle_full(REAL_BUNDLE, &tampered, &allowlist).unwrap();
     match verdict {
         SigstoreVerdict::SignatureInvalid { .. } => {}
-        other => panic!("expected SignatureInvalid for tampered artifact, got: {other:?}"),
+        other => panic!("tampered artifact must be SignatureInvalid, got: {other:?}"),
+    }
+}
+
+#[test]
+fn corrupted_dsse_signature_is_invalid_inside_the_intoto_gap() {
+    let mut bundle: serde_json::Value = serde_json::from_str(REAL_BUNDLE).unwrap();
+    bundle["dsseEnvelope"]["signatures"][0]["sig"] = serde_json::Value::String("AA==".to_string());
+
+    let patterns = permissive_allowlist();
+    let allowlist = IdentityAllowlist {
+        issuer: GITHUB_ACTIONS_OIDC_ISSUER,
+        san_uri_patterns: &patterns,
+    };
+
+    let verdict = verify_bundle_full(&bundle.to_string(), REAL_TARBALL, &allowlist).unwrap();
+    match verdict {
+        SigstoreVerdict::SignatureInvalid { .. } => {}
+        other => panic!("corrupted DSSE signature must be SignatureInvalid, got: {other:?}"),
     }
 }
 

@@ -15,6 +15,29 @@ fn npm_anomaly_cli_help_documents_opt_in_and_cache() {
     assert!(help.contains("--metadata-anomaly"), "{help}");
     assert!(help.contains("--metadata-cache-dir"), "{help}");
     assert!(help.contains("Disabled by default"), "{help}");
+    assert!(
+        help.contains("Feature-off requests fail closed with a hard error before network access"),
+        "{help}"
+    );
+    assert!(
+        help.contains("requires at least one `--sigstore-identity`"),
+        "{help}"
+    );
+}
+
+#[cfg(not(feature = "sigstore"))]
+#[test]
+fn verify_sigstore_without_feature_fails_closed_before_network_access() {
+    let output = argus(&["fetch", "demo", "--verify-sigstore"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("--verify-sigstore was requested")
+            && error.contains("does not include the `sigstore` feature")
+            && error.contains("refusing to skip signature verification"),
+        "{error}"
+    );
 }
 
 #[test]

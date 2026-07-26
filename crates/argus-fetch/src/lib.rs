@@ -128,8 +128,9 @@ pub struct FetchOptions {
     /// Opt-in to full Sigstore signature verification (Fulcio chain +
     /// Rekor inclusion + DSSE + OIDC identity allowlist) layered on top
     /// of the always-on subject-digest cross-check. Requires `argus-fetch`
-    /// to be built with `--features sigstore`; with the feature off, the
-    /// flag is parsed but ignored with an `Info`-level finding.
+    /// to be built with `--features sigstore`; with the feature off, a
+    /// request for verification fails closed with a hard error before any
+    /// network access.
     pub verify_sigstore: bool,
     /// Literal OIDC issuer the leaf cert must carry when
     /// `verify_sigstore` is on. For GitHub Actions this is
@@ -168,6 +169,18 @@ pub fn fetch_and_scan(
     opts: &FetchOptions,
     transport: &dyn Transport,
 ) -> Result<ScanReport> {
+    // Fail closed: the caller explicitly asked for signature verification,
+    // so a build that cannot perform it must refuse to scan rather than
+    // emit an Info finding and allow ("thought it was verified, it wasn't").
+    #[cfg(not(feature = "sigstore"))]
+    if opts.verify_sigstore {
+        anyhow::bail!(
+            "--verify-sigstore was requested but this argus build does not include \
+             the `sigstore` feature; refusing to skip signature verification \
+             silently. Rebuild with `--features sigstore` or drop the flag."
+        );
+    }
+
     // 1. Fetch packument.
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
@@ -318,7 +331,7 @@ fn hex_sha512(bytes: &[u8]) -> String {
 fn check_provenance(
     attestations: &Option<packument::AttestationsRef>,
     tarball_sha512_hex: &str,
-    tarball_bytes: &[u8],
+    #[cfg_attr(not(feature = "sigstore"), allow(unused_variables))] tarball_bytes: &[u8],
     registry_host: &str,
     allowlist: &[String],
     transport: &dyn Transport,
@@ -365,6 +378,7 @@ fn check_provenance(
         }
     };
 
+    #[cfg_attr(not(feature = "sigstore"), allow(unused_mut))]
     let mut findings = match check_subject_digest(&summaries, tarball_sha512_hex) {
         SubjectCheck::Matched {
             subject_name,
@@ -411,40 +425,17 @@ fn check_provenance(
         )],
     };
 
+    // Full Sigstore signature verification (Fulcio chain, Rekor inclusion,
+    // DSSE signature, OIDC identity allowlist), one finding per attestation.
+    // A build without the `sigstore` feature never reaches this point with
+    // verify_sigstore set: fetch_and_scan rejects that combination up front
+    // (fail closed) instead of emitting an Info finding and allowing.
+    #[cfg(feature = "sigstore")]
     if opts.verify_sigstore {
-        findings.extend(verify_provenance_signatures(&bytes, tarball_bytes, opts));
+        findings.extend(sigstore_impl::verify(&bytes, tarball_bytes, opts));
     }
 
     findings
-}
-
-/// Full Sigstore signature verification (Fulcio chain, Rekor inclusion,
-/// DSSE signature, OIDC identity allowlist) for every attestation in the
-/// attestations document. Emits one finding per attestation.
-///
-/// With the `sigstore` feature OFF, emits a single
-/// `provenance-signature-unverified` finding so the report makes the gap
-/// visible rather than silently doing nothing.
-#[cfg_attr(not(feature = "sigstore"), allow(unused_variables))]
-fn verify_provenance_signatures(
-    raw_attestations: &[u8],
-    tarball_bytes: &[u8],
-    opts: &FetchOptions,
-) -> Vec<Finding> {
-    #[cfg(not(feature = "sigstore"))]
-    {
-        vec![Finding::new(
-            "provenance-signature-unverified",
-            Severity::Info,
-            "--verify-sigstore was requested but argus-fetch was built without the \
-             `sigstore` feature; signature verification skipped. Rebuild argus-cli \
-             with `--features sigstore` to enable.",
-        )]
-    }
-    #[cfg(feature = "sigstore")]
-    {
-        sigstore_impl::verify(raw_attestations, tarball_bytes, opts)
-    }
 }
 
 #[cfg(feature = "sigstore")]

@@ -4,10 +4,9 @@
 //! findings appear with the expected rule IDs and severities.
 //!
 //! The full Sigstore Verified path is currently blocked by the upstream
-//! `intoto/0.0.2` gap (see argus-verify Day 2 and design doc §10), so the
-//! happy-path assertion is "fires `provenance-signature-invalid` with the
-//! upstream gap diagnostic" — pinned as a living contract that flips
-//! green the day the gap closes.
+//! `intoto/0.0.2` gap (see argus-verify Day 2 and design doc §10). Argus
+//! cannot prove these bundles valid, so verification remains fail-closed
+//! with `provenance-signature-invalid` / `Block`.
 //!
 //! Gated on the `sigstore` feature so the default build does not have to
 //! drag in the heavy Sigstore dep tree.
@@ -54,6 +53,14 @@ fn make_opts(registry: &str, verify_sigstore: bool, identities: &[&str]) -> Fetc
 }
 
 fn install_routes(transport: &MockTransport, registry: &str) -> (String, String) {
+    install_routes_with_attestations(transport, registry, REAL_ATTESTATIONS.to_vec())
+}
+
+fn install_routes_with_attestations(
+    transport: &MockTransport,
+    registry: &str,
+    attestations: Vec<u8>,
+) -> (String, String) {
     let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(REAL_TARBALL)));
     let tarball_url = format!("{registry}/sigstore/-/sigstore-2.3.1.tgz");
     let attestations_url = format!("{registry}/-/npm/v1/attestations/sigstore@2.3.1");
@@ -61,19 +68,18 @@ fn install_routes(transport: &MockTransport, registry: &str) -> (String, String)
 
     transport.insert(&format!("{registry}/sigstore"), packument.into_bytes());
     transport.insert(&tarball_url, REAL_TARBALL.to_vec());
-    transport.insert(&attestations_url, REAL_ATTESTATIONS.to_vec());
+    transport.insert(&attestations_url, attestations);
     (tarball_url, attestations_url)
 }
 
 #[test]
-fn verify_sigstore_emits_intoto_v02_gap_finding_for_real_npm_bundle() {
+fn verify_sigstore_real_npm_bundle_is_invalid_and_blocks() {
     // The real npm v0.2 bundle hits the upstream intoto/0.0.2 gap inside
-    // sigstore-verify 0.8.0. We expect one
-    // `provenance-signature-invalid` per attestation (npm ships two for
-    // sigstore@2.3.1: the keyring-publish bundle and the SLSA-provenance
-    // bundle). The keyring bundle has no x509 chain, so argus-verify
-    // returns `Unsupported` -> `provenance-signature-unverified`; the
-    // SLSA bundle hits the intoto/0.0.2 gap -> `provenance-signature-invalid`.
+    // sigstore-verify 0.8.0. npm ships two attestations for sigstore@2.3.1:
+    // the keyring-publish bundle (no x509 chain -> Unsupported) and the
+    // SLSA-provenance bundle (intoto/0.0.2 without RFC3161). Because the
+    // verifier cannot complete every cryptographic check, the latter must
+    // remain Critical `provenance-signature-invalid` and Block.
     let transport = MockTransport::new();
     let registry = "https://mock.registry";
     install_routes(&transport, registry);
@@ -92,27 +98,49 @@ fn verify_sigstore_emits_intoto_v02_gap_finding_for_real_npm_bundle() {
         ids.iter().any(|id| id == "provenance-verified-subject"),
         "expected provenance-verified-subject (M1 layer) in: {ids:?}"
     );
-    // At least one signature-layer finding must appear from the new wiring.
-    assert!(
-        ids.iter().any(|id| id.starts_with("provenance-signature-")),
-        "expected at least one provenance-signature-* finding in: {ids:?}"
-    );
-    // The npm-keyring attestation must surface as Unsupported, not as a
-    // misleading SignatureInvalid that blames the keyring bundle for the
-    // intoto/0.0.2 gap.
+    // The npm-keyring bundle remains Unsupported -> Info unverified.
     assert!(
         ids.iter().any(|id| id == "provenance-signature-unverified"),
-        "expected provenance-signature-unverified (npm-keyring/Unsupported \
-         path) in: {ids:?}"
+        "expected provenance-signature-unverified (Unsupported path) in: {ids:?}"
     );
-    // The SLSA-provenance attestation currently hits the upstream
-    // intoto/0.0.2 gap -> SignatureInvalid. The day upstream widens the
-    // V1 fallback this test flips red and we'll know.
     assert!(
         ids.iter().any(|id| id == "provenance-signature-invalid"),
-        "expected provenance-signature-invalid (intoto/0.0.2 gap) in: {ids:?}; \
-         if this is now `provenance-signature-verified`, upstream fixed the gap"
+        "expected fail-closed provenance-signature-invalid in: {ids:?}"
     );
+    assert!(report.findings.iter().any(|finding| {
+        finding.rule_id == "provenance-signature-invalid"
+            && finding.severity == argus_core::Severity::Critical
+    }));
+    assert_eq!(report.decision, argus_core::Decision::Block);
+}
+
+#[test]
+fn corrupted_dsse_signature_is_critical_and_blocks() {
+    let mut attestations: serde_json::Value = serde_json::from_slice(REAL_ATTESTATIONS).unwrap();
+    attestations["attestations"][1]["bundle"]["dsseEnvelope"]["signatures"][0]["sig"] =
+        serde_json::Value::String("AA==".to_string());
+
+    let transport = MockTransport::new();
+    let registry = "https://mock.registry";
+    install_routes_with_attestations(
+        &transport,
+        registry,
+        serde_json::to_vec(&attestations).unwrap(),
+    );
+
+    let opts = make_opts(
+        registry,
+        true,
+        &[r"^https://github\.com/sigstore/sigstore-js/.+$"],
+    );
+    let pkg = PackageRef::parse("sigstore@2.3.1").unwrap();
+    let report = fetch_and_scan(&pkg, &opts, &transport).expect("fetch_and_scan");
+
+    assert!(report.findings.iter().any(|finding| {
+        finding.rule_id == "provenance-signature-invalid"
+            && finding.severity == argus_core::Severity::Critical
+    }));
+    assert_eq!(report.decision, argus_core::Decision::Block);
 }
 
 #[test]

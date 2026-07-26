@@ -127,7 +127,7 @@ argus fetch chalk --verify-sigstore
 | Rule ID | Severity | When | Decision impact |
 |---|---|---|---|
 | `provenance-signature-verified` | Info | All four layers pass (DSSE, Fulcio chain, Rekor inclusion, OIDC identity in allowlist). | none (positive signal only) |
-| `provenance-signature-invalid` | High | DSSE signature does not validate against leaf cert, OR Fulcio chain is broken, OR Rekor inclusion proof is invalid. | `block` |
+| `provenance-signature-invalid` | Critical | DSSE signature does not validate against leaf cert, OR Fulcio chain is broken, OR Rekor inclusion proof is invalid. | `block` |
 | `provenance-signature-untrusted-issuer` | Info | DSSE/Fulcio/Rekor all pass but OIDC identity is not in the allowlist (e.g. custom workflow). | none (transparency only — M1 subject-digest remains the gate) |
 | `provenance-signature-unverified` | Info | Network failure fetching Rekor or Fulcio trust roots; signature could not be evaluated. | none (soft-fail) |
 
@@ -217,9 +217,9 @@ What M2 still does NOT prevent, even with full Sigstore verification:
 - `sigstore-verify` 0.8.0's `helpers.rs:202` requires either an RFC3161 timestamp OR a V1 tlog entry (`version == "0.0.1"` AND `kind in {"hashedrekord", "dsse"}`). The `intoto/0.0.2` case falls into the gap and surfaces as `SignatureInvalid` with the diagnostic `"V2 bundle requires RFC3161 timestamp"`.
 - cosign hit the same shape ([sigstore/cosign#3926](https://github.com/sigstore/cosign/issues/3926)).
 
-**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped — but every real npm v0.2 attestation reaches `SignatureInvalid`. The `npm_keyring_public_key_hint` path and tampered-artifact path both return the operationally correct verdicts (`Unsupported`, `SignatureInvalid`).
+**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped. The known npm shape (tlog `intoto/0.0.2`, zero `rfc3161Timestamps`) cannot complete every cryptographic check, so it remains fail-closed as `SignatureInvalid`, surfaced as Critical `provenance-signature-invalid` and a `Block` decision. This also applies to otherwise legitimate bundles: Argus does not downgrade an unverified shape based on an upstream error string because a forged DSSE signature can reach the same diagnostic before signature validation. The `npm_keyring_public_key_hint` path stays `Unsupported`; artifact tampering for npm packages is also caught independently by the fetch layer's subject-digest cross-check (`provenance-subject-mismatch`, Critical).
 
-**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the current `SignatureInvalid` diagnostic so an upstream fix flips the test red and we will notice immediately.
+**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the current fail-closed verdict for both the captured bundle and the same bundle with a corrupted DSSE signature. The fetch integration pins the corresponding Critical finding and `Block` decision. If upstream adds complete `intoto/0.0.2` verification, the legitimate fixture can move to `Verified` only after that path is proven end to end.
 
 **Resolution paths**, in order of preference:
 
@@ -228,4 +228,4 @@ What M2 still does NOT prevent, even with full Sigstore verification:
 3. Replace `sigstore-verify` with the official `sigstore` crate (async, heavier) once it gains the same wrapper-friendly API surface.
 4. Implement Fulcio chain + Rekor SET verification ourselves on top of the existing `argus-verify::dsse` primitive. Largest scope; largest security surface.
 
-This gap is the most honest statement of where M2 actually lands today: the architecture is in place, the vendored trust root is real, and the only thing blocking a green "Verified" verdict for real npm packages is one strict version check inside an upstream crate.
+This gap is the most honest statement of where M2 actually lands today: the architecture is in place and the vendored trust root is real, but otherwise legitimate npm `intoto/0.0.2` bundles remain blocked because they are not fully verified. Issue #128's end-to-end support goal is therefore not fully satisfied.
