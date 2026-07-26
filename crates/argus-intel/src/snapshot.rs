@@ -187,7 +187,7 @@ pub(crate) fn validate_snapshot(snapshot: &SnapshotEnvelope) -> Result<()> {
         bail!("snapshot schema_versions must be non-empty, sorted, and unique");
     }
     for schema in &snapshot.schema_versions {
-        if !crate::osv::SUPPORTED_SCHEMA_VERSIONS.contains(&schema.as_str()) {
+        if !argus_osv_schema::SUPPORTED_SCHEMA_VERSIONS.contains(&schema.as_str()) {
             bail!("snapshot contains unsupported OSV schema `{schema}`");
         }
     }

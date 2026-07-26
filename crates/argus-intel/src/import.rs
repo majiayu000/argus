@@ -1,9 +1,9 @@
 use crate::normalize::normalize_records;
-use crate::osv::{parse_record, OsvRecord};
 use crate::snapshot::{
     finalize_snapshot, write_atomic, AtomicWriteOutcome, SnapshotEnvelope, SNAPSHOT_FORMAT_VERSION,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use argus_osv_schema::{parse_record, OsvRecord};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};

@@ -1,10 +1,8 @@
 mod fixtures;
 
 use argus_core::{Ecosystem, PackageCoordinate};
-use argus_intel::{
-    import_snapshot, validate_osv_coordinate, ImportLimits, ImportRequest, CANONICAL_SOURCE,
-    SUPPORTED_SCHEMA_VERSIONS,
-};
+use argus_intel::{import_snapshot, ImportLimits, ImportRequest, CANONICAL_SOURCE};
+use argus_osv_schema::{validate_osv_coordinate, SUPPORTED_SCHEMA_VERSIONS};
 use chrono::{TimeZone, Utc};
 use fixtures::{archive, exact_record, MockArchiveTransport, REVISION};
 use serde_json::{json, Value};

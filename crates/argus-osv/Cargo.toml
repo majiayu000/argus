@@ -9,7 +9,7 @@ description = "Bounded OSV advisory normalization and resolution for Argus."
 
 [dependencies]
 argus-core = { workspace = true }
-argus-intel = { workspace = true }
+argus-osv-schema = { workspace = true }
 argus-lockfile = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

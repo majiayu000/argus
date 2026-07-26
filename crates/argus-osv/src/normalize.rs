@@ -4,8 +4,8 @@ use crate::model::{
     MAX_ID_BYTES, MAX_REFERENCE_URL_BYTES,
 };
 use crate::severity::{normalize_severities, SeverityEvidence, SeveritySource};
-use argus_intel::{match_osv_affected, OsvRecord};
 use argus_lockfile::{NormalizedDependency, SourceKind};
+use argus_osv_schema::{match_osv_affected, OsvRecord};
 use url::Url;
 
 pub const OSV_API_BASE: &str = "https://api.osv.dev";
@@ -264,7 +264,7 @@ pub(crate) fn validate_normalized_advisory(
     }
     let bytes = serde_json::to_vec(&raw)
         .map_err(|error| OsvError::malformed(format!("serialize cached advisory: {error}")))?;
-    let record = argus_intel::parse_osv_record(&bytes)
+    let record = argus_osv_schema::parse_osv_record(&bytes)
         .map_err(|error| OsvError::malformed(format!("parse cached advisory: {error}")))?;
     let query = CoordinateQuery::new(
         advisory.coordinate.clone(),
@@ -341,8 +341,8 @@ fn severity_value(evidence: &SeverityEvidence) -> serde_json::Value {
 mod tests {
     use super::*;
     use argus_core::{Ecosystem, PackageCoordinate};
-    use argus_intel::parse_osv_record;
     use argus_lockfile::{IntegrityState, LockfileFormat, NormalizedSource};
+    use argus_osv_schema::parse_osv_record;
 
     fn query() -> CoordinateQuery {
         CoordinateQuery::new(

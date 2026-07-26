@@ -227,7 +227,7 @@ fn validate_coordinate(coordinate: &PackageCoordinate) -> Result<(), OsvError> {
             coordinate.original_version.len()
         )));
     }
-    argus_intel::validate_osv_coordinate(coordinate)
+    argus_osv_schema::validate_osv_coordinate(coordinate)
         .map_err(|error| OsvError::invalid(format!("invalid exact package version: {error}")))
 }
 

@@ -1,5 +1,5 @@
 use crate::model::{validate_scalar, OsvError, MAX_ID_BYTES};
-use argus_intel::{OsvAffectedMatch, OsvSeverity};
+use argus_osv_schema::{OsvAffectedMatch, OsvSeverity};
 use polycvss::{Score, Vector, Version};
 use serde::{Deserialize, Serialize};
 
