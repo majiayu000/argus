@@ -66,14 +66,16 @@ fn install_routes(transport: &MockTransport, registry: &str) -> (String, String)
 }
 
 #[test]
-fn verify_sigstore_emits_intoto_v02_gap_finding_for_real_npm_bundle() {
+fn verify_sigstore_real_npm_bundle_is_unsupported_and_never_blocks() {
     // The real npm v0.2 bundle hits the upstream intoto/0.0.2 gap inside
-    // sigstore-verify 0.8.0. We expect one
-    // `provenance-signature-invalid` per attestation (npm ships two for
-    // sigstore@2.3.1: the keyring-publish bundle and the SLSA-provenance
-    // bundle). The keyring bundle has no x509 chain, so argus-verify
-    // returns `Unsupported` -> `provenance-signature-unverified`; the
-    // SLSA bundle hits the intoto/0.0.2 gap -> `provenance-signature-invalid`.
+    // sigstore-verify 0.8.0. npm ships two attestations for sigstore@2.3.1:
+    // the keyring-publish bundle (no x509 chain -> Unsupported) and the
+    // SLSA-provenance bundle (intoto/0.0.2 without RFC3161 -> Unsupported,
+    // the documented capability gap). Both must surface as Info
+    // `provenance-signature-unverified` — a capability gap of this build is
+    // NOT evidence of a bad signature, and mapping it to Critical
+    // `provenance-signature-invalid` used to Block every real npm package
+    // under --verify-sigstore.
     let transport = MockTransport::new();
     let registry = "https://mock.registry";
     install_routes(&transport, registry);
@@ -92,27 +94,31 @@ fn verify_sigstore_emits_intoto_v02_gap_finding_for_real_npm_bundle() {
         ids.iter().any(|id| id == "provenance-verified-subject"),
         "expected provenance-verified-subject (M1 layer) in: {ids:?}"
     );
-    // At least one signature-layer finding must appear from the new wiring.
-    assert!(
-        ids.iter().any(|id| id.starts_with("provenance-signature-")),
-        "expected at least one provenance-signature-* finding in: {ids:?}"
-    );
-    // The npm-keyring attestation must surface as Unsupported, not as a
-    // misleading SignatureInvalid that blames the keyring bundle for the
-    // intoto/0.0.2 gap.
+    // Both attestations surface as Unsupported -> Info unverified.
     assert!(
         ids.iter().any(|id| id == "provenance-signature-unverified"),
-        "expected provenance-signature-unverified (npm-keyring/Unsupported \
-         path) in: {ids:?}"
+        "expected provenance-signature-unverified (Unsupported path) in: {ids:?}"
     );
-    // The SLSA-provenance attestation currently hits the upstream
-    // intoto/0.0.2 gap -> SignatureInvalid. The day upstream widens the
-    // V1 fallback this test flips red and we'll know.
+    // The gap must never be reported as an invalid signature. The day
+    // upstream widens the V1 fallback, argus-verify's fixture test flips
+    // and `provenance-signature-verified` appears here instead.
     assert!(
-        ids.iter().any(|id| id == "provenance-signature-invalid"),
-        "expected provenance-signature-invalid (intoto/0.0.2 gap) in: {ids:?}; \
-         if this is now `provenance-signature-verified`, upstream fixed the gap"
+        !ids.iter().any(|id| id == "provenance-signature-invalid"),
+        "intoto/0.0.2 gap leaked through as provenance-signature-invalid: {ids:?}"
     );
+    // And the signature layer must not push the decision to Block: every
+    // provenance-signature-* finding in this scenario is Info.
+    for f in &report.findings {
+        if f.rule_id.starts_with("provenance-signature-") {
+            assert_eq!(
+                f.severity,
+                argus_core::Severity::Info,
+                "expected Info severity for {}: {}",
+                f.rule_id,
+                f.detail
+            );
+        }
+    }
 }
 
 #[test]

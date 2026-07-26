@@ -217,9 +217,9 @@ What M2 still does NOT prevent, even with full Sigstore verification:
 - `sigstore-verify` 0.8.0's `helpers.rs:202` requires either an RFC3161 timestamp OR a V1 tlog entry (`version == "0.0.1"` AND `kind in {"hashedrekord", "dsse"}`). The `intoto/0.0.2` case falls into the gap and surfaces as `SignatureInvalid` with the diagnostic `"V2 bundle requires RFC3161 timestamp"`.
 - cosign hit the same shape ([sigstore/cosign#3926](https://github.com/sigstore/cosign/issues/3926)).
 
-**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped — but every real npm v0.2 attestation reaches `SignatureInvalid`. The `npm_keyring_public_key_hint` path and tampered-artifact path both return the operationally correct verdicts (`Unsupported`, `SignatureInvalid`).
+**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped. The known npm shape (tlog `intoto/0.0.2`, zero `rfc3161Timestamps`) is detected structurally alongside the pinned upstream diagnostic and remapped to `Unsupported` — a capability gap of this build, surfaced as an Info `provenance-signature-unverified` finding, never as Critical `provenance-signature-invalid`/Block. Genuine signature failures outside that shape still reach `SignatureInvalid`. The `npm_keyring_public_key_hint` path stays `Unsupported`; artifact tampering for npm packages is caught by the fetch layer's subject-digest cross-check (`provenance-subject-mismatch`, Critical), which runs before the signature layer.
 
-**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the current `SignatureInvalid` diagnostic so an upstream fix flips the test red and we will notice immediately.
+**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the `Unsupported` remap (including the pinned upstream diagnostic inside its reason) so both an upstream fix and an upstream rewording flip the test red and we will notice immediately. If upstream rewords the diagnostic, behaviour falls back to `SignatureInvalid` — fail closed.
 
 **Resolution paths**, in order of preference:
 

@@ -45,11 +45,12 @@ const GITHUB_ACTIONS_OIDC_ISSUER: &str = "https://token.actions.githubuserconten
 const INTOTO_V02_DIAGNOSTIC: &str = "V2 bundle requires RFC3161 timestamp";
 
 #[test]
-fn real_sigstore_bundle_currently_blocked_by_intoto_0_0_2_gap() {
+fn real_sigstore_bundle_is_unsupported_not_invalid_inside_intoto_0_0_2_gap() {
     // This is the test that SHOULD say `Verified` once the upstream
-    // intoto/0.0.2 gap is closed. Today it pins the SignatureInvalid wall
-    // with the exact diagnostic, so a silent upstream fix flips this test
-    // red and we'll know.
+    // intoto/0.0.2 gap is closed. Today it pins the Unsupported mapping:
+    // the shape npm actually publishes is a capability gap of this build,
+    // not evidence of a bad signature, so it must never surface as
+    // SignatureInvalid (which drives a Critical finding and a Block).
     let patterns = permissive_allowlist();
     let allowlist = IdentityAllowlist {
         issuer: GITHUB_ACTIONS_OIDC_ISSUER,
@@ -58,33 +59,42 @@ fn real_sigstore_bundle_currently_blocked_by_intoto_0_0_2_gap() {
 
     let verdict = verify_bundle_full(REAL_BUNDLE, REAL_TARBALL, &allowlist).unwrap();
     match verdict {
-        SigstoreVerdict::SignatureInvalid { reason } => {
+        SigstoreVerdict::Unsupported { reason } => {
+            assert!(
+                reason.contains("intoto/0.0.2"),
+                "expected the intoto/0.0.2 gap explanation, got: {reason}"
+            );
             assert!(
                 reason.contains(INTOTO_V02_DIAGNOSTIC),
-                "expected the intoto/0.0.2 V2-fallback gap diagnostic, got: {reason}"
+                "expected the pinned upstream diagnostic inside the reason, got: {reason}"
             );
         }
         SigstoreVerdict::Verified { identity, issuer } => {
-            // Upstream fixed it. Update this test to assert Verified and
-            // delete the gap section in design doc §10.
+            // Upstream fixed it. Flip this test to assert Verified, drop
+            // the gap remap in sigstore.rs, and delete the gap section in
+            // design doc §10.
             panic!(
                 "upstream fixed intoto/0.0.2 — flip this test to assert \
                  Verified. identity={identity}, issuer={issuer}"
             );
         }
-        other => panic!(
-            "expected SignatureInvalid with the upstream-gap diagnostic, \
-             got: {other:?}"
+        SigstoreVerdict::SignatureInvalid { reason } => panic!(
+            "known npm bundle shape leaked through as SignatureInvalid \
+             (upstream reworded the diagnostic, or the shape check broke): {reason}"
         ),
+        other => panic!("expected Unsupported for the intoto/0.0.2 gap, got: {other:?}"),
     }
 }
 
 #[test]
-fn tampered_artifact_still_rejected_inside_the_intoto_gap() {
-    // Even though the bundle hits the intoto/0.0.2 V2-gap before subject
-    // verification, a tampered artifact must continue to reach a
-    // non-Verified verdict — i.e. tampering must NEVER promote to Verified
-    // regardless of which internal layer rejects.
+fn tampered_artifact_never_verifies_inside_the_intoto_gap() {
+    // The intoto/0.0.2 gap fires before subject verification, so inside
+    // the gap a tampered artifact also reaches Unsupported — the layer
+    // makes no claim either way. The invariant this test protects is that
+    // tampering NEVER promotes to Verified. Actual tamper detection for
+    // npm packages lives in the fetch layer's subject-digest cross-check
+    // (`provenance-subject-mismatch`, Critical), which runs before and
+    // independently of signature verification.
     let mut tampered = REAL_TARBALL.to_vec();
     *tampered.last_mut().unwrap() ^= 0x01;
 
@@ -96,8 +106,8 @@ fn tampered_artifact_still_rejected_inside_the_intoto_gap() {
 
     let verdict = verify_bundle_full(REAL_BUNDLE, &tampered, &allowlist).unwrap();
     match verdict {
-        SigstoreVerdict::SignatureInvalid { .. } => {}
-        other => panic!("expected SignatureInvalid for tampered artifact, got: {other:?}"),
+        SigstoreVerdict::Unsupported { .. } | SigstoreVerdict::SignatureInvalid { .. } => {}
+        other => panic!("tampered artifact must never verify, got: {other:?}"),
     }
 }
 
