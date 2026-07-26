@@ -165,11 +165,24 @@ fn rule_descriptor(rule_id: &str, severity: Severity) -> Value {
     } else {
         RULE_HELP_URI
     };
+    // The central registry supplies a real description; the generic
+    // fallback only fires for ids that predate registration (fail-open on
+    // text only — decisions fail closed separately).
+    let (short_text, help_text) = match argus_core::rules::rule_def(rule_id) {
+        Some(def) => (
+            def.description.to_string(),
+            format!("Argus rule `{rule_id}`: {}", def.description),
+        ),
+        None => (
+            format!("Argus finding: {rule_id}"),
+            format!("Argus rule `{rule_id}` reported this finding."),
+        ),
+    };
     json!({
         "id": rule_id,
         "name": rule_name(rule_id),
-        "shortDescription": {"text": format!("Argus finding: {rule_id}")},
-        "help": {"text": format!("Argus rule `{rule_id}` reported this finding.")},
+        "shortDescription": {"text": short_text},
+        "help": {"text": help_text},
         "helpUri": help_uri,
         "defaultConfiguration": {"level": sarif_level(severity)}
     })
