@@ -116,6 +116,41 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     }
 }
 
+/// Shared typosquat detector used by every ecosystem crate: `name` within
+/// edit distance 1 of a `dictionary` entry (and not an exact entry) yields
+/// the `typosquatting` + `low-reputation` pair. Comparison is
+/// case-insensitive on both sides — this unifies three drifted variants
+/// (#132): pre-lowered dictionaries, `eq_ignore_ascii_case`, and per-entry
+/// lowering all collapse to the same semantics. `label` names the
+/// ecosystem's identifier kind in the message (for example "PyPI name").
+pub fn push_typosquat_findings(
+    name: &str,
+    dictionary: &[&str],
+    label: &str,
+    findings: &mut Vec<Finding>,
+) {
+    let lower = name.to_ascii_lowercase();
+    if dictionary.iter().any(|p| p.eq_ignore_ascii_case(&lower)) {
+        return; // exact popular name: legitimate package
+    }
+    if let Some(target) = dictionary
+        .iter()
+        .copied()
+        .find(|p| levenshtein(&lower, &p.to_ascii_lowercase()) <= 1)
+    {
+        findings.push(Finding::new(
+            "typosquatting",
+            Severity::High,
+            format!("{label} `{name}` is one edit away from popular package `{target}`"),
+        ));
+        findings.push(Finding::new(
+            "low-reputation",
+            Severity::Medium,
+            format!("typosquat candidate `{name}` has no established reputation"),
+        ));
+    }
+}
+
 fn closest_within(name: &str, max_distance: usize) -> Option<&'static str> {
     let name_l = name.to_ascii_lowercase();
     if POPULAR_PACKAGES.iter().any(|p| *p == name_l) {

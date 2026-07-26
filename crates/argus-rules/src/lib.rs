@@ -21,7 +21,7 @@ mod name;
 
 pub use content::scan_text_file;
 pub use decision::derive_from_findings as derive_decision_from_findings;
-pub use name::levenshtein;
+pub use name::{levenshtein, push_typosquat_findings};
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.
 #[derive(Debug, Clone, Deserialize)]

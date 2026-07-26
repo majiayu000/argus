@@ -10,7 +10,7 @@
 //! - embedded build scripts (`.sh`/`.bat`/`.ps1`) inside the jar;
 //! - typosquats of popular Maven coordinates.
 
-use argus_core::{Finding, Severity};
+use argus_core::Finding;
 
 /// Popular Maven artifactIds that are common typosquat targets. Drawn from
 /// Maven Central download statistics + recent attack reports. We match on
@@ -68,28 +68,12 @@ pub const POPULAR_MAVEN_ARTIFACTS: &[&str] = &[
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list, matching against the artifactId.
 pub fn push_name_findings(artifact: &str, findings: &mut Vec<Finding>) {
-    let lower = artifact.to_ascii_lowercase();
-    if POPULAR_MAVEN_ARTIFACTS.iter().any(|p| *p == lower) {
-        return; // legitimate artifact
-    }
-    if let Some(target) = POPULAR_MAVEN_ARTIFACTS
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, p) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!(
-                "Maven artifactId `{artifact}` is one edit away from popular artifact `{target}`"
-            ),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{artifact}` has no established reputation"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(
+        artifact,
+        POPULAR_MAVEN_ARTIFACTS,
+        "Maven artifactId",
+        findings,
+    );
 }
 
 /// True if a jar entry path is an embedded build/launcher script we want to

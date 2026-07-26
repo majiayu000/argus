@@ -11,7 +11,7 @@
 //! `postinstall`. The regex SHAPES mirror `argus-pypi::rules`, translated to
 //! Ruby idioms.
 
-use argus_core::{Finding, Severity};
+use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -186,26 +186,7 @@ pub fn env_bulk_read_regex() -> &'static Regex {
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Mirrors `argus-pypi::push_name_findings`.
 pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    let lower = name.to_ascii_lowercase();
-    if POPULAR_RUBY_GEMS.iter().any(|p| *p == lower) {
-        return; // legitimate gem
-    }
-    if let Some(target) = POPULAR_RUBY_GEMS
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, p) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!("RubyGems name `{name}` is one edit away from popular gem `{target}`"),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(name, POPULAR_RUBY_GEMS, "RubyGems name", findings);
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@
 //! particular is a heuristic that can mis-fire. A real implementation
 //! would eventually want an AST pass; v1 does not have one.
 
-use argus_core::{Finding, Severity};
+use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -217,26 +217,7 @@ pub fn detect_exec_call(content: &str) -> bool {
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Mirrors `argus_pypi::rules::push_name_findings`.
 pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    let lower = name.to_ascii_lowercase();
-    if POPULAR_GO_MODULES.iter().any(|p| *p == lower) {
-        return; // legitimate module
-    }
-    if let Some(target) = POPULAR_GO_MODULES
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, p) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!("Go module `{name}` is one edit away from popular module `{target}`"),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(name, POPULAR_GO_MODULES, "Go module", findings);
 }
 
 #[cfg(test)]

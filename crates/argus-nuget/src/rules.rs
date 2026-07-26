@@ -17,7 +17,7 @@
 //! DLLs under `lib/`, which argus treats as binary and does NOT decompile.
 //! See the crate docs for that blind-spot disclosure.
 
-use argus_core::{Finding, Severity};
+use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -137,29 +137,7 @@ pub fn msbuild_inline_task_regex() -> &'static Regex {
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Matches the pypi/crates shape.
 pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    let lower = name.to_ascii_lowercase();
-    if POPULAR_NUGET_PACKAGES
-        .iter()
-        .any(|p| p.to_ascii_lowercase() == lower)
-    {
-        return; // legitimate package
-    }
-    if let Some(target) = POPULAR_NUGET_PACKAGES
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, &p.to_ascii_lowercase()) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!("NuGet id `{name}` is one edit away from popular package `{target}`"),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(name, POPULAR_NUGET_PACKAGES, "NuGet id", findings);
 }
 
 #[cfg(test)]
