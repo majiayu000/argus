@@ -128,8 +128,9 @@ pub struct FetchOptions {
     /// Opt-in to full Sigstore signature verification (Fulcio chain +
     /// Rekor inclusion + DSSE + OIDC identity allowlist) layered on top
     /// of the always-on subject-digest cross-check. Requires `argus-fetch`
-    /// to be built with `--features sigstore`; with the feature off, the
-    /// flag is parsed but ignored with an `Info`-level finding.
+    /// to be built with `--features sigstore`; with the feature off, a
+    /// request for verification fails closed with a hard error before any
+    /// network access.
     pub verify_sigstore: bool,
     /// Literal OIDC issuer the leaf cert must carry when
     /// `verify_sigstore` is on. For GitHub Actions this is
