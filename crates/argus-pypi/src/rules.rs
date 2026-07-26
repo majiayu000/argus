@@ -8,6 +8,7 @@
 
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// Python packages that are common typosquat targets. Mirrors the
 /// hand-curated cluster in `argus-rules::name::POPULAR_PACKAGES` but
@@ -91,63 +92,73 @@ pub const POPULAR_PYTHON_PACKAGES: &[&str] = &[
 /// any sdist Python file, indicate setup-time arbitrary execution. Real
 /// `setup.py` files do call `setuptools.setup(...)` and `find_packages()`;
 /// those are filtered by the surrounding rule logic, not by this regex.
-pub fn setup_subprocess_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            subprocess\.(?:run|call|Popen|check_output|check_call) |
-            os\.system |
-            os\.popen |
-            commands\.getoutput |
-            pty\.spawn |
-            shutil\.(?:run|call)
+pub fn setup_subprocess_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                subprocess\.(?:run|call|Popen|check_output|check_call) |
+                os\.system |
+                os\.popen |
+                commands\.getoutput |
+                pty\.spawn |
+                shutil\.(?:run|call)
+            )
+            \s* \(
+            "#,
         )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// HTTP-fetching standard-library / third-party APIs that should not
 /// appear in `setup.py` of a benign package.
-pub fn setup_remote_download_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            urllib\.request\.urlopen |
-            urllib\.request\.urlretrieve |
-            urllib2\.urlopen |
-            requests\.(?:get|post|put|patch|delete|request|head) |
-            httpx\.(?:get|post|put|patch|delete|request) |
-            socket\.(?:create_connection|socket)
+pub fn setup_remote_download_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                urllib\.request\.urlopen |
+                urllib\.request\.urlretrieve |
+                urllib2\.urlopen |
+                requests\.(?:get|post|put|patch|delete|request|head) |
+                httpx\.(?:get|post|put|patch|delete|request) |
+                socket\.(?:create_connection|socket)
+            )
+            \s* \(
+            "#,
         )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// `exec(...)` / `eval(...)` over expression results — almost always a
 /// payload-decryption pattern in a malicious sdist.
-pub fn setup_eval_regex() -> Regex {
-    Regex::new(r#"\b(?:exec|eval)\s*\(\s*[^)]"#).unwrap()
+pub fn setup_eval_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\b(?:exec|eval)\s*\(\s*[^)]"#).unwrap())
 }
 
 /// Top-level `sys.modules[...] = ...` or `__builtins__.X = ...` rewrite,
 /// which is how a wheel can hijack downstream imports.
-pub fn import_time_hook_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        (?:
-            sys\.modules \s* \[ \s* [\"'][^\"']+[\"'] \s* \] \s* = |
-            __builtins__\.\w+ \s* = |
-            importlib\.(?:metadata\.)?reload \s* \(
+pub fn import_time_hook_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?:
+                sys\.modules \s* \[ \s* [\"'][^\"']+[\"'] \s* \] \s* = |
+                __builtins__\.\w+ \s* = |
+                importlib\.(?:metadata\.)?reload \s* \(
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
