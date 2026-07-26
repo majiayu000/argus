@@ -179,6 +179,7 @@ name = "argus-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "hex",
  "serde",
@@ -328,7 +329,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "subtle",
  "tempfile",
  "walkdir",
  "zip",
