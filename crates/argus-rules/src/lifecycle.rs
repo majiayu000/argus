@@ -3,6 +3,7 @@
 use crate::PackageContext;
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 const LIFECYCLE_SCRIPT_NAMES: &[&str] = &[
     "preinstall",
@@ -16,21 +17,24 @@ const LIFECYCLE_SCRIPT_NAMES: &[&str] = &[
 
 /// Pattern used by the `blocked-marker` fixture and similar real attacks:
 /// writing to a host-controlled path during a lifecycle script.
-fn marker_write_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        fs\s*\.\s*(write|append|create)[A-Za-z]*Sync\s*\(\s*[\"']
-        (
-            /tmp/ |
-            /var/tmp/ |
-            ~/ |
-            \$HOME/ |
-            /etc/ |
-            /usr/local/
+fn marker_write_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            fs\s*\.\s*(write|append|create)[A-Za-z]*Sync\s*\(\s*[\"']
+            (
+                /tmp/ |
+                /var/tmp/ |
+                ~/ |
+                \$HOME/ |
+                /etc/ |
+                /usr/local/
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
