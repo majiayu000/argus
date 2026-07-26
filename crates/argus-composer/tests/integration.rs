@@ -258,6 +258,8 @@ fn clean_package_allows() {
         "expected no High+ findings, got: {high_or_above:?}"
     );
     assert_eq!(report.decision, Decision::Allow);
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(report.path.to_string_lossy(), "vendor/clean@2.0.0");
 }
 
 // ---------------------------------------------------------------------------

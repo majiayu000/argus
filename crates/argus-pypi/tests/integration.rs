@@ -250,6 +250,14 @@ setup(name="evil-sdist", version="1.0.0")
         "got: {rule_ids:?}"
     );
     assert_eq!(report.decision, Decision::Block);
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!(
+            "evil-sdist@{}",
+            report.package_version.as_deref().expect("version resolved")
+        )
+    );
 }
 
 #[test]

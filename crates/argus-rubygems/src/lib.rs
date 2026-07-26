@@ -176,7 +176,9 @@ pub fn fetch_and_scan_gems(
 
     Ok(ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
-        path: extract_root.path().to_path_buf(),
+        // Registry coordinate, never the random extraction TempDir: the
+        // path feeds text/JSON/SARIF output and fingerprints.
+        path: PathBuf::from(format!("{}@{version}", pkg.name)),
         package_name: scanned.name.or_else(|| Some(pkg.name.clone())),
         package_version: scanned.version.or(Some(version)),
         decision,

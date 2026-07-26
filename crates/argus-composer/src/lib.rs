@@ -174,6 +174,9 @@ pub fn fetch_and_scan_composer(
     report.findings.extend(extra_findings);
 
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+    // Registry coordinate, never the random extraction TempDir: the path
+    // feeds text/JSON/SARIF output and fingerprints.
+    report.path = PathBuf::from(format!("{full_name}@{resolved_version}"));
     if report.package_name.is_none() {
         report.package_name = Some(full_name);
     }

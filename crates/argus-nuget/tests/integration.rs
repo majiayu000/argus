@@ -202,6 +202,8 @@ fn clean_package_allows_and_parses_manifest() {
     assert_eq!(report.decision, Decision::Allow);
     assert_eq!(report.package_name.as_deref(), Some("Clean.Pkg"));
     assert_eq!(report.package_version.as_deref(), Some("3.4.5"));
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(report.path.to_string_lossy(), "Clean.Pkg@3.4.5");
 }
 
 #[test]

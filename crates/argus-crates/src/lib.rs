@@ -175,6 +175,9 @@ pub fn fetch_and_scan_crate(
     rules::push_name_findings(&pkg.name, &mut report.findings);
 
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+    // Registry coordinate, never the random extraction TempDir: the path
+    // feeds text/JSON/SARIF output and fingerprints.
+    report.path = PathBuf::from(format!("{}@{version}", pkg.name));
     if report.package_name.is_none() {
         report.package_name = Some(pkg.name.clone());
     }
