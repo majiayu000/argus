@@ -19,7 +19,7 @@ use argus_core::ScanReport;
 use argus_crates::{
     fetch_and_scan_crate, CrateRef, CratesFetchOptions, HttpTransport as CratesHttpTransport,
 };
-use argus_fetch::{fetch_and_scan, FetchOptions, HttpTransport, PackageRef};
+use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
 use argus_go::{fetch_and_scan_go, GoFetchOptions, GoModuleRef, HttpTransport as GoHttpTransport};
 use argus_lockfile::{
     evaluate as evaluate_lockfile, parse_lockfile, BoundedInput, DetectionRequest, FormatHint,
@@ -39,6 +39,7 @@ use argus_rubygems::{
     fetch_and_scan_gems, GemFetchOptions, GemRef, HttpTransport as GemsHttpTransport,
 };
 use argus_rules::scan_package_dir;
+use argus_transport::HttpTransport;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::io::Read as _;

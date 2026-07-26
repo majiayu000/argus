@@ -10,6 +10,7 @@ use argus_core::url::{host_of, validate_artifact_url};
 use argus_core::{
     canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity,
 };
+use argus_transport::Transport;
 use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 
@@ -18,13 +19,11 @@ mod extract;
 mod integrity;
 mod packument;
 mod provenance;
-mod transport;
 
 pub use extract::extract_tarball;
 pub use integrity::{parse_ssri, verify_ssri};
 pub use packument::{resolve_version, Packument};
 pub use provenance::{check_subject_digest, parse_attestations, AttestationSummary, SubjectCheck};
-pub use transport::{is_not_found, HttpStatusError, HttpTransport, Transport};
 
 /// Cap for the packument JSON body. Real packuments are hundreds of KB; we
 /// leave headroom for very-popular packages without letting a hostile server

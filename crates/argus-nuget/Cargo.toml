@@ -9,8 +9,8 @@ description = "NuGet ecosystem support for argus: fetch .nupkg, verify catalog S
 
 [dependencies]
 argus-core = { workspace = true }
+argus-transport = { workspace = true }
 argus-rules = { workspace = true }
-argus-fetch = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

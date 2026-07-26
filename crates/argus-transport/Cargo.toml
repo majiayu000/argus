@@ -1,0 +1,13 @@
+[package]
+name = "argus-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared HTTP transport for argus registry fetchers: redirect-checked GET with per-request byte caps and confirmed-404 detection."
+
+[dependencies]
+anyhow = { workspace = true }
+ureq = { workspace = true }
+url = { workspace = true }

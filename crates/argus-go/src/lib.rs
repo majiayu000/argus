@@ -34,7 +34,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
-pub use argus_fetch::{is_not_found, HttpTransport, Transport};
+pub use argus_transport::{is_not_found, HttpTransport, Transport};
 pub use metadata::{escape_module_path, parse_go_mod_module, resolve_version, GoModInfo};
 pub use rules::POPULAR_GO_MODULES;
 pub use scan::{extract_module_zip, scan_extracted_module, ExtractedModule};

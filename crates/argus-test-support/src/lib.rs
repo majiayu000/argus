@@ -6,7 +6,7 @@
 //! and only intended as a dev-dependency.
 
 use anyhow::{anyhow, Result};
-use argus_fetch::{HttpStatusError, Transport};
+use argus_transport::{HttpStatusError, Transport};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
