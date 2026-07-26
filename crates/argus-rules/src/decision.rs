@@ -1,4 +1,6 @@
-//! Decision derivation from accumulated findings.
+//! Decision derivation from accumulated findings. The actual fold lives
+//! in `argus_core::rules::aggregate` (PolicyDriven profile); this module
+//! keeps the package-facing API and its regression tests.
 //!
 //! Rule of thumb (SPEC §10): any high-risk finding blocks. Two downgrade
 //! paths exist:
@@ -12,9 +14,8 @@
 //!   land here. A human reviewer still has to opt in before install.
 
 use crate::PackageContext;
-use argus_core::rules::{policy, RulePolicy};
-use argus_core::{Decision, Finding, Severity};
-use std::collections::BTreeSet;
+use argus_core::rules::{aggregate, AggregationProfile};
+use argus_core::{Decision, Finding};
 
 pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
     derive_from_findings(findings)
@@ -25,46 +26,7 @@ pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
 /// semantics to [`derive`] — split off so callers that don't have a
 /// `PackageContext` can still recompute the decision.
 pub fn derive_from_findings(findings: &[Finding]) -> Decision {
-    if findings.is_empty() {
-        return Decision::Allow;
-    }
-
-    // Strip pure-info findings; the same rule id at a higher severity must
-    // still influence the decision. Policy classes come from the central
-    // registry (argus_core::rules); unregistered ids fail closed to
-    // Blocking there.
-    let decision_ids: BTreeSet<&str> = findings
-        .iter()
-        .filter(|finding| {
-            finding.severity != Severity::Info || policy(&finding.rule_id) != RulePolicy::InfoOnly
-        })
-        .map(|finding| finding.rule_id.as_str())
-        .collect();
-
-    if decision_ids.is_empty() {
-        return Decision::Allow;
-    }
-
-    let residual_ids = decision_ids
-        .iter()
-        .copied()
-        .filter(|id| policy(id) != RulePolicy::ApprovalOnly)
-        .collect::<BTreeSet<_>>();
-
-    if residual_ids.is_empty() {
-        return Decision::AllowWithApproval;
-    }
-
-    let has_native_build = residual_ids.contains("known-native-build-pattern");
-    let has_high_risk = residual_ids
-        .iter()
-        .any(|id| policy(id) != RulePolicy::DowngradeSafe);
-
-    if has_native_build && !has_high_risk {
-        Decision::AllowWithApproval
-    } else {
-        Decision::Block
-    }
+    aggregate(findings, AggregationProfile::PolicyDriven)
 }
 
 #[cfg(test)]
