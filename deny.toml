@@ -1,0 +1,22 @@
+# cargo-deny configuration (CI: `cargo deny check advisories bans sources`).
+#
+# License review is intentionally out of scope for the first iteration —
+# advisories/bans/sources are the supply-chain-relevant checks for a scanner
+# that should audit its own dependency tree (#131).
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+# The workspace pulls several crates at multiple versions via transitive
+# deps; collapsing them is follow-up work, not a gate.
+multiple-versions = "allow"
+wildcards = "deny"
+# Workspace-internal `path` dependencies carry no version and would
+# otherwise trip the wildcard check.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

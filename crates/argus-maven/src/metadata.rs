@@ -9,7 +9,7 @@
 
 use anyhow::{bail, Context, Result};
 use quick_xml::events::Event;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 
 /// A Maven coordinate `groupId:artifactId[:version]`.
 ///
@@ -119,7 +119,7 @@ pub fn parse_maven_metadata(xml: &str) -> Result<MavenMetadata> {
             }
             Ok(Event::Text(e)) => {
                 let text = e
-                    .xml_content()
+                    .xml_content(XmlVersion::Implicit1_0)
                     .context("decode maven-metadata text")?
                     .into_owned();
                 match path.as_slice() {
@@ -178,7 +178,7 @@ pub fn parse_pom_plugins(xml: &str) -> Result<PomPlugins> {
             }
             Ok(Event::Text(e)) if is_direct_plugin_artifact_id(&path) => {
                 let text = e
-                    .xml_content()
+                    .xml_content(XmlVersion::Implicit1_0)
                     .context("decode pom.xml text")?
                     .trim()
                     .to_string();

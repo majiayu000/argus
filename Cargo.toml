@@ -25,7 +25,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/majiayu000/argus"
-rust-version = "1.75"
+# Verified against the committed Cargo.lock (`cargo +1.88.0 check
+# --workspace --all-targets`); the lockfile is v4 (needs cargo >= 1.78) and
+# `time` 0.3.47 needs rustc 1.88. Enforced by the `msrv` CI job — keep the
+# job's toolchain in sync when bumping this.
+rust-version = "1.88"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -43,22 +47,22 @@ walkdir = "2"
 toml = "0.8.23"
 yaml-rust2 = { version = "0.8.1", default-features = false }
 
-argus-core = { path = "crates/argus-core" }
-argus-agent = { path = "crates/argus-agent" }
-argus-rules = { path = "crates/argus-rules" }
-argus-fetch = { path = "crates/argus-fetch" }
-argus-pypi = { path = "crates/argus-pypi" }
-argus-rubygems = { path = "crates/argus-rubygems" }
-argus-crates = { path = "crates/argus-crates" }
-argus-composer = { path = "crates/argus-composer" }
-argus-maven = { path = "crates/argus-maven" }
-argus-nuget = { path = "crates/argus-nuget" }
-argus-go = { path = "crates/argus-go" }
-argus-intel = { path = "crates/argus-intel" }
-argus-lockfile = { path = "crates/argus-lockfile" }
-argus-osv = { path = "crates/argus-osv" }
-argus-test-support = { path = "crates/argus-test-support" }
-argus-verify = { path = "crates/argus-verify" }
+argus-core = { path = "crates/argus-core", version = "0.1.0" }
+argus-agent = { path = "crates/argus-agent", version = "0.1.0" }
+argus-rules = { path = "crates/argus-rules", version = "0.1.0" }
+argus-fetch = { path = "crates/argus-fetch", version = "0.1.0" }
+argus-pypi = { path = "crates/argus-pypi", version = "0.1.0" }
+argus-rubygems = { path = "crates/argus-rubygems", version = "0.1.0" }
+argus-crates = { path = "crates/argus-crates", version = "0.1.0" }
+argus-composer = { path = "crates/argus-composer", version = "0.1.0" }
+argus-maven = { path = "crates/argus-maven", version = "0.1.0" }
+argus-nuget = { path = "crates/argus-nuget", version = "0.1.0" }
+argus-go = { path = "crates/argus-go", version = "0.1.0" }
+argus-intel = { path = "crates/argus-intel", version = "0.1.0" }
+argus-lockfile = { path = "crates/argus-lockfile", version = "0.1.0" }
+argus-osv = { path = "crates/argus-osv", version = "0.1.0" }
+argus-test-support = { path = "crates/argus-test-support", version = "0.1.0" }
+argus-verify = { path = "crates/argus-verify", version = "0.1.0" }
 
 # fetch-only deps (HTTP + crypto + archive) live in argus-fetch / argus-pypi.
 ureq = { version = "2", default-features = false, features = ["tls"] }
@@ -69,7 +73,7 @@ base64 = "0.22"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-quick-xml = "0.38"
+quick-xml = "0.41"
 hex = "0.4"
 tempfile = "3"
 subtle = "2"

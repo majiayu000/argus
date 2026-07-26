@@ -2,6 +2,7 @@
 name = "argus-rubygems"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "RubyGems ecosystem support for argus: fetch .gem, verify SHA-256, parse the nested archive, scan extconf.rb + gemspec + Ruby sources."
