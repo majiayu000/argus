@@ -1,7 +1,7 @@
 //! AGT-04 canonical high-context inventory snapshots.
 
-use crate::atomic_write;
 use anyhow::{bail, Context, Result};
+use argus_core::fs::atomic_write_bytes;
 use argus_core::{Finding, Severity};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -151,7 +151,7 @@ pub(crate) fn load(path: &Path) -> Result<Snapshot> {
 
 pub(crate) fn save(path: &Path, snapshot: &Snapshot) -> Result<()> {
     let bytes = render(snapshot)?;
-    atomic_write::write_bytes(path, &bytes, ".argus-snapshot-")
+    atomic_write_bytes(path, &bytes, ".argus-snapshot-")
         .with_context(|| format!("write snapshot {}", path.display()))
 }
 

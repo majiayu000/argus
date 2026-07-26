@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use url::Url;
 
@@ -636,22 +635,9 @@ fn write_cache(path: &Path, fetched_at: DateTime<Utc>, body: &[u8]) -> Result<()
         fetched_at,
         body: body.to_string(),
     };
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary metadata cache in {}", parent.display()))?;
-    serde_json::to_writer(&mut temporary, &entry).context("serialize metadata cache entry")?;
-    temporary.flush().context("flush metadata cache entry")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("sync metadata cache entry")?;
-    temporary.persist(path).map_err(|error| {
-        anyhow!(
-            "atomically replace metadata cache {}: {}",
-            path.display(),
-            error.error
-        )
-    })?;
-    Ok(())
+    let bytes = serde_json::to_vec(&entry).context("serialize metadata cache entry")?;
+    argus_core::fs::atomic_write_bytes(path, &bytes, ".argus-metadata-cache-")
+        .with_context(|| format!("atomically replace metadata cache {}", path.display()))
 }
 
 #[cfg(test)]

@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-mod atomic_write;
 mod baseline;
 mod capability;
 mod config;

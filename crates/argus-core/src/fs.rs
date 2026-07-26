@@ -1,3 +1,17 @@
+//! Filesystem primitives shared across argus crates.
+//!
+//! `atomic_write_bytes` is the standard "write to a sibling temp file,
+//! fsync, then rename over the destination" primitive (moved from
+//! argus-agent, fault-injection test matrix included). Consolidated here
+//! per #139 — argus-fetch's metadata cache previously carried an inline
+//! copy of the same steps.
+//!
+//! NOT consolidated: `argus-intel`'s Unix snapshot writer implements a
+//! strictly stronger contract at the file-descriptor level (directory
+//! fsync phases, verified backups, inode-restoring rollback, cleanup-state
+//! reporting) that a NamedTempFile-based primitive cannot express;
+//! flattening it onto this helper would weaken real durability guarantees.
+
 use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::Path;
@@ -9,7 +23,7 @@ const FLUSH: &str = "flush";
 const FILE_SYNC: &str = "file_sync";
 const PERSIST: &str = "persist";
 
-pub(crate) fn write_bytes(path: &Path, bytes: &[u8], temporary_prefix: &str) -> Result<()> {
+pub fn atomic_write_bytes(path: &Path, bytes: &[u8], temporary_prefix: &str) -> Result<()> {
     write_bytes_inner(path, bytes, temporary_prefix, |_| Ok(()))
 }
 

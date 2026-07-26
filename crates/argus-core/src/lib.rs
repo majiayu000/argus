@@ -6,6 +6,7 @@
 //! Shared URL + integrity helpers live in [`url`]; the per-artifact
 //! intermediate scan shape lives in [`scan`].
 
+pub mod fs;
 pub mod rules;
 pub mod scan;
 pub mod url;

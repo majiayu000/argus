@@ -11,8 +11,9 @@
 //! shows only the first 12 hex chars of the old/new hashes, never the
 //! description plaintext (which may itself carry injection language).
 
-use crate::{atomic_write, SurfaceFile, SurfaceKind};
+use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{Context, Result};
+use argus_core::fs::atomic_write_bytes;
 use argus_core::{Finding, Severity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,7 +72,7 @@ pub fn save(path: &Path, baseline: &Baseline) -> Result<()> {
     let mut text = serde_json::to_string_pretty(baseline)
         .with_context(|| format!("serialize baseline {}", path.display()))?;
     text.push('\n');
-    atomic_write::write_bytes(path, text.as_bytes(), ".argus-baseline-")
+    atomic_write_bytes(path, text.as_bytes(), ".argus-baseline-")
         .with_context(|| format!("write baseline {}", path.display()))
 }
 
