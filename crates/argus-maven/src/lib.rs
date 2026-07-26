@@ -28,10 +28,9 @@
 //! unconditionally to keep that explicit. There is no Sigstore/provenance
 //! layer on Maven Central (gap).
 
-use anyhow::{bail, Context, Result};
-use argus_core::url::{host_of, validate_artifact_url, verify_sha256_hex};
+use anyhow::{Context, Result};
+use argus_core::url::{host_of, validate_artifact_url, verify_sha1_hex, verify_sha256_hex};
 use argus_core::{Ecosystem, Finding, PackageCoordinate, ScanReport, Severity};
-use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 
 mod metadata;
@@ -291,26 +290,6 @@ fn verify_jar_integrity(
     Ok(())
 }
 
-/// Verify the SHA-1 digest of `bytes` matches `expected_hex`. Used ONLY on
-/// the degraded path, paired with a visible `maven-weak-integrity-only`
-/// finding — never presented as a strong integrity guarantee.
-fn verify_sha1_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
-    if expected_hex.is_empty() {
-        bail!("expected SHA-1 is empty — registry did not advertise an integrity digest");
-    }
-    let expected = hex::decode(expected_hex)
-        .with_context(|| format!("decode expected SHA-1 hex `{expected_hex}`"))?;
-    let actual = Sha1::digest(bytes);
-    if actual.as_slice() == expected.as_slice() {
-        Ok(())
-    } else {
-        bail!(
-            "SHA-1 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
-            bytes.len()
-        )
-    }
-}
-
 /// Maven checksum files are usually a bare hex digest, but some tools append
 /// ` <filename>`. Take the first whitespace-delimited token.
 fn first_hex_token(s: &str) -> String {
@@ -363,6 +342,7 @@ mod tests {
 
     #[test]
     fn verify_sha1_matches_and_mismatches() {
+        use sha1::{Digest, Sha1};
         let b = b"hello world";
         let h = hex::encode(Sha1::digest(b));
         verify_sha1_hex(b, &h).unwrap();

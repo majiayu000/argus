@@ -25,6 +25,7 @@
 
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// Popular Go modules that are common typosquat targets. Drawn from Go
 /// module download stats + the wider Go SDK ecosystem.
@@ -58,40 +59,49 @@ pub const POPULAR_GO_MODULES: &[&str] = &[
 ];
 
 /// `func init()` declaration at top level. Structural meta-finding.
-pub fn init_func_regex() -> Regex {
-    // `func init ( )` with flexible whitespace, anchored to a line start.
-    Regex::new(r"(?m)^\s*func\s+init\s*\(\s*\)").unwrap()
+pub fn init_func_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // `func init ( )` with flexible whitespace, anchored to a line start.
+        Regex::new(r"(?m)^\s*func\s+init\s*\(\s*\)").unwrap()
+    })
 }
 
 /// Package-level `var` initializer that runs code at import, e.g.
 /// `var _ = something()`, `var x = exec.Command(...)`, or a grouped
 /// `var ( ... )` block (whose body runs at import too). Structural.
-pub fn package_var_exec_regex() -> Regex {
-    // Two top-level forms (line-anchored to approximate "top level", so a
-    // func-local indented `var` block is not matched):
-    //   1. `var ( ...`  — a grouped var block opener; its initializers run at
-    //      import. We treat the opener as import context (the dangerous call
-    //      itself is detected separately over the whole file).
-    //   2. `var x = call(...)` — a single-line initializer with a call RHS.
-    // This intentionally over-matches (e.g. a `var (` block of constants);
-    // the surrounding logic only treats it as informational on its own.
-    Regex::new(r"(?m)^var\s*\(|^var\s+[\w(),\s]+=\s*[\w.]+\s*\(").unwrap()
+pub fn package_var_exec_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Two top-level forms (line-anchored to approximate "top level", so a
+        // func-local indented `var` block is not matched):
+        //   1. `var ( ...`  — a grouped var block opener; its initializers run at
+        //      import. We treat the opener as import context (the dangerous call
+        //      itself is detected separately over the whole file).
+        //   2. `var x = call(...)` — a single-line initializer with a call RHS.
+        // This intentionally over-matches (e.g. a `var (` block of constants);
+        // the surrounding logic only treats it as informational on its own.
+        Regex::new(r"(?m)^var\s*\(|^var\s+[\w(),\s]+=\s*[\w.]+\s*\(").unwrap()
+    })
 }
 
 /// os/exec / syscall execution.
-pub fn exec_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            exec\.Command(?:Context)? |
-            syscall\.Exec |
-            syscall\.ForkExec
+pub fn exec_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                exec\.Command(?:Context)? |
+                syscall\.Exec |
+                syscall\.ForkExec
+            )
+            \s* \(
+            "#,
         )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Network egress.
@@ -102,51 +112,60 @@ pub fn exec_regex() -> Regex {
 /// `http.Client` value/struct field performs no egress, so matching it
 /// produced false-positive Critical `go-init-network` findings on benign
 /// files (e.g. a `func init()` that only constructs an `http.Client`).
-pub fn network_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            net\.Dial(?:Timeout)? |
-            net\.Dialer\b |
-            http\.Get |
-            http\.Post |
-            http\.NewRequest(?:WithContext)?
+pub fn network_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                net\.Dial(?:Timeout)? |
+                net\.Dialer\b |
+                http\.Get |
+                http\.Post |
+                http\.NewRequest(?:WithContext)?
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Environment read (`os.Getenv` / `os.Environ`).
-pub fn env_read_regex() -> Regex {
-    Regex::new(r"\bos\.(?:Getenv|Environ)\s*\(").unwrap()
+pub fn env_read_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bos\.(?:Getenv|Environ)\s*\(").unwrap())
 }
 
 /// Obfuscated payload decode (`base64.*Decode` / `hex.DecodeString`).
-pub fn decode_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            base64\.[\w.]*Decode[\w]* |
-            hex\.DecodeString
+pub fn decode_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                base64\.[\w.]*Decode[\w]* |
+                hex\.DecodeString
+            )
+            \s* \(
+            "#,
         )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// cgo `import "C"`. Presence alone is not flagged; only when the cgo
 /// preamble comment calls `system(`/`popen(`.
-pub fn cgo_import_regex() -> Regex {
-    Regex::new(r#"(?m)^\s*import\s+"C""#).unwrap()
+pub fn cgo_import_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?m)^\s*import\s+"C""#).unwrap())
 }
 
 /// C `system(` / `popen(` call in a cgo preamble.
-pub fn c_system_regex() -> Regex {
-    Regex::new(r"\b(?:system|popen)\s*\(").unwrap()
+pub fn c_system_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\b(?:system|popen)\s*\(").unwrap())
 }
 
 /// Resolve the import alias the file uses for `"os/exec"`, if any.
@@ -158,7 +177,10 @@ pub fn c_system_regex() -> Regex {
 /// alias group `[A-Za-z_]\w*|\.` deliberately cannot capture the bare
 /// `import` keyword of a default `import "os/exec"`.
 fn os_exec_alias(content: &str) -> Option<String> {
-    let re = Regex::new(r#"(?m)^\s*(?:import\s+)?([A-Za-z_]\w*|\.)\s+"os/exec"\s*$"#).unwrap();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*(?:import\s+)?([A-Za-z_]\w*|\.)\s+"os/exec"\s*$"#).unwrap()
+    });
     re.captures(content).map(|c| c[1].to_string())
 }
 
@@ -176,9 +198,12 @@ pub fn detect_exec_call(content: &str) -> bool {
         return true;
     }
     match os_exec_alias(content).as_deref() {
-        Some(".") => Regex::new(r"\bCommand(?:Context)?\s*\(")
-            .unwrap()
-            .is_match(content),
+        Some(".") => {
+            static RE: OnceLock<Regex> = OnceLock::new();
+            RE.get_or_init(|| Regex::new(r"\bCommand(?:Context)?\s*\(").unwrap())
+                .is_match(content)
+        }
+        // Alias-dependent pattern: built per call by necessity.
         Some(alias) => Regex::new(&format!(
             r"\b{}\.Command(?:Context)?\s*\(",
             regex::escape(alias)

@@ -6,8 +6,10 @@
 //! mechanism is shared.
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 use url::{Position, Url};
 
@@ -204,6 +206,28 @@ pub fn verify_sha1_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
     } else {
         Err(anyhow!(
             "SHA-1 mismatch for {} downloaded bytes (expected `{expected_hex}`)",
+            bytes.len()
+        ))
+    }
+}
+
+/// Verify the SHA-512 digest of `bytes` against a base64-encoded
+/// `expected_b64` (the NuGet catalog `packageHash` encoding) in constant
+/// time. An empty hash is a hard error — callers must never pass a
+/// fabricated/absent digest (U-29).
+pub fn verify_sha512_b64(bytes: &[u8], expected_b64: &str) -> Result<()> {
+    if expected_b64.trim().is_empty() {
+        bail!("expected SHA-512 is empty — catalog did not advertise packageHash");
+    }
+    let expected = STANDARD
+        .decode(expected_b64.trim())
+        .with_context(|| format!("decode expected SHA-512 base64 `{expected_b64}`"))?;
+    let actual = Sha512::digest(bytes);
+    if bool::from(actual.as_slice().ct_eq(&expected)) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "SHA-512 mismatch for {} downloaded bytes (expected `{expected_b64}`)",
             bytes.len()
         ))
     }
@@ -487,5 +511,31 @@ mod tests {
     #[test]
     fn verify_sha1_rejects_malformed_hex() {
         assert!(verify_sha1_hex(b"x", "not-hex").is_err());
+    }
+
+    #[test]
+    fn verify_sha512_b64_matches() {
+        let b = b"hello";
+        let h = STANDARD.encode(Sha512::digest(b));
+        verify_sha512_b64(b, &h).unwrap();
+    }
+
+    #[test]
+    fn verify_sha512_b64_rejects_mismatch() {
+        let b = b"hello";
+        let h = STANDARD.encode(Sha512::digest(b));
+        let mut tampered = b.to_vec();
+        tampered.push(b'!');
+        assert!(verify_sha512_b64(&tampered, &h).is_err());
+    }
+
+    #[test]
+    fn verify_sha512_b64_rejects_empty_digest() {
+        assert!(verify_sha512_b64(b"x", "").is_err());
+    }
+
+    #[test]
+    fn verify_sha512_b64_rejects_malformed_base64() {
+        assert!(verify_sha512_b64(b"x", "!!not-base64!!").is_err());
     }
 }

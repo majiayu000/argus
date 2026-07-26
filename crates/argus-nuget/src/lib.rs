@@ -41,10 +41,10 @@ mod metadata;
 mod rules;
 mod scan;
 
+pub use argus_core::url::verify_sha512_b64;
 pub use argus_fetch::{HttpTransport, Transport};
 pub use metadata::{
-    normalize_version, resolve_version, verify_sha512_b64, CatalogLeaf, FlatContainerIndex,
-    RegistrationLeaf,
+    normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };
 pub use rules::POPULAR_NUGET_PACKAGES;
 pub use scan::{scan_extracted_nupkg, scan_nuget_archive, NupkgScan};

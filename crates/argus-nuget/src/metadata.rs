@@ -14,12 +14,8 @@
 //! No registry value is ever trusted to mutate the filesystem; the download
 //! URL argus uses is constructed locally and validated before transport.
 
-use anyhow::{anyhow, bail, Context, Result};
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
+use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
-use sha2::{Digest, Sha512};
-use subtle::ConstantTimeEq;
 
 /// Flat-container `index.json`: just the versions array.
 #[derive(Debug, Clone, Deserialize)]
@@ -174,28 +170,6 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Verify the SHA-512 digest of `bytes` against a base64-encoded
-/// `expected_b64` (the NuGet catalog `packageHash` encoding) in constant
-/// time. An empty hash is a hard error — callers must never pass a
-/// fabricated/absent digest (U-29).
-pub fn verify_sha512_b64(bytes: &[u8], expected_b64: &str) -> Result<()> {
-    if expected_b64.trim().is_empty() {
-        bail!("expected SHA-512 is empty — catalog did not advertise packageHash");
-    }
-    let expected = STANDARD
-        .decode(expected_b64.trim())
-        .with_context(|| format!("decode expected SHA-512 base64 `{expected_b64}`"))?;
-    let actual = Sha512::digest(bytes);
-    if bool::from(actual.as_slice().ct_eq(&expected)) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "SHA-512 mismatch for {} downloaded bytes (expected `{expected_b64}`)",
-            bytes.len()
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,27 +237,6 @@ mod tests {
             leaf.catalog_entry.catalog_url(),
             "https://api.nuget.org/v3/catalog0/x.json"
         );
-    }
-
-    #[test]
-    fn sha512_b64_matches() {
-        let b = b"hello";
-        let h = STANDARD.encode(Sha512::digest(b));
-        verify_sha512_b64(b, &h).unwrap();
-    }
-
-    #[test]
-    fn sha512_b64_rejects_mismatch() {
-        let b = b"hello";
-        let h = STANDARD.encode(Sha512::digest(b));
-        let mut tampered = b.to_vec();
-        tampered.push(b'!');
-        assert!(verify_sha512_b64(&tampered, &h).is_err());
-    }
-
-    #[test]
-    fn sha512_b64_rejects_empty() {
-        assert!(verify_sha512_b64(b"x", "").is_err());
     }
 
     #[test]
