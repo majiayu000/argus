@@ -150,76 +150,10 @@ pub fn verify_bundle_full(
                 ),
             }),
         },
-        Err(e) => {
-            let reason = e.to_string();
-            // Known upstream gap (design doc §10): sigstore-verify 0.8.0
-            // rejects the bundle shape npm actually publishes — tlog
-            // `kindVersion = intoto/0.0.2` with zero rfc3161Timestamps
-            // (npm relies on Rekor's SET over integratedTime instead).
-            // That is a capability gap of this build, not evidence of a
-            // bad signature, so it must surface as Unsupported: mapping it
-            // to SignatureInvalid made every real npm package Block under
-            // --verify-sigstore. Both conditions are required — the pinned
-            // upstream diagnostic AND the structural npm shape — so a
-            // genuinely broken signature can never ride this branch.
-            // Re-evaluate when the sigstore-verify dependency is bumped.
-            if reason.contains(INTOTO_V02_GAP_DIAGNOSTIC) && is_intoto_v02_without_rfc3161(&bundle)
-            {
-                return Ok(SigstoreVerdict::Unsupported {
-                    reason: format!(
-                        "bundle uses tlog kindVersion intoto/0.0.2 without an RFC3161 \
-                         timestamp (the shape npm publishes today); sigstore-verify 0.8.0 \
-                         cannot verify it — see docs/design/sigstore-verification.md §10. \
-                         Upstream diagnostic: {reason}"
-                    ),
-                });
-            }
-            Ok(SigstoreVerdict::SignatureInvalid { reason })
-        }
+        Err(e) => Ok(SigstoreVerdict::SignatureInvalid {
+            reason: e.to_string(),
+        }),
     }
-}
-
-/// The exact diagnostic `sigstore-verify` 0.8.0 emits for the intoto/0.0.2
-/// timestamp gap (`verify_impl/helpers.rs`). Pinned here and by the
-/// real-fixture tests; if upstream rewords it, verification falls back to
-/// SignatureInvalid (fail closed) and the fixture test trips.
-const INTOTO_V02_GAP_DIAGNOSTIC: &str = "V2 bundle requires RFC3161 timestamp";
-
-/// True when the bundle matches the npm-published shape that falls into the
-/// upstream gap: at least one tlog entry with `kindVersion` exactly
-/// `intoto/0.0.2` and no usable `rfc3161Timestamps`.
-fn is_intoto_v02_without_rfc3161(bundle: &Bundle) -> bool {
-    let Ok(v) = serde_json::to_value(bundle) else {
-        return false;
-    };
-    let Some(vm) = v.get("verificationMaterial") else {
-        return false;
-    };
-    let has_rfc3161 = vm
-        .get("timestampVerificationData")
-        .and_then(|t| t.get("rfc3161Timestamps"))
-        .and_then(|a| a.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
-    if has_rfc3161 {
-        return false;
-    }
-    vm.get("tlogEntries")
-        .and_then(|a| a.as_array())
-        .map(|entries| {
-            entries.iter().any(|e| {
-                let kind = e
-                    .get("kindVersion")
-                    .and_then(|kv| kv.get("kind"))
-                    .and_then(|s| s.as_str());
-                let version = e
-                    .get("kindVersion")
-                    .and_then(|kv| kv.get("version"))
-                    .and_then(|s| s.as_str());
-                kind == Some("intoto") && version == Some("0.0.2")
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn has_x509_chain(bundle: &Bundle) -> bool {
