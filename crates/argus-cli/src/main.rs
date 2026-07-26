@@ -64,6 +64,8 @@ enum Cmd {
         allow_registry_host: Vec<String>,
         #[command(flatten)]
         intel: intel::ScanIntelArgs,
+        #[command(flatten)]
+        vulns: vulns::ScanVulnsArgs,
     },
     /// Agent supply-chain surface commands (MCP configs, skills, hooks, AGENTS.md).
     Agent {
@@ -132,6 +134,8 @@ enum Cmd {
         format: Format,
         #[command(flatten)]
         intel: intel::ScanIntelArgs,
+        #[command(flatten)]
+        vulns: vulns::ScanVulnsArgs,
     },
     /// Fetch a package from PyPI, verify SHA-256, safe-extract sdist/wheel, scan.
     PypiFetch {
@@ -150,6 +154,8 @@ enum Cmd {
         format: Format,
         #[command(flatten)]
         intel: intel::ScanIntelArgs,
+        #[command(flatten)]
+        vulns: vulns::ScanVulnsArgs,
     },
     /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources. Spec: `<name>` or `<name>@<version>`.
     CratesFetch(EcosystemFetchArgs),
@@ -187,6 +193,8 @@ struct EcosystemFetchArgs {
     format: Format,
     #[command(flatten)]
     intel: intel::ScanIntelArgs,
+    #[command(flatten)]
+    vulns: vulns::ScanVulnsArgs,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -337,12 +345,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             lockfile_format,
             allow_registry_host,
             intel,
+            vulns,
         } => cmd_scan(
             &path,
             format,
             lockfile_format,
             &allow_registry_host,
             intel,
+            vulns,
             scan_started_at,
         ),
         Cmd::Intel { op } => intel::cmd_intel(op),
@@ -359,6 +369,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sigstore_identity,
             format,
             intel,
+            vulns,
         } => cmd_fetch(
             &pkg,
             registry,
@@ -371,6 +382,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sigstore_identity,
             format,
             intel,
+            vulns,
             scan_started_at,
         ),
         Cmd::PypiFetch {
@@ -380,6 +392,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             prefer,
             format,
             intel,
+            vulns,
         } => cmd_pypi_fetch(
             &pkg,
             registry,
@@ -387,6 +400,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             prefer.into(),
             format,
             intel,
+            vulns,
             scan_started_at,
         ),
         Cmd::CratesFetch(args) => {
@@ -442,10 +456,11 @@ fn cmd_scan(
     lockfile_format: Option<LockfileFormatArg>,
     allow_registry_hosts: &[String],
     intel: intel::ScanIntelArgs,
+    vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let report = scan_path(path, lockfile_format, allow_registry_hosts)?;
-    finish_scan(report, format, intel, scan_started_at)
+    finish_scan(report, format, intel, vulns, scan_started_at)
 }
 
 fn cmd_ecosystem_fetch(
@@ -465,9 +480,10 @@ fn cmd_ecosystem_fetch(
     let report = fetcher
         .fetch_and_scan(&args.pkg, &opts, &transport)
         .with_context(|| format!("{label} + scan {}", args.pkg))?;
-    finish_scan(report, args.format, args.intel, scan_started_at)
+    finish_scan(report, args.format, args.intel, args.vulns, scan_started_at)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_pypi_fetch(
     pkg: &str,
     registry: String,
@@ -475,6 +491,7 @@ fn cmd_pypi_fetch(
     prefer: PypiPreferredFormat,
     format: Format,
     intel: intel::ScanIntelArgs,
+    vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref =
@@ -488,7 +505,7 @@ fn cmd_pypi_fetch(
     let transport = HttpTransport::new();
     let report = fetch_and_scan_pypi(&pkg_ref, &opts, &transport)
         .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
+    finish_scan(report, format, intel, vulns, scan_started_at)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -504,6 +521,7 @@ fn cmd_fetch(
     sigstore_identity: Vec<String>,
     format: Format,
     intel: intel::ScanIntelArgs,
+    vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
@@ -529,16 +547,18 @@ fn cmd_fetch(
     let transport = HttpTransport::new();
     let report = fetch_and_scan(&pkg_ref, &opts, &transport)
         .with_context(|| format!("fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, scan_started_at)
+    finish_scan(report, format, intel, vulns, scan_started_at)
 }
 
 fn finish_scan(
     mut report: ScanReport,
     format: Format,
     intel: intel::ScanIntelArgs,
+    vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
     intel::apply_malicious_snapshot(&mut report, intel.malicious_db.as_deref(), scan_started_at)?;
+    vulns::apply_osv_query(&mut report, &vulns)?;
     emit_report(&report, format)
 }
 
@@ -570,6 +590,23 @@ pub(crate) fn scan_lockfile_path(
     explicit_format: Option<FormatHint>,
     allow_registry_hosts: &[String],
 ) -> Result<ScanReport> {
+    let parsed = read_and_parse_lockfile(path, explicit_format)?;
+    let policy = PolicyOptions::new(allow_registry_hosts)
+        .with_context(|| format!("validate lockfile host policy for {}", path.display()))?;
+    evaluate_lockfile(&parsed, path, &policy)
+        .with_context(|| format!("evaluate lockfile {}", path.display()))
+}
+
+/// Security-sensitive lockfile input boundary shared by `scan` and the
+/// `vulns lockfile` command (#136): bounded read, UTF-8 basename check, and
+/// format detection live in exactly one place.
+pub(crate) fn read_and_parse_lockfile(
+    path: &Path,
+    explicit_format: Option<FormatHint>,
+) -> Result<argus_lockfile::ParseOutput> {
+    if !path.is_file() {
+        bail!("lockfile path is not a file: {}", path.display());
+    }
     let file =
         std::fs::File::open(path).with_context(|| format!("open lockfile {}", path.display()))?;
     let mut bytes = Vec::new();
@@ -586,16 +623,12 @@ pub(crate) fn scan_lockfile_path(
             path.display()
         );
     }
-    let parsed = parse_lockfile(
+    parse_lockfile(
         &input,
         DetectionRequest {
             basename,
             explicit_format,
         },
     )
-    .with_context(|| format!("parse lockfile {}", path.display()))?;
-    let policy = PolicyOptions::new(allow_registry_hosts)
-        .with_context(|| format!("validate lockfile host policy for {}", path.display()))?;
-    evaluate_lockfile(&parsed, path, &policy)
-        .with_context(|| format!("evaluate lockfile {}", path.display()))
+    .with_context(|| format!("parse lockfile {}", path.display()))
 }

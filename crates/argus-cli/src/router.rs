@@ -1,7 +1,6 @@
 //! Clap-only routing types for the explicit vulnerability query surface.
 
 use argus_core::Ecosystem;
-use argus_lockfile::FormatHint;
 use argus_osv::severity::SeverityLevel;
 use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -24,7 +23,7 @@ pub(crate) enum VulnsOp {
         path: PathBuf,
         /// Explicit lockfile format, validated together with the basename.
         #[arg(long, value_enum)]
-        lockfile_format: Option<VulnsLockfileFormat>,
+        lockfile_format: Option<crate::LockfileFormatArg>,
         #[command(flatten)]
         common: VulnsCommonArgs,
     },
@@ -52,8 +51,8 @@ pub(crate) struct VulnsCommonArgs {
     #[arg(long, value_enum)]
     pub(crate) fail_on_severity: Option<VulnsSeverity>,
     /// Successful report format.
-    #[arg(long, value_enum, default_value_t = VulnsFormat::Text)]
-    pub(crate) format: VulnsFormat,
+    #[arg(long, value_enum, default_value_t = crate::Format::Text)]
+    pub(crate) format: crate::Format,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -92,35 +91,6 @@ impl From<EcosystemArg> for Ecosystem {
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum VulnsLockfileFormat {
-    PackageLock,
-    Yarn,
-    Pnpm,
-    Poetry,
-    Uv,
-    Cargo,
-    GoSum,
-    Bundler,
-    Composer,
-}
-
-impl From<VulnsLockfileFormat> for FormatHint {
-    fn from(value: VulnsLockfileFormat) -> Self {
-        match value {
-            VulnsLockfileFormat::PackageLock => Self::PackageLock,
-            VulnsLockfileFormat::Yarn => Self::Yarn,
-            VulnsLockfileFormat::Pnpm => Self::Pnpm,
-            VulnsLockfileFormat::Poetry => Self::Poetry,
-            VulnsLockfileFormat::Uv => Self::Uv,
-            VulnsLockfileFormat::Cargo => Self::Cargo,
-            VulnsLockfileFormat::GoSum => Self::GoSum,
-            VulnsLockfileFormat::Bundler => Self::Bundler,
-            VulnsLockfileFormat::Composer => Self::Composer,
-        }
-    }
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
 pub(crate) enum VulnsSeverity {
     Low,
     Medium,
@@ -139,16 +109,10 @@ impl From<VulnsSeverity> for SeverityLevel {
     }
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum VulnsFormat {
-    Text,
-    Json,
-    Sarif,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_lockfile::FormatHint;
 
     #[test]
     fn router_mappings_cover_every_closed_enum_variant() {
@@ -164,16 +128,21 @@ mod tests {
         ] {
             assert_eq!(Ecosystem::from(input), expected);
         }
+        // The scan and vulns commands now share crate::LockfileFormatArg, so
+        // this exhaustiveness check covers the single remaining mapping.
         for (input, expected) in [
-            (VulnsLockfileFormat::PackageLock, FormatHint::PackageLock),
-            (VulnsLockfileFormat::Yarn, FormatHint::Yarn),
-            (VulnsLockfileFormat::Pnpm, FormatHint::Pnpm),
-            (VulnsLockfileFormat::Poetry, FormatHint::Poetry),
-            (VulnsLockfileFormat::Uv, FormatHint::Uv),
-            (VulnsLockfileFormat::Cargo, FormatHint::Cargo),
-            (VulnsLockfileFormat::GoSum, FormatHint::GoSum),
-            (VulnsLockfileFormat::Bundler, FormatHint::Bundler),
-            (VulnsLockfileFormat::Composer, FormatHint::Composer),
+            (
+                crate::LockfileFormatArg::PackageLock,
+                FormatHint::PackageLock,
+            ),
+            (crate::LockfileFormatArg::Yarn, FormatHint::Yarn),
+            (crate::LockfileFormatArg::Pnpm, FormatHint::Pnpm),
+            (crate::LockfileFormatArg::Poetry, FormatHint::Poetry),
+            (crate::LockfileFormatArg::Uv, FormatHint::Uv),
+            (crate::LockfileFormatArg::Cargo, FormatHint::Cargo),
+            (crate::LockfileFormatArg::GoSum, FormatHint::GoSum),
+            (crate::LockfileFormatArg::Bundler, FormatHint::Bundler),
+            (crate::LockfileFormatArg::Composer, FormatHint::Composer),
         ] {
             assert_eq!(FormatHint::from(input), expected);
         }
