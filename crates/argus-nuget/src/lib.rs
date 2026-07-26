@@ -278,6 +278,34 @@ pub(crate) fn finding(rule: &str, sev: Severity, detail: impl Into<String>) -> F
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for NuGet.
+pub struct NugetFetcher;
+
+impl argus_pipeline::EcosystemFetcher for NugetFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::NuGet
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://api.nuget.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = NugetRef::parse(spec)?;
+        let opts = NugetFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..NugetFetchOptions::default()
+        };
+        fetch_and_scan_nuget(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

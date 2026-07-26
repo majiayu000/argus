@@ -193,6 +193,34 @@ pub(crate) fn finding(rule: &str, sev: Severity, detail: impl Into<String>) -> F
     Finding::new(rule, sev, detail)
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for RubyGems.
+pub struct GemsFetcher;
+
+impl argus_pipeline::EcosystemFetcher for GemsFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::RubyGems
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://rubygems.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = GemRef::parse(spec)?;
+        let opts = GemFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..GemFetchOptions::default()
+        };
+        fetch_and_scan_gems(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

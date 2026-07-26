@@ -301,6 +301,34 @@ fn cmp_semver(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for Go module.
+pub struct GoFetcher;
+
+impl argus_pipeline::EcosystemFetcher for GoFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::Go
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://proxy.golang.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<argus_core::ScanReport> {
+        let pkg = GoModuleRef::parse(spec)?;
+        let opts = GoFetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..GoFetchOptions::default()
+        };
+        fetch_and_scan_go(&pkg, &opts, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
