@@ -13,9 +13,6 @@ argus-fetch = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-subtle = { workspace = true }
-base64 = { workspace = true }
 regex = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }

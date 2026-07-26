@@ -11,9 +11,6 @@ argus-core = { workspace = true }
 argus-rules = { workspace = true }
 argus-fetch = { workspace = true }
 anyhow = { workspace = true }
-sha2 = { workspace = true }
-sha1 = { workspace = true }
-hex = { workspace = true }
 regex = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
@@ -22,3 +19,6 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 argus-test-support = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+hex = { workspace = true }
