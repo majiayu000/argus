@@ -1,4 +1,7 @@
-use super::LockfileParser;
+use super::{
+    integrity::{valid_digest, DigestEncoding},
+    LockfileParser,
+};
 use crate::{
     BoundedInput, Coverage, DetectedLockfile, FormatVersion, IntegrityEvidence, IntegrityState,
     LockfileError, LockfileFormat, NormalizedDependency, NormalizedSource, ParseOutput,
@@ -660,16 +663,14 @@ fn parse_digest_list(
             )));
         }
         let expected = match algorithm.as_str() {
-            "sha256" => Some(64),
-            "sha384" => Some(96),
-            "sha512" => Some(128),
-            "sha1" => Some(40),
-            "md5" => Some(32),
+            "sha256" => Some(32),
+            "sha384" => Some(48),
+            "sha512" => Some(64),
+            "sha1" => Some(20),
+            "md5" => Some(16),
             _ => None,
         };
-        invalid |= expected.is_none_or(|length| {
-            value.len() != length || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
-        });
+        invalid |= expected.is_none_or(|bytes| !valid_digest(&value, bytes, DigestEncoding::Hex));
         evidence.push(IntegrityEvidence {
             algorithm: Some(algorithm),
             value: Some(value),

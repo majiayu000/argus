@@ -1,4 +1,7 @@
-use super::LockfileParser;
+use super::{
+    integrity::{valid_digest, DigestEncoding},
+    LockfileParser,
+};
 use crate::{
     parse_json, BoundedInput, Coverage, DetectedLockfile, FormatVersion, IntegrityEvidence,
     IntegrityState, LockfileError, LockfileFormat, NormalizedDependency, NormalizedSource,
@@ -389,10 +392,7 @@ fn dist_integrity(
         value: Some(normalized.clone()),
         locator: format!("{locator}.dist.shasum"),
     }];
-    let valid = normalized.len() == 40
-        && normalized
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    let valid = valid_digest(&normalized, 20, DigestEncoding::Hex);
     if valid {
         (IntegrityState::OptionalPresent, evidence)
     } else {

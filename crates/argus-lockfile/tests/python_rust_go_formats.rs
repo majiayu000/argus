@@ -253,6 +253,89 @@ fn python_rust_go_integrity_matrix() {
 }
 
 #[test]
+fn shared_hex_validation_preserves_python_and_rust_format_boundaries() {
+    let uppercase_sha256 = "A".repeat(64);
+    let poetry = parse_fixture(
+        "poetry.lock",
+        &poetry_fixture(
+            "2.1",
+            &format!("[{{file=\"demo.whl\",hash=\"sha256:{uppercase_sha256}\"}}]"),
+            "",
+        ),
+    )
+    .expect("uppercase Poetry hex digest parses");
+    assert_eq!(
+        poetry.records[0].integrity_state,
+        IntegrityState::RequiredPresent
+    );
+
+    let uv = parse_fixture(
+        "uv.lock",
+        &uv_fixture(
+            "{ registry = \"https://pypi.org/simple\" }",
+            &format!(
+                "wheels = [{{ url=\"https://files.pythonhosted.org/demo.whl\", hash=\"sha256:{uppercase_sha256}\" }}]"
+            ),
+        ),
+    )
+    .expect("uppercase uv hex digest parses");
+    assert_eq!(
+        uv.records[0].integrity_state,
+        IntegrityState::RequiredPresent
+    );
+
+    let cargo = parse_fixture(
+        "Cargo.lock",
+        &cargo_fixture(
+            4,
+            &format!(
+                "[[package]]\nname=\"demo\"\nversion=\"1.0.0\"\nsource=\"registry+https://index.crates.io\"\nchecksum=\"{uppercase_sha256}\"\n"
+            ),
+        ),
+    )
+    .expect("uppercase Cargo hex digest parses");
+    assert_eq!(
+        cargo.records[0].integrity_state,
+        IntegrityState::RequiredPresent
+    );
+
+    for basename in ["poetry.lock", "uv.lock", "Cargo.lock"] {
+        let invalid_digest = "g".repeat(64);
+        let output = match basename {
+            "poetry.lock" => parse_fixture(
+                basename,
+                &poetry_fixture(
+                    "2.1",
+                    &format!("[{{file=\"demo.whl\",hash=\"sha256:{invalid_digest}\"}}]"),
+                    "",
+                ),
+            ),
+            "uv.lock" => parse_fixture(
+                basename,
+                &uv_fixture(
+                    "{ registry = \"https://pypi.org/simple\" }",
+                    &format!(
+                        "wheels = [{{ url=\"https://files.pythonhosted.org/demo.whl\", hash=\"sha256:{invalid_digest}\" }}]"
+                    ),
+                ),
+            ),
+            "Cargo.lock" => parse_fixture(
+                basename,
+                &cargo_fixture(
+                    4,
+                    &format!(
+                        "[[package]]\nname=\"demo\"\nversion=\"1.0.0\"\nsource=\"registry+https://index.crates.io\"\nchecksum=\"{invalid_digest}\"\n"
+                    ),
+                ),
+            ),
+            _ => unreachable!(),
+        }
+        .expect("invalid hex is preserved as evidence");
+        assert_eq!(output.records[0].integrity_state, IntegrityState::Invalid);
+    }
+}
+
+#[test]
 fn vcs_sources_distinguish_full_commits_from_mutable_refs() {
     for (reference, immutable) in [(COMMIT, true), ("main", false)] {
         let poetry_source = format!(

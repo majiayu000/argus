@@ -1,4 +1,4 @@
-use super::{package_lock::parse_sri, LockfileParser};
+use super::{integrity::parse_sri, LockfileParser};
 use argus_core::{Ecosystem, PackageCoordinate};
 use std::collections::{BTreeMap, BTreeSet};
 use yaml_rust2::{yaml::Hash, Yaml};

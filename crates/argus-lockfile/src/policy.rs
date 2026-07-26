@@ -1,11 +1,12 @@
 //! Deterministic source and integrity policy over fully normalized records.
 
 use crate::{
-    ensure_canonical_output_size, IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat,
-    NormalizedSource, ParseOutput, SourceKind,
+    ensure_canonical_output_size,
+    parsers::integrity::{valid_digest, DigestEncoding},
+    IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat, NormalizedSource,
+    ParseOutput, SourceKind,
 };
 use argus_core::{ArtifactKind, Decision, Finding, ScanReport, Severity};
-use base64::Engine as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -654,19 +655,19 @@ fn assess_evidence(evidence: &[IntegrityEvidence]) -> IntegrityAssessment {
         {
             assessment.invalid = true;
         }
-        let (strength, expected_bytes, h1_only) = match algorithm.as_str() {
-            "sha256" => (DigestStrength::Strong, 32, false),
-            "sha384" => (DigestStrength::Strong, 48, false),
-            "sha512" => (DigestStrength::Strong, 64, false),
-            "h1" => (DigestStrength::Strong, 32, true),
-            "sha1" => (DigestStrength::Weak, 20, false),
-            "md5" => (DigestStrength::Weak, 16, false),
+        let (strength, expected_bytes, encoding) = match algorithm.as_str() {
+            "sha256" => (DigestStrength::Strong, 32, DigestEncoding::HexOrBase64),
+            "sha384" => (DigestStrength::Strong, 48, DigestEncoding::HexOrBase64),
+            "sha512" => (DigestStrength::Strong, 64, DigestEncoding::HexOrBase64),
+            "h1" => (DigestStrength::Strong, 32, DigestEncoding::Base64),
+            "sha1" => (DigestStrength::Weak, 20, DigestEncoding::HexOrBase64),
+            "md5" => (DigestStrength::Weak, 16, DigestEncoding::HexOrBase64),
             _ => {
                 assessment.invalid = true;
                 continue;
             }
         };
-        if !valid_digest(value, expected_bytes, h1_only) {
+        if !valid_digest(value, expected_bytes, encoding) {
             assessment.invalid = true;
             continue;
         }
@@ -684,18 +685,6 @@ fn assess_evidence(evidence: &[IntegrityEvidence]) -> IntegrityAssessment {
 enum DigestStrength {
     Strong,
     Weak,
-}
-
-fn valid_digest(value: &str, expected_bytes: usize, base64_only: bool) -> bool {
-    if !base64_only
-        && value.len() == expected_bytes * 2
-        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return true;
-    }
-    base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .is_ok_and(|decoded| decoded.len() == expected_bytes)
 }
 
 fn integrity_finding(

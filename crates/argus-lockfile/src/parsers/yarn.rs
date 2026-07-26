@@ -1,6 +1,8 @@
-use super::LockfileParser;
+use super::{
+    integrity::{parse_sri as parse_shared_sri, valid_digest, DigestEncoding},
+    LockfileParser,
+};
 use argus_core::{Ecosystem, PackageCoordinate};
-use base64::Engine as _;
 use yaml_rust2::{yaml::Hash, Yaml};
 
 use crate::{
@@ -178,7 +180,7 @@ fn classic_record(
     let (integrity_state, evidence) =
         if matches!(source_kind, SourceKind::Registry | SourceKind::Url) {
             match integrity {
-                Some(value) => parse_sri(value, &integrity_locator),
+                Some(value) => parse_yarn_sri(value, &integrity_locator),
                 None => resolved_fragment(resolved, &integrity_locator),
             }
         } else {
@@ -481,7 +483,7 @@ fn resolved_fragment(
     else {
         return (IntegrityState::RequiredMissing, Vec::new());
     };
-    let valid = fragment.len() == 40 && fragment.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let valid = valid_digest(fragment, 20, DigestEncoding::Hex);
     (
         if valid {
             IntegrityState::RequiredPresent
@@ -496,47 +498,18 @@ fn resolved_fragment(
     )
 }
 
-fn parse_sri(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
-    let mut evidence = Vec::new();
-    let mut invalid = value.is_empty();
-    for token in value.split_ascii_whitespace() {
-        let Some((algorithm, digest)) = token.split_once('-') else {
-            invalid = true;
-            evidence.push(integrity_evidence(None, token, locator));
-            continue;
-        };
-        let expected = match algorithm.to_ascii_lowercase().as_str() {
-            "sha1" => Some(20),
-            "sha256" => Some(32),
-            "sha384" => Some(48),
-            "sha512" => Some(64),
-            _ => None,
-        };
-        if base64::engine::general_purpose::STANDARD
-            .decode(digest)
-            .ok()
-            .map(|value| value.len())
-            != expected
-        {
-            invalid = true;
-        }
-        evidence.push(IntegrityEvidence {
-            algorithm: Some(algorithm.to_ascii_lowercase()),
-            value: Some(digest.to_string()),
-            locator: locator.to_string(),
-        });
+fn parse_yarn_sri(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
+    if !value.is_empty() && value.split_ascii_whitespace().next().is_none() {
+        return (
+            IntegrityState::RequiredPresent,
+            vec![IntegrityEvidence {
+                algorithm: None,
+                value: Some(value.to_string()),
+                locator: locator.to_string(),
+            }],
+        );
     }
-    if evidence.is_empty() {
-        evidence.push(integrity_evidence(None, value, locator));
-    }
-    (
-        if invalid {
-            IntegrityState::Invalid
-        } else {
-            IntegrityState::RequiredPresent
-        },
-        evidence,
-    )
+    parse_shared_sri(value, locator)
 }
 
 fn parse_berry_checksum(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
@@ -547,7 +520,8 @@ fn parse_berry_checksum(value: &str, locator: &str) -> (IntegrityState, Vec<Inte
         128 => Some("sha512"),
         _ => None,
     };
-    let valid = algorithm.is_some() && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let valid =
+        algorithm.is_some_and(|_| valid_digest(digest, digest.len() / 2, DigestEncoding::Hex));
     (
         if valid {
             IntegrityState::RequiredPresent
@@ -560,14 +534,6 @@ fn parse_berry_checksum(value: &str, locator: &str) -> (IntegrityState, Vec<Inte
             locator: locator.to_string(),
         }],
     )
-}
-
-fn integrity_evidence(algorithm: Option<&str>, value: &str, locator: &str) -> IntegrityEvidence {
-    IntegrityEvidence {
-        algorithm: algorithm.map(str::to_string),
-        value: Some(value.to_string()),
-        locator: locator.to_string(),
-    }
 }
 
 fn immutable_revision(source: &str) -> Option<String> {
@@ -768,5 +734,28 @@ fn yarn_error(detail: impl Into<String>) -> LockfileError {
     LockfileError::Parse {
         syntax: "Yarn lockfile",
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_yarn_sri;
+    use crate::IntegrityState;
+
+    #[test]
+    fn yarn_sri_preserves_legacy_whitespace_and_empty_states() {
+        let (whitespace_state, whitespace_evidence) = parse_yarn_sri(" \t ", "block[0].integrity");
+        assert_eq!(whitespace_state, IntegrityState::RequiredPresent);
+        assert_eq!(whitespace_evidence.len(), 1);
+        assert_eq!(whitespace_evidence[0].algorithm, None);
+        assert_eq!(whitespace_evidence[0].value.as_deref(), Some(" \t "));
+        assert_eq!(whitespace_evidence[0].locator, "block[0].integrity");
+
+        let (empty_state, empty_evidence) = parse_yarn_sri("", "block[0].integrity");
+        assert_eq!(empty_state, IntegrityState::Invalid);
+        assert_eq!(empty_evidence.len(), 1);
+        assert_eq!(empty_evidence[0].algorithm, None);
+        assert_eq!(empty_evidence[0].value.as_deref(), Some(""));
+        assert_eq!(empty_evidence[0].locator, "block[0].integrity");
     }
 }

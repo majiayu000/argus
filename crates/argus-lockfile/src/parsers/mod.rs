@@ -4,6 +4,7 @@ pub mod bundler;
 pub mod cargo;
 pub mod composer;
 pub mod go_sum;
+pub(crate) mod integrity;
 pub mod package_lock;
 pub mod pnpm;
 pub mod poetry;
