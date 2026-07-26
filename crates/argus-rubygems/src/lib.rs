@@ -5,7 +5,7 @@
 //!
 //! - A `.gem` is a NESTED archive: a PLAIN (non-gzipped) ustar tar whose
 //!   members include `metadata.gz` (the YAML gemspec) and `data.tar.gz` (a
-//!   gzipped tar of the real files). `argus_fetch::extract_tarball` cannot
+//!   gzipped tar of the real files). `argus_archive::extract_tarball` cannot
 //!   open the plain-tar outer container, so [`scan::read_gem_member`] reads
 //!   outer members into capped in-memory buffers and only the inner
 //!   `data.tar.gz` is handed to `extract_tarball`, reused intact. See

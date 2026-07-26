@@ -1,0 +1,17 @@
+[package]
+name = "argus-archive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Path-safe archive extraction (tar.gz + ZIP) shared by every argus ecosystem scanner."
+
+[dependencies]
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -11,11 +11,10 @@
 
 use crate::metadata::{ComposerManifest, ComposerVersionObj, ScriptValue};
 use crate::{finding, rules};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
 use argus_rules::{looks_binary, scan_text_file, TextFile};
-use std::io::Read;
-use std::path::{Component, Path};
+use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -72,7 +71,7 @@ pub fn scan_composer_zip(
     version_obj: &ComposerVersionObj,
 ) -> Result<ScanReport> {
     // --- 1. Safe ZIP extraction (copied from wheel.rs) ---
-    extract_zip_safe(zip_bytes, dest_root, max_extracted_bytes)
+    argus_archive::extract_zip(zip_bytes, dest_root, max_extracted_bytes, "zip entry")
         .context("safe-extract Composer zip")?;
 
     // --- 2. Walk extracted tree ---
@@ -169,81 +168,6 @@ pub fn scan_composer_zip(
         coordinate: None,
         intelligence: None,
     })
-}
-
-// ---------------------------------------------------------------------------
-// ZIP safe extractor (copied from argus-pypi/src/wheel.rs, U-04 compliant)
-// ---------------------------------------------------------------------------
-
-fn extract_zip_safe(zip_bytes: &[u8], dest_root: &Path, max_extracted_bytes: u64) -> Result<()> {
-    let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(reader).context("open Composer zip")?;
-
-    let mut total: u64 = 0;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .with_context(|| format!("read zip entry {i}"))?;
-
-        // Path safety: reject any entry whose path is absolute or contains `..`.
-        let path = match file.enclosed_name() {
-            Some(p) => p.to_owned(),
-            None => {
-                bail!(
-                    "zip entry {} has an unsafe path; refusing to extract",
-                    file.name()
-                );
-            }
-        };
-        for comp in path.components() {
-            match comp {
-                Component::Normal(_) | Component::CurDir => {}
-                Component::ParentDir => {
-                    bail!("zip entry `{}` traverses parent dir", path.display())
-                }
-                _ => bail!("zip entry `{}` has unsafe path component", path.display()),
-            }
-        }
-
-        if file.is_dir() {
-            let dest = dest_root.join(&path);
-            std::fs::create_dir_all(&dest).with_context(|| format!("mkdir {}", dest.display()))?;
-            continue;
-        }
-
-        // Reject symlinks encoded as external file attributes.
-        let mode = file.unix_mode().unwrap_or(0);
-        // POSIX: S_IFLNK = 0o120000
-        if (mode & 0o170000) == 0o120000 {
-            bail!("refusing to extract symlink zip entry `{}`", path.display());
-        }
-
-        let remaining = max_extracted_bytes
-            .checked_sub(total)
-            .ok_or_else(|| anyhow!("zip size accounting overflow"))?;
-
-        let dest = dest_root.join(&path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir parent {}", parent.display()))?;
-        }
-        let mut out =
-            std::fs::File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
-        let mut limited = (&mut file).take(remaining + 1);
-        let written = std::io::copy(&mut limited, &mut out)
-            .with_context(|| format!("write {}", dest.display()))?;
-        if written > remaining {
-            bail!(
-                "zip extracted size exceeds cap {max_extracted_bytes} (entry {} overran)",
-                path.display()
-            );
-        }
-        total = total
-            .checked_add(written)
-            .ok_or_else(|| anyhow!("zip size accounting overflow"))?;
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -619,7 +543,8 @@ mod tests {
     fn extract_zip_safe_rejects_path_traversal() {
         let zip_bytes = make_zip_with_entry("../../etc/passwd", b"evil");
         let dir = tempfile::tempdir().unwrap();
-        let result = extract_zip_safe(&zip_bytes, dir.path(), 10 * 1024 * 1024);
+        let result =
+            argus_archive::extract_zip(&zip_bytes, dir.path(), 10 * 1024 * 1024, "zip entry");
         assert!(result.is_err(), "expected path traversal to be rejected");
     }
 
@@ -627,7 +552,8 @@ mod tests {
     fn extract_zip_safe_rejects_absolute_path() {
         let zip_bytes = make_zip_with_entry("/etc/passwd", b"evil");
         let dir = tempfile::tempdir().unwrap();
-        let result = extract_zip_safe(&zip_bytes, dir.path(), 10 * 1024 * 1024);
+        let result =
+            argus_archive::extract_zip(&zip_bytes, dir.path(), 10 * 1024 * 1024, "zip entry");
         assert!(result.is_err(), "expected absolute path to be rejected");
     }
 
@@ -637,7 +563,7 @@ mod tests {
         let zip_bytes = make_zip_with_entry("data.bin", &large);
         let dir = tempfile::tempdir().unwrap();
         // Cap at 512 bytes — must fail.
-        let result = extract_zip_safe(&zip_bytes, dir.path(), 512);
+        let result = argus_archive::extract_zip(&zip_bytes, dir.path(), 512, "zip entry");
         assert!(result.is_err(), "expected size cap to be enforced");
     }
 

@@ -7,8 +7,8 @@
 
 use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
+use argus_archive::extract_tarball;
 use argus_core::{Finding, Severity};
-use argus_fetch::extract_tarball;
 use argus_rules::{looks_binary, scan_text_file, TextFile};
 use std::path::Path;
 

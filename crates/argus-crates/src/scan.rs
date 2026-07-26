@@ -9,8 +9,8 @@
 
 use crate::{finding, rules};
 use anyhow::{Context, Result};
+use argus_archive::extract_tarball;
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
-use argus_fetch::extract_tarball;
 use argus_rules::{looks_binary, scan_text_file, TextFile};
 use serde::Deserialize;
 use std::path::{Component, Path};
