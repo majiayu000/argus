@@ -256,6 +256,38 @@ fn js_integrity_matrix() {
 }
 
 #[test]
+fn package_lock_pnpm_and_yarn_share_sri_state_and_evidence() {
+    let valid = format!("{SHA256_SRI} {SHA256_SRI}");
+    for sri in [&valid, "sha256-AAAA", "sha999-AAAA", "bare-token"] {
+        let package = parse_js_lockfile("package-lock.json", &package_lock(3, Some(sri))).unwrap();
+        let pnpm_raw = pnpm_lock("6.0", "/demo@1.0.0", false).replace(SHA256_SRI, sri);
+        let pnpm = parse_js_lockfile("pnpm-lock.yaml", &pnpm_raw).unwrap();
+        let yarn_raw = format!(
+            "# yarn lockfile v1\n\"demo@^1\":\n  version \"1.0.0\"\n  resolved \"https://registry.yarnpkg.com/demo/-/demo-1.0.0.tgz\"\n  integrity \"{sri}\"\n"
+        );
+        let yarn = parse_js_lockfile("yarn.lock", &yarn_raw).unwrap();
+
+        let package_record = record(&package, "demo");
+        for candidate in [record(&pnpm, "demo"), record(&yarn, "demo")] {
+            assert_eq!(candidate.integrity_state, package_record.integrity_state);
+            assert_eq!(candidate.integrity.len(), package_record.integrity.len());
+            assert_eq!(
+                candidate
+                    .integrity
+                    .iter()
+                    .map(|item| (&item.algorithm, &item.value))
+                    .collect::<Vec<_>>(),
+                package_record
+                    .integrity
+                    .iter()
+                    .map(|item| (&item.algorithm, &item.value))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
 fn js_sources_locators_conditions_and_occurrences_are_preserved() {
     let package =
         parse_js_lockfile("package-lock.json", &package_lock(3, Some(SHA256_SRI))).unwrap();

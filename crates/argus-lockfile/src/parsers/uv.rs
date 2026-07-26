@@ -1,4 +1,7 @@
-use super::LockfileParser;
+use super::{
+    integrity::{valid_digest, DigestEncoding},
+    LockfileParser,
+};
 use crate::{
     ensure_record_count, parse_toml, BoundedInput, Coverage, DetectedLockfile, FormatVersion,
     IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat, NormalizedDependency,
@@ -490,14 +493,14 @@ fn parse_hash(hash: &str) -> (Option<String>, Option<String>, HashValidity) {
         return (None, Some(hash.to_string()), HashValidity::Invalid);
     };
     let expected = match algorithm {
-        "sha256" => Some(64),
-        "sha384" => Some(96),
-        "sha512" => Some(128),
-        "sha1" => Some(40),
-        "md5" => Some(32),
+        "sha256" => Some(32),
+        "sha384" => Some(48),
+        "sha512" => Some(64),
+        "sha1" => Some(20),
+        "md5" => Some(16),
         _ => None,
     };
-    let valid = expected.is_some_and(|length| is_hex(digest, length));
+    let valid = expected.is_some_and(|bytes| valid_digest(digest, bytes, DigestEncoding::Hex));
     (
         Some(algorithm.to_string()),
         Some(digest.to_ascii_lowercase()),
@@ -626,10 +629,6 @@ fn is_commit(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn add_units(count: usize, units: usize) -> Result<usize, LockfileError> {

@@ -4,6 +4,7 @@ use argus_lockfile::{
     LockfileFormat, NormalizedDependency, NormalizedSource, ParseOutput, PolicyError,
     PolicyOptions, SourceKind,
 };
+use base64::Engine as _;
 use std::path::{Path, PathBuf};
 
 fn evidence(algorithm: &str, value: &str, locator: &str) -> IntegrityEvidence {
@@ -605,6 +606,63 @@ fn integrity_matrix() {
             .len(),
         20
     );
+}
+
+#[test]
+fn policy_accepts_hex_or_base64_digests_but_h1_requires_base64() {
+    let sha256_base64 = base64::engine::general_purpose::STANDARD.encode([0_u8; 32]);
+    let h1_base64 = base64::engine::general_purpose::STANDARD.encode([1_u8; 32]);
+    for (algorithm, value) in [
+        ("sha256", "a".repeat(64)),
+        ("sha256", sha256_base64),
+        ("h1", h1_base64),
+    ] {
+        let candidate = record(
+            LockfileFormat::PackageLock,
+            source(
+                SourceKind::Registry,
+                Some("https://registry.npmjs.org/demo"),
+                None,
+                0,
+            ),
+            IntegrityState::RequiredPresent,
+            vec![evidence(algorithm, &value, "integrity")],
+            0,
+        );
+        let report = evaluate(
+            &output(vec![candidate]),
+            Path::new("lockfile"),
+            &PolicyOptions::default(),
+        )
+        .expect("valid digest policy scan");
+        assert_eq!(report.decision, Decision::Allow, "{algorithm}");
+    }
+
+    for (algorithm, value) in [
+        ("h1", "a".repeat(64)),
+        ("sha256", "not-base64-or-hex".to_string()),
+    ] {
+        let candidate = record(
+            LockfileFormat::PackageLock,
+            source(
+                SourceKind::Registry,
+                Some("https://registry.npmjs.org/demo"),
+                None,
+                0,
+            ),
+            IntegrityState::RequiredPresent,
+            vec![evidence(algorithm, &value, "integrity")],
+            0,
+        );
+        let report = evaluate(
+            &output(vec![candidate]),
+            Path::new("lockfile"),
+            &PolicyOptions::default(),
+        )
+        .expect("invalid digest policy scan");
+        assert_eq!(report.decision, Decision::Block, "{algorithm}");
+        assert!(rules(&report).contains(&"lockfile-integrity-invalid"));
+    }
 }
 
 #[test]

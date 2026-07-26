@@ -1,6 +1,5 @@
-use super::LockfileParser;
+use super::{integrity::parse_sri, LockfileParser};
 use argus_core::{Ecosystem, PackageCoordinate};
-use base64::Engine as _;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -251,56 +250,6 @@ fn parse_required_sri(
     match value {
         None => (IntegrityState::RequiredMissing, Vec::new()),
         Some(value) => parse_sri(value, locator),
-    }
-}
-
-pub(super) fn parse_sri(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
-    if value.is_empty() {
-        return (
-            IntegrityState::Invalid,
-            vec![evidence(None, Some(value), locator)],
-        );
-    }
-    let mut evidence_items = Vec::new();
-    let mut invalid = false;
-    for token in value.split_ascii_whitespace() {
-        let Some((algorithm, digest)) = token.split_once('-') else {
-            evidence_items.push(evidence(None, Some(token), locator));
-            invalid = true;
-            continue;
-        };
-        let expected = match algorithm.to_ascii_lowercase().as_str() {
-            "sha1" => Some(20),
-            "sha256" => Some(32),
-            "sha384" => Some(48),
-            "sha512" => Some(64),
-            _ => None,
-        };
-        let decoded = base64::engine::general_purpose::STANDARD.decode(digest);
-        if expected.is_none() || decoded.as_ref().map(|bytes| bytes.len()).ok() != expected {
-            invalid = true;
-        }
-        evidence_items.push(evidence(Some(algorithm), Some(digest), locator));
-    }
-    if evidence_items.is_empty() {
-        evidence_items.push(evidence(None, Some(value), locator));
-        invalid = true;
-    }
-    (
-        if invalid {
-            IntegrityState::Invalid
-        } else {
-            IntegrityState::RequiredPresent
-        },
-        evidence_items,
-    )
-}
-
-fn evidence(algorithm: Option<&str>, value: Option<&str>, locator: &str) -> IntegrityEvidence {
-    IntegrityEvidence {
-        algorithm: algorithm.map(|value| value.to_ascii_lowercase()),
-        value: value.map(str::to_string),
-        locator: locator.to_string(),
     }
 }
 

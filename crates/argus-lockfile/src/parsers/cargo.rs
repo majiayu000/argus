@@ -1,4 +1,7 @@
-use super::LockfileParser;
+use super::{
+    integrity::{valid_digest, DigestEncoding},
+    LockfileParser,
+};
 use crate::{
     ensure_record_count, parse_toml, BoundedInput, Coverage, DetectedLockfile, FormatVersion,
     IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat, NormalizedDependency,
@@ -208,7 +211,7 @@ fn parse_checksum(
         value: Some(value.to_ascii_lowercase()),
         locator: format!("{locator}.checksum"),
     };
-    let state = if is_hex(value, 64) {
+    let state = if valid_digest(value, 32, DigestEncoding::Hex) {
         IntegrityState::RequiredPresent
     } else {
         IntegrityState::Invalid
@@ -291,10 +294,6 @@ fn is_commit(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn finish(
