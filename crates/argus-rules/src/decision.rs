@@ -12,81 +12,9 @@
 //!   land here. A human reviewer still has to opt in before install.
 
 use crate::PackageContext;
+use argus_core::rules::{policy, RulePolicy};
 use argus_core::{Decision, Finding, Severity};
 use std::collections::BTreeSet;
-
-/// Rules that never push the decision toward block on their own.
-/// These are pure structural signals (presence of a build.rs, presence
-/// of a proc-macro crate, etc.) that are universally suspicious but
-/// universally also legitimate, so a finding alone is not a verdict.
-const INFO_ONLY_RULES: &[&str] = &[
-    "missing-provenance",
-    "provenance-verified-subject",
-    "provenance-signature-verified",
-    "provenance-signature-untrusted-issuer",
-    "provenance-signature-unverified",
-    // crates.io: structural meta-findings
-    "proc-macro-crate",
-    "build-rs-execution",
-    "embedded-binary-blob",
-    // PyPI: structural meta-findings
-    "pypi-sdist-no-manifest",
-    // Composer: structural meta-findings
-    // autoload.files runs at autoloader-build time but is ubiquitous and
-    // legitimate; the High `lifecycle-script-shell` fires separately when
-    // the actual command string contains shell-exec tokens.
-    "autoload-files-execution",
-    // Parse errors in composer.json are informational (we still scan what
-    // we can).
-    "composer-manifest-parse-error",
-    // RubyGems: structural meta-findings
-    "gem-native-build",
-    "gem-declared-executable",
-    // Maven: structural / honesty meta-findings
-    "maven-bytecode-not-inspected",
-    "maven-executable-jar",
-    "maven-weak-integrity-only",
-    "maven-no-pom",
-    // NuGet: structural + integrity-disclosure meta-findings
-    "nuget-integrity-unverifiable",
-    "nuget-no-manifest",
-    "nuget-content-files",
-    // Go: structural meta-findings (import-time execution surface that is
-    // ubiquitous and legitimate on its own; only escalates when a
-    // dangerous call co-occurs in the same file).
-    "go-init-function",
-    "go-package-var-exec",
-    // Go: the GOPROXY served no usable .ziphash, so the module bytes could
-    // not be authenticated. Surfaced (not silently skipped) but not a verdict
-    // on its own — mirrors `missing-provenance`.
-    "go-integrity-unverified",
-    // npm metadata anomaly evaluation could not establish a complete,
-    // bounded history. These findings preserve uncertainty without turning
-    // missing evidence into a verdict.
-    "npm-version-shape-unassessed",
-    "npm-rapid-publish-unassessed",
-    // Lockfile formats such as go.sum or older Bundler lockfiles do not
-    // carry a registry artifact hash. This is explicit uncertainty, not a
-    // verdict on its own.
-    "lockfile-integrity-unavailable",
-];
-
-/// Bounded npm metadata anomalies require explicit human approval when they
-/// are the only policy-weighted findings. They never downgrade an unrelated
-/// blocking finding.
-const APPROVAL_ONLY_RULES: &[&str] = &[
-    "version-shape-anomaly",
-    "rapid-publish-window",
-    "lockfile-integrity-weak",
-];
-
-/// Rules that, when paired with `known-native-build-pattern`, drop the
-/// decision from Block to AllowWithApproval.
-const DOWNGRADE_SAFE_RULES: &[&str] = &[
-    "lifecycle-script",
-    "known-native-build-pattern",
-    "composer-plugin-package",
-];
 
 pub fn derive(_ctx: &PackageContext, findings: &[Finding]) -> Decision {
     derive_from_findings(findings)
@@ -102,12 +30,13 @@ pub fn derive_from_findings(findings: &[Finding]) -> Decision {
     }
 
     // Strip pure-info findings; the same rule id at a higher severity must
-    // still influence the decision.
+    // still influence the decision. Policy classes come from the central
+    // registry (argus_core::rules); unregistered ids fail closed to
+    // Blocking there.
     let decision_ids: BTreeSet<&str> = findings
         .iter()
         .filter(|finding| {
-            finding.severity != Severity::Info
-                || !INFO_ONLY_RULES.contains(&finding.rule_id.as_str())
+            finding.severity != Severity::Info || policy(&finding.rule_id) != RulePolicy::InfoOnly
         })
         .map(|finding| finding.rule_id.as_str())
         .collect();
@@ -119,7 +48,7 @@ pub fn derive_from_findings(findings: &[Finding]) -> Decision {
     let residual_ids = decision_ids
         .iter()
         .copied()
-        .filter(|id| !APPROVAL_ONLY_RULES.contains(id))
+        .filter(|id| policy(id) != RulePolicy::ApprovalOnly)
         .collect::<BTreeSet<_>>();
 
     if residual_ids.is_empty() {
@@ -129,7 +58,7 @@ pub fn derive_from_findings(findings: &[Finding]) -> Decision {
     let has_native_build = residual_ids.contains("known-native-build-pattern");
     let has_high_risk = residual_ids
         .iter()
-        .any(|id| !DOWNGRADE_SAFE_RULES.contains(id));
+        .any(|id| policy(id) != RulePolicy::DowngradeSafe);
 
     if has_native_build && !has_high_risk {
         Decision::AllowWithApproval
