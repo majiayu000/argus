@@ -157,6 +157,49 @@ fn pypi_registry_metadata_name_mismatch_fails_closed() {
 }
 
 #[test]
+fn pypi_report_path_uses_canonical_coordinate_for_name_alias() {
+    let registry = "https://mock.registry";
+    let sdist = make_sdist(
+        "demo-package",
+        "1.0.0",
+        &[(
+            "PKG-INFO",
+            b"Metadata-Version: 2.1\nName: demo-package\nVersion: 1.0.0\n",
+        )],
+    );
+    let artifact_url = format!("{registry}/p/demo-package-1.0.0.tar.gz");
+    let packument = packument_for_artifact(
+        "demo-package",
+        "1.0.0",
+        "demo-package-1.0.0.tar.gz",
+        &artifact_url,
+        "sdist",
+        &sha256_hex(&sdist),
+    );
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/pypi/Demo_Package/json"),
+        packument.into_bytes(),
+    );
+    transport.insert(&artifact_url, sdist);
+    let opts = PypiFetchOptions {
+        registry: registry.to_string(),
+        prefer: PreferredFormat::Sdist,
+        ..PypiFetchOptions::default()
+    };
+    let pkg = PypiPackageRef::parse("Demo_Package").unwrap();
+
+    let report = fetch_and_scan_pypi(&pkg, &opts, &transport).unwrap();
+    let coordinate = report.coordinate.as_ref().expect("coordinate is set");
+
+    assert_eq!(report.path.to_string_lossy(), "demo-package@1.0.0");
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!("{}@{}", coordinate.canonical_name, coordinate.version)
+    );
+}
+
+#[test]
 fn pypi_rejects_parent_dir_artifact_filename_before_extracting() -> anyhow::Result<()> {
     let cache_parent = tempfile::tempdir()?;
     let escaped_dir = cache_parent.path().join("escaped-pypi-artifact");

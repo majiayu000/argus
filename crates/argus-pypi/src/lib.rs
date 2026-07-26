@@ -259,7 +259,7 @@ pub fn fetch_and_scan_pypi(
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints (see the
         // matching invariant in argus-fetch).
-        path: PathBuf::from(format!("{}@{version}", pkg.name)),
+        path: PathBuf::from(format!("{}@{version}", coordinate.canonical_name)),
         package_name: last_name.or_else(|| Some(pkg.name.clone())),
         package_version: last_version.or(Some(version)),
         decision,
