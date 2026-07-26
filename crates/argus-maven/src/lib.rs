@@ -213,7 +213,9 @@ pub fn fetch_and_scan_maven(
 
     Ok(ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
-        path: extract_root.path().to_path_buf(),
+        // Registry coordinate, never the random extraction TempDir: the
+        // path feeds text/JSON/SARIF output and fingerprints.
+        path: PathBuf::from(format!("{}:{}@{version}", pkg.group, pkg.artifact)),
         package_name: Some(pkg.artifact.clone()),
         package_version: Some(version),
         decision,

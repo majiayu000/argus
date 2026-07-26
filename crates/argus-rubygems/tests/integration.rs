@@ -152,6 +152,8 @@ fn native_platform_gem_downloads_platform_filename() {
         "findings: {:?}",
         report.findings
     );
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(report.path.to_string_lossy(), format!("{name}@{version}"));
 }
 
 #[test]
