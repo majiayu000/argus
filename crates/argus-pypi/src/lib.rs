@@ -28,7 +28,7 @@ mod sdist;
 mod wheel;
 
 pub use argus_core::ArtifactScan;
-pub use argus_fetch::{HttpTransport, Transport};
+pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, PypiPackument, PypiUrl};
 pub use rules::POPULAR_PYTHON_PACKAGES;
 

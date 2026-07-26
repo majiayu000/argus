@@ -1,5 +1,11 @@
-//! HTTP transport for the npm registry. Abstracted as a trait so tests can
-//! inject in-memory bytes without binding to a real socket.
+//! Shared HTTP transport for every argus registry fetcher. Abstracted as a
+//! trait so tests can inject in-memory bytes without binding to a real
+//! socket.
+//!
+//! Extracted from `argus-fetch` (#134): the seven non-npm ecosystem crates
+//! previously depended on the npm-specific fetch crate solely to reach
+//! `Transport`/`HttpTransport`, dragging npm packument parsing and the
+//! optional Sigstore stack into every scanner build.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Read;

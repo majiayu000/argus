@@ -38,8 +38,8 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
-use argus_fetch::is_not_found;
-pub use argus_fetch::{HttpTransport, Transport};
+use argus_transport::is_not_found;
+pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{
     parse_maven_metadata, parse_pom_plugins, resolve_version, MavenMetadata, MavenRef, PomPlugins,
 };

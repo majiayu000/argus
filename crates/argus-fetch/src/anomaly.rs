@@ -1,9 +1,9 @@
 //! Deterministic npm metadata anomaly evaluation (`npm-anomaly-v1`).
 
 use crate::packument::Packument;
-use crate::Transport;
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::{Finding, Severity};
+use argus_transport::Transport;
 use chrono::{DateTime, Duration, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/argus-core",
+    "crates/argus-transport",
     "crates/argus-rules",
     "crates/argus-fetch",
     "crates/argus-pypi",
@@ -48,6 +49,7 @@ toml = "0.8.23"
 yaml-rust2 = { version = "0.8.1", default-features = false }
 
 argus-core = { path = "crates/argus-core", version = "0.1.0" }
+argus-transport = { path = "crates/argus-transport", version = "0.1.0" }
 argus-agent = { path = "crates/argus-agent", version = "0.1.0" }
 argus-rules = { path = "crates/argus-rules", version = "0.1.0" }
 argus-fetch = { path = "crates/argus-fetch", version = "0.1.0" }

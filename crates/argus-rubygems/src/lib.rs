@@ -31,7 +31,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
-pub use argus_fetch::{HttpTransport, Transport};
+pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, GemVersion, ResolvedVersion};
 pub use rules::POPULAR_RUBY_GEMS;
 pub use scan::{parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem};

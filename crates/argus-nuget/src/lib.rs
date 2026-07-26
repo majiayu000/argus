@@ -42,7 +42,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::url::verify_sha512_b64;
-pub use argus_fetch::{HttpTransport, Transport};
+pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{
     normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };

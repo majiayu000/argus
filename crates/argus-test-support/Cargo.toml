@@ -9,5 +9,5 @@ description = "Shared test helpers for argus ecosystem crates (MockTransport)."
 publish = false
 
 [dependencies]
-argus-fetch = { workspace = true }
+argus-transport = { workspace = true }
 anyhow = { workspace = true }

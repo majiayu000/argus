@@ -18,6 +18,7 @@ sigstore = ["dep:argus-verify", "dep:regex"]
 
 [dependencies]
 argus-core = { workspace = true }
+argus-transport = { workspace = true }
 argus-rules = { workspace = true }
 argus-verify = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }

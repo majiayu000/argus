@@ -23,7 +23,7 @@ mod rules;
 mod scan;
 
 pub use argus_core::ArtifactScan;
-pub use argus_fetch::{HttpTransport, Transport};
+pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, ComposerManifest, ComposerPackument, ComposerRef};
 pub use scan::scan_composer_zip;
 
