@@ -288,6 +288,25 @@ fn package_lock_pnpm_and_yarn_share_sri_state_and_evidence() {
 }
 
 #[test]
+fn yarn_preserves_legacy_whitespace_only_sri_state() {
+    let yarn_raw = "# yarn lockfile v1\n\"demo@^1\":\n  version \"1.0.0\"\n  resolved \"https://registry.yarnpkg.com/demo/-/demo-1.0.0.tgz\"\n  integrity \"   \"\n";
+    let yarn = parse_js_lockfile("yarn.lock", yarn_raw).unwrap();
+    let yarn_record = record(&yarn, "demo");
+    assert_eq!(yarn_record.integrity_state, IntegrityState::RequiredPresent);
+    assert_eq!(yarn_record.integrity.len(), 1);
+    assert_eq!(yarn_record.integrity[0].algorithm, None);
+    assert_eq!(yarn_record.integrity[0].value.as_deref(), Some("   "));
+    assert_eq!(yarn_record.integrity[0].locator, "block[0].integrity");
+
+    let package = parse_js_lockfile("package-lock.json", &package_lock(3, Some("   "))).unwrap();
+    let package_record = record(&package, "demo");
+    assert_eq!(package_record.integrity_state, IntegrityState::Invalid);
+    assert_eq!(package_record.integrity.len(), 1);
+    assert_eq!(package_record.integrity[0].algorithm, None);
+    assert_eq!(package_record.integrity[0].value.as_deref(), Some("   "));
+}
+
+#[test]
 fn js_sources_locators_conditions_and_occurrences_are_preserved() {
     let package =
         parse_js_lockfile("package-lock.json", &package_lock(3, Some(SHA256_SRI))).unwrap();

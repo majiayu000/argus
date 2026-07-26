@@ -1,5 +1,5 @@
 use super::{
-    integrity::{parse_sri, valid_digest, DigestEncoding},
+    integrity::{parse_sri as parse_shared_sri, valid_digest, DigestEncoding},
     LockfileParser,
 };
 use argus_core::{Ecosystem, PackageCoordinate};
@@ -180,7 +180,7 @@ fn classic_record(
     let (integrity_state, evidence) =
         if matches!(source_kind, SourceKind::Registry | SourceKind::Url) {
             match integrity {
-                Some(value) => parse_sri(value, &integrity_locator),
+                Some(value) => parse_yarn_sri(value, &integrity_locator),
                 None => resolved_fragment(resolved, &integrity_locator),
             }
         } else {
@@ -498,6 +498,20 @@ fn resolved_fragment(
     )
 }
 
+fn parse_yarn_sri(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
+    if !value.is_empty() && value.split_ascii_whitespace().next().is_none() {
+        return (
+            IntegrityState::RequiredPresent,
+            vec![IntegrityEvidence {
+                algorithm: None,
+                value: Some(value.to_string()),
+                locator: locator.to_string(),
+            }],
+        );
+    }
+    parse_shared_sri(value, locator)
+}
+
 fn parse_berry_checksum(value: &str, locator: &str) -> (IntegrityState, Vec<IntegrityEvidence>) {
     let digest = value.rsplit_once('/').map_or(value, |(_, digest)| digest);
     let algorithm = match digest.len() {
@@ -720,5 +734,28 @@ fn yarn_error(detail: impl Into<String>) -> LockfileError {
     LockfileError::Parse {
         syntax: "Yarn lockfile",
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_yarn_sri;
+    use crate::IntegrityState;
+
+    #[test]
+    fn yarn_sri_preserves_legacy_whitespace_and_empty_states() {
+        let (whitespace_state, whitespace_evidence) = parse_yarn_sri(" \t ", "block[0].integrity");
+        assert_eq!(whitespace_state, IntegrityState::RequiredPresent);
+        assert_eq!(whitespace_evidence.len(), 1);
+        assert_eq!(whitespace_evidence[0].algorithm, None);
+        assert_eq!(whitespace_evidence[0].value.as_deref(), Some(" \t "));
+        assert_eq!(whitespace_evidence[0].locator, "block[0].integrity");
+
+        let (empty_state, empty_evidence) = parse_yarn_sri("", "block[0].integrity");
+        assert_eq!(empty_state, IntegrityState::Invalid);
+        assert_eq!(empty_evidence.len(), 1);
+        assert_eq!(empty_evidence[0].algorithm, None);
+        assert_eq!(empty_evidence[0].value.as_deref(), Some(""));
+        assert_eq!(empty_evidence[0].locator, "block[0].integrity");
     }
 }
