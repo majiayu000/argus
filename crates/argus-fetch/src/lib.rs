@@ -6,6 +6,7 @@
 //! --to-command`, or any post-extract hook.
 
 use anyhow::{anyhow, bail, Context, Result};
+use argus_archive::extract_tarball;
 use argus_core::url::{host_of, validate_artifact_url};
 use argus_core::{
     canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity,
@@ -15,12 +16,10 @@ use sha2::{Digest, Sha512};
 use std::path::PathBuf;
 
 mod anomaly;
-mod extract;
 mod integrity;
 mod packument;
 mod provenance;
 
-pub use extract::extract_tarball;
 pub use integrity::{parse_ssri, verify_ssri};
 pub use packument::{resolve_version, Packument};
 pub use provenance::{check_subject_digest, parse_attestations, AttestationSummary, SubjectCheck};

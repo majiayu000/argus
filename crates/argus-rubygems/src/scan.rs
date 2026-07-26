@@ -5,7 +5,7 @@
 //!   - `data.tar.gz`       -- gzipped tar of the package's real files
 //!   - `checksums.yaml.gz` -- gzip of RubyGems' own per-member digests
 //!
-//! `argus_fetch::extract_tarball` hard-wires a `GzDecoder` over the whole
+//! `argus_archive::extract_tarball` hard-wires a `GzDecoder` over the whole
 //! input, so it CANNOT open the plain-tar outer container. We therefore read
 //! the outer members into capped in-memory buffers here -- copying the
 //! path-safety + non-regular rejection + `take(remaining+1)` byte-cap
@@ -16,8 +16,8 @@
 
 use crate::{finding, rules};
 use anyhow::{anyhow, bail, Context, Result};
+use argus_archive::extract_tarball;
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_fetch::extract_tarball;
 use argus_rules::{looks_binary, scan_text_file, TextFile};
 use flate2::read::GzDecoder;
 use std::io::Read;

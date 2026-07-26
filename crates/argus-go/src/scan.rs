@@ -2,7 +2,7 @@
 //!
 //! A Go module zip is a flat ZIP archive whose every entry is prefixed
 //! `<module>@<version>/...` (Go's module zip layout). Extraction is ZIP,
-//! NOT tar.gz, so the shared `argus_fetch::extract_tarball` does not apply.
+//! NOT tar.gz; ZIP extraction is the shared `argus_archive` implementation.
 //! There is no shared ZIP helper in argus-fetch, so the ZIP-safe extractor
 //! below is the same hardened pattern used by `argus_pypi::wheel`:
 //! `enclosed_name()` + `Component` checks + `unix_mode()` symlink rejection
@@ -14,11 +14,9 @@
 //! and platform/build-tag selection (we conservatively scan all files).
 
 use crate::{finding, rules, ArtifactScan};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
 use argus_rules::{looks_binary, scan_text_file, TextFile};
-use std::io::Read;
-use std::path::Component;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -64,82 +62,15 @@ impl ExtractedModule {
 /// symlink / size-cap safety the disk extractor enforces, so a malicious
 /// zip cannot blow up memory or smuggle traversal names.
 pub fn extract_module_zip(zip_bytes: &[u8], max_extracted_bytes: u64) -> Result<ExtractedModule> {
-    let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(reader).context("open Go module as ZIP")?;
-
-    let mut total: u64 = 0;
-    let mut files: Vec<ExtractedFile> = Vec::new();
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .with_context(|| format!("read module zip entry {i}"))?;
-
-        // Path safety: reject any entry path that is absolute or contains
-        // `..`. `enclosed_name` returns `Some` only if the path is safe to
-        // extract under a root.
-        let path = match file.enclosed_name() {
-            Some(p) => p.to_owned(),
-            None => bail!(
-                "module zip entry {} has an unsafe path; refusing to extract",
-                file.name()
-            ),
-        };
-        for comp in path.components() {
-            match comp {
-                Component::Normal(_) | Component::CurDir => {}
-                Component::ParentDir => {
-                    bail!("module zip entry `{}` traverses parent dir", path.display())
-                }
-                _ => bail!(
-                    "module zip entry `{}` has unsafe path component",
-                    path.display()
-                ),
-            }
-        }
-
-        if file.is_dir() {
-            continue;
-        }
-
-        // External attributes can mark an entry as a symlink. We refuse.
-        let mode = file.unix_mode().unwrap_or(0);
-        // POSIX: S_IFLNK = 0o120000
-        if (mode & 0o170000) == 0o120000 {
-            bail!(
-                "refusing to extract symlink module zip entry `{}`",
-                path.display()
-            );
-        }
-
-        let remaining = max_extracted_bytes
-            .checked_sub(total)
-            .ok_or_else(|| anyhow!("module zip size accounting overflow"))?;
-
-        let mut buf = Vec::new();
-        let mut limited = (&mut file).take(remaining + 1);
-        let written = limited
-            .read_to_end(&mut buf)
-            .with_context(|| format!("read module zip entry `{}`", path.display()))?
-            as u64;
-        if written > remaining {
-            bail!(
-                "module extracted size exceeds cap {max_extracted_bytes} (entry {} overran)",
-                path.display()
-            );
-        }
-        total = total
-            .checked_add(written)
-            .ok_or_else(|| anyhow!("module zip size accounting overflow"))?;
-
-        // The in-zip name is the canonical dirhash name; normalise the
-        // path separator to `/` for portability.
-        let zip_name = file.name().replace('\\', "/");
-        files.push(ExtractedFile {
-            zip_name,
-            bytes: buf,
-        });
-    }
+    let files: Vec<ExtractedFile> =
+        argus_archive::extract_zip_to_memory(zip_bytes, max_extracted_bytes, "module zip entry")
+            .context("extract Go module zip")?
+            .into_iter()
+            .map(|file| ExtractedFile {
+                zip_name: file.zip_name,
+                bytes: file.bytes,
+            })
+            .collect();
 
     // Locate the embedded go.mod (entry name ends with `/go.mod` or is
     // exactly `go.mod`) and parse the module directive.

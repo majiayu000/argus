@@ -130,6 +130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-archive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "tar",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
 name = "argus-cli"
 version = "0.1.0"
 dependencies = [
@@ -161,6 +172,7 @@ name = "argus-composer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
  "argus-rules",
  "argus-test-support",
@@ -197,8 +209,8 @@ name = "argus-crates"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
- "argus-fetch",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -219,6 +231,7 @@ name = "argus-fetch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
  "argus-rules",
  "argus-test-support",
@@ -244,6 +257,7 @@ name = "argus-go"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
  "argus-rules",
  "argus-test-support",
@@ -301,6 +315,7 @@ name = "argus-maven"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
  "argus-rules",
  "argus-test-support",
@@ -320,6 +335,7 @@ name = "argus-nuget"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
  "argus-rules",
  "argus-test-support",
@@ -376,8 +392,8 @@ name = "argus-pypi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
- "argus-fetch",
  "argus-rules",
  "argus-test-support",
  "argus-transport",
@@ -398,8 +414,8 @@ name = "argus-rubygems"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-archive",
  "argus-core",
- "argus-fetch",
  "argus-rules",
  "argus-test-support",
  "argus-transport",

@@ -9,6 +9,7 @@ description = "Maven Central ecosystem support for argus: fetch .jar, verify che
 
 [dependencies]
 argus-core = { workspace = true }
+argus-archive = { workspace = true }
 argus-transport = { workspace = true }
 argus-rules = { workspace = true }
 anyhow = { workspace = true }
