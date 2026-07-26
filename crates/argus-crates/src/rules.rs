@@ -1,6 +1,6 @@
 //! Rust / crates.io-specific detection rules.
 
-use argus_core::{Finding, Severity};
+use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -182,29 +182,7 @@ pub fn xor_loop_regex() -> &'static Regex {
 
 /// Push name-based findings (typosquatting + low-reputation).
 pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    let lower = name.to_ascii_lowercase();
-    if POPULAR_CRATES
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(&lower))
-    {
-        return;
-    }
-    if let Some(target) = POPULAR_CRATES
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, p) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!("crate name `{name}` is one edit away from popular crate `{target}`"),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation on crates.io"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(name, POPULAR_CRATES, "crate name", findings);
 }
 
 #[cfg(test)]

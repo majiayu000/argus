@@ -211,32 +211,12 @@ pub fn script_shell_exec_regex() -> &'static Regex {
 /// Push typosquatting + low-reputation findings when `full_name` is one
 /// Levenshtein edit away from a popular Composer package.
 pub fn push_name_findings(full_name: &str, findings: &mut Vec<Finding>) {
-    let lower = full_name.to_ascii_lowercase();
-    // Exact match → legitimate, skip.
-    if POPULAR_COMPOSER_PACKAGES
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(&lower))
-    {
-        return;
-    }
-    if let Some(target) = POPULAR_COMPOSER_PACKAGES
-        .iter()
-        .copied()
-        .find(|p| argus_rules::levenshtein(&lower, p) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!(
-                "Composer package `{full_name}` is one edit away from popular package `{target}`"
-            ),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{full_name}` has no established reputation on Packagist"),
-        ));
-    }
+    argus_rules::push_typosquat_findings(
+        full_name,
+        POPULAR_COMPOSER_PACKAGES,
+        "Composer package",
+        findings,
+    );
 }
 
 // ---------------------------------------------------------------------------
