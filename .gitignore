@@ -4,5 +4,10 @@ target/
 .DS_Store
 __pycache__/
 *.py[cod]
+.pytest_cache/
 eval/labeling/assignments/
 eval/labeling/out/
+
+# Agent/process runtime residue — never commit (see #131).
+artifacts/
+.specrail/

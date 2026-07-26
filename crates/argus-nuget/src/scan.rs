@@ -18,6 +18,7 @@ use argus_core::{Finding, Severity};
 use argus_rules::{looks_binary, scan_text_file, TextFile};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use quick_xml::XmlVersion;
 use std::io::Read;
 use std::path::{Component, Path};
 
@@ -333,7 +334,11 @@ fn parse_nuspec_name_version(xml: &str) -> Option<(Option<String>, Option<String
             }
             Ok(Event::Text(t)) => {
                 if let Some(field) = current.as_deref() {
-                    let text = t.xml_content().ok()?.trim().to_string();
+                    let text = t
+                        .xml_content(XmlVersion::Implicit1_0)
+                        .ok()?
+                        .trim()
+                        .to_string();
                     if !text.is_empty() {
                         match field {
                             "id" => name = name.or(Some(text)),
