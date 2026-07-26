@@ -1,12 +1,10 @@
 //! Explicit, bounded OSV package and lockfile query commands.
 
-use crate::router::{VulnsCommonArgs, VulnsFormat, VulnsOp};
+use crate::router::{VulnsCommonArgs, VulnsOp};
 use crate::sarif_vulns;
 use anyhow::{bail, Context, Result};
 use argus_core::{Decision, PackageCoordinate};
-use argus_lockfile::{
-    parse_lockfile, BoundedInput, DetectionRequest, FormatHint, ParseOutput, MAX_INPUT_BYTES,
-};
+use argus_lockfile::FormatHint;
 use argus_osv::cache::SecureCache;
 use argus_osv::client::HttpsOsvTransport;
 use argus_osv::report::{OsvReportBuilder, ReportBuilder, VulnerabilityReport};
@@ -16,7 +14,6 @@ use argus_osv::{collect_lockfile_coordinates, CoordinateQuery, CoordinateSet};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -41,7 +38,8 @@ pub(crate) fn cmd_vulns(op: VulnsOp) -> Result<ExitCode> {
             lockfile_format,
             common,
         } => {
-            let parsed = parse_lockfile_path(&path, lockfile_format.map(FormatHint::from))?;
+            let parsed =
+                crate::read_and_parse_lockfile(&path, lockfile_format.map(FormatHint::from))?;
             (
                 collect_lockfile_coordinates(&parsed.records)
                     .context("normalize lockfile OSV coordinates")?,
@@ -53,37 +51,143 @@ pub(crate) fn cmd_vulns(op: VulnsOp) -> Result<ExitCode> {
 }
 
 fn resolve_and_emit(coordinates: CoordinateSet, common: VulnsCommonArgs) -> Result<ExitCode> {
-    let trusted_root = trusted_cache_root(&common.cache_dir)?;
+    let snapshot = resolve_snapshot(
+        &coordinates,
+        &common.cache_dir,
+        common.offline,
+        common.allow_stale,
+        common.max_age_seconds,
+    )?;
+    let report = OsvReportBuilder::new(common.fail_on_severity.map(Into::into))?
+        .build(&snapshot)
+        .context("build complete vulnerability report")?;
+    emit_report(&report, common.format)
+}
+
+/// Shared resolution core used by the standalone `vulns` commands and the
+/// `--osv` flag on scan/fetch commands (#136).
+fn resolve_snapshot(
+    coordinates: &CoordinateSet,
+    cache_dir: &Path,
+    offline: bool,
+    allow_stale: bool,
+    max_age_seconds: u64,
+) -> Result<argus_osv::resolver::ResolvedSnapshot> {
+    let trusted_root = trusted_cache_root(cache_dir)?;
     let cache = SecureCache::new(trusted_root);
     let now = Utc::now();
-    if common.offline
+    if offline
         && cache
-            .load_at(&common.cache_dir, now)
+            .load_at(cache_dir, now)
             .context("validate offline OSV cache")?
             .is_none()
     {
         bail!("offline cache snapshot is missing");
     }
-    let resolver = OsvResolver::new(cache, &common.cache_dir);
-    let transport = (!common.offline).then(HttpsOsvTransport::new);
-    let snapshot = resolver
+    let resolver = OsvResolver::new(cache, cache_dir);
+    let transport = (!offline).then(HttpsOsvTransport::new);
+    resolver
         .resolve(
             ResolveRequest {
-                coordinates: &coordinates,
-                offline: common.offline,
-                allow_stale: common.allow_stale,
-                max_age_seconds: common.max_age_seconds,
+                coordinates,
+                offline,
+                allow_stale,
+                max_age_seconds,
                 now,
             },
             transport
                 .as_ref()
                 .map(|value| value as &dyn argus_osv::client::OsvTransport),
         )
-        .context("resolve complete OSV vulnerability snapshot")?;
-    let report = OsvReportBuilder::new(common.fail_on_severity.map(Into::into))?
+        .context("resolve complete OSV vulnerability snapshot")
+}
+
+/// OSV lookup flags flattened into `scan` and every fetch subcommand,
+/// mirroring `ScanIntelArgs`: opt-in, cache-dir required, folded into the
+/// report's findings and decision before emission.
+#[derive(clap::Args, Debug)]
+pub(crate) struct ScanVulnsArgs {
+    /// Also query OSV for known vulnerabilities of the resolved package
+    /// coordinate and fold the results into the decision.
+    #[arg(long = "osv", requires = "osv_cache_dir")]
+    pub(crate) osv: bool,
+    /// Secure OSV cache directory (required with --osv).
+    #[arg(long = "osv-cache-dir", value_name = "DIR")]
+    pub(crate) osv_cache_dir: Option<std::path::PathBuf>,
+    /// With --osv: disable network access; require a complete cache snapshot.
+    #[arg(long = "osv-offline", requires = "osv")]
+    pub(crate) osv_offline: bool,
+    /// With --osv-offline: authorize complete stale cache data.
+    #[arg(long = "osv-allow-stale", requires = "osv_offline")]
+    pub(crate) osv_allow_stale: bool,
+    /// With --osv: maximum fresh-cache age in seconds.
+    #[arg(
+        long = "osv-max-age-seconds",
+        default_value_t = 86_400,
+        value_parser = clap::value_parser!(u64).range(0..=2_592_000)
+    )]
+    pub(crate) osv_max_age_seconds: u64,
+    /// With --osv: block when an active advisory meets or exceeds this
+    /// normalized severity.
+    #[arg(long = "osv-fail-on-severity", value_enum, requires = "osv")]
+    pub(crate) osv_fail_on_severity: Option<crate::router::VulnsSeverity>,
+}
+
+/// Fold OSV advisory findings for the report's resolved coordinate into the
+/// scan report. The advisory sub-decision keeps the standalone `vulns`
+/// threshold semantics (advisories alone require approval; meeting
+/// --osv-fail-on-severity blocks) and the final decision is the stricter of
+/// the scan decision and the advisory decision.
+pub(crate) fn apply_osv_query(
+    report: &mut argus_core::ScanReport,
+    args: &ScanVulnsArgs,
+) -> Result<()> {
+    if !args.osv {
+        return Ok(());
+    }
+    let cache_dir = args
+        .osv_cache_dir
+        .as_deref()
+        .expect("clap enforces --osv-cache-dir with --osv");
+    let Some(coordinate) = report.coordinate.clone() else {
+        bail!(
+            "--osv requires a trusted resolved package coordinate; this scan did not produce one              (use a fetch command, or query lockfiles via `argus vulns lockfile`)"
+        );
+    };
+    coordinate
+        .validate()
+        .context("revalidate scanned package coordinate before OSV query")?;
+    let query = CoordinateQuery::new(coordinate, std::iter::empty())
+        .context("validate OSV package coordinate")?;
+    let coordinates = CoordinateSet::new(vec![query], 0)?;
+    let snapshot = resolve_snapshot(
+        &coordinates,
+        cache_dir,
+        args.osv_offline,
+        args.osv_allow_stale,
+        args.osv_max_age_seconds,
+    )?;
+    let vulnerability = OsvReportBuilder::new(args.osv_fail_on_severity.map(Into::into))?
         .build(&snapshot)
-        .context("build complete vulnerability report")?;
-    emit_report(&report, common.format)
+        .context("build vulnerability report for scanned coordinate")?;
+    report.findings.extend(vulnerability.findings);
+    report.decision = stricter(report.decision, vulnerability.decision);
+    Ok(())
+}
+
+fn stricter(left: Decision, right: Decision) -> Decision {
+    fn rank(decision: Decision) -> u8 {
+        match decision {
+            Decision::Block => 2,
+            Decision::AllowWithApproval => 1,
+            Decision::Allow => 0,
+        }
+    }
+    if rank(right) > rank(left) {
+        right
+    } else {
+        left
+    }
 }
 
 fn trusted_cache_root(cache_dir: &Path) -> Result<PathBuf> {
@@ -97,41 +201,11 @@ fn trusted_cache_root(cache_dir: &Path) -> Result<PathBuf> {
     std::env::current_dir().context("open trusted cache root")
 }
 
-fn parse_lockfile_path(path: &Path, explicit_format: Option<FormatHint>) -> Result<ParseOutput> {
-    if !path.is_file() {
-        bail!("lockfile path is not a file: {}", path.display());
-    }
-    let file =
-        std::fs::File::open(path).with_context(|| format!("open lockfile {}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take((MAX_INPUT_BYTES as u64) + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read lockfile {}", path.display()))?;
-    let path_label = path.to_string_lossy();
-    let input = BoundedInput::new(&bytes, &path_label)
-        .with_context(|| format!("bound lockfile {}", path.display()))?;
-    let basename = path.file_name().and_then(|name| name.to_str());
-    if basename.is_none() && explicit_format.is_none() {
-        bail!(
-            "lockfile basename is not UTF-8; pass --lockfile-format for {}",
-            path.display()
-        );
-    }
-    parse_lockfile(
-        &input,
-        DetectionRequest {
-            basename,
-            explicit_format,
-        },
-    )
-    .with_context(|| format!("parse lockfile {}", path.display()))
-}
-
-fn emit_report(report: &VulnerabilityReport, format: VulnsFormat) -> Result<ExitCode> {
+fn emit_report(report: &VulnerabilityReport, format: crate::Format) -> Result<ExitCode> {
     match format {
-        VulnsFormat::Text => print!("{}", render_text(report)?),
-        VulnsFormat::Json => println!("{}", serde_json::to_string_pretty(&json_report(report)?)?),
-        VulnsFormat::Sarif => println!(
+        crate::Format::Text => print!("{}", render_text(report)?),
+        crate::Format::Json => println!("{}", serde_json::to_string_pretty(&json_report(report)?)?),
+        crate::Format::Sarif => println!(
             "{}",
             serde_json::to_string_pretty(&sarif_vulns::render_report(report, CACHE_LABEL)?)?
         ),
@@ -372,5 +446,66 @@ mod tests {
             "cache",
         ]);
         assert!(parsed.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod scan_vulns_tests {
+    use super::*;
+    use argus_core::{ArtifactKind, ScanReport};
+
+    fn args(osv: bool) -> ScanVulnsArgs {
+        ScanVulnsArgs {
+            osv,
+            osv_cache_dir: osv.then(|| std::path::PathBuf::from("/tmp/does-not-matter")),
+            osv_offline: false,
+            osv_allow_stale: false,
+            osv_max_age_seconds: 86_400,
+            osv_fail_on_severity: None,
+        }
+    }
+
+    fn report() -> ScanReport {
+        ScanReport {
+            artifact: ArtifactKind::PackageDir,
+            path: "demo@1.0.0".into(),
+            package_name: Some("demo".into()),
+            package_version: Some("1.0.0".into()),
+            decision: Decision::Allow,
+            findings: Vec::new(),
+            coordinate: None,
+            intelligence: None,
+        }
+    }
+
+    #[test]
+    fn without_osv_flag_is_a_no_op() {
+        let mut r = report();
+        apply_osv_query(&mut r, &args(false)).unwrap();
+        assert!(r.findings.is_empty());
+        assert_eq!(r.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn osv_without_resolved_coordinate_fails_closed() {
+        let mut r = report();
+        let err = apply_osv_query(&mut r, &args(true)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("trusted resolved package coordinate"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn stricter_takes_the_worse_decision() {
+        use Decision::{Allow, AllowWithApproval, Block};
+        assert_eq!(stricter(Allow, Block), Block);
+        assert_eq!(stricter(Block, Allow), Block);
+        assert_eq!(stricter(Allow, AllowWithApproval), AllowWithApproval);
+        assert_eq!(
+            stricter(AllowWithApproval, AllowWithApproval),
+            AllowWithApproval
+        );
+        assert_eq!(stricter(Allow, Allow), Allow);
     }
 }
