@@ -158,13 +158,23 @@ mod tests {
             "sha256-AAAA",
             "sha256-not+standard/base64?",
             "missing-separator-extra",
-            "bare-token",
         ] {
             let (state, evidence) = parse_sri(&format!("{valid} {invalid}"), "artifact.integrity");
             assert_eq!(state, IntegrityState::Invalid, "{invalid}");
             assert_eq!(evidence.len(), 2, "{invalid}");
             assert_eq!(evidence[1].locator, "artifact.integrity");
         }
+    }
+
+    #[test]
+    fn sri_token_without_separator_retains_invalid_evidence() {
+        let (state, evidence) = parse_sri("malformed", "artifact.integrity");
+
+        assert_eq!(state, IntegrityState::Invalid);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].algorithm, None);
+        assert_eq!(evidence[0].value.as_deref(), Some("malformed"));
+        assert_eq!(evidence[0].locator, "artifact.integrity");
     }
 
     #[test]
