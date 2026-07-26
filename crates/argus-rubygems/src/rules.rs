@@ -13,6 +13,7 @@
 
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// Ruby gems that are common typosquat targets. Mirrors the hand-curated
 /// approach in `argus-pypi::POPULAR_PYTHON_PACKAGES`, drawn from RubyGems
@@ -83,52 +84,58 @@ pub const POPULAR_RUBY_GEMS: &[&str] = &[
 /// `ext/` file). Ruby has several spawn idioms; this regex covers the common
 /// ones. Benign `extconf.rb` files only call `mkmf` helpers
 /// (`create_makefile`, `have_header`, ...), which this does not match.
-pub fn extconf_subprocess_regex() -> Regex {
-    // Ruby allows BOTH parenthesized (`system("cmd")`) and paren-less
-    // (`system "cmd"`) calls. The argument suffix `(?: \( | \s+ ARG )` matches
-    // either an opening paren OR whitespace followed by a command argument: a
-    // string literal (`"`/`'`), a `%`-literal start, or an identifier/variable
-    // (`[A-Za-z_$@]`). Requiring an actual argument is what keeps the bare word
-    // "system" in prose/comments from firing, and the leading `\b` (plus the
-    // method names being whole-word) keeps `subsystem` from matching.
-    Regex::new(
-        r#"(?x)
-        (?:
-            ` [^`]* `                                |   # backtick command
-            %x \s* [\(\{\[\|/!]                       |   # %x(...) / %x{...} (no \b: `%` is non-word, breaks the boundary)
+pub fn extconf_subprocess_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Ruby allows BOTH parenthesized (`system("cmd")`) and paren-less
+        // (`system "cmd"`) calls. The argument suffix `(?: \( | \s+ ARG )` matches
+        // either an opening paren OR whitespace followed by a command argument: a
+        // string literal (`"`/`'`), a `%`-literal start, or an identifier/variable
+        // (`[A-Za-z_$@]`). Requiring an actual argument is what keeps the bare word
+        // "system" in prose/comments from firing, and the leading `\b` (plus the
+        // method names being whole-word) keeps `subsystem` from matching.
+        Regex::new(
+            r#"(?x)
             (?:
-                \b system                             |
-                \b exec                               |
-                \b spawn                              |
-                \b Kernel\.(?:system|exec|spawn)      |
-                \b IO\.popen                          |
-                \b Open3\.(?:popen3|popen2|capture2|capture3|capture2e)
+                ` [^`]* `                                |   # backtick command
+                %x \s* [\(\{\[\|/!]                       |   # %x(...) / %x{...} (no \b: `%` is non-word, breaks the boundary)
+                (?:
+                    \b system                             |
+                    \b exec                               |
+                    \b spawn                              |
+                    \b Kernel\.(?:system|exec|spawn)      |
+                    \b IO\.popen                          |
+                    \b Open3\.(?:popen3|popen2|capture2|capture3|capture2e)
+                )
+                (?: \s* \( | \s+ ['"%A-Za-z_$@] )            # `(args)` OR paren-less ` "cmd"` / ` var`
             )
-            (?: \s* \( | \s+ ['"%A-Za-z_$@] )            # `(args)` OR paren-less ` "cmd"` / ` var`
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Build-time remote download from an `extconf.rb` (or any `ext/` file).
 /// A benign C-extension build never fetches code from the network.
-pub fn extconf_remote_download_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        (?:
-            \b Net::HTTP \b                           |
-            \b URI\.open \s* \(                       |
-            \b URI\.parse \s* \( [^)]* \) \.open      |
-            \b open-uri \b                            |
-            require \s* ['"] open-uri ['"]            |
-            \b Gem\.fetch \s* \(                      |
-            \b Down\.download \s* \(                  |
-            \b HTTParty\. (?:get|post|put|patch|delete) \s* \(
+pub fn extconf_remote_download_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?:
+                \b Net::HTTP \b                           |
+                \b URI\.open \s* \(                       |
+                \b URI\.parse \s* \( [^)]* \) \.open      |
+                \b open-uri \b                            |
+                require \s* ['"] open-uri ['"]            |
+                \b Gem\.fetch \s* \(                      |
+                \b Down\.download \s* \(                  |
+                \b HTTParty\. (?:get|post|put|patch|delete) \s* \(
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Reads of credential-shaped environment variables (the 2022 RubyGems
@@ -137,16 +144,19 @@ pub fn extconf_remote_download_regex() -> Regex {
 /// matches host secret-file *paths* (`.aws`/`.npmrc`/`.ssh`), not Ruby env
 /// reads, so the harvester idiom that exfiltrates env credentials is detected
 /// here (paired with a network egress in `scan`).
-pub fn env_credential_read_regex() -> Regex {
-    Regex::new(
-        r#"(?xi)
-        \b ENV \s* (?: \[ | \.fetch \s* \( ) \s*
-        ['"] [^'"]*
-        (?: SECRET | TOKEN | API[_-]?KEY | ACCESS[_-]?KEY | PASSWORD | PASSWD | CREDENTIAL | PRIVATE[_-]?KEY )
-        [^'"]* ['"]
-        "#,
-    )
-    .unwrap()
+pub fn env_credential_read_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?xi)
+            \b ENV \s* (?: \[ | \.fetch \s* \( ) \s*
+            ['"] [^'"]*
+            (?: SECRET | TOKEN | API[_-]?KEY | ACCESS[_-]?KEY | PASSWORD | PASSWD | CREDENTIAL | PRIVATE[_-]?KEY )
+            [^'"]* ['"]
+            "#,
+        )
+        .unwrap()
+    })
 }
 
 /// BULK environment dumps: a gem that harvests the ENTIRE environment block
@@ -158,16 +168,19 @@ pub fn env_credential_read_regex() -> Regex {
 /// variable at once, sweeping up credentials without naming them. A benign
 /// single read like `ENV['HOME']` does NOT match (it is a `[`/`fetch` indexed
 /// access, not a whole-map enumeration).
-pub fn env_bulk_read_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b ENV \s* \.
-        (?: to_h | to_a | to_hash | each(?:_pair)? | select | map | values | keys
-          | entries | filter | find | reject | collect | sort | inject | reduce )
-        \b
-        "#,
-    )
-    .unwrap()
+pub fn env_bulk_read_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b ENV \s* \.
+            (?: to_h | to_a | to_hash | each(?:_pair)? | select | map | values | keys
+              | entries | filter | find | reject | collect | sort | inject | reduce )
+            \b
+            "#,
+        )
+        .unwrap()
+    })
 }
 
 /// Push name-based findings (typosquatting + low-reputation) onto the

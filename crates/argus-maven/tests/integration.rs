@@ -135,6 +135,8 @@ fn maven_clean_package_allows_with_only_info_findings() {
     assert_eq!(report.decision, Decision::Allow, "got findings: {ids:?}");
     assert_eq!(report.package_name.as_deref(), Some("demo"));
     assert_eq!(report.package_version.as_deref(), Some("1.0.0"));
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(report.path.to_string_lossy(), "com.example:demo@1.0.0");
 }
 
 #[test]

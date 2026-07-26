@@ -2,6 +2,7 @@
 
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// Popular crates that are common typosquat targets. Drawn from
 /// crates.io download stats + the 2026 TrapDoor target list.
@@ -98,56 +99,63 @@ pub const POPULAR_CRATES: &[&str] = &[
 /// from the canonical "obviously suspicious" set: shells, curl/wget,
 /// powershell, scripting interpreters, netcat. This matches argus's npm
 /// `binary-execution` rule shape.
-pub fn build_rs_subprocess_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            std::process::Command::new |
-            Command::new |
-            std::process::Command \s* :: \s* new
+pub fn build_rs_subprocess_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                std::process::Command::new |
+                Command::new |
+                std::process::Command \s* :: \s* new
+            )
+            \s* \( \s* [\"']
+            (?:
+                sh | bash | zsh | dash | fish |
+                curl | wget |
+                powershell(?:\.exe)? | pwsh |
+                cmd\.exe |
+                nc | ncat |
+                python\d? | perl | ruby | node |
+                /bin/(?: sh | bash | zsh )
+            )
+            [\"']
+            "#,
         )
-        \s* \( \s* [\"']
-        (?:
-            sh | bash | zsh | dash | fish |
-            curl | wget |
-            powershell(?:\.exe)? | pwsh |
-            cmd\.exe |
-            nc | ncat |
-            python\d? | perl | ruby | node |
-            /bin/(?: sh | bash | zsh )
-        )
-        [\"']
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// `build.rs` reaches the network at compile time. Matches the common
 /// HTTP client crates used by malicious build scripts.
-pub fn build_rs_network_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b
-        (?:
-            reqwest::(?:get|blocking::get|Client::new) |
-            ureq::(?:get|post|put|request|head) |
-            hyper::(?:Client|client) |
-            isahc::(?:get|post) |
-            std::net::TcpStream::connect
+pub fn build_rs_network_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b
+            (?:
+                reqwest::(?:get|blocking::get|Client::new) |
+                ureq::(?:get|post|put|request|head) |
+                hyper::(?:Client|client) |
+                isahc::(?:get|post) |
+                std::net::TcpStream::connect
+            )
+            \s* \(
+            "#,
         )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// `include_bytes!("...")` — common idiom for embedding fonts or default
 /// configs, but also the canonical way a malicious build.rs ships an
 /// encrypted payload. Severity is medium on its own; combined with the
 /// XOR-loop signature this jumps to critical.
-pub fn include_bytes_regex() -> Regex {
-    Regex::new(r#"\binclude_bytes!\s*\("#).unwrap()
+pub fn include_bytes_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\binclude_bytes!\s*\("#).unwrap())
 }
 
 /// Heuristic for a byte-by-byte XOR decrypt loop in Rust. Matches the
@@ -156,17 +164,20 @@ pub fn include_bytes_regex() -> Regex {
 /// Allows braces between the `.iter()` / `.iter_mut()` call and the
 /// `^=` operator — the loop body is enclosed in `{}` and must be
 /// crossed. The combined `s` flag + `.` lets us span newlines.
-pub fn xor_loop_regex() -> Regex {
-    Regex::new(
-        r#"(?xs)
-        for \s+ \( \s* [A-Za-z_][A-Za-z_0-9]* \s* , \s* [A-Za-z_][A-Za-z_0-9]* \s* \)
-        \s+ in \s+
-        .{0,200}? \. iter (?:_mut)? \s* \(
-        .{0,400}?
-        \^= \s* [A-Za-z_]
-        "#,
-    )
-    .unwrap()
+pub fn xor_loop_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?xs)
+            for \s+ \( \s* [A-Za-z_][A-Za-z_0-9]* \s* , \s* [A-Za-z_][A-Za-z_0-9]* \s* \)
+            \s+ in \s+
+            .{0,200}? \. iter (?:_mut)? \s* \(
+            .{0,400}?
+            \^= \s* [A-Za-z_]
+            "#,
+        )
+        .unwrap()
+    })
 }
 
 /// Push name-based findings (typosquatting + low-reputation).

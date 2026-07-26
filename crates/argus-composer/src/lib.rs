@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use argus_core::url::{host_of, validate_artifact_url};
-use argus_core::{Ecosystem, Finding, PackageCoordinate, ScanReport};
+use argus_core::{canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport};
 use std::path::PathBuf;
 
 mod metadata;
@@ -70,12 +70,15 @@ pub fn fetch_and_scan_composer(
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
 
+    let full_name = format!("{}/{}", pkg.vendor, pkg.package);
+    let canonical_name = canonicalize_package_name(Ecosystem::Packagist, &full_name)
+        .context("normalize requested Packagist package name")?;
+
     // --- 1. Fetch p2 metadata ---
     let meta_url = format!(
-        "{}/p2/{}/{}.json",
+        "{}/p2/{}.json",
         opts.registry.trim_end_matches('/'),
-        pkg.vendor,
-        pkg.package,
+        canonical_name,
     );
     let meta_bytes = transport
         .get(&meta_url, MAX_PACKUMENT_BYTES)
@@ -84,8 +87,7 @@ pub fn fetch_and_scan_composer(
         .with_context(|| format!("parse Composer p2 metadata {meta_url}"))?;
 
     // --- 2. Resolve version ---
-    let full_name = format!("{}/{}", pkg.vendor, pkg.package);
-    let version_obj = resolve_version(&packument, &full_name, pkg.version.as_deref())
+    let version_obj = resolve_version(&packument, &canonical_name, pkg.version.as_deref())
         .with_context(|| format!("resolve version for {full_name}"))?;
 
     let resolved_version = version_obj.version.clone();
@@ -174,6 +176,9 @@ pub fn fetch_and_scan_composer(
     report.findings.extend(extra_findings);
 
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+    // Registry coordinate, never the random extraction TempDir: the path
+    // feeds text/JSON/SARIF output and fingerprints.
+    report.path = PathBuf::from(format!("{}@{resolved_version}", coordinate.canonical_name));
     if report.package_name.is_none() {
         report.package_name = Some(full_name);
     }

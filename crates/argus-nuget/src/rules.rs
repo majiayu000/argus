@@ -19,6 +19,7 @@
 
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 /// NuGet packages that are common typosquat targets. Drawn from
 /// nuget.org download statistics + recent attack reports.
@@ -63,55 +64,64 @@ pub const POPULAR_NUGET_PACKAGES: &[&str] = &[
 /// PowerShell content that downloads + executes code at install time. This
 /// is the highest-concern signal: a `.ps1` install hook that pulls a remote
 /// payload and runs it.
-pub fn powershell_download_exec_regex() -> Regex {
-    Regex::new(
-        r#"(?ix)
-        (?:
-            Invoke-WebRequest |
-            Invoke-RestMethod |
-            \bIEX\b |
-            Invoke-Expression |
-            DownloadString |
-            DownloadFile |
-            DownloadData |
-            Start-Process |
-            New-Object \s+ (?:System\.)?Net\.WebClient |
-            \[ Reflection\.Assembly \] :: Load
+pub fn powershell_download_exec_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            (?:
+                Invoke-WebRequest |
+                Invoke-RestMethod |
+                \bIEX\b |
+                Invoke-Expression |
+                DownloadString |
+                DownloadFile |
+                DownloadData |
+                Start-Process |
+                New-Object \s+ (?:System\.)?Net\.WebClient |
+                \[ Reflection\.Assembly \] :: Load
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// PowerShell obfuscation / encoded-command markers — base64 payloads and
 /// `-EncodedCommand` are classic loader shapes.
-pub fn powershell_obfuscation_regex() -> Regex {
-    Regex::new(
-        r#"(?ix)
-        (?:
-            FromBase64String |
-            -enc(?:odedcommand)?\b |
-            \[ Convert \] :: FromBase64String
+pub fn powershell_obfuscation_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            (?:
+                FromBase64String |
+                -enc(?:odedcommand)?\b |
+                \[ Convert \] :: FromBase64String
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// MSBuild element that executes a command or downloads a file at build
 /// time — `<Exec Command=...>`, `<DownloadFile ...>`, or a custom inline
 /// `<Task><Code>` block. These fire on every consumer `dotnet build`.
-pub fn msbuild_exec_task_regex() -> Regex {
-    Regex::new(
-        r#"(?ix)
-        <\s*(?:
-            Exec\b |
-            DownloadFile\b |
-            Code\b
+pub fn msbuild_exec_task_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?ix)
+            <\s*(?:
+                Exec\b |
+                DownloadFile\b |
+                Code\b
+            )
+            "#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// MSBuild `<UsingTask ... AssemblyFile=...>` referencing a packaged DLL —
@@ -119,8 +129,9 @@ pub fn msbuild_exec_task_regex() -> Regex {
 /// either single or double quotes around the attribute value
 /// (`AssemblyFile="x.dll"` or `AssemblyFile='x.dll'`), so the detector
 /// requires a following quote of either kind.
-pub fn msbuild_inline_task_regex() -> Regex {
-    Regex::new(r#"(?ix)<\s*UsingTask\b[^>]*\bAssemblyFile\s*=\s*["']"#).unwrap()
+pub fn msbuild_inline_task_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?ix)<\s*UsingTask\b[^>]*\bAssemblyFile\s*=\s*["']"#).unwrap())
 }
 
 /// Push name-based findings (typosquatting + low-reputation) onto the

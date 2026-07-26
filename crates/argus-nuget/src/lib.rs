@@ -41,10 +41,10 @@ mod metadata;
 mod rules;
 mod scan;
 
+pub use argus_core::url::verify_sha512_b64;
 pub use argus_fetch::{HttpTransport, Transport};
 pub use metadata::{
-    normalize_version, resolve_version, verify_sha512_b64, CatalogLeaf, FlatContainerIndex,
-    RegistrationLeaf,
+    normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };
 pub use rules::POPULAR_NUGET_PACKAGES;
 pub use scan::{scan_extracted_nupkg, scan_nuget_archive, NupkgScan};
@@ -218,7 +218,9 @@ pub fn fetch_and_scan_nuget(
 
     Ok(ScanReport {
         artifact: ArtifactKind::PackageDir,
-        path: extract_root.path().to_path_buf(),
+        // Registry coordinate, never the random extraction TempDir: the
+        // path feeds text/JSON/SARIF output and fingerprints.
+        path: PathBuf::from(format!("{}@{version}", coordinate.canonical_name)),
         package_name: scan.name.or_else(|| Some(pkg.name.clone())),
         package_version: scan.version.or(Some(version)),
         decision,

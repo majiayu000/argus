@@ -69,6 +69,39 @@ fn crates_registry_metadata_name_mismatch_fails_closed() {
 }
 
 #[test]
+fn crates_report_path_uses_canonical_coordinate_for_case_alias() {
+    let registry = "https://mock.registry";
+    let cargo_toml = b"[package]\nname = \"demo-crate\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
+    let crate_bytes = make_crate(
+        "demo-crate",
+        "1.0.0",
+        &[("Cargo.toml", cargo_toml), ("src/lib.rs", b"")],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/demo-crate/1.0.0/download");
+    let pack = packument("demo-crate", "1.0.0", &sha256_hex(&crate_bytes));
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/Demo-Crate"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("Demo-Crate").unwrap();
+
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport).unwrap();
+    let coordinate = report.coordinate.as_ref().expect("coordinate is set");
+
+    assert_eq!(report.path.to_string_lossy(), "demo-crate@1.0.0");
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!("{}@{}", coordinate.canonical_name, coordinate.version)
+    );
+}
+
+#[test]
 fn crates_build_rs_subprocess_blocks() {
     let registry = "https://mock.registry";
     let cargo_toml = b"[package]\nname = \"evil-crate\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
@@ -116,6 +149,14 @@ fn main() {
         "got: {rule_ids:?}"
     );
     assert_eq!(report.decision, Decision::Block);
+    // The report path is the registry coordinate, never the extraction TempDir.
+    assert_eq!(
+        report.path.to_string_lossy(),
+        format!(
+            "evil-crate@{}",
+            report.package_version.as_deref().expect("version resolved")
+        )
+    );
 }
 
 #[test]

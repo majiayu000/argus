@@ -7,6 +7,7 @@
 use crate::{all_script_bodies, PackageContext, TextFile};
 use argus_core::{Finding, Severity};
 use regex::Regex;
+use std::sync::OnceLock;
 
 pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
     let script_blob = all_script_bodies(&ctx.package);
@@ -181,7 +182,7 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
     }
 }
 
-// ---------- regex helpers (lazy-compiled per call; the corpus is tiny) ----------
+// ---------- regex helpers (compiled once via OnceLock; scans touch every file) ----------
 
 /// Quoted string that mentions a host credential path anywhere inside.
 ///
@@ -197,9 +198,14 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
 /// side of a `.npmrc` token. JavaScript template literals (backticks)
 /// are not in the class, so paths inside template literals fall through
 /// to the npmrc-read regex instead.
-fn cred_paths_regex() -> Regex {
-    Regex::new(r#"[\"'][^\"'\n]*(\.npmrc|\.env|\.ssh/[^\"'\n]+|\.aws/credentials)[^\"'\n]*[\"']"#)
+fn cred_paths_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"[\"'][^\"'\n]*(\.npmrc|\.env|\.ssh/[^\"'\n]+|\.aws/credentials)[^\"'\n]*[\"']"#,
+        )
         .unwrap()
+    })
 }
 
 /// AI-agent context files. A package that writes here is impersonating a
@@ -208,71 +214,77 @@ fn cred_paths_regex() -> Regex {
 /// `appendFileSync`, `writeFile`, `outputFileSync`, etc.) targeting one
 /// of the well-known path names — quoted, in a template literal, or as a
 /// `path.join(..., 'CLAUDE.md')` final argument.
-fn ai_context_paths_regex() -> Regex {
-    // Match a write call whose first 400 characters of arguments mention
-    // one of the well-known AI-agent context filenames. Recognises both
-    // JS-flavour writes (`writeFileSync`, `appendFileSync`, `writeFile`,
-    // `outputFileSync`, etc.) and Python-flavour writes (pathlib's
-    // `write_text` / `write_bytes`). The Python sdist TrapDoor variant
-    // poisons `~/.cursorrules` via `Path(...).write_text(...)`.
-    //
-    // We deliberately do NOT require quote/template delimiters around the
-    // filename: real attacks construct the path via interpolation
-    // (``${homedir}/.cursorrules`` in JS, `Path.home() / ".cursorrules"`
-    // in Python) where the only character immediately before the
-    // filename is the `/` that follows the interpolation. Rust regex has
-    // no lookbehind, so we just match the filename anywhere inside the
-    // call argument list.
-    //
-    // Capture group 1 returns the matched filename for the finding detail.
-    Regex::new(
-        r#"(?x)
-        (?:
-            (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? \s* \(           |  # JS
-            write_text \s* \(                                                     |  # Python pathlib
-            write_bytes \s* \(                                                    |  # Python pathlib
-            format \s* ! \s* \(                                                      # Rust path-builder macro
+fn ai_context_paths_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Match a write call whose first 400 characters of arguments mention
+        // one of the well-known AI-agent context filenames. Recognises both
+        // JS-flavour writes (`writeFileSync`, `appendFileSync`, `writeFile`,
+        // `outputFileSync`, etc.) and Python-flavour writes (pathlib's
+        // `write_text` / `write_bytes`). The Python sdist TrapDoor variant
+        // poisons `~/.cursorrules` via `Path(...).write_text(...)`.
+        //
+        // We deliberately do NOT require quote/template delimiters around the
+        // filename: real attacks construct the path via interpolation
+        // (``${homedir}/.cursorrules`` in JS, `Path.home() / ".cursorrules"`
+        // in Python) where the only character immediately before the
+        // filename is the `/` that follows the interpolation. Rust regex has
+        // no lookbehind, so we just match the filename anywhere inside the
+        // call argument list.
+        //
+        // Capture group 1 returns the matched filename for the finding detail.
+        Regex::new(
+            r#"(?x)
+            (?:
+                (?:write|append|outputFile|writeFile)[A-Za-z]*Sync? \s* \(           |  # JS
+                write_text \s* \(                                                     |  # Python pathlib
+                write_bytes \s* \(                                                    |  # Python pathlib
+                format \s* ! \s* \(                                                      # Rust path-builder macro
+            )
+            [^)]{0,400}?
+            ( \.cursorrules
+            | CLAUDE\.md
+            | \.claude/[^\"'`)\s]+
+            | AGENTS\.md
+            | \.aider\.conf\.yml
+            | \.continuerules
+            | \.codexrules
+            | \.windsurfrules
+            )
+            "#,
         )
-        [^)]{0,400}?
-        ( \.cursorrules
-        | CLAUDE\.md
-        | \.claude/[^\"'`)\s]+
-        | AGENTS\.md
-        | \.aider\.conf\.yml
-        | \.continuerules
-        | \.codexrules
-        | \.windsurfrules
-        )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 /// Pathlib-style reverse shape: filename literal first, then a chained
 /// `.write_text(` / `.write_bytes(` call within ~200 chars. Catches
 /// `(home / ".cursorrules").write_text(...)` which the forward regex
 /// misses because the filename sits OUTSIDE the parenthesized arg list.
-fn ai_context_paths_regex_reverse() -> Regex {
-    Regex::new(
-        r#"(?x)
-        [\"'`/]
-        ( \.cursorrules
-        | CLAUDE\.md
-        | \.claude/[^\"'`)\s]+
-        | AGENTS\.md
-        | \.aider\.conf\.yml
-        | \.continuerules
-        | \.codexrules
-        | \.windsurfrules
+fn ai_context_paths_regex_reverse() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            [\"'`/]
+            ( \.cursorrules
+            | CLAUDE\.md
+            | \.claude/[^\"'`)\s]+
+            | AGENTS\.md
+            | \.aider\.conf\.yml
+            | \.continuerules
+            | \.codexrules
+            | \.windsurfrules
+            )
+            [\"'`)]?
+            [^\n]{0,200}?
+            \.\s*
+            (?: write_text | write_bytes | write )
+            \s* \(
+            "#,
         )
-        [\"'`)]?
-        [^\n]{0,200}?
-        \.\s*
-        (?: write_text | write_bytes | write )
-        \s* \(
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
 fn ai_context_write(body: &str) -> Option<String> {
@@ -284,72 +296,91 @@ fn ai_context_write(body: &str) -> Option<String> {
         .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
 
-fn token_env_regex() -> Regex {
-    Regex::new(
-        r#"process\.env\.(NPM_TOKEN|GITHUB_TOKEN|GH_TOKEN|NODE_AUTH_TOKEN|NPM_AUTH_TOKEN)\b"#,
-    )
-    .unwrap()
-}
-
-fn npmrc_read_regex() -> Regex {
-    Regex::new(r#"readFile\w*\s*\(\s*[^)]*\.npmrc"#).unwrap()
-}
-
-fn github_write_regex() -> Regex {
-    Regex::new(
-        r#"(?xs)
-        api\.github\.com [^\"']* .{0,300}? method\s*:\s*[\"'](PUT|POST|PATCH|DELETE)[\"']
-        "#,
-    )
-    .unwrap()
-}
-
-fn npm_publish_regex() -> Regex {
-    Regex::new(r#"\bnpm\s+publish\b"#).unwrap()
-}
-
-fn binary_exec_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        \b(exec|execFile|execFileSync|execSync|spawn|spawnSync)\s*\(\s*
-        [\"'] (?:
-            [^\"']*\.(?:so|dll|dylib|exe|node) \b |
-            rundll32(?:\.exe)? |
-            powershell(?:\.exe)? |
-            cmd\.exe
+fn token_env_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"process\.env\.(NPM_TOKEN|GITHUB_TOKEN|GH_TOKEN|NODE_AUTH_TOKEN|NPM_AUTH_TOKEN)\b"#,
         )
-        "#,
-    )
-    .unwrap()
+        .unwrap()
+    })
 }
 
-fn runtime_hook_regex() -> Regex {
-    // No lookarounds: forbid `==` / `===` by requiring a non-`=` byte after the
-    // assignment operator.
-    Regex::new(
-        r#"(?x)
-        (?:globalThis|window|global)
-        \s*\.\s* [A-Za-z_$][A-Za-z0-9_$]*
-        (?:\s*\.\s* [A-Za-z_$][A-Za-z0-9_$]* )?
-        \s*=\s* [^=]
-        "#,
-    )
-    .unwrap()
+fn npmrc_read_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"readFile\w*\s*\(\s*[^)]*\.npmrc"#).unwrap())
 }
 
-fn wallet_regex() -> Regex {
-    Regex::new(
-        r#"(?x)
-        (?:globalThis|window) \. ethereum |
-        \beth_sendTransaction\b |
-        \bwallet_(?:requestPermissions|switchEthereumChain)\b
-        "#,
-    )
-    .unwrap()
+fn github_write_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?xs)
+            api\.github\.com [^\"']* .{0,300}? method\s*:\s*[\"'](PUT|POST|PATCH|DELETE)[\"']
+            "#,
+        )
+        .unwrap()
+    })
+}
+
+fn npm_publish_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\bnpm\s+publish\b"#).unwrap())
+}
+
+fn binary_exec_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \b(exec|execFile|execFileSync|execSync|spawn|spawnSync)\s*\(\s*
+            [\"'] (?:
+                [^\"']*\.(?:so|dll|dylib|exe|node) \b |
+                rundll32(?:\.exe)? |
+                powershell(?:\.exe)? |
+                cmd\.exe
+            )
+            "#,
+        )
+        .unwrap()
+    })
+}
+
+fn runtime_hook_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // No lookarounds: forbid `==` / `===` by requiring a non-`=` byte after the
+        // assignment operator.
+        Regex::new(
+            r#"(?x)
+            (?:globalThis|window|global)
+            \s*\.\s* [A-Za-z_$][A-Za-z0-9_$]*
+            (?:\s*\.\s* [A-Za-z_$][A-Za-z0-9_$]* )?
+            \s*=\s* [^=]
+            "#,
+        )
+        .unwrap()
+    })
+}
+
+fn wallet_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?:globalThis|window) \. ethereum |
+            \beth_sendTransaction\b |
+            \bwallet_(?:requestPermissions|switchEthereumChain)\b
+            "#,
+        )
+        .unwrap()
+    })
 }
 
 fn curl_sh_pipe(blob: &str) -> Option<String> {
-    let re = Regex::new(r#"(?i)(curl|wget)\s+[^\n]*\|\s*(sh|bash|zsh)\b"#).unwrap();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| Regex::new(r#"(?i)(curl|wget)\s+[^\n]*\|\s*(sh|bash|zsh)\b"#).unwrap());
     re.find(blob).map(|m| m.as_str().to_string())
 }
 
@@ -366,10 +397,13 @@ fn curl_sh_pipe(blob: &str) -> Option<String> {
 /// rates. PyPI install-time network calls are caught by argus-pypi's
 /// `setup-remote-download` rule instead.
 fn external_fetch(body: &str) -> Option<String> {
-    let re = Regex::new(
-        r#"(?i)(?:fetch|axios\.(?:post|put|patch|request))\s*\(\s*[\"']https?://([^\"'/]+)"#,
-    )
-    .unwrap();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(?:fetch|axios\.(?:post|put|patch|request))\s*\(\s*[\"']https?://([^\"'/]+)"#,
+        )
+        .unwrap()
+    });
     for cap in re.captures_iter(body) {
         let host = cap.get(1).unwrap().as_str().to_ascii_lowercase();
         if is_local_host(&host) {
