@@ -2,11 +2,13 @@
 
 pub mod cache;
 pub mod client;
+mod coordinator;
 pub mod model;
 pub mod normalize;
 pub mod report;
 pub mod resolver;
 pub mod severity;
+mod transport;
 
 pub use model::{
     AdvisoryEvidence, AdvisoryReference, AffectedEvidence, CoordinateQuery, CoordinateSet,

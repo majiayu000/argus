@@ -1,12 +1,18 @@
+use crate::coordinator::OsvCoordinator;
 use crate::model::{
     modified_intervals_overlap, parse_modified, CoordinateQuery, CoordinateSet, ModifiedInterval,
     NormalizedAdvisory, OsvError, OsvErrorKind, MAX_ID_BYTES,
 };
 use crate::normalize::normalize_advisory;
+pub use crate::transport::{
+    HttpsOsvTransport, OsvTransport, ResponseLimits, TransportAttempt, TransportResponse,
+    CONNECT_TIMEOUT, REQUEST_TIMEOUT,
+};
+use argus_core::ExecutionContext;
 use argus_osv_schema::parse_osv_record;
+use argus_transport::GET_MAX_ATTEMPTS;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 use std::time::{Duration, Instant};
 
 pub const MAX_BATCH_QUERIES: usize = 1_000;
@@ -15,153 +21,13 @@ pub const MAX_PAGES_PER_COORDINATE: usize = 16;
 pub const MAX_ASSOCIATIONS: usize = 100_000;
 pub const MAX_UNIQUE_ADVISORY_IDS: usize = 20_000;
 pub const MAX_HTTP_REQUESTS: usize = 25_000;
-pub const MAX_DETAIL_CONCURRENCY: usize = 8;
+pub const MAX_OSV_IN_FLIGHT: usize = 8;
+pub const MAX_DETAIL_CONCURRENCY: usize = MAX_OSV_IN_FLIGHT;
 pub const MAX_ENCODED_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_QUERY_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_DETAIL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TOTAL_DECODED_BYTES: usize = 512 * 1024 * 1024;
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResponseLimits {
-    pub encoded_request_bytes: usize,
-    pub decoded_response_bytes: usize,
-    pub connect_timeout: Duration,
-    pub request_timeout: Duration,
-    pub redirect_limit: usize,
-    pub send_credentials: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransportResponse {
-    pub status: u16,
-    pub content_type: Option<String>,
-    pub body: Vec<u8>,
-}
-
-pub trait OsvTransport: Send + Sync {
-    fn post_query_batch(
-        &self,
-        body: &[u8],
-        limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError>;
-
-    fn get_advisory(
-        &self,
-        percent_encoded_id: &str,
-        limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError>;
-}
-
-pub struct HttpsOsvTransport(ureq::Agent);
-
-impl HttpsOsvTransport {
-    pub fn new() -> Self {
-        Self(
-            ureq::AgentBuilder::new()
-                .timeout_connect(CONNECT_TIMEOUT)
-                .timeout(REQUEST_TIMEOUT)
-                .redirects(0)
-                .build(),
-        )
-    }
-}
-
-impl Default for HttpsOsvTransport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OsvTransport for HttpsOsvTransport {
-    fn post_query_batch(
-        &self,
-        body: &[u8],
-        _limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError> {
-        if body.len() > MAX_ENCODED_REQUEST_BYTES {
-            return Err(OsvError::new(
-                OsvErrorKind::ResourceLimit,
-                "encoded querybatch request exceeds 4 MiB",
-            ));
-        }
-        read_http_response(
-            self.0
-                .post("https://api.osv.dev/v1/querybatch")
-                .set("Accept", "application/json")
-                .set("Content-Type", "application/json")
-                .send_bytes(body),
-            MAX_QUERY_RESPONSE_BYTES,
-            "querybatch",
-        )
-    }
-
-    fn get_advisory(
-        &self,
-        percent_encoded_id: &str,
-        _limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError> {
-        if percent_encoded_id.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'%'))
-        }) {
-            return Err(OsvError::malformed(
-                "advisory path ID is not percent encoded",
-            ));
-        }
-        read_http_response(
-            self.0
-                .get(&format!(
-                    "https://api.osv.dev/v1/vulns/{percent_encoded_id}"
-                ))
-                .set("Accept", "application/json")
-                .call(),
-            MAX_DETAIL_RESPONSE_BYTES,
-            "advisory detail",
-        )
-    }
-}
-
-fn read_http_response(
-    response: Result<ureq::Response, ureq::Error>,
-    maximum: usize,
-    label: &str,
-) -> Result<TransportResponse, OsvError> {
-    let response = match response {
-        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(error) => {
-            return Err(OsvError::new(
-                OsvErrorKind::Transport,
-                format!("{label} transport failed: {error}"),
-            ))
-        }
-    };
-    let status = response.status();
-    let content_type = response.header("Content-Type").map(str::to_string);
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .take((maximum as u64).saturating_add(1))
-        .read_to_end(&mut body)
-        .map_err(|error| {
-            OsvError::new(
-                OsvErrorKind::Transport,
-                format!("read {label} response body: {error}"),
-            )
-        })?;
-    if body.len() > maximum {
-        return Err(OsvError::new(
-            OsvErrorKind::ResourceLimit,
-            format!("{label} decoded body exceeds maximum {maximum}"),
-        ));
-    }
-    Ok(TransportResponse {
-        status,
-        content_type,
-        body,
-    })
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuerySummary {
@@ -183,23 +49,59 @@ pub struct CompleteSnapshot {
     pub total_decoded_bytes: usize,
 }
 
+pub trait OsvClock: Send + Sync {
+    fn elapsed(&self, started: Instant) -> Duration;
+}
+
+struct SystemOsvClock;
+
+impl OsvClock for SystemOsvClock {
+    fn elapsed(&self, started: Instant) -> Duration {
+        started.elapsed()
+    }
+}
+
+static SYSTEM_OSV_CLOCK: SystemOsvClock = SystemOsvClock;
+
 pub struct OsvClient<'a> {
     transport: &'a dyn OsvTransport,
+    clock: &'a dyn OsvClock,
 }
 
 impl<'a> OsvClient<'a> {
     pub fn new(transport: &'a dyn OsvTransport) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            clock: &SYSTEM_OSV_CLOCK,
+        }
+    }
+
+    pub fn with_clock(transport: &'a dyn OsvTransport, clock: &'a dyn OsvClock) -> Self {
+        Self { transport, clock }
     }
 
     pub fn query(&self, coordinates: &CoordinateSet) -> Result<CompleteSnapshot, OsvError> {
+        let execution = ExecutionContext::serial().map_err(|error| {
+            OsvError::new(
+                OsvErrorKind::Internal,
+                format!("construct serial OSV execution context: {error}"),
+            )
+        })?;
+        self.query_with_context(coordinates, &execution)
+    }
+
+    pub fn query_with_context(
+        &self,
+        coordinates: &CoordinateSet,
+        execution: &ExecutionContext,
+    ) -> Result<CompleteSnapshot, OsvError> {
         coordinates.validate()?;
         let started = Instant::now();
         let mut budget = OperationBudget::default();
-        let first = self.query_round(coordinates, started, &mut budget);
+        let first = self.query_round(coordinates, execution, started, &mut budget);
         let mut snapshot = match first {
             Err(error) if error.kind == OsvErrorKind::SnapshotRace => {
-                self.query_round(coordinates, started, &mut budget)?
+                self.query_round(coordinates, execution, started, &mut budget)?
             }
             result => result?,
         };
@@ -211,9 +113,11 @@ impl<'a> OsvClient<'a> {
     fn query_round(
         &self,
         coordinates: &CoordinateSet,
+        execution: &ExecutionContext,
         started: Instant,
         budget: &mut OperationBudget,
     ) -> Result<CompleteSnapshot, OsvError> {
+        let coordinator = OsvCoordinator::new(execution);
         let mut states = coordinates
             .queries
             .iter()
@@ -226,56 +130,69 @@ impl<'a> OsvClient<'a> {
 
         while !pending.is_empty() {
             let mut next_pending = Vec::new();
-            for chunk in pending.chunks(MAX_BATCH_QUERIES) {
-                ensure_time(started)?;
-                let body = encode_batch_request(chunk, &states)?;
-                budget.observe_request()?;
-                let response = self
-                    .transport
-                    .post_query_batch(&body, response_limits(MAX_QUERY_RESPONSE_BYTES))?;
-                ensure_time(started)?;
-                let body =
-                    validate_response(response, MAX_QUERY_RESPONSE_BYTES, "querybatch", budget)?;
-                let response: BatchResponse = serde_json::from_slice(&body).map_err(|error| {
-                    OsvError::new(
-                        OsvErrorKind::MalformedResponse,
-                        format!("parse querybatch JSON: {error}"),
-                    )
-                })?;
-                if response.results.len() != chunk.len() {
-                    return Err(OsvError::new(
-                        OsvErrorKind::MalformedResponse,
-                        format!(
-                            "querybatch returned {} results for {} positional queries",
-                            response.results.len(),
-                            chunk.len()
-                        ),
-                    ));
-                }
-                for (&index, result) in chunk.iter().zip(response.results) {
-                    process_batch_result(
-                        index,
-                        result,
-                        &mut states,
-                        &mut intervals,
-                        &mut association_count,
-                        &mut next_pending,
+            let chunks = pending.chunks(MAX_BATCH_QUERIES).collect::<Vec<_>>();
+            for window in chunks.chunks(coordinator.window_size()) {
+                self.ensure_operation_time(started)?;
+                let work = window
+                    .iter()
+                    .map(|indices| {
+                        Ok(BatchWork {
+                            indices: (*indices).to_vec(),
+                            body: encode_batch_request(indices, &states)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, OsvError>>()?;
+                budget.reserve_requests(work.len())?;
+                let outcomes = coordinator.execute_window(&work, |_, item| {
+                    let operation_remaining = self.operation_remaining(started)?;
+                    let response = self.transport.post_query_batch(
+                        &item.body,
+                        response_limits(MAX_QUERY_RESPONSE_BYTES, operation_remaining),
                     )?;
+                    let body = validate_response(response, MAX_QUERY_RESPONSE_BYTES, "querybatch")?;
+                    let decoded_bytes = body.len();
+                    let response =
+                        serde_json::from_slice::<BatchResponse>(&body).map_err(|error| {
+                            OsvError::new(
+                                OsvErrorKind::MalformedResponse,
+                                format!("parse querybatch JSON: {error}"),
+                            )
+                        })?;
+                    Ok(BatchOutcome {
+                        decoded_bytes,
+                        response,
+                    })
+                })?;
+                self.ensure_operation_time(started)?;
+                for (item, outcome) in work.into_iter().zip(outcomes) {
+                    budget.observe_bytes(outcome.decoded_bytes)?;
+                    if outcome.response.results.len() != item.indices.len() {
+                        return Err(OsvError::new(
+                            OsvErrorKind::MalformedResponse,
+                            format!(
+                                "querybatch returned {} results for {} positional queries",
+                                outcome.response.results.len(),
+                                item.indices.len()
+                            ),
+                        ));
+                    }
+                    for (index, result) in item.indices.into_iter().zip(outcome.response.results) {
+                        process_batch_result(
+                            index,
+                            result,
+                            &mut states,
+                            &mut intervals,
+                            &mut association_count,
+                            &mut next_pending,
+                        )?;
+                    }
                 }
             }
             pending = next_pending;
         }
 
-        if intervals.len() > MAX_UNIQUE_ADVISORY_IDS {
-            return Err(OsvError::new(
-                OsvErrorKind::ResourceLimit,
-                format!(
-                    "unique advisory ID count {} exceeds maximum {MAX_UNIQUE_ADVISORY_IDS}",
-                    intervals.len()
-                ),
-            ));
-        }
-        let details = self.hydrate_details(intervals.keys(), started, budget)?;
+        ensure_unique_advisory_count(intervals.len())?;
+        let details = self.hydrate_details(intervals.keys(), &coordinator, started, budget)?;
         let mut queries = Vec::with_capacity(states.len());
         for state in states {
             let mut advisories = Vec::with_capacity(state.summaries.len());
@@ -323,69 +240,88 @@ impl<'a> OsvClient<'a> {
     fn hydrate_details<'b>(
         &self,
         ids: impl Iterator<Item = &'b String>,
+        coordinator: &OsvCoordinator<'_>,
         started: Instant,
         budget: &mut OperationBudget,
     ) -> Result<BTreeMap<String, (argus_osv_schema::OsvRecord, String)>, OsvError> {
         let ids = ids.cloned().collect::<Vec<_>>();
         let mut details = BTreeMap::new();
-        for chunk in ids.chunks(MAX_DETAIL_CONCURRENCY) {
-            ensure_time(started)?;
-            for _ in chunk {
-                budget.observe_request()?;
-            }
-            let responses = std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(chunk.len());
-                for id in chunk {
-                    let encoded = percent_encode_id(id);
-                    handles.push((
-                        id.clone(),
-                        scope.spawn(move || {
-                            self.transport
-                                .get_advisory(&encoded, response_limits(MAX_DETAIL_RESPONSE_BYTES))
-                        }),
-                    ));
-                }
-                handles
-                    .into_iter()
-                    .map(|(id, handle)| {
-                        handle.join().map(|response| (id, response)).map_err(|_| {
-                            OsvError::new(
-                                OsvErrorKind::Internal,
-                                "OSV detail transport worker panicked",
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        for chunk in ids.chunks(coordinator.window_size()) {
+            self.ensure_operation_time(started)?;
+            let maximum_attempts = chunk.len().checked_mul(GET_MAX_ATTEMPTS).ok_or_else(|| {
+                OsvError::new(
+                    OsvErrorKind::ResourceLimit,
+                    "advisory detail request reservation overflowed",
+                )
             })?;
-            ensure_time(started)?;
-            for (requested_id, response) in responses {
-                let response = response?;
-                let body = validate_response(
-                    response,
-                    MAX_DETAIL_RESPONSE_BYTES,
-                    "advisory detail",
-                    budget,
-                )?;
-                let raw_modified = detail_modified(&body)?;
-                let record = parse_osv_record(&body).map_err(|error| {
+            budget.reserve_requests(maximum_attempts)?;
+            let outcomes = coordinator.execute_window(chunk, |_, requested_id| {
+                let operation_remaining = self.operation_remaining(started)?;
+                let encoded = percent_encode_id(requested_id);
+                let attempted = self.transport.get_advisory_attempted(
+                    &encoded,
+                    response_limits(MAX_DETAIL_RESPONSE_BYTES, operation_remaining),
+                );
+                let result = attempted.result.and_then(|response| {
+                    let body =
+                        validate_response(response, MAX_DETAIL_RESPONSE_BYTES, "advisory detail")?;
+                    let decoded_bytes = body.len();
+                    let raw_modified = detail_modified(&body)?;
+                    let record = parse_osv_record(&body).map_err(|error| {
+                        OsvError::new(
+                            OsvErrorKind::MalformedResponse,
+                            format!("parse advisory detail `{requested_id}`: {error}"),
+                        )
+                    })?;
+                    if record.id != *requested_id {
+                        return Err(OsvError::new(
+                            OsvErrorKind::MalformedResponse,
+                            format!(
+                                "detail ID `{}` does not match requested `{requested_id}`",
+                                record.id
+                            ),
+                        ));
+                    }
+                    Ok(ParsedDetail {
+                        decoded_bytes,
+                        raw_modified,
+                        record,
+                    })
+                });
+                Ok(DetailOutcome {
+                    attempts: attempted.attempts,
+                    result,
+                })
+            })?;
+            self.ensure_operation_time(started)?;
+            let actual_attempts = outcomes.iter().try_fold(0usize, |total, outcome| {
+                total.checked_add(outcome.attempts).ok_or_else(|| {
                     OsvError::new(
-                        OsvErrorKind::MalformedResponse,
-                        format!("parse advisory detail `{requested_id}`: {error}"),
+                        OsvErrorKind::ResourceLimit,
+                        "advisory detail attempt count overflowed",
                     )
-                })?;
-                if record.id != requested_id {
-                    return Err(OsvError::new(
-                        OsvErrorKind::MalformedResponse,
-                        format!(
-                            "detail ID `{}` does not match requested `{requested_id}`",
-                            record.id
-                        ),
-                    ));
-                }
-                details.insert(requested_id, (record, raw_modified));
+                })
+            })?;
+            budget.settle_request_reservation(maximum_attempts, actual_attempts)?;
+            for (requested_id, outcome) in chunk.iter().cloned().zip(outcomes) {
+                let parsed = outcome.result?;
+                budget.observe_bytes(parsed.decoded_bytes)?;
+                details.insert(requested_id, (parsed.record, parsed.raw_modified));
             }
         }
         Ok(details)
+    }
+
+    fn operation_remaining(&self, started: Instant) -> Result<Duration, OsvError> {
+        let remaining = OPERATION_TIMEOUT.saturating_sub(self.clock.elapsed(started));
+        if remaining.is_zero() {
+            return Err(operation_timeout());
+        }
+        Ok(remaining)
+    }
+
+    fn ensure_operation_time(&self, started: Instant) -> Result<(), OsvError> {
+        self.operation_remaining(started).map(|_| ())
     }
 }
 
@@ -396,16 +332,43 @@ struct OperationBudget {
 }
 
 impl OperationBudget {
-    fn observe_request(&mut self) -> Result<(), OsvError> {
-        self.requests = self.requests.checked_add(1).ok_or_else(|| {
+    fn ensure_request_capacity(&self, count: usize) -> Result<(), OsvError> {
+        let requests = self.requests.checked_add(count).ok_or_else(|| {
             OsvError::new(OsvErrorKind::ResourceLimit, "HTTP request count overflowed")
         })?;
-        if self.requests > MAX_HTTP_REQUESTS {
+        if requests > MAX_HTTP_REQUESTS {
             return Err(OsvError::new(
                 OsvErrorKind::ResourceLimit,
                 format!("HTTP request count exceeds maximum {MAX_HTTP_REQUESTS}"),
             ));
         }
+        Ok(())
+    }
+
+    fn reserve_requests(&mut self, count: usize) -> Result<(), OsvError> {
+        self.ensure_request_capacity(count)?;
+        self.requests += count;
+        Ok(())
+    }
+
+    fn settle_request_reservation(
+        &mut self,
+        reserved: usize,
+        actual: usize,
+    ) -> Result<(), OsvError> {
+        if actual > reserved {
+            return Err(OsvError::new(
+                OsvErrorKind::Internal,
+                "OSV transport exceeded its reserved attempt count",
+            ));
+        }
+        let unused = reserved - actual;
+        self.requests = self.requests.checked_sub(unused).ok_or_else(|| {
+            OsvError::new(
+                OsvErrorKind::Internal,
+                "OSV request reservation accounting underflowed",
+            )
+        })?;
         Ok(())
     }
 
@@ -443,6 +406,27 @@ impl QueryState {
             pages: 0,
         }
     }
+}
+
+struct BatchWork {
+    indices: Vec<usize>,
+    body: Vec<u8>,
+}
+
+struct BatchOutcome {
+    decoded_bytes: usize,
+    response: BatchResponse,
+}
+
+struct ParsedDetail {
+    decoded_bytes: usize,
+    raw_modified: String,
+    record: argus_osv_schema::OsvRecord,
+}
+
+struct DetailOutcome {
+    attempts: usize,
+    result: Result<ParsedDetail, OsvError>,
 }
 
 #[derive(Serialize)]
@@ -636,7 +620,6 @@ fn validate_response(
     response: TransportResponse,
     maximum: usize,
     label: &str,
-    budget: &mut OperationBudget,
 ) -> Result<Vec<u8>, OsvError> {
     if response.status != 200 {
         return Err(OsvError::new(
@@ -670,16 +653,15 @@ fn validate_response(
             ),
         ));
     }
-    budget.observe_bytes(response.body.len())?;
     Ok(response.body)
 }
 
-fn response_limits(decoded_response_bytes: usize) -> ResponseLimits {
+fn response_limits(decoded_response_bytes: usize, operation_remaining: Duration) -> ResponseLimits {
     ResponseLimits {
         encoded_request_bytes: MAX_ENCODED_REQUEST_BYTES,
         decoded_response_bytes,
         connect_timeout: CONNECT_TIMEOUT,
-        request_timeout: REQUEST_TIMEOUT,
+        request_timeout: operation_remaining.min(REQUEST_TIMEOUT),
         redirect_limit: 0,
         send_credentials: false,
     }
@@ -719,15 +701,25 @@ fn percent_encode_id(id: &str) -> String {
     encoded
 }
 
-fn ensure_time(started: Instant) -> Result<(), OsvError> {
-    if started.elapsed() > OPERATION_TIMEOUT {
+fn operation_timeout() -> OsvError {
+    OsvError::new(
+        OsvErrorKind::Transport,
+        "OSV operation exceeded 300 second timeout",
+    )
+}
+
+fn ensure_unique_advisory_count(count: usize) -> Result<(), OsvError> {
+    if count > MAX_UNIQUE_ADVISORY_IDS {
         return Err(OsvError::new(
-            OsvErrorKind::Transport,
-            "OSV operation exceeded 300 second timeout",
+            OsvErrorKind::ResourceLimit,
+            format!("unique advisory ID count {count} exceeds maximum {MAX_UNIQUE_ADVISORY_IDS}"),
         ));
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod resource_tests;
 
 #[cfg(test)]
 mod tests {
@@ -739,7 +731,7 @@ mod tests {
         budget.observe_bytes(MAX_TOTAL_DECODED_BYTES).unwrap();
         assert!(budget.observe_bytes(1).is_err());
         budget.requests = MAX_HTTP_REQUESTS - 1;
-        budget.observe_request().unwrap();
-        assert!(budget.observe_request().is_err());
+        budget.reserve_requests(1).unwrap();
+        assert!(budget.reserve_requests(1).is_err());
     }
 }

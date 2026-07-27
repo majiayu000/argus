@@ -285,6 +285,7 @@ dependencies = [
  "argus-core",
  "argus-osv-schema",
  "argus-test-support",
+ "argus-transport",
  "chrono",
  "flate2",
  "hex",
@@ -367,6 +368,7 @@ dependencies = [
  "argus-core",
  "argus-lockfile",
  "argus-osv-schema",
+ "argus-transport",
  "chrono",
  "hex",
  "polycvss",
@@ -493,6 +495,7 @@ name = "argus-transport"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rustls",
  "ureq",
  "url",
 ]

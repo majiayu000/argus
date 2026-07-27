@@ -11,6 +11,7 @@ description = "Bounded OSV advisory normalization and resolution for Argus."
 argus-core = { workspace = true }
 argus-osv-schema = { workspace = true }
 argus-lockfile = { workspace = true }
+argus-transport = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
