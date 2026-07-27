@@ -11,7 +11,7 @@ use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -24,11 +24,26 @@ pub fn scan_crate_archive(
     dest_root: &Path,
     max_extracted_bytes: u64,
 ) -> Result<ScanReport> {
+    let rules = RuleSession::builtin()?;
+    scan_crate_archive_with_rules(crate_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_crate_archive_with_rules(
+    crate_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+) -> Result<ScanReport> {
     let pkg_dir = extract_tarball(crate_bytes, dest_root, max_extracted_bytes)
         .context("safe-extract .crate")?;
-    let scan = scan_extracted_crate(&pkg_dir)?;
+    let mut scan = scan_extracted_crate(&pkg_dir)?;
+    rules
+        .scan_directory(dest_root, &mut scan.findings)
+        .context("run configured rules on extracted .crate archive")?;
+    rules.validate_external_limits(&scan.findings)?;
+    rules.normalize_findings(&mut scan.findings);
     let decision = argus_rules::derive_decision_from_findings(&scan.findings);
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: ArtifactKind::PackageDir,
         path: pkg_dir,
         package_name: scan.name,
@@ -37,10 +52,21 @@ pub fn scan_crate_archive(
         findings: scan.findings,
         coordinate: None,
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_extracted_crate_with_rules(pkg_dir, &rules)
+}
+
+pub fn scan_extracted_crate_with_rules(
+    pkg_dir: &Path,
+    rules: &RuleSession,
+) -> Result<crate::ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let manifest = read_top_level_manifest(pkg_dir)?;
     let (name, version) = manifest
@@ -130,6 +156,12 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
             "crate declares `[lib] proc-macro = true` — code runs at consumer compile time",
         ));
     }
+
+    rules
+        .scan_directory(pkg_dir, &mut findings)
+        .context("run configured rules on extracted .crate")?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(crate::ArtifactScan {
         findings,

@@ -14,9 +14,9 @@
 //! and platform/build-tag selection (we conservatively scan all files).
 
 use crate::{finding, rules, ArtifactScan};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -62,7 +62,7 @@ impl ExtractedModule {
 /// symlink / size-cap safety the disk extractor enforces, so a malicious
 /// zip cannot blow up memory or smuggle traversal names.
 pub fn extract_module_zip(zip_bytes: &[u8], max_extracted_bytes: u64) -> Result<ExtractedModule> {
-    let files: Vec<ExtractedFile> =
+    let mut files: Vec<ExtractedFile> =
         argus_archive::extract_zip_to_memory(zip_bytes, max_extracted_bytes, "module zip entry")
             .context("extract Go module zip")?
             .into_iter()
@@ -71,6 +71,7 @@ pub fn extract_module_zip(zip_bytes: &[u8], max_extracted_bytes: u64) -> Result<
                 bytes: file.bytes,
             })
             .collect();
+    files.sort_by(|left, right| left.zip_name.cmp(&right.zip_name));
 
     // Locate the embedded go.mod (entry name ends with `/go.mod` or is
     // exactly `go.mod`) and parse the module directive.
@@ -94,6 +95,22 @@ pub fn extract_module_zip(zip_bytes: &[u8], max_extracted_bytes: u64) -> Result<
 /// Scan an already-extracted module: apply ecosystem-agnostic content
 /// rules to every `.go` source plus the Go-specific trigger-surface rules.
 pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
+    let rules = RuleSession::builtin().expect("embedded built-in rule catalog must be valid");
+    scan_extracted_module_with_rules(module, &rules)
+        .expect("built-in rule session cannot fail while scanning external rules")
+}
+
+pub fn scan_extracted_module_with_rules(
+    module: &ExtractedModule,
+    rules: &RuleSession,
+) -> Result<ArtifactScan> {
+    if rules.external_rule_count() > 0 && module.files.len() > argus_rules::MAX_EXTERNAL_SCAN_FILES
+    {
+        bail!(
+            "external-rule scan exceeds {} regular files",
+            argus_rules::MAX_EXTERNAL_SCAN_FILES
+        );
+    }
     let mut findings: Vec<Finding> = Vec::new();
 
     let init_re = rules::init_func_regex();
@@ -105,6 +122,10 @@ pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
     let c_sys_re = rules::c_system_regex();
 
     for (zip_name, bytes) in &module.files {
+        let rel = strip_module_prefix(zip_name);
+        rules
+            .scan_bytes(zip_name, bytes, &mut findings)
+            .with_context(|| format!("run configured rules on Go module file `{zip_name}`"))?;
         if bytes.len() as u64 > TEXT_MAX_BYTES {
             continue;
         }
@@ -112,9 +133,6 @@ pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
             continue; // e.g. `.syso` object blobs — a genuine blind spot.
         }
         let content = String::from_utf8_lossy(bytes).into_owned();
-
-        // Strip the `<module>@<version>/` prefix for a readable location.
-        let rel = strip_module_prefix(zip_name);
 
         // Ecosystem-agnostic content rules first (credential-access,
         // ai-context-poisoning, runtime-hook, …).
@@ -221,11 +239,14 @@ pub fn scan_extracted_module(module: &ExtractedModule) -> ArtifactScan {
         }
     }
 
-    ArtifactScan {
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
+
+    Ok(ArtifactScan {
         findings,
         name: module.module_path().map(str::to_string),
         version: None,
-    }
+    })
 }
 
 /// Strip the leading `<module>@<version>/` directory from a Go module zip
@@ -247,6 +268,8 @@ fn strip_module_prefix(zip_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write as _;
 
     #[test]
     fn strip_prefix_removes_module_version() {
@@ -263,5 +286,73 @@ mod tests {
     #[test]
     fn strip_prefix_keeps_unprefixed() {
         assert_eq!(strip_module_prefix("plain/path.go"), "plain/path.go");
+    }
+
+    fn external_session() -> RuleSession {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("rules.yaml"),
+            "schema_version: 1\nrules:\n  - { id: \"go-bounded-external\", description: \"bounded\", policy_class: blocking, default_severity: low, help_uri: \"https://example.test/go-bounded\", languages: [go], matcher: { kind: literal, pattern: \"marker\" } }\n",
+        )
+        .unwrap();
+        RuleSession::load(Some(temp.path()), &[]).unwrap()
+    }
+
+    fn module_zip(paths: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            for path in paths {
+                writer.start_file(*path, options).unwrap();
+                writer.write_all(b"marker").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn external_file_count_accepts_limit_and_rejects_plus_one() {
+        let rules = external_session();
+        let files = (0..argus_rules::MAX_EXTERNAL_SCAN_FILES)
+            .map(|index| (format!("example.test/m@v1.0.0/{index:05}.go"), Vec::new()))
+            .collect::<Vec<_>>();
+        let exact = ExtractedModule {
+            files: files.clone(),
+            module_path: Some("example.test/m".to_string()),
+        };
+        scan_extracted_module_with_rules(&exact, &rules).unwrap();
+
+        let mut overflow_files = files;
+        overflow_files.push(("example.test/m@v1.0.0/overflow.go".to_string(), Vec::new()));
+        let overflow = ExtractedModule {
+            files: overflow_files,
+            module_path: Some("example.test/m".to_string()),
+        };
+        assert!(scan_extracted_module_with_rules(&overflow, &rules).is_err());
+    }
+
+    #[test]
+    fn zip_entry_permutations_produce_identical_sorted_findings() {
+        let a = "example.test/m@v1.0.0/a.go";
+        let z = "example.test/m@v1.0.0/z.go";
+        let first = extract_module_zip(&module_zip(&[z, a]), 1024 * 1024).unwrap();
+        let second = extract_module_zip(&module_zip(&[a, z]), 1024 * 1024).unwrap();
+        assert_eq!(
+            first
+                .files()
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            [a, z]
+        );
+        let rules = external_session();
+        let first = scan_extracted_module_with_rules(&first, &rules).unwrap();
+        let second = scan_extracted_module_with_rules(&second, &rules).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first.findings).unwrap(),
+            serde_json::to_vec(&second.findings).unwrap()
+        );
     }
 }

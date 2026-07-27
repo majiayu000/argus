@@ -371,6 +371,37 @@ fn result_states_and_exit_codes_are_distinct() {
     assert_eq!(approval.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&approval.stdout).contains("known-vulnerability"));
 
+    for format in ["text", "json", "sarif"] {
+        let mut args = package_args("npm", "active-demo", "1.0.0", &active_cache);
+        args.extend([
+            "--rule-override".to_string(),
+            "known-vulnerability=off".to_string(),
+            "--format".to_string(),
+            format.to_string(),
+        ]);
+        let output = argus(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty(), "{format}");
+        if format == "text" {
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(text.contains("rules_overrides: known-vulnerability=off"));
+            assert!(text.contains("findings: none"));
+        } else {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let rules = if format == "json" {
+                &value["rules"]
+            } else {
+                &value["runs"][0]["properties"]["argusRules"]
+            };
+            assert_eq!(rules["applied_overrides"][0], "known-vulnerability=off");
+        }
+    }
+
     let mut blocking_args = package_args("npm", "active-demo", "1.0.0", &active_cache);
     blocking_args.extend(["--fail-on-severity".to_string(), "high".to_string()]);
     let blocking = argus(&blocking_args);

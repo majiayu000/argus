@@ -100,18 +100,21 @@ pub(crate) fn render_report(report: &VulnerabilityReport, cache_label: &str) -> 
             "properties": properties
         }));
     }
-    if advisory_index != report.advisories.len() {
+    if advisory_index != 0 && advisory_index != report.advisories.len() {
         return Err(anyhow!(
             "vulnerability advisories do not match rendered findings"
         ));
     }
+    let mut properties = Map::new();
+    properties.insert("argusVulnerability".to_string(), json!(report.evidence));
+    properties.insert("cache_label".to_string(), json!(cache_label));
+    if let Some(rules) = &report.rules {
+        properties.insert("argusRules".to_string(), json!(rules));
+    }
     Ok(sarif::render_document(
         rules,
         results,
-        Some(json!({
-            "argusVulnerability": report.evidence,
-            "cache_label": cache_label
-        })),
+        Some(Value::Object(properties)),
     ))
 }
 

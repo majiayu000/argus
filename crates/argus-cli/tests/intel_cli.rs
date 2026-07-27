@@ -72,6 +72,7 @@ fn synthetic_report(ecosystem: Ecosystem, name: &str, version: &str) -> ScanRepo
             PackageCoordinate::new(ecosystem, name, version).expect("synthetic coordinate"),
         ),
         intelligence: None,
+        rules: None,
     }
 }
 

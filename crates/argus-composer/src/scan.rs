@@ -13,7 +13,7 @@ use crate::metadata::{ComposerManifest, ComposerVersionObj, ScriptValue};
 use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -69,6 +69,23 @@ pub fn scan_composer_zip(
     dest_root: &Path,
     max_extracted_bytes: u64,
     version_obj: &ComposerVersionObj,
+) -> Result<ScanReport> {
+    let rules = RuleSession::builtin()?;
+    scan_composer_zip_with_rules(
+        zip_bytes,
+        dest_root,
+        max_extracted_bytes,
+        version_obj,
+        &rules,
+    )
+}
+
+pub fn scan_composer_zip_with_rules(
+    zip_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    version_obj: &ComposerVersionObj,
+    rules: &RuleSession,
 ) -> Result<ScanReport> {
     // --- 1. Safe ZIP extraction (copied from wheel.rs) ---
     argus_archive::extract_zip(zip_bytes, dest_root, max_extracted_bytes, "zip entry")
@@ -157,8 +174,13 @@ pub fn scan_composer_zip(
         scan_scripts_map(scripts, &mut findings, &mut scanned_events);
     }
 
+    rules
+        .scan_directory(dest_root, &mut findings)
+        .context("run configured rules on extracted Composer zip")?;
+    rules.validate_external_limits(&findings)?;
+
     let decision = argus_rules::derive_decision_from_findings(&findings);
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: ArtifactKind::PackageDir,
         path: dest_root.to_path_buf(),
         package_name: name,
@@ -167,7 +189,10 @@ pub fn scan_composer_zip(
         findings,
         coordinate: None,
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------

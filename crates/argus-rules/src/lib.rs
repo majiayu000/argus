@@ -18,10 +18,15 @@ mod content;
 mod decision;
 mod lifecycle;
 mod name;
+mod session;
 
 pub use content::scan_text_file;
 pub use decision::derive_from_findings as derive_decision_from_findings;
 pub use name::{levenshtein, push_typosquat_findings};
+pub use session::{
+    RuleSession, MAX_EXTERNAL_EVIDENCE_BYTES, MAX_EXTERNAL_FINDINGS, MAX_EXTERNAL_INPUT_BYTES,
+    MAX_EXTERNAL_SCAN_FILES, MAX_RULE_DIRECTORY_BYTES, MAX_RULE_FILES, MAX_RULE_FILE_BYTES,
+};
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +59,10 @@ const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Top-level entry: scan a package directory, return a full report.
 pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
+    scan_package_dir_inner(path).map(|(report, _)| report)
+}
+
+fn scan_package_dir_inner(path: &Path) -> Result<(ScanReport, PackageJson)> {
     let pkg_json_path = path.join("package.json");
     let pkg_json_raw = std::fs::read_to_string(&pkg_json_path)
         .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
@@ -77,16 +86,55 @@ pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
 
     let decision = decision::derive(&ctx, &findings);
 
-    Ok(ScanReport {
-        artifact: ArtifactKind::PackageDir,
-        path: path.to_path_buf(),
-        package_name: package.name.clone(),
-        package_version: package.version.clone(),
-        decision,
-        findings,
-        coordinate: None,
-        intelligence: None,
-    })
+    Ok((
+        ScanReport {
+            artifact: ArtifactKind::PackageDir,
+            path: path.to_path_buf(),
+            package_name: package.name.clone(),
+            package_version: package.version.clone(),
+            decision,
+            findings,
+            coordinate: None,
+            intelligence: None,
+            rules: None,
+        },
+        package,
+    ))
+}
+
+/// Scan a package directory with one explicitly constructed immutable rule
+/// session. External matching and overrides are completed before return.
+pub fn scan_package_dir_with_rules(path: &Path, rules: &RuleSession) -> Result<ScanReport> {
+    let (mut report, package) = scan_package_dir_inner(path)?;
+    rules.scan_directory(path, &mut report.findings)?;
+    for (name, body) in &package.scripts {
+        rules.scan_bytes(
+            &format!(
+                "package.json:scripts/{}.sh",
+                encode_virtual_path_segment(name)
+            ),
+            body.as_bytes(),
+            &mut report.findings,
+        )?;
+    }
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
+}
+
+fn encode_virtual_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn collect_files(root: &Path) -> Result<(Vec<TextFile>, Vec<String>)> {

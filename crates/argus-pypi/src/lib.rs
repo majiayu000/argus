@@ -36,8 +36,11 @@ pub use rules::POPULAR_PYTHON_PACKAGES;
 /// `files.pythonhosted.org`), not from `pypi.org`. The subdomain-suffix
 /// entry accepts every legitimate Warehouse CDN host.
 const PYPI_CDN_ALLOWLIST: &[&str] = &[".pythonhosted.org"];
-pub use sdist::scan_sdist_dir;
-pub use wheel::scan_wheel_zip;
+pub use sdist::{
+    scan_extracted_sdist, scan_extracted_sdist_with_rules, scan_sdist_dir,
+    scan_sdist_dir_with_rules,
+};
+pub use wheel::{scan_wheel_zip, scan_wheel_zip_with_rules};
 
 /// Cap for the PyPI JSON packument body. Real PyPI packuments are large
 /// (Django ships ~5 MB of versions/releases history), so we allow a bit
@@ -110,6 +113,16 @@ pub fn fetch_and_scan_pypi(
     pkg: &PypiPackageRef,
     opts: &PypiFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_pypi_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_pypi_with_rules(
+    pkg: &PypiPackageRef,
+    opts: &PypiFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     // 1. Fetch packument.
     let registry_host = host_of(&opts.registry)
@@ -229,13 +242,15 @@ pub fn fetch_and_scan_pypi(
             .with_context(|| format!("mkdir {}", art_dir.display()))?;
         let (findings, name, version_str) = match artifact_kind {
             "sdist" => {
-                let report = scan_sdist_dir(&bytes, &art_dir, opts.max_extracted_bytes)
-                    .with_context(|| format!("scan sdist {}", art.filename))?;
+                let report =
+                    scan_sdist_dir_with_rules(&bytes, &art_dir, opts.max_extracted_bytes, rules)
+                        .with_context(|| format!("scan sdist {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
             "wheel" => {
-                let report = scan_wheel_zip(&bytes, &art_dir, opts.max_extracted_bytes)
-                    .with_context(|| format!("scan wheel {}", art.filename))?;
+                let report =
+                    scan_wheel_zip_with_rules(&bytes, &art_dir, opts.max_extracted_bytes, rules)
+                        .with_context(|| format!("scan wheel {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
             _ => unreachable!("artifact_kind is normalized above"),
@@ -254,7 +269,7 @@ pub fn fetch_and_scan_pypi(
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints (see the
@@ -266,7 +281,11 @@ pub fn fetch_and_scan_pypi(
         findings: all_findings,
         coordinate: Some(coordinate),
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 fn validate_artifact_filename(filename: &str) -> Result<()> {
@@ -307,6 +326,7 @@ impl argus_pipeline::EcosystemFetcher for PypiFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = PypiPackageRef::parse(spec)?;
         let opts = PypiFetchOptions {
@@ -314,7 +334,7 @@ impl argus_pipeline::EcosystemFetcher for PypiFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..PypiFetchOptions::default()
         };
-        fetch_and_scan_pypi(&pkg, &opts, transport)
+        fetch_and_scan_pypi_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

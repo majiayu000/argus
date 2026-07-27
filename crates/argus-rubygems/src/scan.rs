@@ -18,7 +18,7 @@ use crate::{finding, rules};
 use anyhow::{anyhow, bail, Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::path::{Component, Path};
@@ -119,6 +119,16 @@ pub fn scan_gem(
     dest_root: &Path,
     max_extracted_bytes: u64,
 ) -> Result<ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_gem_with_rules(gem_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_gem_with_rules(
+    gem_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+) -> Result<ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
@@ -133,6 +143,9 @@ pub fn scan_gem(
 
     // The gemspec is itself a trigger surface, scanned as raw text.
     scan_gemspec(&gemspec, &mut findings);
+    rules
+        .scan_bytes("metadata.yml", gemspec.as_bytes(), &mut findings)
+        .context("run configured rules on RubyGems metadata")?;
     if let Some((n, v)) = parse_gemspec_name_version(&gemspec) {
         name = name.or(Some(n));
         version = version.or(Some(v));
@@ -241,6 +254,12 @@ pub fn scan_gem(
             "gem includes a native build step (extconf.rb)",
         ));
     }
+
+    rules
+        .scan_directory(dest_root, &mut findings)
+        .context("run configured rules on extracted gem")?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(ArtifactScan {
         findings,

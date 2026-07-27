@@ -11,6 +11,7 @@
 
 use anyhow::Result;
 use argus_core::{Ecosystem, ScanReport};
+use argus_rules::RuleSession;
 use argus_transport::Transport;
 use std::path::PathBuf;
 
@@ -45,5 +46,6 @@ pub trait EcosystemFetcher {
         spec: &str,
         opts: &CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &RuleSession,
     ) -> Result<ScanReport>;
 }

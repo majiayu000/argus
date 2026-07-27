@@ -167,6 +167,16 @@ pub fn fetch_and_scan(
     opts: &FetchOptions,
     transport: &dyn Transport,
 ) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_with_rules(
+    pkg: &PackageRef,
+    opts: &FetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
     // Fail closed: the caller explicitly asked for signature verification,
     // so a build that cannot perform it must refuse to scan rather than
     // emit an Info finding and allow ("thought it was verified, it wasn't").
@@ -278,7 +288,8 @@ pub fn fetch_and_scan(
     .context("safe-extract tarball")?;
 
     // 7. Scan with existing rules.
-    let mut report = argus_rules::scan_package_dir(&pkg_dir).context("scan extracted package")?;
+    let mut report = argus_rules::scan_package_dir_with_rules(&pkg_dir, rules)
+        .context("scan extracted package")?;
 
     // 8. Provenance cross-check. We compute the tarball SHA-512 (already
     //    proved equal to `dist.integrity` in step 5), fetch the attestations
@@ -308,6 +319,8 @@ pub fn fetch_and_scan(
     report.package_name = Some(pkg.name.clone());
     report.package_version = Some(version);
     report.coordinate = Some(coordinate);
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
 
     Ok(report)
 }

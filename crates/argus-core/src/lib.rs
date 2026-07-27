@@ -539,6 +539,27 @@ pub struct VulnerabilityQueryEvidence {
     pub advisories: Vec<VulnerabilityAdvisoryEvidence>,
 }
 
+/// Auditable description of one external rule loaded for a scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRuleMetadata {
+    pub id: String,
+    pub description: String,
+    pub help_uri: String,
+    pub severity: Severity,
+}
+
+/// Effective rule configuration attached only when the caller explicitly
+/// supplies a rules directory or override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleExecutionMetadata {
+    pub digest: String,
+    pub loaded_external_files: Vec<String>,
+    pub external_rule_count: usize,
+    pub disabled_rule_ids: Vec<String>,
+    pub applied_overrides: Vec<String>,
+    pub external_rules: Vec<ExternalRuleMetadata>,
+}
+
 /// Final report after running all rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
@@ -552,6 +573,8 @@ pub struct ScanReport {
     pub coordinate: Option<PackageCoordinate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intelligence: Option<IntelSnapshotStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RuleExecutionMetadata>,
 }
 
 impl ScanReport {
@@ -595,6 +618,7 @@ mod tests {
             ],
             coordinate: None,
             intelligence: None,
+            rules: None,
         };
         assert_eq!(
             report.rule_ids(),
@@ -747,6 +771,7 @@ mod tests {
             findings: Vec::new(),
             coordinate: None,
             intelligence: None,
+            rules: None,
         };
         let report_json = serde_json::to_value(report).unwrap();
         assert!(report_json.get("coordinate").is_none());

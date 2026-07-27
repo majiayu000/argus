@@ -1,7 +1,11 @@
 //! End-to-end tests for `fetch_and_scan_pypi` via MockTransport.
 
-use argus_core::{Decision, ScanReport};
-use argus_pypi::{fetch_and_scan_pypi, PreferredFormat, PypiFetchOptions, PypiPackageRef};
+use argus_core::{Decision, ScanReport, Severity};
+use argus_pypi::{
+    fetch_and_scan_pypi, fetch_and_scan_pypi_with_rules, PreferredFormat, PypiFetchOptions,
+    PypiPackageRef,
+};
+use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -76,6 +80,14 @@ fn packument_for_artifact(
 }
 
 fn fetch_sdist_fixture(files: &[(&str, &[u8])]) -> anyhow::Result<ScanReport> {
+    let rules = RuleSession::builtin()?;
+    fetch_sdist_fixture_with_rules(files, &rules)
+}
+
+fn fetch_sdist_fixture_with_rules(
+    files: &[(&str, &[u8])],
+    rules: &RuleSession,
+) -> anyhow::Result<ScanReport> {
     let registry = "https://mock.registry";
     let name = "syntax-demo";
     let version = "1.0.0";
@@ -100,7 +112,7 @@ fn fetch_sdist_fixture(files: &[(&str, &[u8])]) -> anyhow::Result<ScanReport> {
         prefer: PreferredFormat::Sdist,
         ..PypiFetchOptions::default()
     };
-    fetch_and_scan_pypi(&PypiPackageRef::parse(name)?, &opts, &transport)
+    fetch_and_scan_pypi_with_rules(&PypiPackageRef::parse(name)?, &opts, &transport, rules)
 }
 
 fn fetch_error_for_artifact_filename(
@@ -689,4 +701,84 @@ fn pypi_ordinary_module_network_call_is_not_setup_execution() -> anyhow::Result<
         report.findings
     );
     Ok(())
+}
+
+const EXTERNAL_RULE_ID: &str = "pypi-external-marker";
+
+fn external_rule_session(off: bool) -> RuleSession {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rules.yaml"),
+        format!(
+            "schema_version: 1\nrules:\n  - {{ id: \"{EXTERNAL_RULE_ID}\", description: \"external test rule\", policy_class: blocking, default_severity: high, help_uri: \"https://example.test/external-rule\", languages: [text], matcher: {{ kind: literal, pattern: \"ARGUS_EXTERNAL_RULE_MARKER\" }} }}\n"
+        ),
+    )
+    .unwrap();
+    let overrides = off
+        .then(|| format!("{EXTERNAL_RULE_ID}=off"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    RuleSession::load(Some(dir.path()), &overrides).unwrap()
+}
+
+#[test]
+fn pypi_external_rule_matches_and_can_be_disabled() {
+    let files: &[(&str, &[u8])] = &[
+        (
+            "setup.py",
+            b"from setuptools import setup\nsetup(name='syntax-demo')\n",
+        ),
+        ("marker.txt", b"ARGUS_EXTERNAL_RULE_MARKER"),
+    ];
+    let enabled = external_rule_session(false);
+    let report = fetch_sdist_fixture_with_rules(files, &enabled).unwrap();
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == EXTERNAL_RULE_ID)
+        .unwrap();
+    let location = "syntax-demo-1.0.0/marker.txt";
+    assert_eq!(
+        (finding.severity, finding.location.as_deref()),
+        (Severity::High, Some(location))
+    );
+    assert_eq!(finding.evidence, Some(vec![format!("{location}:1")]));
+    assert_eq!(report.decision, Decision::Block);
+    assert_eq!(report.rules.as_ref(), enabled.metadata());
+    let metadata = report.rules.as_ref().unwrap();
+    assert_eq!(metadata.loaded_external_files, vec!["rules.yaml"]);
+    assert_eq!(metadata.external_rule_count, 1);
+    assert_eq!(metadata.disabled_rule_ids, Vec::<String>::new());
+    assert_eq!(metadata.applied_overrides, Vec::<String>::new());
+    assert_eq!(metadata.external_rules.len(), 1);
+    let external_rule = &metadata.external_rules[0];
+    assert_eq!(
+        (
+            external_rule.id.as_str(),
+            external_rule.description.as_str(),
+            external_rule.help_uri.as_str(),
+            external_rule.severity,
+        ),
+        (
+            EXTERNAL_RULE_ID,
+            "external test rule",
+            "https://example.test/external-rule",
+            Severity::High,
+        )
+    );
+
+    let disabled = external_rule_session(true);
+    let report = fetch_sdist_fixture_with_rules(files, &disabled).unwrap();
+    assert!(!report
+        .findings
+        .iter()
+        .any(|f| f.rule_id == EXTERNAL_RULE_ID));
+    assert_eq!(report.decision, Decision::Allow);
+    assert_eq!(report.rules.as_ref(), disabled.metadata());
+    let metadata = report.rules.unwrap();
+    assert_eq!(metadata.disabled_rule_ids, vec![EXTERNAL_RULE_ID]);
+    assert_eq!(
+        metadata.applied_overrides,
+        vec![format!("{EXTERNAL_RULE_ID}=off")]
+    );
 }

@@ -11,9 +11,9 @@ mod effective;
 
 pub use catalog::{
     CatalogError, CatalogOrigin, DefaultSeverity, HelpUri, MatcherKind, RuleCatalog, RuleDef,
-    RuleId, RuleMatcher, RuleParameters, EMBEDDED_RULE_CATALOG_YAML, MAX_CATALOG_BYTES,
-    MAX_CATALOG_RULES, MAX_DESCRIPTION_BYTES, MAX_MATCHER_BYTES, MAX_RULE_ID_BYTES,
-    RULE_CATALOG_SCHEMA_VERSION,
+    RuleId, RuleLanguage, RuleMatcher, RuleParameters, EMBEDDED_RULE_CATALOG_YAML,
+    MAX_CATALOG_BYTES, MAX_CATALOG_RULES, MAX_DESCRIPTION_BYTES, MAX_MATCHER_BYTES,
+    MAX_RULE_ID_BYTES, RULE_CATALOG_SCHEMA_VERSION,
 };
 pub use effective::{
     AppliedRuleOverride, DisabledRule, EffectiveRule, EffectiveRuleSet, RuleOverride,
@@ -83,13 +83,24 @@ pub enum AggregationProfile {
 }
 
 pub fn aggregate(findings: &[crate::Finding], profile: AggregationProfile) -> crate::Decision {
+    aggregate_with_policy(findings, profile, policy)
+}
+
+pub(crate) fn aggregate_with_policy(
+    findings: &[crate::Finding],
+    profile: AggregationProfile,
+    policy_for: impl Fn(&str) -> RulePolicy,
+) -> crate::Decision {
     match profile {
-        AggregationProfile::PolicyDriven => aggregate_policy_driven(findings),
+        AggregationProfile::PolicyDriven => aggregate_policy_driven(findings, policy_for),
         AggregationProfile::SeverityDriven => aggregate_severity_driven(findings),
     }
 }
 
-fn aggregate_policy_driven(findings: &[crate::Finding]) -> crate::Decision {
+fn aggregate_policy_driven(
+    findings: &[crate::Finding],
+    policy_for: impl Fn(&str) -> RulePolicy,
+) -> crate::Decision {
     use crate::{Decision, Severity};
     use std::collections::BTreeSet;
 
@@ -99,7 +110,8 @@ fn aggregate_policy_driven(findings: &[crate::Finding]) -> crate::Decision {
     let decision_ids: BTreeSet<&str> = findings
         .iter()
         .filter(|finding| {
-            finding.severity != Severity::Info || policy(&finding.rule_id) != RulePolicy::InfoOnly
+            finding.severity != Severity::Info
+                || policy_for(&finding.rule_id) != RulePolicy::InfoOnly
         })
         .map(|finding| finding.rule_id.as_str())
         .collect();
@@ -109,7 +121,7 @@ fn aggregate_policy_driven(findings: &[crate::Finding]) -> crate::Decision {
     let residual_ids: BTreeSet<&str> = decision_ids
         .iter()
         .copied()
-        .filter(|id| policy(id) != RulePolicy::ApprovalOnly)
+        .filter(|id| policy_for(id) != RulePolicy::ApprovalOnly)
         .collect();
     if residual_ids.is_empty() {
         return Decision::AllowWithApproval;
@@ -117,7 +129,7 @@ fn aggregate_policy_driven(findings: &[crate::Finding]) -> crate::Decision {
     let has_native_build = residual_ids.contains("known-native-build-pattern");
     let has_high_risk = residual_ids
         .iter()
-        .any(|id| policy(id) != RulePolicy::DowngradeSafe);
+        .any(|id| policy_for(id) != RulePolicy::DowngradeSafe);
     if has_native_build && !has_high_risk {
         Decision::AllowWithApproval
     } else {

@@ -34,7 +34,10 @@ pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, GemVersion, ResolvedVersion};
 pub use rules::POPULAR_RUBY_GEMS;
-pub use scan::{parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem};
+pub use scan::{
+    parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem,
+    scan_gem_with_rules,
+};
 
 /// RubyGems serves both metadata and `.gem` downloads from `rubygems.org`
 /// itself, so the CDN allowlist is empty. If a future mirror uses a distinct
@@ -102,6 +105,16 @@ pub fn fetch_and_scan_gems(
     opts: &GemFetchOptions,
     transport: &dyn Transport,
 ) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_gems_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_gems_with_rules(
+    pkg: &GemRef,
+    opts: &GemFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
     // 1. Fetch the version list and resolve the requested version + sha.
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(registry)
@@ -165,7 +178,7 @@ pub fn fetch_and_scan_gems(
     std::fs::create_dir_all(&art_dir).with_context(|| format!("mkdir {}", art_dir.display()))?;
 
     // 5. Parse + scan the nested archive.
-    let scanned = scan_gem(&gem_bytes, &art_dir, opts.max_extracted_bytes)
+    let scanned = scan_gem_with_rules(&gem_bytes, &art_dir, opts.max_extracted_bytes, rules)
         .with_context(|| format!("scan .gem {}-{version}", pkg.name))?;
     let mut all_findings: Vec<Finding> = scanned.findings;
 
@@ -174,7 +187,7 @@ pub fn fetch_and_scan_gems(
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints.
@@ -185,7 +198,11 @@ pub fn fetch_and_scan_gems(
         findings: all_findings,
         coordinate: Some(coordinate),
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 /// Build a Finding with the given rule_id/severity/detail and no location.
@@ -210,6 +227,7 @@ impl argus_pipeline::EcosystemFetcher for GemsFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = GemRef::parse(spec)?;
         let opts = GemFetchOptions {
@@ -217,7 +235,7 @@ impl argus_pipeline::EcosystemFetcher for GemsFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..GemFetchOptions::default()
         };
-        fetch_and_scan_gems(&pkg, &opts, transport)
+        fetch_and_scan_gems_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

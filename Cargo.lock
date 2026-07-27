@@ -303,6 +303,7 @@ name = "argus-lockfile"
 version = "0.1.0"
 dependencies = [
  "argus-core",
+ "argus-rules",
  "base64",
  "semver",
  "serde",
@@ -398,6 +399,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-core",
+ "argus-rules",
  "argus-transport",
 ]
 
@@ -455,8 +457,10 @@ dependencies = [
  "argus-core",
  "argus-syntax",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
+ "tempfile",
  "walkdir",
 ]
 

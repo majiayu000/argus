@@ -20,7 +20,7 @@ pub use model::{
     LockfileFormat, NormalizedDependency, NormalizedSource, ParseOutput, SourceKind,
 };
 pub use parsers::{parser_for, LockfileParser};
-pub use policy::{evaluate, PolicyError, PolicyOptions};
+pub use policy::{evaluate, evaluate_with_rules, PolicyError, PolicyOptions};
 
 /// Detect and fully parse one lockfile through the frozen parser contract.
 pub fn parse_lockfile(

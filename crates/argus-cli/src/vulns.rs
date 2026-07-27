@@ -11,6 +11,7 @@ use argus_osv::report::{OsvReportBuilder, ReportBuilder, VulnerabilityReport};
 use argus_osv::resolver::{AdvisoryResolver, OsvResolver, ResolveRequest};
 use argus_osv::severity::SeveritySource;
 use argus_osv::{collect_lockfile_coordinates, CoordinateQuery, CoordinateSet};
+use argus_rules::RuleSession;
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -20,37 +21,62 @@ use std::process::ExitCode;
 const CACHE_LABEL: &str = "<argus-osv-cache>";
 
 pub(crate) fn cmd_vulns(op: VulnsOp) -> Result<ExitCode> {
-    let (coordinates, common) = match op {
+    match op {
         VulnsOp::Package {
             ecosystem,
             name,
             version,
             common,
         } => {
+            validate_vulnerability_overrides(&common.rule_override)?;
+            let rules = RuleSession::load_typed(None, common.rule_override.clone())
+                .context("load effective rules")?;
             let coordinate = PackageCoordinate::new(ecosystem.into(), name, version)
                 .context("validate exact package coordinate")?;
             let query = CoordinateQuery::new(coordinate, std::iter::empty())
                 .context("validate OSV package coordinate")?;
-            (CoordinateSet::new(vec![query], 0)?, common)
+            resolve_and_emit(CoordinateSet::new(vec![query], 0)?, common, &rules)
         }
         VulnsOp::Lockfile {
             path,
             lockfile_format,
             common,
         } => {
+            validate_vulnerability_overrides(&common.rule_override)?;
+            let rules = RuleSession::load_typed(None, common.rule_override.clone())
+                .context("load effective rules")?;
             let parsed =
                 crate::read_and_parse_lockfile(&path, lockfile_format.map(FormatHint::from))?;
-            (
+            resolve_and_emit(
                 collect_lockfile_coordinates(&parsed.records)
                     .context("normalize lockfile OSV coordinates")?,
                 common,
+                &rules,
             )
         }
-    };
-    resolve_and_emit(coordinates, common)
+    }
 }
 
-fn resolve_and_emit(coordinates: CoordinateSet, common: VulnsCommonArgs) -> Result<ExitCode> {
+fn validate_vulnerability_overrides(overrides: &[argus_core::rules::RuleOverride]) -> Result<()> {
+    for rule_override in overrides {
+        if !matches!(
+            rule_override.id.as_str(),
+            "known-vulnerability" | "vulnerability-data-stale"
+        ) {
+            bail!(
+                "standalone vulnerability queries accept overrides only for \
+                 `known-vulnerability` and `vulnerability-data-stale`"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_and_emit(
+    coordinates: CoordinateSet,
+    common: VulnsCommonArgs,
+    rules: &RuleSession,
+) -> Result<ExitCode> {
     let snapshot = resolve_snapshot(
         &coordinates,
         &common.cache_dir,
@@ -58,9 +84,10 @@ fn resolve_and_emit(coordinates: CoordinateSet, common: VulnsCommonArgs) -> Resu
         common.allow_stale,
         common.max_age_seconds,
     )?;
-    let report = OsvReportBuilder::new(common.fail_on_severity.map(Into::into))?
+    let mut report = OsvReportBuilder::new(common.fail_on_severity.map(Into::into))?
         .build(&snapshot)
         .context("build complete vulnerability report")?;
+    normalize_vulnerability_report(&mut report, rules);
     emit_report(&report, common.format)
 }
 
@@ -141,6 +168,7 @@ pub(crate) struct ScanVulnsArgs {
 pub(crate) fn apply_osv_query(
     report: &mut argus_core::ScanReport,
     args: &ScanVulnsArgs,
+    rules: &RuleSession,
 ) -> Result<()> {
     if !args.osv {
         return Ok(());
@@ -167,12 +195,30 @@ pub(crate) fn apply_osv_query(
         args.osv_allow_stale,
         args.osv_max_age_seconds,
     )?;
-    let vulnerability = OsvReportBuilder::new(args.osv_fail_on_severity.map(Into::into))?
+    let mut vulnerability = OsvReportBuilder::new(args.osv_fail_on_severity.map(Into::into))?
         .build(&snapshot)
         .context("build vulnerability report for scanned coordinate")?;
+    normalize_vulnerability_report(&mut vulnerability, rules);
     report.findings.extend(vulnerability.findings);
     report.decision = stricter(report.decision, vulnerability.decision);
     Ok(())
+}
+
+fn normalize_vulnerability_report(report: &mut VulnerabilityReport, rules: &RuleSession) {
+    let threshold_decision = report.decision;
+    rules.normalize_findings(&mut report.findings);
+    report.decision = if report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "known-vulnerability")
+    {
+        threshold_decision
+    } else if report.findings.is_empty() {
+        Decision::Allow
+    } else {
+        Decision::AllowWithApproval
+    };
+    report.rules = rules.metadata().cloned();
 }
 
 fn stricter(left: Decision, right: Decision) -> Decision {
@@ -253,6 +299,9 @@ fn render_text(report: &VulnerabilityReport) -> Result<String> {
         evidence.maximum_age_seconds
     )
     .expect("write String");
+    if let Some(rules) = &report.rules {
+        output.push_str(&crate::report::render_rules_text(rules));
+    }
     if report.findings.is_empty() {
         writeln!(output, "findings: none").expect("write String");
     } else {
@@ -277,7 +326,7 @@ fn render_text(report: &VulnerabilityReport) -> Result<String> {
                 writeln!(output, "    locators: {}", locators.join(", ")).expect("write String");
             }
         }
-        if advisory_index != report.advisories.len() {
+        if advisory_index != 0 && advisory_index != report.advisories.len() {
             bail!("vulnerability advisories do not match rendered findings");
         }
     }
@@ -475,13 +524,15 @@ mod scan_vulns_tests {
             findings: Vec::new(),
             coordinate: None,
             intelligence: None,
+            rules: None,
         }
     }
 
     #[test]
     fn without_osv_flag_is_a_no_op() {
         let mut r = report();
-        apply_osv_query(&mut r, &args(false)).unwrap();
+        let rules = RuleSession::builtin().unwrap();
+        apply_osv_query(&mut r, &args(false), &rules).unwrap();
         assert!(r.findings.is_empty());
         assert_eq!(r.decision, Decision::Allow);
     }
@@ -489,7 +540,8 @@ mod scan_vulns_tests {
     #[test]
     fn osv_without_resolved_coordinate_fails_closed() {
         let mut r = report();
-        let err = apply_osv_query(&mut r, &args(true)).unwrap_err();
+        let rules = RuleSession::builtin().unwrap();
+        let err = apply_osv_query(&mut r, &args(true), &rules).unwrap_err();
         assert!(
             format!("{err:#}").contains("trusted resolved package coordinate"),
             "got: {err:#}"

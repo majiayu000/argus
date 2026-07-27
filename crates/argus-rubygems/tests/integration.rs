@@ -6,8 +6,11 @@
 //! nested shape so the test exercises the real outer-tar member reader +
 //! inner extract_tarball reuse.
 
-use argus_core::Decision;
-use argus_rubygems::{fetch_and_scan_gems, GemFetchOptions, GemRef};
+use argus_core::{Decision, Severity};
+use argus_rubygems::{
+    fetch_and_scan_gems, fetch_and_scan_gems_with_rules, GemFetchOptions, GemRef,
+};
+use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -80,6 +83,16 @@ fn scan_gem_fixture(
     version: &str,
     gem: Vec<u8>,
 ) -> anyhow::Result<argus_core::ScanReport> {
+    let rules = RuleSession::builtin()?;
+    scan_gem_fixture_with_rules(name, version, gem, &rules)
+}
+
+fn scan_gem_fixture_with_rules(
+    name: &str,
+    version: &str,
+    gem: Vec<u8>,
+    rules: &RuleSession,
+) -> anyhow::Result<argus_core::ScanReport> {
     let registry = "https://rubygems.org";
     let versions_url = format!("{registry}/api/v1/versions/{name}.json");
     let download_url = format!("{registry}/downloads/{name}-{version}.gem");
@@ -92,7 +105,7 @@ fn scan_gem_fixture(
 
     let opts = GemFetchOptions::default();
     let pkg = GemRef::parse(name)?;
-    fetch_and_scan_gems(&pkg, &opts, &transport)
+    fetch_and_scan_gems_with_rules(&pkg, &opts, &transport, rules)
 }
 
 fn gemspec(name: &str, version: &str, extra: &str) -> String {
@@ -460,5 +473,84 @@ fn foreign_download_host_rejected() {
     assert!(
         err.contains("non-HTTPS") || err.contains("validate"),
         "got: {err}"
+    );
+}
+
+const EXTERNAL_RULE_ID: &str = "rubygems-external-marker";
+
+fn external_rule_session(off: bool) -> RuleSession {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rules.yaml"),
+        format!(
+            "schema_version: 1\nrules:\n  - {{ id: \"{EXTERNAL_RULE_ID}\", description: \"external test rule\", policy_class: blocking, default_severity: high, help_uri: \"https://example.test/external-rule\", languages: [text], matcher: {{ kind: literal, pattern: \"ARGUS_EXTERNAL_RULE_MARKER\" }} }}\n"
+        ),
+    )
+    .unwrap();
+    let overrides = off
+        .then(|| format!("{EXTERNAL_RULE_ID}=off"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    RuleSession::load(Some(dir.path()), &overrides).unwrap()
+}
+
+#[test]
+fn rubygems_external_rule_matches_and_can_be_disabled() {
+    let fixture = || {
+        make_gem(
+            &gemspec("externalgem", "1.0.0", "extensions: []\n"),
+            &[("lib/marker.rb", b"# ARGUS_EXTERNAL_RULE_MARKER\n")],
+        )
+    };
+    let enabled = external_rule_session(false);
+    let report = scan_gem_fixture_with_rules("externalgem", "1.0.0", fixture(), &enabled).unwrap();
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == EXTERNAL_RULE_ID)
+        .unwrap();
+    let location = "lib/marker.rb";
+    assert_eq!(
+        (finding.severity, finding.location.as_deref()),
+        (Severity::High, Some(location))
+    );
+    assert_eq!(finding.evidence, Some(vec![format!("{location}:1")]));
+    assert_eq!(report.decision, Decision::Block);
+    assert_eq!(report.rules.as_ref(), enabled.metadata());
+    let metadata = report.rules.as_ref().unwrap();
+    assert_eq!(metadata.loaded_external_files, vec!["rules.yaml"]);
+    assert_eq!(metadata.external_rule_count, 1);
+    assert_eq!(metadata.disabled_rule_ids, Vec::<String>::new());
+    assert_eq!(metadata.applied_overrides, Vec::<String>::new());
+    assert_eq!(metadata.external_rules.len(), 1);
+    let external_rule = &metadata.external_rules[0];
+    assert_eq!(
+        (
+            external_rule.id.as_str(),
+            external_rule.description.as_str(),
+            external_rule.help_uri.as_str(),
+            external_rule.severity,
+        ),
+        (
+            EXTERNAL_RULE_ID,
+            "external test rule",
+            "https://example.test/external-rule",
+            Severity::High,
+        )
+    );
+
+    let disabled = external_rule_session(true);
+    let report = scan_gem_fixture_with_rules("externalgem", "1.0.0", fixture(), &disabled).unwrap();
+    assert!(!report
+        .findings
+        .iter()
+        .any(|f| f.rule_id == EXTERNAL_RULE_ID));
+    assert_eq!(report.decision, Decision::Allow);
+    assert_eq!(report.rules.as_ref(), disabled.metadata());
+    let metadata = report.rules.unwrap();
+    assert_eq!(metadata.disabled_rule_ids, vec![EXTERNAL_RULE_ID]);
+    assert_eq!(
+        metadata.applied_overrides,
+        vec![format!("{EXTERNAL_RULE_ID}=off")]
     );
 }

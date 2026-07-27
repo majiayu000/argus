@@ -1,7 +1,10 @@
 //! End-to-end tests for `fetch_and_scan_nuget` via MockTransport.
 
-use argus_core::Decision;
-use argus_nuget::{fetch_and_scan_nuget, NugetFetchOptions, NugetRef};
+use argus_core::{Decision, ScanReport, Severity};
+use argus_nuget::{
+    fetch_and_scan_nuget, fetch_and_scan_nuget_with_rules, NugetFetchOptions, NugetRef,
+};
+use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -99,6 +102,100 @@ fn integrity_routes_string_catalog(
 
 fn rule_ids(report: &argus_core::ScanReport) -> Vec<String> {
     report.findings.iter().map(|f| f.rule_id.clone()).collect()
+}
+
+const EXTERNAL_RULE_ID: &str = "nuget-external-marker";
+
+fn external_rule_session(off: bool) -> RuleSession {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rules.yaml"),
+        format!(
+            "schema_version: 1\nrules:\n  - {{ id: \"{EXTERNAL_RULE_ID}\", description: \"external test rule\", policy_class: blocking, default_severity: high, help_uri: \"https://example.test/external-rule\", languages: [text], matcher: {{ kind: literal, pattern: \"ARGUS_EXTERNAL_RULE_MARKER\" }} }}\n"
+        ),
+    )
+    .unwrap();
+    let overrides = off
+        .then(|| format!("{EXTERNAL_RULE_ID}=off"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    RuleSession::load(Some(dir.path()), &overrides).unwrap()
+}
+
+fn scan_external_fixture(rules: &RuleSession) -> ScanReport {
+    let id = "external.package";
+    let version = "1.0.0";
+    let nupkg = make_nupkg(&[
+        (
+            "external.package.nuspec",
+            &nuspec("External.Package", version),
+        ),
+        ("marker.txt", b"ARGUS_EXTERNAL_RULE_MARKER"),
+    ]);
+    let transport = MockTransport::new();
+    base_routes(&transport, id, version, &nupkg);
+    integrity_routes(&transport, id, version, &sha512_b64(&nupkg), "SHA512");
+    fetch_and_scan_nuget_with_rules(
+        &NugetRef::parse(&format!("External.Package@{version}")).unwrap(),
+        &NugetFetchOptions::default(),
+        &transport,
+        rules,
+    )
+    .unwrap()
+}
+
+#[test]
+fn nuget_external_rule_matches_and_can_be_disabled() {
+    let enabled = external_rule_session(false);
+    let report = scan_external_fixture(&enabled);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == EXTERNAL_RULE_ID)
+        .unwrap();
+    assert_eq!(
+        (finding.severity, finding.location.as_deref()),
+        (Severity::High, Some("marker.txt"))
+    );
+    assert_eq!(finding.evidence, Some(vec!["marker.txt:1".to_string()]));
+    assert_eq!(report.decision, Decision::Block);
+    assert_eq!(report.rules.as_ref(), enabled.metadata());
+    let metadata = report.rules.as_ref().unwrap();
+    assert_eq!(metadata.loaded_external_files, vec!["rules.yaml"]);
+    assert_eq!(metadata.external_rule_count, 1);
+    assert_eq!(metadata.disabled_rule_ids, Vec::<String>::new());
+    assert_eq!(metadata.applied_overrides, Vec::<String>::new());
+    assert_eq!(metadata.external_rules.len(), 1);
+    let external_rule = &metadata.external_rules[0];
+    assert_eq!(
+        (
+            external_rule.id.as_str(),
+            external_rule.description.as_str(),
+            external_rule.help_uri.as_str(),
+            external_rule.severity,
+        ),
+        (
+            EXTERNAL_RULE_ID,
+            "external test rule",
+            "https://example.test/external-rule",
+            Severity::High,
+        )
+    );
+
+    let disabled = external_rule_session(true);
+    let report = scan_external_fixture(&disabled);
+    assert!(!report
+        .findings
+        .iter()
+        .any(|f| f.rule_id == EXTERNAL_RULE_ID));
+    assert_eq!(report.decision, Decision::Allow);
+    assert_eq!(report.rules.as_ref(), disabled.metadata());
+    let metadata = report.rules.unwrap();
+    assert_eq!(metadata.disabled_rule_ids, vec![EXTERNAL_RULE_ID]);
+    assert_eq!(
+        metadata.applied_overrides,
+        vec![format!("{EXTERNAL_RULE_ID}=off")]
+    );
 }
 
 #[test]

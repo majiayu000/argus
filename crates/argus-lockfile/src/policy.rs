@@ -3,10 +3,11 @@
 use crate::{
     ensure_canonical_output_size,
     parsers::integrity::{valid_digest, DigestEncoding},
-    IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat, NormalizedSource,
-    ParseOutput, SourceKind,
+    BoundedInput, IntegrityEvidence, IntegrityState, LockfileError, LockfileFormat,
+    NormalizedSource, ParseOutput, SourceKind,
 };
 use argus_core::{ArtifactKind, Decision, Finding, ScanReport, Severity};
+use argus_rules::RuleSession;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -54,6 +55,7 @@ pub enum PolicyError {
     InvalidNormalizedOutput(LockfileError),
     Canonicalization(String),
     CanonicalOutputLimit(LockfileError),
+    RuleExecution(String),
 }
 
 impl fmt::Display for PolicyError {
@@ -75,6 +77,7 @@ impl fmt::Display for PolicyError {
                 write!(formatter, "canonicalize lockfile findings: {detail}")
             }
             Self::CanonicalOutputLimit(error) => error.fmt(formatter),
+            Self::RuleExecution(detail) => write!(formatter, "execute lockfile rules: {detail}"),
         }
     }
 }
@@ -88,8 +91,8 @@ impl Error for PolicyError {
     }
 }
 
-/// Evaluate a complete normalized parse. This function performs no file,
-/// process, transport, DNS, or network I/O.
+/// Evaluate a complete normalized parse. This compatibility API has no raw
+/// input for external text matchers; use [`evaluate_with_rules`] for those.
 pub fn evaluate(
     output: &ParseOutput,
     path: &Path,
@@ -156,7 +159,31 @@ pub fn evaluate(
         findings,
         coordinate: None,
         intelligence: None,
+        rules: None,
     })
+}
+
+/// Evaluate policy plus configured rules over bounded raw bytes and their
+/// relative path label.
+pub fn evaluate_with_rules(
+    output: &ParseOutput,
+    path: &Path,
+    options: &PolicyOptions,
+    input: &BoundedInput<'_>,
+    rules: &RuleSession,
+) -> Result<ScanReport, PolicyError> {
+    let mut report = evaluate(output, path, options)?;
+    rules
+        .scan_bytes(input.path_label(), input.bytes(), &mut report.findings)
+        .map_err(|error| PolicyError::RuleExecution(error.to_string()))?;
+    rules
+        .validate_external_limits(&report.findings)
+        .map_err(|error| PolicyError::RuleExecution(error.to_string()))?;
+    rules.finalize_package(&mut report);
+    let canonical = serde_json_canonicalizer::to_vec(&report.findings)
+        .map_err(|error| PolicyError::Canonicalization(error.to_string()))?;
+    ensure_canonical_output_size(canonical.len()).map_err(PolicyError::CanonicalOutputLimit)?;
+    Ok(report)
 }
 
 fn evaluate_source(

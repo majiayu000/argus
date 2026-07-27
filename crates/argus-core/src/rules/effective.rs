@@ -39,11 +39,7 @@ impl FromStr for RuleOverride {
             "severity:medium" => RuleOverrideAction::Severity(Severity::Medium),
             "severity:low" => RuleOverrideAction::Severity(Severity::Low),
             "severity:info" => RuleOverrideAction::Severity(Severity::Info),
-            other => {
-                return Err(CatalogError::new(format!(
-                    "unsupported rule override value `{other}`"
-                )))
-            }
+            _ => return Err(CatalogError::new("unsupported rule override value")),
         };
         Ok(Self { id, action })
     }
@@ -117,19 +113,14 @@ impl EffectiveRuleSet {
         let mut overrides_by_id = BTreeMap::new();
         for rule_override in overrides {
             if catalog.get(rule_override.id.as_str()).is_none() {
-                return Err(CatalogError::new(format!(
-                    "unknown rule override id `{}`",
-                    rule_override.id
-                )));
+                return Err(CatalogError::new("unknown rule override id"));
             }
             let id = rule_override.id.clone();
             if overrides_by_id
                 .insert(id.clone(), rule_override.action)
                 .is_some()
             {
-                return Err(CatalogError::new(format!(
-                    "duplicate rule override for `{id}`"
-                )));
+                return Err(CatalogError::new("duplicate rule override"));
             }
         }
 
@@ -186,6 +177,14 @@ impl EffectiveRuleSet {
     pub fn policy(&self, id: &str) -> RulePolicy {
         self.rule(id)
             .map_or(RulePolicy::Blocking, |rule| rule.definition.policy_class)
+    }
+
+    pub fn aggregate(
+        &self,
+        findings: &[Finding],
+        profile: super::AggregationProfile,
+    ) -> crate::Decision {
+        super::aggregate_with_policy(findings, profile, |id| self.policy(id))
     }
 
     pub fn applied_overrides(&self) -> &[AppliedRuleOverride] {

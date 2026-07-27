@@ -294,7 +294,8 @@ fn scan_case(index_root: &Path, index: &CorpusIndex, case: &CorpusCase) -> Resul
         // The frozen corpus schema predates multi-format scans: its
         // `kind=lockfile` contract explicitly means package-lock. Future
         // lockfile corpus kinds need an explicit schema field.
-        crate::scan_lockfile_path(&case_path, Some(FormatHint::PackageLock), &[])
+        let rules = argus_rules::RuleSession::builtin()?;
+        crate::scan_lockfile_path(&case_path, Some(FormatHint::PackageLock), &[], &rules)
     }
     .context("scan corpus case")
 }

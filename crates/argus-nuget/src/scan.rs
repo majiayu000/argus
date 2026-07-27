@@ -15,7 +15,7 @@
 use crate::{finding, rules};
 use anyhow::Result;
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use quick_xml::XmlVersion;
@@ -36,12 +36,27 @@ pub fn scan_nuget_archive(
     dest_root: &Path,
     max_extracted_bytes: u64,
 ) -> Result<NupkgScan> {
+    let rules = RuleSession::builtin()?;
+    scan_nuget_archive_with_rules(nupkg_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_nuget_archive_with_rules(
+    nupkg_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+) -> Result<NupkgScan> {
     argus_archive::extract_zip(nupkg_bytes, dest_root, max_extracted_bytes, ".nupkg entry")?;
-    scan_extracted_nupkg(dest_root)
+    scan_extracted_nupkg_with_rules(dest_root, rules)
 }
 
 /// Walk the extracted tree and apply all rules.
 pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
+    let rules = RuleSession::builtin()?;
+    scan_extracted_nupkg_with_rules(dest_root, &rules)
+}
+
+pub fn scan_extracted_nupkg_with_rules(dest_root: &Path, rules: &RuleSession) -> Result<NupkgScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
@@ -138,6 +153,10 @@ pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
             "no root-level `.nuspec` manifest found in .nupkg".to_string(),
         ));
     }
+
+    rules.scan_directory(dest_root, &mut findings)?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(NupkgScan {
         findings,

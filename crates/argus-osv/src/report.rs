@@ -2,8 +2,9 @@ use crate::model::{NormalizedAdvisory, OsvError, OsvErrorKind};
 use crate::resolver::ResolvedSnapshot;
 use crate::severity::SeverityLevel;
 use argus_core::{
-    Decision, Finding, Severity, VulnerabilityAdvisoryEvidence, VulnerabilityQueryEvidence,
-    VulnerabilityQueryStatus, VulnerabilitySourceMode, VULNERABILITY_QUERY_EVIDENCE_VERSION,
+    Decision, Finding, RuleExecutionMetadata, Severity, VulnerabilityAdvisoryEvidence,
+    VulnerabilityQueryEvidence, VulnerabilityQueryStatus, VulnerabilitySourceMode,
+    VULNERABILITY_QUERY_EVIDENCE_VERSION,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -17,6 +18,8 @@ pub struct VulnerabilityReport {
     pub findings: Vec<Finding>,
     pub evidence: VulnerabilityQueryEvidence,
     pub advisories: Vec<NormalizedAdvisory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RuleExecutionMetadata>,
 }
 
 pub trait ReportBuilder {
@@ -120,6 +123,7 @@ impl ReportBuilder for OsvReportBuilder {
                 advisories: evidence,
             },
             advisories,
+            rules: None,
         };
         let size = serde_json_canonicalizer::to_vec(&report)
             .map_err(|error| {

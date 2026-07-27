@@ -13,7 +13,7 @@
 use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -23,6 +23,16 @@ pub fn scan_wheel_zip(
     wheel_bytes: &[u8],
     dest_root: &Path,
     max_extracted_bytes: u64,
+) -> Result<ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_wheel_zip_with_rules(wheel_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_wheel_zip_with_rules(
+    wheel_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
 ) -> Result<ArtifactScan> {
     argus_archive::extract_zip(wheel_bytes, dest_root, max_extracted_bytes, "wheel entry")
         .context("extract wheel")?;
@@ -90,6 +100,12 @@ pub fn scan_wheel_zip(
             ));
         }
     }
+
+    rules
+        .scan_directory(dest_root, &mut findings)
+        .context("run configured rules on extracted wheel")?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(ArtifactScan {
         findings,

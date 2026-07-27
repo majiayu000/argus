@@ -62,9 +62,9 @@ impl RuleId {
             || bytes
                 .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'_' | b'-'))
         {
-            return Err(CatalogError::new(format!(
-                "rule id `{value}` must match [A-Za-z0-9][A-Za-z0-9._-]*"
-            )));
+            return Err(CatalogError::new(
+                "rule id must match [A-Za-z0-9][A-Za-z0-9._-]*",
+            ));
         }
         Ok(Self(value.to_string()))
     }
@@ -108,8 +108,7 @@ impl HelpUri {
                 "help_uri must not contain leading or trailing whitespace",
             ));
         }
-        let parsed = Url::parse(value)
-            .map_err(|error| CatalogError::new(format!("invalid help_uri: {error}")))?;
+        let parsed = Url::parse(value).map_err(|_| CatalogError::new("invalid help_uri"))?;
         if parsed.scheme() != "https" || parsed.host_str().is_none() {
             return Err(CatalogError::new("help_uri must be an absolute HTTPS URL"));
         }
@@ -125,6 +124,43 @@ impl HelpUri {
 pub enum DefaultSeverity {
     DetectorOwned,
     Fixed(Severity),
+}
+
+/// Closed language set accepted by external text rules.
+///
+/// The four executable-script variants reuse `argus-syntax` ownership; the
+/// remaining variants describe non-executable text surfaces in ecosystem
+/// archives and lockfiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuleLanguage {
+    Bash,
+    Python,
+    JavaScript,
+    TypeScript,
+    Rust,
+    Go,
+    Ruby,
+    Php,
+    PowerShell,
+    CSharp,
+    Xml,
+    Json,
+    Yaml,
+    Toml,
+    Markdown,
+    Text,
+}
+
+impl RuleLanguage {
+    pub fn from_script_language(language: ScriptLanguage) -> Option<Self> {
+        match language {
+            ScriptLanguage::Bash => Some(Self::Bash),
+            ScriptLanguage::Python => Some(Self::Python),
+            ScriptLanguage::JavaScript => Some(Self::JavaScript),
+            ScriptLanguage::TypeScript => Some(Self::TypeScript),
+            ScriptLanguage::Unsupported => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +215,7 @@ pub struct RuleDef {
     pub policy_class: RulePolicy,
     pub default_severity: DefaultSeverity,
     pub help_uri: HelpUri,
-    pub languages: Vec<ScriptLanguage>,
+    pub languages: Vec<RuleLanguage>,
     pub matcher: RuleMatcher,
 }
 
@@ -208,10 +244,9 @@ impl RuleCatalog {
             let builtin = builtin_catalog()?;
             for rule in &catalog.rules {
                 if builtin.get(rule.id.as_str()).is_some() {
-                    return Err(CatalogError::new(format!(
-                        "external rule id `{}` collides with a built-in rule",
-                        rule.id
-                    )));
+                    return Err(CatalogError::new(
+                        "external rule id collides with a built-in rule",
+                    ));
                 }
             }
         }
@@ -228,8 +263,8 @@ impl RuleCatalog {
             )));
         }
         reject_yaml_indirection(source)?;
-        let documents = YamlLoader::load_from_str(source)
-            .map_err(|error| CatalogError::new(format!("invalid YAML: {error}")))?;
+        let documents =
+            YamlLoader::load_from_str(source).map_err(|_| CatalogError::new("invalid YAML"))?;
         if documents.len() != 1 {
             return Err(CatalogError::new(
                 "catalog must contain exactly one YAML document",
@@ -242,9 +277,7 @@ impl RuleCatalog {
             "schema_version",
         )?;
         if version != i64::from(RULE_CATALOG_SCHEMA_VERSION) {
-            return Err(CatalogError::new(format!(
-                "unsupported schema_version `{version}`"
-            )));
+            return Err(CatalogError::new("unsupported schema_version"));
         }
         let records = yaml_array(required(root, "rules", "catalog root")?, "rules")?;
         if records.is_empty() {
@@ -263,10 +296,7 @@ impl RuleCatalog {
         rules.sort_by(|left, right| left.id.cmp(&right.id));
         for adjacent in rules.windows(2) {
             if adjacent[0].id == adjacent[1].id {
-                return Err(CatalogError::new(format!(
-                    "duplicate rule id `{}`",
-                    adjacent[0].id
-                )));
+                return Err(CatalogError::new("duplicate rule id"));
             }
         }
         Ok(Self {
@@ -303,10 +333,9 @@ impl RuleCatalog {
         rules.sort_by(|left, right| left.id.cmp(&right.id));
         for adjacent in rules.windows(2) {
             if adjacent[0].id == adjacent[1].id {
-                return Err(CatalogError::new(format!(
-                    "duplicate rule id `{}` while merging catalogs",
-                    adjacent[0].id
-                )));
+                return Err(CatalogError::new(
+                    "duplicate rule id while merging catalogs",
+                ));
             }
         }
         if rules.len() > MAX_CATALOG_RULES {
@@ -455,8 +484,8 @@ fn parse_matcher(value: &Yaml, rule_id: &RuleId, context: &str) -> CatalogResult
                     pattern: pattern.to_string(),
                 })
             } else {
-                let compiled = Regex::new(pattern).map_err(|error| {
-                    CatalogError::new(format!("{context}.matcher has invalid regex: {error}"))
+                let compiled = Regex::new(pattern).map_err(|_| {
+                    CatalogError::new(format!("{context}.matcher has invalid regex"))
                 })?;
                 Ok(RuleMatcher::Regex {
                     pattern: pattern.to_string(),
@@ -464,32 +493,44 @@ fn parse_matcher(value: &Yaml, rule_id: &RuleId, context: &str) -> CatalogResult
                 })
             }
         }
-        other => Err(CatalogError::new(format!(
-            "{context}.matcher.kind has unsupported value `{other}`"
+        _ => Err(CatalogError::new(format!(
+            "{context}.matcher.kind has unsupported value"
         ))),
     }
 }
 
-fn parse_languages(value: &Yaml, context: &str) -> CatalogResult<Vec<ScriptLanguage>> {
+fn parse_languages(value: &Yaml, context: &str) -> CatalogResult<Vec<RuleLanguage>> {
     let values = yaml_array(value, &format!("{context}.languages"))?;
     let mut languages = Vec::with_capacity(values.len());
     let mut seen = BTreeSet::new();
     for value in values {
         let name = yaml_string(value, "language")?;
         let language = match name {
-            "bash" => ScriptLanguage::Bash,
-            "python" => ScriptLanguage::Python,
-            "javascript" => ScriptLanguage::JavaScript,
-            "typescript" => ScriptLanguage::TypeScript,
-            other => {
+            "bash" => RuleLanguage::Bash,
+            "python" => RuleLanguage::Python,
+            "javascript" => RuleLanguage::JavaScript,
+            "typescript" => RuleLanguage::TypeScript,
+            "rust" => RuleLanguage::Rust,
+            "go" => RuleLanguage::Go,
+            "ruby" => RuleLanguage::Ruby,
+            "php" => RuleLanguage::Php,
+            "powershell" => RuleLanguage::PowerShell,
+            "csharp" => RuleLanguage::CSharp,
+            "xml" => RuleLanguage::Xml,
+            "json" => RuleLanguage::Json,
+            "yaml" => RuleLanguage::Yaml,
+            "toml" => RuleLanguage::Toml,
+            "markdown" => RuleLanguage::Markdown,
+            "text" => RuleLanguage::Text,
+            _ => {
                 return Err(CatalogError::new(format!(
-                    "{context}.languages contains unsupported language `{other}`"
+                    "{context}.languages contains unsupported language"
                 )))
             }
         };
         if !seen.insert(language_name(language)) {
             return Err(CatalogError::new(format!(
-                "{context}.languages contains duplicate `{name}`"
+                "{context}.languages contains a duplicate"
             )));
         }
         languages.push(language);
@@ -498,13 +539,24 @@ fn parse_languages(value: &Yaml, context: &str) -> CatalogResult<Vec<ScriptLangu
     Ok(languages)
 }
 
-pub(crate) fn language_name(language: ScriptLanguage) -> &'static str {
+pub(crate) fn language_name(language: RuleLanguage) -> &'static str {
     match language {
-        ScriptLanguage::Bash => "bash",
-        ScriptLanguage::Python => "python",
-        ScriptLanguage::JavaScript => "javascript",
-        ScriptLanguage::TypeScript => "typescript",
-        ScriptLanguage::Unsupported => "unsupported",
+        RuleLanguage::Bash => "bash",
+        RuleLanguage::Python => "python",
+        RuleLanguage::JavaScript => "javascript",
+        RuleLanguage::TypeScript => "typescript",
+        RuleLanguage::Rust => "rust",
+        RuleLanguage::Go => "go",
+        RuleLanguage::Ruby => "ruby",
+        RuleLanguage::Php => "php",
+        RuleLanguage::PowerShell => "powershell",
+        RuleLanguage::CSharp => "csharp",
+        RuleLanguage::Xml => "xml",
+        RuleLanguage::Json => "json",
+        RuleLanguage::Yaml => "yaml",
+        RuleLanguage::Toml => "toml",
+        RuleLanguage::Markdown => "markdown",
+        RuleLanguage::Text => "text",
     }
 }
 
@@ -514,9 +566,7 @@ fn parse_policy(value: &str) -> CatalogResult<RulePolicy> {
         "approval-only" => Ok(RulePolicy::ApprovalOnly),
         "downgrade-safe" => Ok(RulePolicy::DowngradeSafe),
         "info-only" => Ok(RulePolicy::InfoOnly),
-        other => Err(CatalogError::new(format!(
-            "unsupported policy_class `{other}`"
-        ))),
+        _ => Err(CatalogError::new("unsupported policy_class")),
     }
 }
 
@@ -528,9 +578,7 @@ fn parse_default_severity(value: &str) -> CatalogResult<DefaultSeverity> {
         "medium" => Ok(DefaultSeverity::Fixed(Severity::Medium)),
         "low" => Ok(DefaultSeverity::Fixed(Severity::Low)),
         "info" => Ok(DefaultSeverity::Fixed(Severity::Info)),
-        other => Err(CatalogError::new(format!(
-            "unsupported default_severity `{other}`"
-        ))),
+        _ => Err(CatalogError::new("unsupported default_severity")),
     }
 }
 
@@ -556,7 +604,7 @@ fn reject_yaml_indirection(source: &str) -> CatalogResult<()> {
     let mut receiver = Receiver::default();
     Parser::new_from_str(source)
         .load(&mut receiver, true)
-        .map_err(|error| CatalogError::new(format!("invalid YAML: {error}")))?;
+        .map_err(|_| CatalogError::new("invalid YAML"))?;
     if receiver.rejected {
         return Err(CatalogError::new(
             "YAML aliases, anchors, and explicit tags are unsupported",
@@ -616,7 +664,7 @@ fn check_fields(
         };
         if !allowed.contains(&key) {
             return Err(CatalogError::new(format!(
-                "{context} contains unknown field `{key}`"
+                "{context} contains unknown field"
             )));
         }
     }

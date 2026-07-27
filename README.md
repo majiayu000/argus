@@ -131,6 +131,54 @@ cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 
 The compiled binary is named `argus` and exits non-zero on `block`.
 
+### External rules and overrides
+
+`scan`, all eight ecosystem fetch commands, and `agent scan` accept an explicit
+trusted `--rules-dir`. Every lowercase `.yaml`/`.yml` file below that directory
+is loaded atomically before artifact or network work begins. A malformed,
+unreadable, duplicate, colliding, oversized, or escaping rule file rejects the
+whole invocation; Argus never activates a partial directory.
+
+`--rules-dir` is supported on Unix in v1. Non-Unix builds reject it during
+preflight, before scanning or network access, until handle-relative Windows
+directory traversal is implemented. Typed `--rule-override` values remain
+available on every supported platform.
+
+```yaml
+schema_version: 1
+rules:
+  - id: corp-forbidden-installer
+    description: corporate installer marker
+    policy_class: blocking
+    default_severity: high
+    help_uri: https://security.example.com/rules/corp-forbidden-installer
+    languages: [bash, javascript, text]
+    matcher: { kind: literal, pattern: CORP_FORBIDDEN_INSTALLER }
+```
+
+External rules require a fixed severity and a `literal` or `regex` matcher.
+The closed language set is `bash`, `python`, `javascript`, `typescript`,
+`rust`, `go`, `ruby`, `php`, `powershell`, `csharp`, `xml`, `json`, `yaml`,
+`toml`, `markdown`, and `text`. Matching is bounded, uses valid UTF-8 only, and
+emits at most one finding per rule and logical file. npm lifecycle bodies are
+also matched as Bash surfaces.
+
+```bash
+argus scan path/to/pkg --rules-dir ./rules
+argus agent scan path/to/skill --rules-dir ./rules --format sarif
+argus scan Cargo.lock \
+  --rules-dir ./rules \
+  --rule-override corp-forbidden-installer=severity:medium
+```
+
+`--rule-override ID=off|severity:LEVEL` is repeatable and works for registered
+built-in or external IDs. `off` is an explicit trust decision: text, JSON, and
+SARIF retain the effective ruleset digest, loaded files, disabled IDs, and
+applied overrides even when no findings remain. With neither rules flag,
+reports keep the existing output shape and behavior. Standalone `vulns`
+commands accept overrides for registered vulnerability findings but do not
+accept a rules directory because they do not scan artifact text.
+
 ### Lockfile source and integrity policy
 
 `argus scan` statically normalizes nine lockfile families without starting a

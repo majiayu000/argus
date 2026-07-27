@@ -25,7 +25,10 @@ pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, CrateVersion, CratesPackument};
 pub use rules::POPULAR_CRATES;
-pub use scan::scan_crate_archive;
+pub use scan::{
+    scan_crate_archive, scan_crate_archive_with_rules, scan_extracted_crate,
+    scan_extracted_crate_with_rules,
+};
 
 /// crates.io serves `.crate` archives from `*.crates.io` (canonically
 /// `static.crates.io`). The subdomain-suffix entry accepts every
@@ -92,6 +95,16 @@ pub fn fetch_and_scan_crate(
     pkg: &CrateRef,
     opts: &CratesFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_crate_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_crate_with_rules(
+    pkg: &CrateRef,
+    opts: &CratesFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
@@ -167,9 +180,13 @@ pub fn fetch_and_scan_crate(
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
 
-    let mut report =
-        scan_crate_archive(&crate_bytes, extract_root.path(), opts.max_extracted_bytes)
-            .context("scan extracted .crate")?;
+    let mut report = scan_crate_archive_with_rules(
+        &crate_bytes,
+        extract_root.path(),
+        opts.max_extracted_bytes,
+        rules,
+    )
+    .context("scan extracted .crate")?;
 
     // Name-based rules apply to the user-supplied package name.
     rules::push_name_findings(&pkg.name, &mut report.findings);
@@ -185,6 +202,8 @@ pub fn fetch_and_scan_crate(
         report.package_version = Some(version);
     }
     report.coordinate = Some(coordinate);
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
     Ok(report)
 }
 
@@ -209,6 +228,7 @@ impl argus_pipeline::EcosystemFetcher for CratesFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = CrateRef::parse(spec)?;
         let opts = CratesFetchOptions {
@@ -216,7 +236,7 @@ impl argus_pipeline::EcosystemFetcher for CratesFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..CratesFetchOptions::default()
         };
-        fetch_and_scan_crate(&pkg, &opts, transport)
+        fetch_and_scan_crate_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

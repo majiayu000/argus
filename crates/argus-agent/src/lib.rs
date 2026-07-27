@@ -21,6 +21,7 @@ mod config;
 mod decision;
 mod injection;
 mod judge;
+mod rule_runtime;
 mod snapshot;
 mod surface;
 
@@ -90,7 +91,8 @@ enum CandidateState {
 /// Thin wrapper over [`scan_agent_surface_with_baseline`] with no baseline —
 /// identical to GH-57 behavior.
 pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
-    scan_agent_surface_inner(path, BaselineMode::None, None)
+    let rules = argus_rules::RuleSession::builtin()?;
+    scan_agent_surface_inner(path, BaselineMode::None, None, &rules)
 }
 
 /// Scan an agent surface, optionally checking or updating an AGT-02 baseline.
@@ -100,7 +102,8 @@ pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
 /// mode an unreadable/unparseable baseline yields an info finding and the
 /// other rules still run (no panic, no silent "no drift").
 pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Result<ScanReport> {
-    scan_agent_surface_inner(path, mode, None)
+    let rules = argus_rules::RuleSession::builtin()?;
+    scan_agent_surface_inner(path, mode, None, &rules)
 }
 
 /// Scan an agent surface and run an explicitly supplied semantic judge after
@@ -111,7 +114,8 @@ pub fn scan_agent_surface_with_judge(
     mode: BaselineMode,
     judge: &dyn LlmJudge,
 ) -> Result<ScanReport> {
-    scan_agent_surface_inner(path, mode, Some(judge))
+    let rules = argus_rules::RuleSession::builtin()?;
+    scan_agent_surface_inner(path, mode, Some(judge), &rules)
 }
 
 /// Scan with optional AGT-04 comparison or approval.
@@ -121,8 +125,19 @@ pub fn scan_agent_surface_with_snapshot(
     snapshot_mode: SnapshotMode<'_>,
     judge: Option<&dyn LlmJudge>,
 ) -> Result<AgentScanOutcome> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    scan_agent_surface_with_snapshot_and_rules(path, baseline_mode, snapshot_mode, judge, &rules)
+}
+
+pub fn scan_agent_surface_with_snapshot_and_rules(
+    path: &Path,
+    baseline_mode: BaselineMode<'_>,
+    snapshot_mode: SnapshotMode<'_>,
+    judge: Option<&dyn LlmJudge>,
+    rules: &argus_rules::RuleSession,
+) -> Result<AgentScanOutcome> {
     if matches!(snapshot_mode, SnapshotMode::None) {
-        return scan_agent_surface_inner(path, baseline_mode, judge).map(|report| {
+        return scan_agent_surface_inner(path, baseline_mode, judge, rules).map(|report| {
             AgentScanOutcome {
                 report,
                 operational_error: None,
@@ -130,13 +145,14 @@ pub fn scan_agent_surface_with_snapshot(
             }
         });
     }
-    scan_snapshot_mode(path, baseline_mode, snapshot_mode, judge)
+    scan_snapshot_mode(path, baseline_mode, snapshot_mode, judge, rules)
 }
 
 fn scan_agent_surface_inner(
     path: &Path,
     mode: BaselineMode,
     judge: Option<&dyn LlmJudge>,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     // Exclude the baseline file itself from the scanned tree so it is never
     // self-hashed (product edge case: baseline may live inside the tree).
@@ -147,6 +163,7 @@ fn scan_agent_surface_inner(
     let files = collect_surface_files(path, exclude.as_deref())?;
 
     let mut findings: Vec<Finding> = Vec::new();
+    rule_runtime::scan_files(rules, &files, &mut findings)?;
     injection::run(&files, &mut findings);
     capability::run(&files, &mut findings)?;
     config::run(path, &files, &mut findings);
@@ -179,13 +196,15 @@ fn scan_agent_surface_inner(
         findings,
         coordinate: None,
         intelligence: None,
+        rules: None,
     };
+    rules.finalize_agent(&mut report);
 
     if let Some(judge) = judge {
         let request = LlmJudgeRequest::from_scan(&files, &report)?;
         let response = judge.judge(&request).context("run external LLM judge")?;
         report.findings.push(response.into_finding()?);
-        report.decision = decision::derive(&report.findings);
+        rules.finalize_agent(&mut report);
     }
 
     Ok(report)
@@ -196,6 +215,7 @@ fn scan_snapshot_mode(
     baseline_mode: BaselineMode<'_>,
     snapshot_mode: SnapshotMode<'_>,
     judge: Option<&dyn LlmJudge>,
+    rules: &argus_rules::RuleSession,
 ) -> Result<AgentScanOutcome> {
     let (context, discovered, canonical_root) = discover_complete(path)?;
     let target = match snapshot_mode {
@@ -220,12 +240,17 @@ fn scan_snapshot_mode(
             excluded.as_deref(),
             baseline_excluded.as_deref(),
         )?;
+        rule_runtime::scan_files(rules, &files, &mut semantic_findings)?;
         injection::run(&files, &mut semantic_findings);
         capability::run(&files, &mut semantic_findings)?;
         config::run(path, &files, &mut semantic_findings);
         apply_baseline(baseline_mode, &files, &mut semantic_findings)?;
         if let Some(judge) = judge {
-            let report = report(path, join_findings(&semantic_findings, &inventory_findings));
+            let report = rule_runtime::report(
+                path,
+                join_findings(&semantic_findings, &inventory_findings),
+                rules,
+            );
             let request = LlmJudgeRequest::from_scan(&files, &report)?;
             let response = judge.judge(&request).context("run external LLM judge")?;
             semantic_findings.push(response.into_finding()?);
@@ -233,21 +258,27 @@ fn scan_snapshot_mode(
         Ok(())
     })();
     if let Err(error) = post_inventory {
-        return Ok(incomplete(
+        return Ok(rule_runtime::incomplete(
             path,
             semantic_findings,
             inventory_findings,
             error,
+            rules,
         ));
     }
-    let report = report(path, join_findings(&semantic_findings, &inventory_findings));
+    let report = rule_runtime::report(
+        path,
+        join_findings(&semantic_findings, &inventory_findings),
+        rules,
+    );
     if let SnapshotMode::Update(target) = snapshot_mode {
         if let Err(error) = snapshot::save(target, &current) {
-            return Ok(incomplete(
+            return Ok(rule_runtime::incomplete(
                 path,
                 semantic_findings,
                 inventory_findings,
                 error,
+                rules,
             ));
         }
     }
@@ -261,34 +292,6 @@ fn scan_snapshot_mode(
 
 fn join_findings(semantic: &[Finding], inventory: &[Finding]) -> Vec<Finding> {
     semantic.iter().chain(inventory).cloned().collect()
-}
-
-fn report(path: &Path, findings: Vec<Finding>) -> ScanReport {
-    ScanReport {
-        artifact: ArtifactKind::AgentSurface,
-        path: path.to_path_buf(),
-        package_name: None,
-        package_version: None,
-        decision: decision::derive(&findings),
-        findings,
-        coordinate: None,
-        intelligence: None,
-    }
-}
-
-fn incomplete(
-    path: &Path,
-    semantic: Vec<Finding>,
-    inventory: Vec<Finding>,
-    error: anyhow::Error,
-) -> AgentScanOutcome {
-    let mut report = report(path, join_findings(&semantic, &inventory));
-    report.decision = argus_core::Decision::Block;
-    AgentScanOutcome {
-        report,
-        operational_error: Some(error),
-        snapshot_entry_count: None,
-    }
 }
 
 fn apply_baseline(

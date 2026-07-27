@@ -5,8 +5,9 @@
 //! the full fetch pipeline against a `MockTransport` that hands back the
 //! right bytes for the right URLs.
 
-use argus_core::{Decision, ScanReport};
-use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
+use argus_core::{Decision, ScanReport, Severity};
+use argus_fetch::{fetch_and_scan, fetch_and_scan_with_rules, FetchOptions, PackageRef};
+use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -36,6 +37,15 @@ fn make_targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
 fn fetch_syntax_fixture(
     package_json: &[u8],
     sources: &[(&str, &[u8])],
+) -> anyhow::Result<ScanReport> {
+    let rules = RuleSession::builtin()?;
+    fetch_syntax_fixture_with_rules(package_json, sources, &rules)
+}
+
+fn fetch_syntax_fixture_with_rules(
+    package_json: &[u8],
+    sources: &[(&str, &[u8])],
+    rules: &RuleSession,
 ) -> anyhow::Result<ScanReport> {
     let cache = tempfile::tempdir()?;
     let registry = "https://mock.registry";
@@ -70,7 +80,7 @@ fn fetch_syntax_fixture(
         cache_dir: Some(cache.path().to_path_buf()),
         ..FetchOptions::default()
     };
-    fetch_and_scan(&PackageRef::parse("syntax-demo")?, &opts, &transport)
+    fetch_and_scan_with_rules(&PackageRef::parse("syntax-demo")?, &opts, &transport, rules)
 }
 
 #[test]
@@ -680,5 +690,87 @@ fn npm_malformed_lifecycle_script_fails_closed() {
     assert!(
         format!("{error:#}").contains("refusing incomplete analysis"),
         "got: {error:#}"
+    );
+}
+
+const EXTERNAL_RULE_ID: &str = "npm-external-marker";
+
+fn external_rule_session(off: bool) -> RuleSession {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rules.yaml"),
+        format!(
+            "schema_version: 1\nrules:\n  - {{ id: \"{EXTERNAL_RULE_ID}\", description: \"external test rule\", policy_class: blocking, default_severity: high, help_uri: \"https://example.test/external-rule\", languages: [text], matcher: {{ kind: literal, pattern: \"ARGUS_EXTERNAL_RULE_MARKER\" }} }}\n"
+        ),
+    )
+    .unwrap();
+    let overrides = off
+        .then(|| format!("{EXTERNAL_RULE_ID}=off"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    RuleSession::load(Some(dir.path()), &overrides).unwrap()
+}
+
+#[test]
+fn npm_external_rule_matches_and_can_be_disabled() {
+    let enabled = external_rule_session(false);
+    let report = fetch_syntax_fixture_with_rules(
+        br#"{"name":"syntax-demo","version":"1.0.0"}"#,
+        &[("marker.txt", b"ARGUS_EXTERNAL_RULE_MARKER")],
+        &enabled,
+    )
+    .unwrap();
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.rule_id == EXTERNAL_RULE_ID)
+        .unwrap();
+    assert_eq!(
+        (finding.severity, finding.location.as_deref()),
+        (Severity::High, Some("marker.txt"))
+    );
+    assert_eq!(finding.evidence, Some(vec!["marker.txt:1".to_string()]));
+    assert_eq!(report.decision, Decision::Block);
+    assert_eq!(report.rules.as_ref(), enabled.metadata());
+    let metadata = report.rules.as_ref().unwrap();
+    assert_eq!(metadata.loaded_external_files, vec!["rules.yaml"]);
+    assert_eq!(metadata.external_rule_count, 1);
+    assert_eq!(metadata.disabled_rule_ids, Vec::<String>::new());
+    assert_eq!(metadata.applied_overrides, Vec::<String>::new());
+    assert_eq!(metadata.external_rules.len(), 1);
+    let external_rule = &metadata.external_rules[0];
+    assert_eq!(
+        (
+            external_rule.id.as_str(),
+            external_rule.description.as_str(),
+            external_rule.help_uri.as_str(),
+            external_rule.severity,
+        ),
+        (
+            EXTERNAL_RULE_ID,
+            "external test rule",
+            "https://example.test/external-rule",
+            Severity::High,
+        )
+    );
+
+    let disabled = external_rule_session(true);
+    let report = fetch_syntax_fixture_with_rules(
+        br#"{"name":"syntax-demo","version":"1.0.0"}"#,
+        &[("marker.txt", b"ARGUS_EXTERNAL_RULE_MARKER")],
+        &disabled,
+    )
+    .unwrap();
+    assert!(!report
+        .findings
+        .iter()
+        .any(|f| f.rule_id == EXTERNAL_RULE_ID));
+    assert_eq!(report.decision, Decision::Allow);
+    assert_eq!(report.rules.as_ref(), disabled.metadata());
+    let metadata = report.rules.unwrap();
+    assert_eq!(metadata.disabled_rule_ids, vec![EXTERNAL_RULE_ID]);
+    assert_eq!(
+        metadata.applied_overrides,
+        vec![format!("{EXTERNAL_RULE_ID}=off")]
     );
 }
