@@ -172,18 +172,9 @@ pub fn evaluate_with_rules(
     input: &BoundedInput<'_>,
     rules: &RuleSession,
 ) -> Result<ScanReport, PolicyError> {
-    let mut report = evaluate(output, path, options)?;
-    rules
-        .scan_bytes(input.path_label(), input.bytes(), &mut report.findings)
+    let execution = argus_core::ExecutionContext::serial()
         .map_err(|error| PolicyError::RuleExecution(error.to_string()))?;
-    rules
-        .validate_external_limits(&report.findings)
-        .map_err(|error| PolicyError::RuleExecution(error.to_string()))?;
-    rules.finalize_package(&mut report);
-    let canonical = serde_json_canonicalizer::to_vec(&report.findings)
-        .map_err(|error| PolicyError::Canonicalization(error.to_string()))?;
-    ensure_canonical_output_size(canonical.len()).map_err(PolicyError::CanonicalOutputLimit)?;
-    Ok(report)
+    crate::evaluate_with_rules_and_context(output, path, options, input, rules, &execution)
 }
 
 fn evaluate_source(

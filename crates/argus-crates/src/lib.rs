@@ -25,8 +25,9 @@ pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, CrateVersion, CratesPackument};
 pub use scan::{
-    scan_crate_archive, scan_crate_archive_with_rules, scan_extracted_crate,
-    scan_extracted_crate_with_rules,
+    scan_crate_archive, scan_crate_archive_with_rules, scan_crate_archive_with_rules_and_context,
+    scan_extracted_crate, scan_extracted_crate_with_rules,
+    scan_extracted_crate_with_rules_and_context,
 };
 
 /// crates.io serves `.crate` archives from `*.crates.io` (canonically
@@ -105,6 +106,17 @@ pub fn fetch_and_scan_crate_with_rules(
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_crate_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_crate_with_rules_and_context(
+    pkg: &CrateRef,
+    opts: &CratesFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ScanReport> {
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
     let packument_url = format!(
@@ -179,11 +191,12 @@ pub fn fetch_and_scan_crate_with_rules(
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
 
-    let mut report = scan_crate_archive_with_rules(
+    let mut report = scan_crate_archive_with_rules_and_context(
         &crate_bytes,
         extract_root.path(),
         opts.max_extracted_bytes,
         rules,
+        execution,
     )
     .context("scan extracted .crate")?;
 
@@ -234,13 +247,25 @@ impl argus_pipeline::EcosystemFetcher for CratesFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = CrateRef::parse(spec)?;
         let opts = CratesFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..CratesFetchOptions::default()
         };
-        fetch_and_scan_crate_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_crate_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

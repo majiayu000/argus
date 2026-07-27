@@ -25,7 +25,9 @@ mod scan;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, ComposerManifest, ComposerPackument, ComposerRef};
-pub use scan::{scan_composer_zip, scan_composer_zip_with_rules};
+pub use scan::{
+    scan_composer_zip, scan_composer_zip_with_rules, scan_composer_zip_with_rules_and_context,
+};
 
 /// Composer dist artifacts come from GitHub/GitLab/Bitbucket CDNs, not from
 /// repo.packagist.org itself. The allowlist covers those well-known code-
@@ -76,6 +78,17 @@ pub fn fetch_and_scan_composer_with_rules(
     opts: &ComposerFetchOptions,
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_composer_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_composer_with_rules_and_context(
+    pkg: &ComposerRef,
+    opts: &ComposerFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
@@ -171,12 +184,13 @@ pub fn fetch_and_scan_composer_with_rules(
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
 
-    let mut report = scan::scan_composer_zip_with_rules(
+    let mut report = scan::scan_composer_zip_with_rules_and_context(
         &zip_bytes,
         extract_root.path(),
         opts.max_extracted_bytes,
         version_obj,
         rules,
+        execution,
     )
     .context("scan extracted Composer zip")?;
 
@@ -230,13 +244,25 @@ impl argus_pipeline::EcosystemFetcher for ComposerFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = ComposerRef::parse(spec)?;
         let opts = ComposerFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..ComposerFetchOptions::default()
         };
-        fetch_and_scan_composer_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_composer_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

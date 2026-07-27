@@ -47,8 +47,9 @@ pub use metadata::{
     normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };
 pub use scan::{
-    scan_extracted_nupkg, scan_extracted_nupkg_with_rules, scan_nuget_archive,
-    scan_nuget_archive_with_rules, NupkgScan,
+    scan_extracted_nupkg, scan_extracted_nupkg_with_rules,
+    scan_extracted_nupkg_with_rules_and_context, scan_nuget_archive, scan_nuget_archive_with_rules,
+    scan_nuget_archive_with_rules_and_context, NupkgScan,
 };
 
 /// The flat-container download host for nuget.org is the registry host
@@ -127,6 +128,17 @@ pub fn fetch_and_scan_nuget_with_rules(
     opts: &NugetFetchOptions,
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_nuget_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_nuget_with_rules_and_context(
+    pkg: &NugetRef,
+    opts: &NugetFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(&opts.registry)
@@ -219,11 +231,12 @@ pub fn fetch_and_scan_nuget_with_rules(
         }
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
-    let scan = scan_nuget_archive_with_rules(
+    let scan = scan_nuget_archive_with_rules_and_context(
         &nupkg_bytes,
         extract_root.path(),
         opts.max_extracted_bytes,
         rules,
+        execution,
     )
     .context("scan extracted .nupkg")?;
     findings.extend(scan.findings);
@@ -318,13 +331,25 @@ impl argus_pipeline::EcosystemFetcher for NugetFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = NugetRef::parse(spec)?;
         let opts = NugetFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..NugetFetchOptions::default()
         };
-        fetch_and_scan_nuget_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_nuget_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

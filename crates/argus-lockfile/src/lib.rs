@@ -4,6 +4,7 @@
 //! and no parser can invoke a process, transport, or package manager.
 
 mod bounds;
+mod context;
 mod detect;
 mod model;
 pub mod parsers;
@@ -14,6 +15,7 @@ pub use bounds::{
     BoundedInput, ScalarBudget, MAX_CANONICAL_OUTPUT_BYTES, MAX_INPUT_BYTES, MAX_NESTING_DEPTH,
     MAX_RECORDS, MAX_SCALAR_BYTES, MAX_SCALAR_COUNT,
 };
+pub use context::evaluate_with_rules_and_context;
 pub use detect::{detect_format, DetectionRequest, FormatHint};
 pub use model::{
     Coverage, DetectedLockfile, FormatVersion, IntegrityEvidence, IntegrityState, LockfileError,

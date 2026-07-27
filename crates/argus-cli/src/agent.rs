@@ -3,8 +3,8 @@
 use crate::{print_report_text, sarif, Format};
 use anyhow::{bail, Context, Result};
 use argus_agent::{
-    scan_agent_surface_with_snapshot_and_rules, BaselineMode, LlmJudge, LlmJudgeRequest,
-    LlmJudgeResponse, SnapshotMode,
+    scan_agent_surface_with_snapshot_and_rules_and_context, BaselineMode, LlmJudge,
+    LlmJudgeRequest, LlmJudgeResponse, SnapshotMode,
 };
 use argus_core::{Decision, ScanReport};
 use argus_rules::RuleSession;
@@ -41,6 +41,7 @@ pub fn cmd_agent_scan(
     llm_judge: bool,
     llm_judge_command: Option<&Path>,
     rules: RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ExitCode> {
     validate_persistence_flags(
         paths,
@@ -73,12 +74,13 @@ pub fn cmd_agent_scan(
         if !path.exists() {
             bail!("path does not exist: {}", path.display());
         }
-        let outcome = scan_agent_surface_with_snapshot_and_rules(
+        let outcome = scan_agent_surface_with_snapshot_and_rules_and_context(
             path,
             baseline_mode,
             snapshot_mode,
             judge.as_ref().map(|judge| judge as &dyn LlmJudge),
             &rules,
+            execution,
         )
         .with_context(|| format!("agent scan {}", path.display()))?;
         if outcome.operational_error.is_some() {
@@ -492,6 +494,10 @@ fn baseline_entry_count(path: &Path) -> Result<usize> {
 mod tests {
     use super::*;
 
+    fn execution() -> argus_core::ExecutionContext {
+        argus_core::ExecutionContext::serial().unwrap()
+    }
+
     // The multi-path guard must fire before any filesystem access, so
     // non-existent paths still trigger it deterministically.
     fn two_paths() -> Vec<PathBuf> {
@@ -513,6 +519,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("single"), "{err}");
@@ -530,6 +537,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("single"), "{err}");
@@ -550,6 +558,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
@@ -583,6 +592,7 @@ mod tests {
             true,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("requires --llm-judge-command"));
@@ -600,6 +610,7 @@ mod tests {
             false,
             Some(Path::new("/tmp/judge")),
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("requires --llm-judge"));
@@ -623,6 +634,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .expect("text agent scan");
         cmd_agent_scan(
@@ -635,6 +647,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .expect("JSON agent scan");
 
@@ -655,6 +668,7 @@ mod tests {
             false,
             None,
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .expect("update baseline agent scan");
         assert!(baseline.exists());
@@ -737,6 +751,7 @@ mod tests {
             true,
             Some(&path),
             RuleSession::builtin().unwrap(),
+            &execution(),
         )
         .expect("agent scan with enabled judge");
     }

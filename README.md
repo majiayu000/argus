@@ -131,6 +131,25 @@ cargo run -p argus-cli -- corpus eval --corpus corpus/agent --format json
 
 The compiled binary is named `argus` and exits non-zero on `block`.
 
+Scanning commands accept `--jobs N` with `N` in `1..=64`. Omitted jobs resolve
+once per invocation to the machine's available parallelism, capped at 16.
+Argus creates one private worker pool, keeps discovery, archive extraction,
+metadata selection, global resource accounting, and report emission ordered,
+and parallelizes only independent bounded file matching. `--jobs 1` is the
+deterministic compatibility/debug path. Invalid values are rejected by CLI
+preflight before filesystem scanning or network access. The flag is available
+on `scan`, all fetch routes, `agent scan`, `vulns package|lockfile`, and
+`corpus test|eval`; unrelated commands do not accept it.
+
+Registry, artifact, OSV advisory-detail, and intelligence archive GETs use a
+fixed fail-closed retry policy: at most three total attempts, 10 seconds per
+attempt, and 30 seconds including backoff. Only typed transient connection
+failures and HTTP 408, 425, 429, 500, 502, 503, or 504 are retried. Other
+statuses, TLS or redirect-policy failures, oversized/malformed bodies, parsing,
+and integrity failures stop immediately. OSV querybatch POST requests and
+other non-idempotent operations are never retried. This policy is intentionally
+not user-configurable.
+
 ### External rules and overrides
 
 `scan`, all eight ecosystem fetch commands, and `agent scan` accept an explicit

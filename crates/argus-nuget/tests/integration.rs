@@ -2,7 +2,7 @@
 
 use argus_core::{Decision, ScanReport, Severity};
 use argus_nuget::{
-    fetch_and_scan_nuget, fetch_and_scan_nuget_with_rules, NugetFetchOptions, NugetRef,
+    fetch_and_scan_nuget, fetch_and_scan_nuget_with_rules_and_context, NugetFetchOptions, NugetRef,
 };
 use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
@@ -122,7 +122,7 @@ fn external_rule_session(off: bool) -> RuleSession {
     RuleSession::load(Some(dir.path()), &overrides).unwrap()
 }
 
-fn scan_external_fixture(rules: &RuleSession) -> ScanReport {
+fn scan_external_fixture(rules: &RuleSession, jobs: usize) -> ScanReport {
     let id = "external.package";
     let version = "1.0.0";
     let nupkg = make_nupkg(&[
@@ -135,11 +135,14 @@ fn scan_external_fixture(rules: &RuleSession) -> ScanReport {
     let transport = MockTransport::new();
     base_routes(&transport, id, version, &nupkg);
     integrity_routes(&transport, id, version, &sha512_b64(&nupkg), "SHA512");
-    fetch_and_scan_nuget_with_rules(
+    let execution =
+        argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(jobs).unwrap()).unwrap();
+    fetch_and_scan_nuget_with_rules_and_context(
         &NugetRef::parse(&format!("External.Package@{version}")).unwrap(),
         &NugetFetchOptions::default(),
         &transport,
         rules,
+        &execution,
     )
     .unwrap()
 }
@@ -147,7 +150,14 @@ fn scan_external_fixture(rules: &RuleSession) -> ScanReport {
 #[test]
 fn nuget_external_rule_matches_and_can_be_disabled() {
     let enabled = external_rule_session(false);
-    let report = scan_external_fixture(&enabled);
+    let report = scan_external_fixture(&enabled, 1);
+    let baseline = serde_json::to_vec(&report).unwrap();
+    for jobs in [2, 8, 64] {
+        assert_eq!(
+            serde_json::to_vec(&scan_external_fixture(&enabled, jobs)).unwrap(),
+            baseline
+        );
+    }
     let finding = report
         .findings
         .iter()
@@ -183,7 +193,7 @@ fn nuget_external_rule_matches_and_can_be_disabled() {
     );
 
     let disabled = external_rule_session(true);
-    let report = scan_external_fixture(&disabled);
+    let report = scan_external_fixture(&disabled, 1);
     assert!(!report
         .findings
         .iter()

@@ -1,5 +1,6 @@
 use argus_rules::{
-    scan_package_dir_with_rules, RuleSession, MAX_EXTERNAL_INPUT_BYTES, MAX_EXTERNAL_SCAN_FILES,
+    scan_package_dir_with_rules, scan_package_dir_with_rules_and_context, RuleSession,
+    MAX_EXTERNAL_INPUT_BYTES, MAX_EXTERNAL_SCAN_FILES,
 };
 use serde_json::{Map, Value};
 use std::fs;
@@ -33,12 +34,14 @@ fn write_package(root: &std::path::Path, count: usize) {
 #[test]
 fn lifecycle_surface_count_accepts_limit_and_rejects_plus_one() {
     let rules = external_session();
+    let execution =
+        argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(64).unwrap()).unwrap();
     let package = tempfile::tempdir().unwrap();
     write_package(package.path(), MAX_EXTERNAL_SCAN_FILES - 1);
-    scan_package_dir_with_rules(package.path(), &rules).unwrap();
+    scan_package_dir_with_rules_and_context(package.path(), &rules, &execution).unwrap();
 
     write_package(package.path(), MAX_EXTERNAL_SCAN_FILES);
-    assert!(scan_package_dir_with_rules(package.path(), &rules).is_err());
+    assert!(scan_package_dir_with_rules_and_context(package.path(), &rules, &execution).is_err());
 }
 
 #[test]

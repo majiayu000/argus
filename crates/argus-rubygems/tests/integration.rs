@@ -8,7 +8,7 @@
 
 use argus_core::{Decision, Severity};
 use argus_rubygems::{
-    fetch_and_scan_gems, fetch_and_scan_gems_with_rules, GemFetchOptions, GemRef,
+    fetch_and_scan_gems, fetch_and_scan_gems_with_rules_and_context, GemFetchOptions, GemRef,
 };
 use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
@@ -93,6 +93,22 @@ fn scan_gem_fixture_with_rules(
     gem: Vec<u8>,
     rules: &RuleSession,
 ) -> anyhow::Result<argus_core::ScanReport> {
+    scan_gem_fixture_with_context(
+        name,
+        version,
+        gem,
+        rules,
+        &argus_core::ExecutionContext::serial()?,
+    )
+}
+
+fn scan_gem_fixture_with_context(
+    name: &str,
+    version: &str,
+    gem: Vec<u8>,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> anyhow::Result<argus_core::ScanReport> {
     let registry = "https://rubygems.org";
     let versions_url = format!("{registry}/api/v1/versions/{name}.json");
     let download_url = format!("{registry}/downloads/{name}-{version}.gem");
@@ -105,7 +121,7 @@ fn scan_gem_fixture_with_rules(
 
     let opts = GemFetchOptions::default();
     let pkg = GemRef::parse(name)?;
-    fetch_and_scan_gems_with_rules(&pkg, &opts, &transport, rules)
+    fetch_and_scan_gems_with_rules_and_context(&pkg, &opts, &transport, rules, execution)
 }
 
 fn gemspec(name: &str, version: &str, extra: &str) -> String {
@@ -285,6 +301,98 @@ fn clean_pure_ruby_gem_allows() {
     );
     assert_eq!(report.package_name.as_deref(), Some("cleangem"));
     assert_eq!(report.package_version.as_deref(), Some("1.0.0"));
+}
+
+fn assert_rubygems_jobs_report(
+    name: &str,
+    gem: impl Fn() -> Vec<u8>,
+    rules: &RuleSession,
+) -> argus_core::ScanReport {
+    let mut baseline = None;
+    let mut baseline_report = None;
+    for jobs in [1, 2, 8, 64] {
+        let execution =
+            argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(jobs).unwrap())
+                .unwrap();
+        let report =
+            scan_gem_fixture_with_context(name, "1.0.0", gem(), rules, &execution).unwrap();
+        let actual = serde_json::to_vec(&report).unwrap();
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected, "jobs={jobs}");
+        } else {
+            baseline = Some(actual);
+            baseline_report = Some(report);
+        }
+    }
+    baseline_report.unwrap()
+}
+
+#[test]
+fn rubygems_positive_clean_and_deterministic_error_are_identical_across_jobs() {
+    let builtin = RuleSession::builtin().unwrap();
+    let clean = assert_rubygems_jobs_report(
+        "jobs-clean",
+        || {
+            make_gem(
+                &gemspec("jobs-clean", "1.0.0", "extensions: []\n"),
+                &[("lib/jobs_clean.rb", b"module JobsClean; end\n")],
+            )
+        },
+        &builtin,
+    );
+    assert_eq!(clean.decision, Decision::Allow);
+
+    let positive = assert_rubygems_jobs_report(
+        "jobs-positive",
+        || {
+            make_gem(
+                &gemspec(
+                    "jobs-positive",
+                    "1.0.0",
+                    "extensions:\n- ext/jobs/extconf.rb\n",
+                ),
+                &[(
+                    "ext/jobs/extconf.rb",
+                    b"require 'open-uri'\nURI.open('https://collector.example.invalid')\n",
+                )],
+            )
+        },
+        &builtin,
+    );
+    assert_eq!(positive.decision, Decision::Block);
+    assert!(!positive.findings.is_empty());
+
+    let fixture = || {
+        make_gem(
+            &gemspec("jobs-error", "1.0.0", "extensions: []\n"),
+            &[
+                ("lib/a-invalid.rb", b"puts \xff"),
+                ("lib/b-invalid.rb", b"puts \xfe"),
+            ],
+        )
+    };
+    let error_rules = external_rule_session(false);
+    let mut baseline = None;
+    for jobs in [1, 2, 8, 64] {
+        let execution =
+            argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(jobs).unwrap())
+                .unwrap();
+        let error = scan_gem_fixture_with_context(
+            "jobs-error",
+            "1.0.0",
+            fixture(),
+            &error_rules,
+            &execution,
+        )
+        .unwrap_err();
+        let actual = format!("{error:#}");
+        assert!(actual.contains("a-invalid.rb"), "{actual}");
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected, "jobs={jobs}");
+        } else {
+            baseline = Some(actual);
+        }
+    }
 }
 
 #[test]
@@ -504,6 +612,16 @@ fn rubygems_external_rule_matches_and_can_be_disabled() {
     };
     let enabled = external_rule_session(false);
     let report = scan_gem_fixture_with_rules("externalgem", "1.0.0", fixture(), &enabled).unwrap();
+    let baseline = serde_json::to_vec(&report).unwrap();
+    for jobs in [2, 8, 64] {
+        let execution =
+            argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(jobs).unwrap())
+                .unwrap();
+        let parallel =
+            scan_gem_fixture_with_context("externalgem", "1.0.0", fixture(), &enabled, &execution)
+                .unwrap();
+        assert_eq!(serde_json::to_vec(&parallel).unwrap(), baseline);
+    }
     let finding = report
         .findings
         .iter()

@@ -15,13 +15,14 @@
 use crate::{finding, rules};
 use anyhow::Result;
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{read_text_file_bounded, scan_text_file, RuleSession};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use quick_xml::XmlVersion;
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
+type NupkgFileResult = (Vec<Finding>, bool, Option<(Option<String>, Option<String>)>);
 
 /// Result of scanning an extracted `.nupkg` tree.
 pub struct NupkgScan {
@@ -46,8 +47,25 @@ pub fn scan_nuget_archive_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<NupkgScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_nuget_archive_with_rules_and_context(
+        nupkg_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_nuget_archive_with_rules_and_context(
+    nupkg_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<NupkgScan> {
     argus_archive::extract_zip(nupkg_bytes, dest_root, max_extracted_bytes, ".nupkg entry")?;
-    scan_extracted_nupkg_with_rules(dest_root, rules)
+    scan_extracted_nupkg_with_rules_and_context(dest_root, rules, execution)
 }
 
 /// Walk the extracted tree and apply all rules.
@@ -57,11 +75,21 @@ pub fn scan_extracted_nupkg(dest_root: &Path) -> Result<NupkgScan> {
 }
 
 pub fn scan_extracted_nupkg_with_rules(dest_root: &Path, rules: &RuleSession) -> Result<NupkgScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_extracted_nupkg_with_rules_and_context(dest_root, rules, &execution)
+}
+
+pub fn scan_extracted_nupkg_with_rules_and_context(
+    dest_root: &Path,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<NupkgScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut nuspec_seen = false;
 
+    let mut inputs = Vec::new();
     for entry in walkdir::WalkDir::new(dest_root).follow_links(false) {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -74,9 +102,6 @@ pub fn scan_extracted_nupkg_with_rules(dest_root: &Path, rules: &RuleSession) ->
             .to_string_lossy()
             .replace('\\', "/");
         let lower_rel = rel.to_ascii_lowercase();
-        let meta = entry.metadata()?;
-        let oversized = meta.len() > TEXT_MAX_BYTES;
-
         // STEP 1 — PATH-based classification, BEFORE the size cap.
         //
         // The NuGet trigger surface (install-hook scripts, MSBuild
@@ -88,63 +113,44 @@ pub fn scan_extracted_nupkg_with_rules(dest_root: &Path, rules: &RuleSession) ->
         let is_nuspec = !rel.contains('/') && lower_rel.ends_with(".nuspec");
         let is_ps1 = lower_rel.ends_with(".ps1");
         let is_msbuild = is_msbuild_autoimport(&lower_rel);
-        if is_ps1 {
-            // Path-only: a canonically-named install hook is flagged even
-            // when its body is oversized (content rules below may be
-            // unavailable, but its mere presence is the structural signal).
-            scan_powershell_name(&rel, &mut findings);
-        }
-
-        // STEP 2 — read + decode the body. NuGet trigger files have their
-        // content rules applied even when oversized (their set is bounded
-        // and they are exactly the evasion target); generic files honor the
-        // size cap so an arbitrarily large blob is not loaded into memory.
-        let is_trigger = is_nuspec || is_ps1 || is_msbuild;
-        if oversized && !is_trigger {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // The single root-level `*.nuspec` is the manifest.
-        if is_nuspec {
-            nuspec_seen = true;
-            if let Some((n, v)) = parse_nuspec_name_version(&content) {
-                name = name.or(n);
-                version = version.or(v);
-            }
-            scan_nuspec_structure(&content, &rel, &mut findings);
-            continue;
-        }
-
-        // Ecosystem-agnostic content rules. Generic files only reach here
-        // when within the size cap; trigger files reach here regardless.
-        if !oversized {
-            scan_text_file(
-                &TextFile {
-                    rel: rel.clone(),
-                    content: content.clone(),
-                },
-                &mut findings,
-            );
-        }
-
-        // PowerShell install/uninstall content rules (download-exec, obfuscation).
-        if is_ps1 {
-            scan_powershell_content(&content, &rel, &mut findings);
-        }
-
-        // MSBuild build-time content rules.
-        if is_msbuild {
-            scan_msbuild(&content, &rel, &mut findings);
-        }
+        inputs.push((rel, abs.to_path_buf(), is_nuspec, is_ps1, is_msbuild));
     }
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    execution.execute_ordered(
+        &inputs,
+        None,
+        |_index, (rel, abs, is_nuspec, is_ps1, is_msbuild)| -> Result<NupkgFileResult> {
+            let mut per_file = Vec::new();
+            if *is_ps1 {
+                scan_powershell_name(rel, &mut per_file);
+            }
+            let Some(file) = read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? else {
+                return Ok((per_file, *is_nuspec, None));
+            };
+            if *is_nuspec {
+                let metadata = parse_nuspec_name_version(&file.content);
+                scan_nuspec_structure(&file.content, rel, &mut per_file);
+                return Ok((per_file, true, metadata));
+            }
+            scan_text_file(&file, &mut per_file);
+            if *is_ps1 {
+                scan_powershell_content(&file.content, rel, &mut per_file);
+            }
+            if *is_msbuild {
+                scan_msbuild(&file.content, rel, &mut per_file);
+            }
+            Ok((per_file, false, None))
+        },
+        |_index, (mut per_file, saw_nuspec, metadata)| {
+            nuspec_seen |= saw_nuspec;
+            if let Some((found_name, found_version)) = metadata {
+                name = name.take().or(found_name);
+                version = version.take().or(found_version);
+            }
+            findings.append(&mut per_file);
+            Ok(())
+        },
+    )?;
 
     if !nuspec_seen {
         findings.push(finding(
@@ -154,7 +160,7 @@ pub fn scan_extracted_nupkg_with_rules(dest_root: &Path, rules: &RuleSession) ->
         ));
     }
 
-    rules.scan_directory(dest_root, &mut findings)?;
+    rules.scan_directory_with_context(dest_root, &mut findings, execution)?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);
 

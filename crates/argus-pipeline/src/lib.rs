@@ -10,7 +10,7 @@
 //! Mirrors the pattern proven by `argus-lockfile`'s `LockfileParser`.
 
 use anyhow::Result;
-use argus_core::{Ecosystem, ScanReport};
+use argus_core::{Ecosystem, ExecutionContext, ScanReport};
 use argus_rules::RuleSession;
 use argus_transport::Transport;
 use std::path::PathBuf;
@@ -48,4 +48,94 @@ pub trait EcosystemFetcher {
         transport: &dyn Transport,
         rules: &RuleSession,
     ) -> Result<ScanReport>;
+
+    /// Run through one invocation-local worker pool supplied by the caller.
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &RuleSession,
+        _execution: &ExecutionContext,
+    ) -> Result<ScanReport> {
+        self.fetch_and_scan(spec, opts, transport, rules)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_core::{ArtifactKind, Decision, ScanConcurrency};
+    use std::sync::Mutex;
+
+    struct NoNetwork;
+
+    impl Transport for NoNetwork {
+        fn get(&self, _url: &str, _max_bytes: u64) -> Result<Vec<u8>> {
+            unreachable!("routing test performs no network work")
+        }
+    }
+
+    struct Probe(Mutex<Vec<usize>>);
+
+    impl EcosystemFetcher for Probe {
+        fn ecosystem(&self) -> Ecosystem {
+            Ecosystem::Npm
+        }
+
+        fn default_registry(&self) -> &'static str {
+            "https://example.test"
+        }
+
+        fn fetch_and_scan(
+            &self,
+            spec: &str,
+            opts: &CommonFetchOptions,
+            transport: &dyn Transport,
+            rules: &RuleSession,
+        ) -> Result<ScanReport> {
+            let execution = ExecutionContext::serial()?;
+            self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+        }
+
+        fn fetch_and_scan_with_context(
+            &self,
+            _spec: &str,
+            _opts: &CommonFetchOptions,
+            _transport: &dyn Transport,
+            _rules: &RuleSession,
+            execution: &ExecutionContext,
+        ) -> Result<ScanReport> {
+            self.0.lock().unwrap().push(execution.concurrency().get());
+            Ok(ScanReport {
+                artifact: ArtifactKind::PackageDir,
+                path: "probe".into(),
+                package_name: None,
+                package_version: None,
+                decision: Decision::Allow,
+                findings: Vec::new(),
+                coordinate: None,
+                intelligence: None,
+                rules: None,
+            })
+        }
+    }
+
+    #[test]
+    fn trait_routes_explicit_context_and_legacy_serial_wrapper() {
+        let probe = Probe(Mutex::new(Vec::new()));
+        let options = CommonFetchOptions {
+            registry: probe.default_registry().to_string(),
+            cache_dir: None,
+        };
+        let rules = RuleSession::builtin().unwrap();
+        let execution = ExecutionContext::new(ScanConcurrency::new(64).unwrap()).unwrap();
+        probe
+            .fetch_and_scan_with_context("demo", &options, &NoNetwork, &rules, &execution)
+            .unwrap();
+        probe
+            .fetch_and_scan("demo", &options, &NoNetwork, &rules)
+            .unwrap();
+        assert_eq!(*probe.0.lock().unwrap(), [64, 1]);
+    }
 }

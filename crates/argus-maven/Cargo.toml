@@ -22,6 +22,7 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 argus-test-support = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 sha1 = { workspace = true }
 hex = { workspace = true }

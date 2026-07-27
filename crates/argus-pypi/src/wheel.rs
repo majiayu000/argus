@@ -13,7 +13,7 @@
 use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -34,6 +34,42 @@ pub fn scan_wheel_zip_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_wheel_zip_with_rules_and_context(
+        wheel_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_wheel_zip_with_rules_and_context(
+    wheel_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
+    let mut budget = argus_rules::ExternalScanBudget::default();
+    scan_wheel_zip_with_rules_budget_and_context(
+        wheel_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        execution,
+        &mut budget,
+    )
+}
+
+pub(crate) fn scan_wheel_zip_with_rules_budget_and_context(
+    wheel_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+    external_budget: &mut argus_rules::ExternalScanBudget,
+) -> Result<ArtifactScan> {
     argus_archive::extract_zip(wheel_bytes, dest_root, max_extracted_bytes, "wheel entry")
         .context("extract wheel")?;
 
@@ -41,68 +77,50 @@ pub fn scan_wheel_zip_with_rules(
     let mut version: Option<String> = None;
     let mut findings: Vec<Finding> = Vec::new();
 
-    // Now walk the extracted dir and apply rules. Two distinct kinds of
-    // files matter:
-    // - `*.dist-info/METADATA` for the package name + version
-    // - any `*.py` for import-time hooks + generic rules
-    for entry in walkdir::WalkDir::new(dest_root).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
+    let (file_results, _) = scan_text_files_with_context(
+        dest_root,
+        TEXT_MAX_BYTES,
+        execution,
+        |file| {
+            let mut per_file = Vec::new();
+            let metadata = if file.rel.ends_with(".dist-info/METADATA")
+                || file.rel.ends_with(".dist-info/METADATA.txt")
+            {
+                parse_metadata_name_version(&file.content)
+            } else {
+                scan_text_file(file, &mut per_file);
+                if (file.rel.ends_with(".py") || file.rel.ends_with(".pyi"))
+                    && rules::import_time_hook_regex().is_match(&file.content)
+                {
+                    per_file.push(finding(
+                        "import-time-hook",
+                        Severity::Critical,
+                        format!(
+                            "wheel Python file `{}` rewrites sys.modules or __builtins__ at module load",
+                            file.rel
+                        ),
+                    ));
+                }
+                None
+            };
+            Ok::<_, anyhow::Error>((per_file, metadata))
+        },
+    )?;
+    for (mut per_file, metadata) in file_results {
+        if let Some((found_name, found_version)) = metadata {
+            name = name.take().or(Some(found_name));
+            version = version.take().or(Some(found_version));
         }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(dest_root)
-            .unwrap_or(abs)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // METADATA gives us name + version.
-        if rel.ends_with(".dist-info/METADATA") || rel.ends_with(".dist-info/METADATA.txt") {
-            if let Some((n, v)) = parse_metadata_name_version(&content) {
-                name = name.or(Some(n));
-                version = version.or(Some(v));
-            }
-            continue;
-        }
-
-        // Ecosystem-agnostic content rules.
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
-
-        // Import-time hook detection for any Python source.
-        if (rel.ends_with(".py") || rel.ends_with(".pyi"))
-            && rules::import_time_hook_regex().is_match(&content)
-        {
-            findings.push(finding(
-                "import-time-hook",
-                Severity::Critical,
-                format!(
-                    "wheel Python file `{rel}` rewrites sys.modules or __builtins__ at module load"
-                ),
-            ));
-        }
+        findings.append(&mut per_file);
     }
 
     rules
-        .scan_directory(dest_root, &mut findings)
+        .scan_directory_with_budget_and_context(
+            dest_root,
+            &mut findings,
+            execution,
+            external_budget,
+        )
         .context("run configured rules on extracted wheel")?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);

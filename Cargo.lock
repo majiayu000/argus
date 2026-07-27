@@ -329,6 +329,7 @@ dependencies = [
  "hex",
  "quick-xml",
  "regex",
+ "serde_json",
  "sha1",
  "sha2",
  "tempfile",
