@@ -14,7 +14,7 @@
 //! and platform/build-tag selection (we conservatively scan all files).
 
 use crate::{finding, rules, ArtifactScan};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
 use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 
@@ -104,14 +104,17 @@ pub fn scan_extracted_module_with_rules(
     module: &ExtractedModule,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
-    if rules.external_rule_count() > 0 && module.files.len() > argus_rules::MAX_EXTERNAL_SCAN_FILES
-    {
-        bail!(
-            "external-rule scan exceeds {} regular files",
-            argus_rules::MAX_EXTERNAL_SCAN_FILES
-        );
-    }
     let mut findings: Vec<Finding> = Vec::new();
+    rules
+        .scan_virtual_inputs(
+            module.files.len(),
+            module
+                .files
+                .iter()
+                .map(|(zip_name, bytes)| (zip_name.as_str(), bytes.as_slice())),
+            &mut findings,
+        )
+        .context("run configured rules on Go module files")?;
 
     let init_re = rules::init_func_regex();
     let var_re = rules::package_var_exec_regex();
@@ -123,9 +126,6 @@ pub fn scan_extracted_module_with_rules(
 
     for (zip_name, bytes) in &module.files {
         let rel = strip_module_prefix(zip_name);
-        rules
-            .scan_bytes(zip_name, bytes, &mut findings)
-            .with_context(|| format!("run configured rules on Go module file `{zip_name}`"))?;
         if bytes.len() as u64 > TEXT_MAX_BYTES {
             continue;
         }

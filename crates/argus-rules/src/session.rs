@@ -13,9 +13,7 @@ use argus_syntax::ScriptLanguage;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read as _;
-use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
 pub const MAX_RULE_FILES: usize = 1_024;
@@ -31,6 +29,11 @@ pub struct RuleSession {
     effective: EffectiveRuleSet,
     metadata: Option<RuleExecutionMetadata>,
     external_rule_count: usize,
+}
+
+enum ExternalScanInput<'a> {
+    File(PathBuf),
+    Virtual(&'a [u8]),
 }
 
 impl RuleSession {
@@ -128,6 +131,12 @@ impl RuleSession {
         self.external_rule_count
     }
 
+    pub(crate) fn has_enabled_external_rules(&self) -> bool {
+        self.effective.rules().iter().any(|rule| {
+            rule.enabled() && !matches!(rule.definition().matcher, RuleMatcher::Builtin { .. })
+        })
+    }
+
     /// Match one bounded text surface. At most one finding is emitted for
     /// each external rule and logical file.
     pub fn scan_bytes(&self, rel: &str, bytes: &[u8], findings: &mut Vec<Finding>) -> Result<()> {
@@ -200,10 +209,27 @@ impl RuleSession {
 
     /// Recursively scan eligible regular files in deterministic path order.
     pub fn scan_directory(&self, root: &Path, findings: &mut Vec<Finding>) -> Result<()> {
-        if self.external_rule_count == 0 {
+        self.scan_directory_with_virtual_inputs(
+            root,
+            0,
+            std::iter::empty::<(String, &[u8])>(),
+            findings,
+        )
+    }
+
+    /// Scan real files and caller-declared virtual inputs under one shared
+    /// pre-match surface budget.
+    pub fn scan_directory_with_virtual_inputs<'a>(
+        &self,
+        root: &Path,
+        virtual_input_count: usize,
+        virtual_inputs: impl IntoIterator<Item = (String, &'a [u8])>,
+        findings: &mut Vec<Finding>,
+    ) -> Result<()> {
+        if !self.has_enabled_external_rules() {
             return Ok(());
         }
-        let mut files = Vec::new();
+        let mut inputs = Vec::new();
         for entry in walkdir::WalkDir::new(root).follow_links(false) {
             let entry = entry
                 .with_context(|| format!("walk external-rule scan root {}", root.display()))?;
@@ -215,23 +241,73 @@ impl RuleSession {
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("external-rule path is not valid UTF-8"))?
                     .replace('\\', "/");
-                files.push((rel, entry.path().to_path_buf()));
-                if files.len() > MAX_EXTERNAL_SCAN_FILES {
-                    bail!("external-rule scan exceeds {MAX_EXTERNAL_SCAN_FILES} regular files");
+                inputs.push((rel, ExternalScanInput::File(entry.path().to_path_buf())));
+                if inputs.len() > MAX_EXTERNAL_SCAN_FILES {
+                    bail!("external-rule scan exceeds {MAX_EXTERNAL_SCAN_FILES} inputs");
                 }
             }
         }
-        files.sort_by(|left, right| left.0.cmp(&right.0));
+        validate_external_input_count(inputs.len(), virtual_input_count)?;
+        let virtual_inputs = virtual_inputs
+            .into_iter()
+            .take(virtual_input_count + 1)
+            .collect::<Vec<_>>();
+        if virtual_inputs.len() != virtual_input_count {
+            bail!("external-rule virtual input count does not match declared count");
+        }
+        inputs.extend(
+            virtual_inputs
+                .into_iter()
+                .map(|(rel, bytes)| (rel, ExternalScanInput::Virtual(bytes))),
+        );
+        self.scan_inputs(inputs, findings)
+    }
+
+    /// Scan an in-memory batch under the shared pre-match surface budget.
+    pub fn scan_virtual_inputs<'a>(
+        &self,
+        input_count: usize,
+        inputs: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+        findings: &mut Vec<Finding>,
+    ) -> Result<()> {
+        if !self.has_enabled_external_rules() {
+            return Ok(());
+        }
+        validate_external_input_count(0, input_count)?;
+        let inputs = inputs
+            .into_iter()
+            .take(input_count + 1)
+            .map(|(rel, bytes)| (rel.to_string(), ExternalScanInput::Virtual(bytes)))
+            .collect::<Vec<_>>();
+        if inputs.len() != input_count {
+            bail!("external-rule virtual input count does not match declared count");
+        }
+        self.scan_inputs(inputs, findings)
+    }
+
+    fn scan_inputs(
+        &self,
+        mut inputs: Vec<(String, ExternalScanInput<'_>)>,
+        findings: &mut Vec<Finding>,
+    ) -> Result<()> {
+        inputs.sort_by(|left, right| left.0.cmp(&right.0));
         let initial_len = findings.len();
         let mut evidence_bytes = 0usize;
-        for (rel, path) in files {
+        for (rel, input) in inputs {
             if !has_relevant_language(self, &rel) {
                 continue;
             }
-            let bytes = read_bounded(&path, MAX_EXTERNAL_INPUT_BYTES)
-                .with_context(|| format!("read external-rule input `{rel}`"))?;
+            let owned;
+            let bytes = match input {
+                ExternalScanInput::File(path) => {
+                    owned = read_bounded(&path, MAX_EXTERNAL_INPUT_BYTES)
+                        .with_context(|| format!("read external-rule input `{rel}`"))?;
+                    owned.as_slice()
+                }
+                ExternalScanInput::Virtual(bytes) => bytes,
+            };
             let previous_len = findings.len();
-            self.scan_bytes(&rel, &bytes, findings)?;
+            self.scan_bytes(&rel, bytes, findings)?;
             if findings.len() - initial_len > MAX_EXTERNAL_FINDINGS {
                 bail!("external-rule findings exceed {MAX_EXTERNAL_FINDINGS}");
             }
@@ -507,6 +583,16 @@ fn read_bounded_file(file: File, maximum: usize) -> Result<Vec<u8>> {
         bail!("file exceeds {maximum} bytes");
     }
     Ok(bytes)
+}
+
+fn validate_external_input_count(real: usize, virtual_count: usize) -> Result<()> {
+    let total = real
+        .checked_add(virtual_count)
+        .ok_or_else(|| anyhow::anyhow!("external-rule input count overflow"))?;
+    if total > MAX_EXTERNAL_SCAN_FILES {
+        bail!("external-rule scan exceeds {MAX_EXTERNAL_SCAN_FILES} inputs");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

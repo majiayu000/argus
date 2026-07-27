@@ -11,11 +11,15 @@ pub(super) fn scan_files(
     files: &[SurfaceFile],
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
-    for file in files {
-        rules
-            .scan_bytes(&file.rel, file.content.as_bytes(), findings)
-            .with_context(|| format!("run external rules on agent surface `{}`", file.rel))?;
-    }
+    rules
+        .scan_virtual_inputs(
+            files.len(),
+            files
+                .iter()
+                .map(|file| (file.rel.as_str(), file.content.as_bytes())),
+            findings,
+        )
+        .context("run external rules on agent surfaces")?;
     rules.validate_external_limits(findings)?;
     Ok(())
 }
@@ -50,5 +54,49 @@ pub(super) fn incomplete(
         report,
         operational_error: Some(error),
         snapshot_entry_count: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SurfaceKind;
+    use std::fs;
+
+    fn external_session() -> RuleSession {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("rules.yaml"),
+            "schema_version: 1\nrules:\n  - { id: \"agent-bounded-external\", description: \"bounded\", policy_class: blocking, default_severity: low, help_uri: \"https://example.test/agent-bounded\", languages: [markdown], matcher: { kind: literal, pattern: \"never-match\" } }\n",
+        )
+        .unwrap();
+        RuleSession::load(Some(temp.path()), &[]).unwrap()
+    }
+
+    fn surfaces(count: usize) -> Vec<SurfaceFile> {
+        (0..count)
+            .map(|index| SurfaceFile {
+                rel: format!("{index:05}.md"),
+                content: String::new(),
+                kind: SurfaceKind::Instruction,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn external_surface_count_accepts_limit_and_rejects_plus_one() {
+        let rules = external_session();
+        scan_files(
+            &rules,
+            &surfaces(argus_rules::MAX_EXTERNAL_SCAN_FILES),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(scan_files(
+            &rules,
+            &surfaces(argus_rules::MAX_EXTERNAL_SCAN_FILES + 1),
+            &mut Vec::new(),
+        )
+        .is_err());
     }
 }

@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Decision, Finding, ScanReport};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 mod binary;
@@ -63,9 +64,35 @@ pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
 }
 
 fn scan_package_dir_inner(path: &Path) -> Result<(ScanReport, PackageJson)> {
+    scan_package_dir_inner_with_limit(path, None)
+}
+
+fn scan_package_dir_inner_with_limit(
+    path: &Path,
+    package_json_limit: Option<usize>,
+) -> Result<(ScanReport, PackageJson)> {
     let pkg_json_path = path.join("package.json");
-    let pkg_json_raw = std::fs::read_to_string(&pkg_json_path)
-        .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
+    let pkg_json_raw = match package_json_limit {
+        Some(maximum) => {
+            let file = std::fs::File::open(&pkg_json_path)
+                .with_context(|| format!("open package.json at {}", pkg_json_path.display()))?;
+            let mut bytes = Vec::new();
+            file.take(maximum as u64 + 1)
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
+            if bytes.len() > maximum {
+                anyhow::bail!("external-rule package manifest exceeds {maximum} bytes");
+            }
+            String::from_utf8(bytes).with_context(|| {
+                format!(
+                    "package.json is not valid UTF-8 at {}",
+                    pkg_json_path.display()
+                )
+            })?
+        }
+        None => std::fs::read_to_string(&pkg_json_path)
+            .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?,
+    };
     let package: PackageJson = serde_json::from_str(&pkg_json_raw)
         .with_context(|| format!("parse package.json at {}", pkg_json_path.display()))?;
 
@@ -105,18 +132,24 @@ fn scan_package_dir_inner(path: &Path) -> Result<(ScanReport, PackageJson)> {
 /// Scan a package directory with one explicitly constructed immutable rule
 /// session. External matching and overrides are completed before return.
 pub fn scan_package_dir_with_rules(path: &Path, rules: &RuleSession) -> Result<ScanReport> {
-    let (mut report, package) = scan_package_dir_inner(path)?;
-    rules.scan_directory(path, &mut report.findings)?;
-    for (name, body) in &package.scripts {
-        rules.scan_bytes(
-            &format!(
-                "package.json:scripts/{}.sh",
-                encode_virtual_path_segment(name)
-            ),
-            body.as_bytes(),
-            &mut report.findings,
-        )?;
-    }
+    let package_json_limit = rules
+        .has_enabled_external_rules()
+        .then_some(MAX_EXTERNAL_INPUT_BYTES);
+    let (mut report, package) = scan_package_dir_inner_with_limit(path, package_json_limit)?;
+    rules.scan_directory_with_virtual_inputs(
+        path,
+        package.scripts.len(),
+        package.scripts.iter().map(|(name, body)| {
+            (
+                format!(
+                    "package.json:scripts/{}.sh",
+                    encode_virtual_path_segment(name)
+                ),
+                body.as_bytes(),
+            )
+        }),
+        &mut report.findings,
+    )?;
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);
     Ok(report)
