@@ -22,7 +22,7 @@ pub use normalize::canonicalize_typosquat_identity;
 pub const MAX_CANDIDATE_BYTES: usize = 512;
 /// Maximum accepted Unicode scalar values in one package identity.
 pub const MAX_CANDIDATE_SCALARS: usize = 256;
-/// Maximum targets examined for one identity.
+/// Maximum canonical or alias identities examined for one candidate.
 pub const MAX_MATCH_COMPARISONS: usize = 10_000;
 /// Maximum edit distance supported by the bounded matcher.
 pub const MAX_EDIT_DISTANCE: u8 = 2;

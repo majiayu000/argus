@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 
 const MAX_DATASET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_AGGREGATE_DATASET_BYTES: usize = 16 * 1024 * 1024;
-const MAX_ENTRIES_PER_ECOSYSTEM: usize = 50_000;
-const MAX_AGGREGATE_ENTRIES: usize = 200_000;
+const MAX_IDENTITIES_PER_ECOSYSTEM: usize = super::MAX_MATCH_COMPARISONS;
+const MAX_AGGREGATE_IDENTITIES: usize = MAX_IDENTITIES_PER_ECOSYSTEM * DATA_FILES.len();
 const MAX_ALIASES_PER_ENTRY: usize = 16;
 const MAX_SOURCES_PER_FILE: usize = 64;
 const MAX_KEYBOARD_KEYS: usize = 128;
@@ -86,6 +86,7 @@ pub(crate) struct Dataset {
 pub(crate) struct DatasetEntry {
     pub display: String,
     pub identity: SegmentedIdentity,
+    pub aliases: Vec<SegmentedIdentity>,
     pub canonical: String,
     pub legacy_priority: u64,
 }
@@ -261,7 +262,7 @@ fn load_assets() -> Result<Assets, TyposquatError> {
     let manifest: ManifestFile = parse_json("manifest.json", MANIFEST_BYTES)?;
     validate_manifest_header(&manifest)?;
     let mut aggregate_bytes = 0usize;
-    let mut aggregate_entries = 0usize;
+    let mut aggregate_identities = 0usize;
     let mut datasets = BTreeMap::new();
     let mut source_order = String::new();
     let mut audit_assets = Vec::with_capacity(10);
@@ -290,13 +291,15 @@ fn load_assets() -> Result<Assets, TyposquatError> {
         }
         let raw: DatasetFile = parse_json(file, bytes)?;
         let dataset = validate_dataset(ecosystem, file, &raw, record)?;
-        aggregate_entries =
-            checked_add(aggregate_entries, dataset.entries.len(), "dataset entries")?;
-        if dataset.entries.len() > MAX_ENTRIES_PER_ECOSYSTEM {
-            return limit(format!(
-                "{file} exceeds {MAX_ENTRIES_PER_ECOSYSTEM} entries"
-            ));
-        }
+        let identity_count = dataset.entries.iter().try_fold(0usize, |count, entry| {
+            checked_add(count, 1 + entry.aliases.len(), "dataset identities")
+        })?;
+        aggregate_identities = checked_add(
+            aggregate_identities,
+            identity_count,
+            "aggregate dataset identities",
+        )?;
+        validate_dataset_identity_count(file, identity_count)?;
         source_order.push_str(match ecosystem {
             Ecosystem::CratesIo => "crates",
             _ => expected_ecosystem,
@@ -320,9 +323,7 @@ fn load_assets() -> Result<Assets, TyposquatError> {
     if aggregate_bytes > MAX_AGGREGATE_DATASET_BYTES {
         return limit("aggregate dataset byte limit exceeded");
     }
-    if aggregate_entries > MAX_AGGREGATE_ENTRIES {
-        return limit("aggregate dataset entry limit exceeded");
-    }
+    validate_aggregate_identity_count(aggregate_identities)?;
     if sha256(source_order.as_bytes()) != manifest.combined_legacy_source_order_sha256 {
         return embedded("combined frozen source-order hash mismatch");
     }
@@ -437,22 +438,24 @@ fn validate_dataset(
             return embedded(format!("{file} has duplicate normalized identity"));
         }
         let mut previous_alias: Option<String> = None;
+        let mut aliases = Vec::with_capacity(entry.aliases.len());
         for alias in &entry.aliases {
-            let alias = segment_identity(ecosystem, alias)
-                .map_err(|error| {
-                    TyposquatError::InvalidEmbeddedData(format!("{file} invalid alias: {error}"))
-                })?
-                .canonical();
+            let alias_identity = segment_identity(ecosystem, alias).map_err(|error| {
+                TyposquatError::InvalidEmbeddedData(format!("{file} invalid alias: {error}"))
+            })?;
+            let alias = alias_identity.canonical();
             if previous_alias.as_ref().is_some_and(|value| value >= &alias)
                 || !identities.insert(alias.clone())
             {
                 return embedded(format!("{file} has duplicate or unsorted alias"));
             }
             previous_alias = Some(alias);
+            aliases.push(alias_identity);
         }
         entries.push(DatasetEntry {
             display: entry.canonical_name.clone(),
             identity,
+            aliases,
             canonical,
             legacy_priority: entry.popularity.value,
         });
@@ -586,6 +589,24 @@ fn checked_add(left: usize, right: usize, label: &str) -> Result<usize, Typosqua
         .ok_or_else(|| TyposquatError::ResourceLimit(format!("{label} overflow")))
 }
 
+fn validate_dataset_identity_count(file: &str, count: usize) -> Result<(), TyposquatError> {
+    if count > MAX_IDENTITIES_PER_ECOSYSTEM {
+        limit(format!(
+            "{file} exceeds {MAX_IDENTITIES_PER_ECOSYSTEM} canonical and alias identities"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_aggregate_identity_count(count: usize) -> Result<(), TyposquatError> {
+    if count > MAX_AGGREGATE_IDENTITIES {
+        limit("aggregate dataset identity limit exceeded")
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_sha256(label: &str, hash: &str) -> Result<(), TyposquatError> {
     if hash.len() == 64
         && hash
@@ -680,5 +701,13 @@ mod tests {
         let audit = asset_audit().unwrap();
         assert_eq!(audit.assets.len(), 10);
         assert!(audit.assets.windows(2).all(|pair| pair[0].id < pair[1].id));
+    }
+
+    #[test]
+    fn identity_work_limits_accept_equality_and_reject_plus_one() {
+        assert!(validate_dataset_identity_count("test", MAX_IDENTITIES_PER_ECOSYSTEM).is_ok());
+        assert!(validate_dataset_identity_count("test", MAX_IDENTITIES_PER_ECOSYSTEM + 1).is_err());
+        assert!(validate_aggregate_identity_count(MAX_AGGREGATE_IDENTITIES).is_ok());
+        assert!(validate_aggregate_identity_count(MAX_AGGREGATE_IDENTITIES + 1).is_err());
     }
 }

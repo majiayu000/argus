@@ -37,7 +37,7 @@ pub fn match_typosquat_with_options(
     if dataset
         .entries
         .iter()
-        .any(|target| exact_identity(&candidate, &target.identity))
+        .any(|target| entry_identities(target).any(|identity| exact_identity(&candidate, identity)))
     {
         return Ok(None);
     }
@@ -50,50 +50,15 @@ pub fn match_typosquat_with_options(
     let mut comparisons = 0usize;
     let mut matches = Vec::new();
     for target in &dataset.entries {
-        let Some((candidate_unit, target_unit)) = comparable_units(&candidate, &target.identity)
-        else {
-            continue;
-        };
-        comparisons = comparisons
-            .checked_add(1)
-            .ok_or_else(|| TyposquatError::ResourceLimit("comparison counter overflow".into()))?;
-        if comparisons > MAX_MATCH_COMPARISONS {
-            return Err(TyposquatError::ResourceLimit(format!(
-                "candidate requires more than {MAX_MATCH_COMPARISONS} comparisons"
-            )));
-        }
-
-        let mut signals = BTreeSet::new();
-        let candidate_length = candidate_unit.chars().count();
-        let target_length = target_unit.chars().count();
-        if options.edit_distance_enabled {
-            if let Some(distance) =
-                bounded_levenshtein(candidate_unit, target_unit, options.max_edit_distance)
-            {
-                let distance_two_allowed = distance < 2
-                    || (candidate_length >= options.min_length_for_distance_two
-                        && target_length >= options.min_length_for_distance_two);
-                if distance > 0 && distance_two_allowed {
-                    signals.insert(TyposquatSignal::EditDistance { distance });
-                }
-            }
-            if is_adjacent_transposition(candidate_unit, target_unit) {
-                signals.insert(TyposquatSignal::Transposition);
-            }
-        }
-        if options.keyboard_enabled
-            && is_keyboard_substitution(candidate_unit, target_unit, &shared_assets.keyboard_edges)
-        {
-            signals.insert(TyposquatSignal::KeyboardAdjacent);
-        }
-        if options.unicode_confusables_enabled
-            && unicode_allowed
-            && (!candidate_unit.is_ascii() || !target_unit.is_ascii())
-            && skeleton(candidate_unit, &shared_assets.confusables)?
-                == skeleton(target_unit, &shared_assets.confusables)?
-        {
-            signals.insert(TyposquatSignal::UnicodeConfusable);
-        }
+        let signals = signals_for_entry(
+            &candidate,
+            target,
+            options,
+            unicode_allowed,
+            &shared_assets.keyboard_edges,
+            &shared_assets.confusables,
+            &mut comparisons,
+        )?;
         if !signals.is_empty() {
             matches.push((target, signals.into_iter().collect::<Vec<_>>()));
         }
@@ -115,6 +80,85 @@ pub fn match_typosquat_with_options(
         signals,
         dataset,
     )))
+}
+
+fn entry_identities(entry: &DatasetEntry) -> impl Iterator<Item = &SegmentedIdentity> {
+    std::iter::once(&entry.identity).chain(&entry.aliases)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn signals_for_entry(
+    candidate: &SegmentedIdentity,
+    target: &DatasetEntry,
+    options: TyposquatMatchOptions,
+    unicode_allowed: bool,
+    keyboard_edges: &BTreeSet<(char, char)>,
+    confusables: &std::collections::BTreeMap<char, String>,
+    comparisons: &mut usize,
+) -> Result<BTreeSet<TyposquatSignal>, TyposquatError> {
+    let mut signals = BTreeSet::new();
+    for target_identity in entry_identities(target) {
+        let Some((candidate_unit, target_unit)) = comparable_units(candidate, target_identity)
+        else {
+            continue;
+        };
+        *comparisons = comparisons
+            .checked_add(1)
+            .ok_or_else(|| TyposquatError::ResourceLimit("comparison counter overflow".into()))?;
+        if *comparisons > MAX_MATCH_COMPARISONS {
+            return Err(TyposquatError::ResourceLimit(format!(
+                "candidate requires more than {MAX_MATCH_COMPARISONS} comparisons"
+            )));
+        }
+        collect_signals(
+            candidate_unit,
+            target_unit,
+            options,
+            unicode_allowed,
+            keyboard_edges,
+            confusables,
+            &mut signals,
+        )?;
+    }
+    Ok(signals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_signals(
+    candidate: &str,
+    target: &str,
+    options: TyposquatMatchOptions,
+    unicode_allowed: bool,
+    keyboard_edges: &BTreeSet<(char, char)>,
+    confusables: &std::collections::BTreeMap<char, String>,
+    signals: &mut BTreeSet<TyposquatSignal>,
+) -> Result<(), TyposquatError> {
+    let candidate_length = candidate.chars().count();
+    let target_length = target.chars().count();
+    if options.edit_distance_enabled {
+        if let Some(distance) = bounded_levenshtein(candidate, target, options.max_edit_distance) {
+            let distance_two_allowed = distance < 2
+                || (candidate_length >= options.min_length_for_distance_two
+                    && target_length >= options.min_length_for_distance_two);
+            if distance > 0 && distance_two_allowed {
+                signals.insert(TyposquatSignal::EditDistance { distance });
+            }
+        }
+        if is_adjacent_transposition(candidate, target) {
+            signals.insert(TyposquatSignal::Transposition);
+        }
+    }
+    if options.keyboard_enabled && is_keyboard_substitution(candidate, target, keyboard_edges) {
+        signals.insert(TyposquatSignal::KeyboardAdjacent);
+    }
+    if options.unicode_confusables_enabled
+        && unicode_allowed
+        && (!candidate.is_ascii() || !target.is_ascii())
+        && skeleton(candidate, confusables)? == skeleton(target, confusables)?
+    {
+        signals.insert(TyposquatSignal::UnicodeConfusable);
+    }
+    Ok(())
 }
 
 fn build_match(
@@ -445,5 +489,34 @@ mod tests {
         assert!(configured
             .signals
             .contains(&TyposquatSignal::EditDistance { distance: 2 }));
+    }
+
+    #[test]
+    fn aliases_are_exact_clean_and_participate_in_matching() {
+        let entry = DatasetEntry {
+            display: "canonical".into(),
+            identity: segment_identity(Ecosystem::Npm, "canonical").unwrap(),
+            aliases: vec![segment_identity(Ecosystem::Npm, "alternative").unwrap()],
+            canonical: "canonical".into(),
+            legacy_priority: 1,
+        };
+        let exact_alias = segment_identity(Ecosystem::Npm, "alternative").unwrap();
+        assert!(entry_identities(&entry).any(|identity| exact_identity(&exact_alias, identity)));
+
+        let candidate = segment_identity(Ecosystem::Npm, "alternativx").unwrap();
+        let shared_assets = assets().unwrap();
+        let mut comparisons = 0;
+        let signals = signals_for_entry(
+            &candidate,
+            &entry,
+            TyposquatMatchOptions::default(),
+            false,
+            &shared_assets.keyboard_edges,
+            &shared_assets.confusables,
+            &mut comparisons,
+        )
+        .unwrap();
+        assert!(signals.contains(&TyposquatSignal::EditDistance { distance: 1 }));
+        assert_eq!(comparisons, 2);
     }
 }
