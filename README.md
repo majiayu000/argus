@@ -169,15 +169,39 @@ argus agent scan path/to/skill --rules-dir ./rules --format sarif
 argus scan Cargo.lock \
   --rules-dir ./rules \
   --rule-override corp-forbidden-installer=severity:medium
+argus fetch react@latest \
+  --metadata-anomaly \
+  --rule-override version-shape-anomaly=param:minimum_history_days=60
 ```
 
-`--rule-override ID=off|severity:LEVEL` is repeatable and works for registered
-built-in or external IDs. `off` is an explicit trust decision: text, JSON, and
-SARIF retain the effective ruleset digest, loaded files, disabled IDs, and
-applied overrides even when no findings remain. With neither rules flag,
-reports keep the existing output shape and behavior. Standalone `vulns`
-commands accept overrides for registered vulnerability findings but do not
-accept a rules directory because they do not scan artifact text.
+`--rule-override ID=off|severity:LEVEL|param:KEY=VALUE` is repeatable.
+`off` and severity work for registered built-in or external IDs. Parameter
+overrides are accepted only for the closed built-in typosquat and npm anomaly
+schemas; unknown keys, wrong types, duplicates, out-of-range values, security
+caps, and cross-field-invalid combinations are rejected during preflight.
+Text, JSON, and SARIF retain the effective ruleset digest, loaded files,
+disabled IDs, parameter overrides, and versioned data digests even when no
+findings remain. With neither rules flag, reports keep the existing output
+shape and behavior. Standalone `vulns` commands accept action overrides for
+registered vulnerability findings but do not accept detector parameters or a
+rules directory because they do not scan artifact text.
+
+### Offline typosquat data
+
+Typosquat matching uses ten embedded, versioned assets: one popular-name
+dataset for each supported ecosystem, a US QWERTY adjacency graph, and a
+pinned Unicode confusables table. Scanning never downloads reputation data.
+The initial 382-name migration preserves the exact frozen Rust lists from
+commit `6aef7b1`; its `legacy-priority` records are compatibility provenance,
+not claims about current registry download rank. Dataset age, normalization,
+namespace semantics, source references, and raw SHA-256 digests live in the
+checked-in manifest under `crates/argus-rules/data/typosquat/v1/`.
+
+Updates are an offline maintainer operation and must provide reviewable source
+evidence. Generated files are sorted deterministically; a data change should
+show counts, added/removed canonical identities, source evidence, and manifest
+digest changes in the pull request. Runtime scans only validate and consume
+the committed assets.
 
 ### Lockfile source and integrity policy
 
