@@ -15,9 +15,13 @@ patched narrowly for npm Sigstore bundle v0.2 compatibility.
 
 Argus changes only the candidate timestamp allowlist, byte-derived SHA-512
 in-toto subject binding, committed `intoto/0.0.2` Rekor body consistency,
-and a mechanical helper extraction needed to keep files below the repository
-size limit. None of the SET, checkpoint/proof, Fulcio chain/time/EKU, SCT,
-DSSE signature, Rekor consistency, or identity checks are skipped.
+an explicit policy gate requiring every verified tlog entry to carry its own
+inclusion proof and signed checkpoint, and a mechanical helper extraction
+needed to keep files below the repository size limit. The gate is deliberately
+independent of the bundle's unsigned outer `mediaType`, so changing that field
+cannot weaken `VerificationPolicy::default().verify_tlog`. None of the SET,
+checkpoint/proof, Fulcio chain/time/EKU, SCT, DSSE signature, Rekor consistency,
+or identity checks are skipped.
 
 The crates.io package's 1,264-line `tests/verification_tests.rs` is omitted:
 it exceeds Argus's 800-line hard limit and imports sibling

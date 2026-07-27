@@ -251,6 +251,9 @@ impl Verifier {
             require_inclusion_proof: policy.verify_tlog,
             require_timestamp: false, // Don't require timestamps, but verify if present
         };
+        if policy.verify_tlog {
+            crate::verify_impl::tlog::require_tlog_inclusion_material(bundle)?;
+        }
         validate_bundle_with_options(bundle, &options)
             .map_err(|e| Error::Verification(format!("bundle validation failed: {}", e)))?;
 
@@ -511,6 +514,7 @@ pub fn verify_with_key<'a>(
         require_inclusion_proof: true,
         require_timestamp: false,
     };
+    crate::verify_impl::tlog::require_tlog_inclusion_material(bundle)?;
     validate_bundle_with_options(bundle, &options)
         .map_err(|e| Error::Verification(format!("bundle validation failed: {}", e)))?;
 

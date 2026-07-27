@@ -77,6 +77,40 @@ pub fn verify_tlog_entries(
     Ok(integrated_time_result)
 }
 
+/// Enforce the transparency-log material required by a verification policy.
+///
+/// The bundle's outer `mediaType` is not signed, so version-specific structural
+/// validation cannot decide whether the caller's `verify_tlog` policy requires
+/// an inclusion proof. Every entry that can contribute an integrated time or
+/// be checked for consistency must carry its own proof and signed checkpoint.
+pub(crate) fn require_tlog_inclusion_material(bundle: &Bundle) -> Result<()> {
+    if bundle.verification_material.tlog_entries.is_empty() {
+        return Err(Error::Verification(
+            "transparency log verification requires at least one tlog entry".to_string(),
+        ));
+    }
+
+    for (index, entry) in bundle
+        .verification_material
+        .tlog_entries
+        .iter()
+        .enumerate()
+    {
+        let proof = entry.inclusion_proof.as_ref().ok_or_else(|| {
+            Error::Verification(format!(
+                "tlog entry {index} is missing the inclusion proof required by policy"
+            ))
+        })?;
+        if proof.checkpoint.is_empty() {
+            return Err(Error::Verification(format!(
+                "tlog entry {index} inclusion proof is missing its signed checkpoint"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Cryptographically verify the log-inclusion material of a single tlog entry.
 ///
 /// This performs all per-entry transparency log crypto checks:
@@ -267,4 +301,55 @@ pub fn verify_set(entry: &TransparencyLogEntry, trusted_root: &TrustedRoot) -> R
         .map_err(|e| Error::Verification(format!("SET verification failed: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const V0_1_BUNDLE: &str =
+        include_str!("../../test_data/bundles/sigstore.js@2.0.0-provenance.sigstore.json");
+
+    fn v0_1_bundle() -> Bundle {
+        Bundle::from_json(V0_1_BUNDLE).expect("test fixture must parse")
+    }
+
+    #[test]
+    fn policy_requires_inclusion_material_independent_of_bundle_version() {
+        let mut bundle = v0_1_bundle();
+        assert!(require_tlog_inclusion_material(&bundle).is_ok());
+
+        bundle.verification_material.tlog_entries[0].inclusion_proof = None;
+        let err = require_tlog_inclusion_material(&bundle).unwrap_err();
+        assert!(err.to_string().contains("missing the inclusion proof"));
+    }
+
+    #[test]
+    fn policy_requires_a_signed_checkpoint() {
+        let mut bundle = v0_1_bundle();
+        bundle.verification_material.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .unwrap()
+            .checkpoint
+            .envelope
+            .clear();
+
+        let err = require_tlog_inclusion_material(&bundle).unwrap_err();
+        assert!(err.to_string().contains("missing its signed checkpoint"));
+    }
+
+    #[test]
+    fn policy_checks_every_tlog_entry() {
+        let mut bundle = v0_1_bundle();
+        let mut unproven = bundle.verification_material.tlog_entries[0].clone();
+        unproven.inclusion_proof = None;
+        bundle
+            .verification_material
+            .tlog_entries
+            .push(unproven);
+
+        let err = require_tlog_inclusion_material(&bundle).unwrap_err();
+        assert!(err.to_string().contains("tlog entry 1"));
+    }
 }

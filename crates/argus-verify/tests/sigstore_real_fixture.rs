@@ -136,6 +136,56 @@ fn rekor_body_or_inclusion_proof_mismatch_is_invalid() {
 }
 
 #[test]
+fn downgraded_bundle_without_inclusion_material_is_invalid() {
+    assert_bundle_invalid(|bundle| {
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.1".into();
+        bundle["verificationMaterial"]["tlogEntries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("inclusionProof");
+    });
+    assert_bundle_invalid(|bundle| {
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.1".into();
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]
+            .as_object_mut()
+            .unwrap()
+            .remove("checkpoint");
+    });
+}
+
+#[test]
+fn every_tlog_entry_requires_inclusion_material() {
+    assert_bundle_invalid(|bundle| {
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.1".into();
+        let mut unproven_entry = bundle["verificationMaterial"]["tlogEntries"][0].clone();
+        unproven_entry
+            .as_object_mut()
+            .unwrap()
+            .remove("inclusionProof");
+        bundle["verificationMaterial"]["tlogEntries"]
+            .as_array_mut()
+            .unwrap()
+            .push(unproven_entry);
+    });
+}
+
+#[test]
+fn unproven_tlog_entry_cannot_supply_validation_time() {
+    assert_bundle_invalid(|bundle| {
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.1".into();
+        let proven_entry = bundle["verificationMaterial"]["tlogEntries"][0].clone();
+        bundle["verificationMaterial"]["tlogEntries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("inclusionProof");
+        bundle["verificationMaterial"]["tlogEntries"]
+            .as_array_mut()
+            .unwrap()
+            .push(proven_entry);
+    });
+}
+
+#[test]
 fn broken_fulcio_chain_is_invalid() {
     assert_bundle_invalid(|bundle| {
         let encoded = bundle["verificationMaterial"]["x509CertificateChain"]["certificates"][0]

@@ -151,6 +151,49 @@ fn corrupted_dsse_signature_is_critical_and_blocks() {
 }
 
 #[test]
+fn downgraded_bundle_without_inclusion_material_is_critical_and_blocks() {
+    for remove_checkpoint_only in [false, true] {
+        let mut attestations: serde_json::Value =
+            serde_json::from_slice(REAL_ATTESTATIONS).unwrap();
+        let bundle = &mut attestations["attestations"][1]["bundle"];
+        bundle["mediaType"] = "application/vnd.dev.sigstore.bundle+json;version=0.1".into();
+        if remove_checkpoint_only {
+            bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]
+                .as_object_mut()
+                .unwrap()
+                .remove("checkpoint");
+        } else {
+            bundle["verificationMaterial"]["tlogEntries"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("inclusionProof");
+        }
+
+        let transport = MockTransport::new();
+        let registry = "https://mock.registry";
+        install_routes_with_attestations(
+            &transport,
+            registry,
+            serde_json::to_vec(&attestations).unwrap(),
+        );
+
+        let opts = make_opts(
+            registry,
+            true,
+            &[r"^https://github\.com/sigstore/sigstore-js/.+$"],
+        );
+        let pkg = PackageRef::parse("sigstore@2.3.1").unwrap();
+        let report = fetch_and_scan(&pkg, &opts, &transport).expect("fetch_and_scan");
+
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "provenance-signature-invalid"
+                && finding.severity == argus_core::Severity::Critical
+        }));
+        assert_eq!(report.decision, argus_core::Decision::Block);
+    }
+}
+
+#[test]
 fn downloaded_artifact_bytes_are_bound_by_sha512_and_tampering_blocks() {
     let mut artifact = REAL_TARBALL.to_vec();
     *artifact.last_mut().unwrap() ^= 1;
