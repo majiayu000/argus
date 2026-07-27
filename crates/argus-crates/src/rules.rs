@@ -1,95 +1,9 @@
 //! Rust / crates.io-specific detection rules.
 
+#[cfg(test)]
 use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// Popular crates that are common typosquat targets. Drawn from
-/// crates.io download stats + the 2026 TrapDoor target list.
-pub const POPULAR_CRATES: &[&str] = &[
-    // core foundation
-    "serde",
-    "serde_json",
-    "tokio",
-    "anyhow",
-    "thiserror",
-    "clap",
-    "regex",
-    "log",
-    "env_logger",
-    "tracing",
-    "futures",
-    "async-trait",
-    "bytes",
-    "once_cell",
-    "lazy_static",
-    "parking_lot",
-    "rand",
-    "ring",
-    "base64",
-    "sha2",
-    "hex",
-    "num-traits",
-    "itertools",
-    "indexmap",
-    "rayon",
-    "chrono",
-    "time",
-    "uuid",
-    "url",
-    "http",
-    "mime",
-    "percent-encoding",
-    "libc",
-    "winapi",
-    "byteorder",
-    // http + async runtimes
-    "reqwest",
-    "ureq",
-    "hyper",
-    "axum",
-    "actix-web",
-    "rocket",
-    "tonic",
-    "warp",
-    "tower",
-    "tide",
-    "rustls",
-    "native-tls",
-    "openssl",
-    // db
-    "diesel",
-    "sqlx",
-    "sea-orm",
-    "rusqlite",
-    "redis",
-    "mongodb",
-    // proc-macro ecosystem
-    "syn",
-    "quote",
-    "proc-macro2",
-    "darling",
-    // crypto + security
-    "rustls-pemfile",
-    "x509-parser",
-    "ed25519-dalek",
-    "x25519-dalek",
-    "k256",
-    "p256",
-    "secp256k1",
-    "blake2",
-    "blake3",
-    // logging adjacent (target of 2026 faster_log incident)
-    "fast_log",
-    "slog",
-    "fern",
-    "flexi_logger",
-    // common build-time
-    "cc",
-    "bindgen",
-    "pkg-config",
-    "cmake",
-];
 
 /// `build.rs` invokes shell-out APIs at compile time AGAINST a known
 /// shell-flavoured command. Plain `Command::new("rustc")` /
@@ -559,8 +473,14 @@ pub fn xor_loop_regex() -> &'static Regex {
 }
 
 /// Push name-based findings (typosquatting + low-reputation).
-pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(name, POPULAR_CRATES, "crate name", findings);
+#[cfg(test)]
+pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::CratesIo,
+        name,
+        "crate name",
+        findings,
+    )
 }
 
 #[cfg(test)]
@@ -695,7 +615,7 @@ pub(crate) mod r#type;
     #[test]
     fn typosquat_toikio() {
         let mut f = Vec::new();
-        push_name_findings("toikio", &mut f);
+        push_name_findings("toikio", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
     }
@@ -703,7 +623,7 @@ pub(crate) mod r#type;
     #[test]
     fn legitimate_name_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("tokio", &mut f);
+        push_name_findings("tokio", &mut f).unwrap();
         assert!(f.is_empty());
     }
 }

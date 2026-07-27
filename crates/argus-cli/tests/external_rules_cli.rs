@@ -339,6 +339,18 @@ fn malformed_unknown_and_duplicate_overrides_fail_without_a_report() {
             "scan",
             path,
             "--rule-override",
+            "typosquatting=param:unknown=1",
+        ],
+        &[
+            "scan",
+            path,
+            "--rule-override",
+            "rapid-publish-window=param:package_threshold=251",
+        ],
+        &[
+            "scan",
+            path,
+            "--rule-override",
             "remote-download=off",
             "--rule-override",
             "remote-download=severity:low",
@@ -352,6 +364,36 @@ fn malformed_unknown_and_duplicate_overrides_fail_without_a_report() {
             "{args:?} emitted a partial report"
         );
     }
+}
+
+#[test]
+fn typed_parameter_override_emits_sorted_data_audit_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("package.json"),
+        r#"{"name":"clean-demo","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let output = argus(&[
+        "scan",
+        temp.path().to_str().unwrap(),
+        "--format",
+        "json",
+        "--rule-override",
+        "typosquatting=param:max_edit_distance=2",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json(&output);
+    assert_eq!(
+        report["rules"]["parameter_overrides"][0],
+        "typosquatting=param:max_edit_distance=2"
+    );
+    assert_eq!(report["rules"]["data"].as_array().unwrap().len(), 10);
+    assert_eq!(report["rules"]["digest"].as_str().unwrap().len(), 64);
 }
 
 #[cfg(not(unix))]

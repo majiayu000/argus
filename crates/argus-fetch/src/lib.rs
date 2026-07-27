@@ -227,6 +227,7 @@ pub fn fetch_and_scan_with_rules(
             &opts.registry,
             opts.metadata_cache_dir.as_deref(),
             transport,
+            rules,
         )
         .with_context(|| format!("evaluate npm metadata anomalies for {}@{version}", pkg.name))?
     } else {

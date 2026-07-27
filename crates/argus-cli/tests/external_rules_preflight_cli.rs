@@ -179,6 +179,34 @@ fn invalid_rules_win_over_scan_agent_intel_and_osv_inputs() {
 }
 
 #[test]
+fn invalid_behavioral_parameters_fail_before_npm_registry_network() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let registry = format!("http://{}", listener.local_addr().unwrap());
+    let invalid = [
+        "rapid-publish-window=param:package_threshold=251",
+        "rapid-publish-window=param:maximum_search_objects=1",
+        "version-shape-anomaly=param:minimum_predecessors=1",
+        "typosquatting=param:max_edit_distance=3",
+        "typosquatting=param:keyboard_enabled=maybe",
+    ];
+    for rule_override in invalid {
+        let output = argus(&[
+            "fetch",
+            "demo@1.0.0",
+            "--registry",
+            &registry,
+            "--metadata-anomaly",
+            "--rule-override",
+            rule_override,
+        ]);
+        assert_eq!(output.status.code(), Some(2), "{rule_override}");
+        assert!(output.stdout.is_empty(), "{rule_override}");
+    }
+    assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+}
+
+#[test]
 fn valid_rules_reach_the_loopback_registry() {
     let temp = tempfile::tempdir().unwrap();
     let rules = temp.path().join("valid");

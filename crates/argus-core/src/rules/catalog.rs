@@ -10,6 +10,9 @@ use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
 use yaml_rust2::scanner::Marker;
 use yaml_rust2::{Yaml, YamlLoader};
 
+pub use super::effective::RuleParameters;
+use super::effective::{ConfusablesProfileId, KeyboardLayoutId};
+
 pub const RULE_CATALOG_SCHEMA_VERSION: u32 = 1;
 pub const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOG_RULES: usize = 10_000;
@@ -161,11 +164,6 @@ impl RuleLanguage {
             ScriptLanguage::Unsupported => None,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuleParameters {
-    None,
 }
 
 #[derive(Debug, Clone)]
@@ -454,18 +452,11 @@ fn parse_matcher(value: &Yaml, rule_id: &RuleId, context: &str) -> CatalogResult
                     "{context}.matcher.name must equal its rule id"
                 )));
             }
-            let parameters = match optional(matcher, "parameters") {
-                None => RuleParameters::None,
-                Some(value) => {
-                    let parameters = yaml_hash(value, "matcher.parameters")?;
-                    if !parameters.is_empty() {
-                        return Err(CatalogError::new(format!(
-                            "{context}.matcher contains unsupported built-in parameters"
-                        )));
-                    }
-                    RuleParameters::None
-                }
-            };
+            let parameters = RuleParameters::parse_embedded(
+                rule_id.as_str(),
+                optional(matcher, "parameters"),
+                context,
+            )?;
             Ok(RuleMatcher::Builtin { name, parameters })
         }
         "literal" | "regex" => {
@@ -496,6 +487,98 @@ fn parse_matcher(value: &Yaml, rule_id: &RuleId, context: &str) -> CatalogResult
         _ => Err(CatalogError::new(format!(
             "{context}.matcher.kind has unsupported value"
         ))),
+    }
+}
+
+impl RuleParameters {
+    pub(crate) fn parse_embedded(
+        rule_id: &str,
+        value: Option<&Yaml>,
+        context: &str,
+    ) -> CatalogResult<Self> {
+        let mut parameters = Self::defaults_for(rule_id);
+        let Some(value) = value else {
+            return Ok(parameters);
+        };
+        let map = yaml_hash(value, &format!("{context}.matcher.parameters"))?;
+        for (key, value) in map {
+            let key = key.as_str().ok_or_else(|| {
+                CatalogError::new(format!(
+                    "{context}.matcher.parameters field names must be strings"
+                ))
+            })?;
+            parameters.set_embedded(key, value, context)?;
+        }
+        parameters.validate()?;
+        Ok(parameters)
+    }
+
+    fn set_embedded(&mut self, key: &str, value: &Yaml, context: &str) -> CatalogResult<()> {
+        let field = format!("{context}.matcher.parameters.{key}");
+        match (self, key) {
+            (Self::Typosquat(parameters), "max_edit_distance") => {
+                parameters.max_edit_distance = yaml_unsigned(value, &field)?
+            }
+            (Self::Typosquat(parameters), "min_length_for_distance_two") => {
+                parameters.min_length_for_distance_two = yaml_unsigned(value, &field)?
+            }
+            (Self::Typosquat(parameters), "edit_distance_enabled") => {
+                parameters.edit_distance_enabled = yaml_boolean(value, &field)?
+            }
+            (Self::Typosquat(parameters), "keyboard_enabled") => {
+                parameters.keyboard_enabled = yaml_boolean(value, &field)?
+            }
+            (Self::Typosquat(parameters), "keyboard_layout") => {
+                parameters.keyboard_layout = match yaml_string(value, &field)? {
+                    "qwerty-us-v1" => KeyboardLayoutId::QwertyUsV1,
+                    _ => return Err(CatalogError::new(format!("{field} is unsupported"))),
+                }
+            }
+            (Self::Typosquat(parameters), "unicode_confusables_enabled") => {
+                parameters.unicode_confusables_enabled = yaml_boolean(value, &field)?
+            }
+            (Self::Typosquat(parameters), "confusables_profile") => {
+                parameters.confusables_profile = match yaml_string(value, &field)? {
+                    "uts39-v1" => ConfusablesProfileId::Uts39V1,
+                    _ => return Err(CatalogError::new(format!("{field} is unsupported"))),
+                }
+            }
+            (Self::NpmVersionShape(parameters), "minimum_predecessors") => {
+                parameters.minimum_predecessors = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmVersionShape(parameters), "baseline_transitions") => {
+                parameters.baseline_transitions = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmVersionShape(parameters), "minimum_history_days") => {
+                parameters.minimum_history_days = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmVersionShape(parameters), "maximum_jump_delay_hours") => {
+                parameters.maximum_jump_delay_hours = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmVersionShape(parameters), "major_jump_threshold") => {
+                parameters.major_jump_threshold = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmVersionShape(parameters), "minor_jump_threshold") => {
+                parameters.minor_jump_threshold = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmRapidPublish(parameters), "window_hours") => {
+                parameters.window_hours = yaml_unsigned(value, &field)?
+            }
+            (Self::NpmRapidPublish(parameters), "package_threshold") => {
+                parameters.package_threshold = yaml_unsigned(value, &field)?
+            }
+            (Self::None, _) => {
+                return Err(CatalogError::new(format!(
+                    "{context}.matcher contains unsupported built-in parameters"
+                )))
+            }
+            _ => {
+                return Err(CatalogError::new(format!(
+                    "{context}.matcher.parameters contains unknown field"
+                )))
+            }
+        }
+        Ok(())
     }
 }
 
@@ -636,6 +719,23 @@ fn yaml_integer(value: &Yaml, context: &str) -> CatalogResult<i64> {
     value
         .as_i64()
         .ok_or_else(|| CatalogError::new(format!("{context} must be an integer")))
+}
+
+fn yaml_unsigned<T>(value: &Yaml, context: &str) -> CatalogResult<T>
+where
+    T: TryFrom<u64>,
+{
+    let integer = yaml_integer(value, context)?;
+    let unsigned = u64::try_from(integer)
+        .map_err(|_| CatalogError::new(format!("{context} must be non-negative")))?;
+    T::try_from(unsigned)
+        .map_err(|_| CatalogError::new(format!("{context} is outside the supported range")))
+}
+
+fn yaml_boolean(value: &Yaml, context: &str) -> CatalogResult<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| CatalogError::new(format!("{context} must be a boolean")))
 }
 
 fn required<'a>(

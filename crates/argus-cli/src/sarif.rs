@@ -664,6 +664,8 @@ mod tests {
             external_rule_count: 1,
             disabled_rule_ids: Vec::new(),
             applied_overrides: vec!["external-demo=severity:low".to_string()],
+            parameter_overrides: Vec::new(),
+            data: Vec::new(),
             external_rules: vec![ExternalRuleMetadata {
                 id: "external-demo".to_string(),
                 description: "exact external description".to_string(),

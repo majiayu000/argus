@@ -30,7 +30,6 @@ mod wheel;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, PypiPackument, PypiUrl};
-pub use rules::POPULAR_PYTHON_PACKAGES;
 
 /// PyPI serves package files from `*.pythonhosted.org` (canonically
 /// `files.pythonhosted.org`), not from `pypi.org`. The subdomain-suffix
@@ -265,7 +264,7 @@ pub fn fetch_and_scan_pypi_with_rules(
     }
 
     // 6. Run name-based rules (typosquatting) on the package name itself.
-    rules::push_name_findings(&pkg.name, &mut all_findings);
+    rules.push_typosquat_findings(Ecosystem::PyPi, &pkg.name, "PyPI name", &mut all_findings)?;
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 

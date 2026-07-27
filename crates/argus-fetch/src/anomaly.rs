@@ -2,6 +2,7 @@
 
 use crate::packument::Packument;
 use anyhow::{anyhow, bail, Context, Result};
+use argus_core::rules::{NpmRapidPublishParameters, NpmVersionShapeParameters};
 use argus_core::{Finding, Severity};
 use argus_transport::Transport;
 use chrono::{DateTime, Duration, Utc};
@@ -14,14 +15,6 @@ use std::path::Path;
 use url::Url;
 
 pub(crate) const POLICY_ID: &str = "npm-anomaly-v1";
-const MINIMUM_PREDECESSORS: usize = 6;
-const BASELINE_TRANSITIONS: usize = 5;
-const MINIMUM_HISTORY_DAYS: i64 = 30;
-const MAXIMUM_JUMP_DELAY_HOURS: i64 = 72;
-const MAJOR_JUMP_THRESHOLD: u64 = 2;
-const MINOR_JUMP_THRESHOLD: u64 = 10;
-const RAPID_PUBLISH_WINDOW_HOURS: i64 = 24;
-const RAPID_PUBLISH_PACKAGE_THRESHOLD: usize = 5;
 const MAXIMUM_SEARCH_OBJECTS: usize = 250;
 const MAXIMUM_SEARCH_BYTES: u64 = 2 * 1024 * 1024;
 const CACHE_TTL_MINUTES: i64 = 15;
@@ -68,9 +61,22 @@ enum JumpClass {
     Minor,
 }
 
+#[cfg(test)]
 pub(crate) fn version_shape_findings(
     packument: &Packument,
     target_version: &str,
+) -> Result<Vec<Finding>> {
+    version_shape_findings_with_parameters(
+        packument,
+        target_version,
+        NpmVersionShapeParameters::default(),
+    )
+}
+
+fn version_shape_findings_with_parameters(
+    packument: &Packument,
+    target_version: &str,
+    parameters: NpmVersionShapeParameters,
 ) -> Result<Vec<Finding>> {
     let times = packument
         .time
@@ -128,12 +134,13 @@ pub(crate) fn version_shape_findings(
         (left.published_at, left.version).cmp(&(right.published_at, right.version))
     });
 
-    if predecessors.len() < MINIMUM_PREDECESSORS {
+    if predecessors.len() < parameters.minimum_predecessors() {
         return Ok(vec![unassessed_finding(
             packument,
             target_version,
             &format!(
-                "requires at least {MINIMUM_PREDECESSORS} earlier stable versions; found {}",
+                "requires at least {} earlier stable versions; found {}",
+                parameters.minimum_predecessors(),
                 predecessors.len()
             ),
         )]);
@@ -142,12 +149,13 @@ pub(crate) fn version_shape_findings(
     let history_days = target_time
         .signed_duration_since(predecessors[0].published_at)
         .num_days();
-    if history_days < MINIMUM_HISTORY_DAYS {
+    if history_days < i64::from(parameters.minimum_history_days()) {
         return Ok(vec![unassessed_finding(
             packument,
             target_version,
             &format!(
-                "requires at least {MINIMUM_HISTORY_DAYS} days of history; found {history_days}"
+                "requires at least {} days of history; found {history_days}",
+                parameters.minimum_history_days()
             ),
         )]);
     }
@@ -160,38 +168,44 @@ pub(crate) fn version_shape_findings(
     }
 
     let delay = target_time.signed_duration_since(predecessor.published_at);
-    if delay <= Duration::zero() || delay > Duration::hours(MAXIMUM_JUMP_DELAY_HOURS) {
+    if delay <= Duration::zero()
+        || delay > Duration::hours(i64::from(parameters.maximum_jump_delay_hours()))
+    {
         return Ok(Vec::new());
     }
 
-    let Some(target_jump_class) = jump_class(predecessor.version, target) else {
+    let Some(target_jump_class) = jump_class(predecessor.version, target, parameters) else {
         return Ok(Vec::new());
     };
     let baseline_start = predecessors
         .len()
-        .checked_sub(BASELINE_TRANSITIONS + 1)
+        .checked_sub(parameters.baseline_transitions() + 1)
         .ok_or_else(|| anyhow!("version-shape baseline cardinality underflow"))?;
-    let baseline_repeats_shape = predecessors[baseline_start..]
-        .windows(2)
-        .any(|pair| jump_class(pair[0].version, pair[1].version) == Some(target_jump_class));
+    let baseline_repeats_shape = predecessors[baseline_start..].windows(2).any(|pair| {
+        jump_class(pair[0].version, pair[1].version, parameters) == Some(target_jump_class)
+    });
     if baseline_repeats_shape {
         return Ok(Vec::new());
     }
 
     let threshold = match target_jump_class {
-        JumpClass::Major => format!("major_delta>={MAJOR_JUMP_THRESHOLD}"),
-        JumpClass::Minor => format!("same_major_minor_delta>={MINOR_JUMP_THRESHOLD}"),
+        JumpClass::Major => format!("major_delta>={}", parameters.major_jump_threshold()),
+        JumpClass::Minor => format!(
+            "same_major_minor_delta>={}",
+            parameters.minor_jump_threshold()
+        ),
     };
     let mut finding = Finding::new(
         "version-shape-anomaly",
         Severity::Medium,
         format!(
             "policy={POLICY_ID}; target={target}@{}; predecessor={}@{}; delay_hours={}; \
-             threshold={threshold}; baseline_transitions={BASELINE_TRANSITIONS}",
+             threshold={threshold}; baseline_transitions={}",
             target_time.to_rfc3339(),
             predecessor.version,
             predecessor.published_at.to_rfc3339(),
-            delay.num_hours()
+            delay.num_hours(),
+            parameters.baseline_transitions()
         ),
     );
     finding.evidence = Some(vec![
@@ -218,12 +232,23 @@ fn required_time(times: &BTreeMap<String, String>, version: &str) -> Result<Date
         .with_context(|| format!("packument `time[{version}]` is not RFC3339"))
 }
 
-fn jump_class(predecessor: NormalizedVersion, target: NormalizedVersion) -> Option<JumpClass> {
-    if target.major >= predecessor.major.saturating_add(MAJOR_JUMP_THRESHOLD) {
+fn jump_class(
+    predecessor: NormalizedVersion,
+    target: NormalizedVersion,
+    parameters: NpmVersionShapeParameters,
+) -> Option<JumpClass> {
+    if target.major
+        >= predecessor
+            .major
+            .saturating_add(parameters.major_jump_threshold())
+    {
         return Some(JumpClass::Major);
     }
     if target.major == predecessor.major
-        && target.minor >= predecessor.minor.saturating_add(MINOR_JUMP_THRESHOLD)
+        && target.minor
+            >= predecessor
+                .minor
+                .saturating_add(parameters.minor_jump_threshold())
     {
         return Some(JumpClass::Minor);
     }
@@ -282,24 +307,30 @@ pub(crate) fn metadata_findings(
     registry: &str,
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<Vec<Finding>> {
-    metadata_findings_at(
+    metadata_findings_with_parameters_at(
         packument,
         target_version,
         registry,
         cache_dir,
         transport,
         Utc::now(),
+        rules.npm_version_shape_parameters()?,
+        rules.npm_rapid_publish_parameters()?,
     )
 }
 
-fn metadata_findings_at(
+#[allow(clippy::too_many_arguments)]
+fn metadata_findings_with_parameters_at(
     packument: &Packument,
     target_version: &str,
     registry: &str,
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
     now: DateTime<Utc>,
+    version_parameters: NpmVersionShapeParameters,
+    rapid_parameters: NpmRapidPublishParameters,
 ) -> Result<Vec<Finding>> {
     let times = packument
         .time
@@ -318,7 +349,8 @@ fn metadata_findings_at(
             anyhow!("metadata anomaly detection requires versions[{target_version}]._npmUser.name")
         })?;
 
-    let mut findings = version_shape_findings(packument, target_version)?;
+    let mut findings =
+        version_shape_findings_with_parameters(packument, target_version, version_parameters)?;
     findings.extend(rapid_publish_findings(
         packument,
         target_version,
@@ -328,6 +360,7 @@ fn metadata_findings_at(
         cache_dir,
         transport,
         now,
+        rapid_parameters,
     )?);
     Ok(findings)
 }
@@ -342,6 +375,7 @@ fn rapid_publish_findings(
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
     now: DateTime<Utc>,
+    parameters: NpmRapidPublishParameters,
 ) -> Result<Vec<Finding>> {
     let registry_base = normalized_registry_base(registry)?;
     let response = load_search_response(
@@ -352,7 +386,7 @@ fn rapid_publish_findings(
         transport,
         now,
     )?;
-    let window_start = target_published_at - Duration::hours(RAPID_PUBLISH_WINDOW_HOURS);
+    let window_start = target_published_at - Duration::hours(i64::from(parameters.window_hours()));
     let mut events = BTreeSet::new();
 
     for object in response.objects {
@@ -384,14 +418,15 @@ fn rapid_publish_findings(
         .map(|(name, _, _, _)| name.clone())
         .collect::<BTreeSet<_>>();
     let observed = package_names.len();
-    if observed < RAPID_PUBLISH_PACKAGE_THRESHOLD {
+    if observed < parameters.package_threshold() {
         let mut finding = Finding::new(
             "npm-rapid-publish-unassessed",
             Severity::Info,
             format!(
                 "policy={POLICY_ID}; status=unassessed; publisher={publisher}; \
-                 window_hours={RAPID_PUBLISH_WINDOW_HOURS}; observed_distinct_packages={observed}; \
-                 reason=npm search candidates do not prove publisher activity completeness"
+                 window_hours={}; observed_distinct_packages={observed}; \
+                 reason=npm search candidates do not prove publisher activity completeness",
+                parameters.window_hours()
             ),
         );
         finding.evidence = Some(vec![
@@ -412,9 +447,11 @@ fn rapid_publish_findings(
         Severity::Medium,
         format!(
             "policy={POLICY_ID}; publisher={publisher}; target_published_at={}; \
-             window_hours={RAPID_PUBLISH_WINDOW_HOURS}; distinct_packages={observed}; \
-             threshold={RAPID_PUBLISH_PACKAGE_THRESHOLD}; packages={}",
+             window_hours={}; distinct_packages={observed}; \
+             threshold={}; packages={}",
             target_published_at.to_rfc3339(),
+            parameters.window_hours(),
+            parameters.package_threshold(),
             package_list
         ),
     );
@@ -641,142 +678,5 @@ fn write_cache(path: &Path, fetched_at: DateTime<Utc>, body: &[u8]) -> Result<()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{json, Map, Value};
-
-    fn packument(target: &str, events: &[(&str, &str)]) -> Packument {
-        let mut versions = Map::new();
-        let mut times = Map::new();
-        for (version, published_at) in events {
-            versions.insert(
-                (*version).to_string(),
-                json!({
-                    "dist": {
-                        "tarball": format!("https://registry.example/demo-{version}.tgz"),
-                        "integrity": "sha512-AA"
-                    },
-                    "_npmUser": {"name": "publisher"}
-                }),
-            );
-            times.insert(
-                (*version).to_string(),
-                Value::String((*published_at).to_string()),
-            );
-        }
-        serde_json::from_value(json!({
-            "name": "demo",
-            "dist-tags": {"latest": target},
-            "versions": versions,
-            "time": times
-        }))
-        .expect("valid test packument")
-    }
-
-    fn suspicious_events() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("1.0.0", "2025-01-01T00:00:00Z"),
-            ("1.1.0", "2025-01-10T00:00:00Z"),
-            ("1.2.0", "2025-01-20T00:00:00Z"),
-            ("1.3.0", "2025-02-01T00:00:00Z"),
-            ("1.4.0", "2025-02-10T00:00:00Z"),
-            ("1.5.0", "2025-02-20T00:00:00Z"),
-            ("3.0.0", "2025-02-21T00:00:00Z"),
-        ]
-    }
-
-    #[test]
-    fn anomaly_insufficient_history_is_explicit() {
-        let packet = packument(
-            "3.0.0",
-            &[
-                ("1.0.0", "2025-01-01T00:00:00Z"),
-                ("3.0.0", "2025-02-21T00:00:00Z"),
-            ],
-        );
-        let findings = version_shape_findings(&packet, "3.0.0").expect("evaluate");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule_id, "npm-version-shape-unassessed");
-        assert_eq!(findings[0].severity, Severity::Info);
-        assert!(findings[0].detail.contains("found 1"));
-    }
-
-    #[test]
-    fn anomaly_ordering_is_independent_of_json_order() {
-        let mut events = suspicious_events();
-        events.reverse();
-        let packet = packument("3.0.0", &events);
-        let findings = version_shape_findings(&packet, "3.0.0").expect("evaluate");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule_id, "version-shape-anomaly");
-    }
-
-    #[test]
-    fn version_shape_matrix_excludes_legitimate_edges() {
-        let mut single_major = suspicious_events();
-        single_major.pop();
-        single_major.push(("2.0.0", "2025-02-21T00:00:00Z"));
-        assert!(
-            version_shape_findings(&packument("2.0.0", &single_major), "2.0.0")
-                .expect("single major")
-                .is_empty()
-        );
-
-        let mut backport = suspicious_events();
-        backport.pop();
-        backport.push(("1.4.1", "2025-02-21T00:00:00Z"));
-        assert!(
-            version_shape_findings(&packument("1.4.1", &backport), "1.4.1")
-                .expect("backport")
-                .is_empty()
-        );
-
-        let mut late = suspicious_events();
-        late.pop();
-        late.push(("3.0.0", "2025-03-01T00:00:00Z"));
-        assert!(version_shape_findings(&packument("3.0.0", &late), "3.0.0")
-            .expect("late major")
-            .is_empty());
-
-        let mut same_time = suspicious_events();
-        same_time.insert(6, ("1.6.0", "2025-02-21T00:00:00Z"));
-        assert!(
-            version_shape_findings(&packument("3.0.0", &same_time), "3.0.0")
-                .expect("same-time publication")
-                .is_empty()
-        );
-
-        let mut prerelease = suspicious_events();
-        prerelease.pop();
-        prerelease.push(("3.0.0-beta.1", "2025-02-21T00:00:00Z"));
-        let findings =
-            version_shape_findings(&packument("3.0.0-beta.1", &prerelease), "3.0.0-beta.1")
-                .expect("prerelease");
-        assert_eq!(findings[0].rule_id, "npm-version-shape-unassessed");
-    }
-
-    #[test]
-    fn version_shape_evidence_names_versions_times_and_policy() {
-        let packet = packument("3.0.0", &suspicious_events());
-        let finding = version_shape_findings(&packet, "3.0.0")
-            .expect("evaluate")
-            .pop()
-            .expect("finding");
-        assert!(finding.detail.contains("policy=npm-anomaly-v1"));
-        assert!(finding.detail.contains("target=3.0.0@2025-02-21"));
-        assert!(finding.detail.contains("predecessor=1.5.0@2025-02-20"));
-        assert!(finding.detail.contains("major_delta>=2"));
-    }
-
-    #[test]
-    fn cache_ttl_boundary_is_inclusive() {
-        let now = DateTime::parse_from_rfc3339("2025-02-21T00:15:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let fetched = now - Duration::minutes(15);
-        assert!(cache_entry_is_reusable(fetched, now, fetched).unwrap());
-        assert!(
-            !cache_entry_is_reusable(fetched, now + Duration::nanoseconds(1), fetched).unwrap()
-        );
-    }
-}
+#[path = "anomaly/tests.rs"]
+mod tests;

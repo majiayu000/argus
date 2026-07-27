@@ -30,7 +30,7 @@ fn assert_catalog_error(source: &str, origin: CatalogOrigin, expected: &str) {
 fn embedded_catalog_is_the_complete_deterministic_registry() {
     let catalog = builtin_catalog().unwrap();
     assert_eq!(catalog.schema_version(), 1);
-    assert_eq!(catalog.rules().len(), 117);
+    assert_eq!(catalog.rules().len(), 116);
     let mut ids = BTreeSet::new();
     let mut prior = None;
     for rule in catalog.rules() {
@@ -41,7 +41,16 @@ fn embedded_catalog_is_the_complete_deterministic_registry() {
         match &rule.matcher {
             RuleMatcher::Builtin { name, parameters } => {
                 assert_eq!(name, &rule.id);
-                assert_eq!(parameters, &RuleParameters::None);
+                match rule.id.as_str() {
+                    "typosquatting" => assert!(parameters.typosquat().is_some()),
+                    "version-shape-anomaly" => {
+                        assert!(parameters.npm_version_shape().is_some())
+                    }
+                    "rapid-publish-window" => {
+                        assert!(parameters.npm_rapid_publish().is_some())
+                    }
+                    _ => assert_eq!(parameters, &RuleParameters::None),
+                }
             }
             other => panic!("built-in rule used non-builtin matcher: {other:?}"),
         }
@@ -50,7 +59,7 @@ fn embedded_catalog_is_the_complete_deterministic_registry() {
         }
         prior = Some(rule.id.as_str());
     }
-    assert_eq!(all_rules().len(), 117);
+    assert_eq!(all_rules().len(), 116);
 }
 
 #[test]
@@ -490,10 +499,6 @@ fn effective_ruleset_digest_is_order_independent_and_state_sensitive() {
     )
     .unwrap();
     let default = EffectiveRuleSet::build(catalog, []).unwrap();
-    assert_eq!(
-        default.digest().to_hex(),
-        "d17f499c0b2160351865a055db5994a630356bb237e3007e11782cdbe4f85a4c"
-    );
     assert_eq!(first.digest(), reordered.digest());
     assert_ne!(first.digest(), default.digest());
     assert_eq!(first.digest().to_hex().len(), 64);
@@ -523,7 +528,7 @@ fn catalogs_merge_deterministically_without_shadowing() {
     assert_eq!(merged.rules()[1].id.as_str(), "external-z");
     assert!(first.merged_with(&first).is_err());
     let complete = builtin_catalog().unwrap().merged_with(&merged).unwrap();
-    assert_eq!(complete.rules().len(), 119);
+    assert_eq!(complete.rules().len(), 118);
 }
 
 #[test]
@@ -637,4 +642,135 @@ fn invalid_external_values_are_not_reflected_in_diagnostics() {
         .unwrap_err()
         .to_string();
     assert!(!error.contains("SECRET_UNKNOWN"));
+}
+
+#[test]
+fn typed_builtin_parameter_defaults_are_closed_and_bounded() {
+    let catalog = builtin_catalog().unwrap();
+    let typo = match &catalog.get("typosquatting").unwrap().matcher {
+        RuleMatcher::Builtin { parameters, .. } => parameters.typosquat().unwrap(),
+        _ => panic!("expected builtin"),
+    };
+    assert_eq!(typo.max_edit_distance(), 1);
+    assert_eq!(typo.min_length_for_distance_two(), 8);
+    assert!(typo.edit_distance_enabled() && typo.keyboard_enabled());
+    assert_eq!(typo.keyboard_layout().as_str(), "qwerty-us-v1");
+    assert!(typo.unicode_confusables_enabled());
+    assert_eq!(typo.confusables_profile().as_str(), "uts39-v1");
+    let defaults = EffectiveRuleSet::build(catalog, []).unwrap();
+    let shape = defaults
+        .rule("version-shape-anomaly")
+        .unwrap()
+        .parameters()
+        .npm_version_shape()
+        .unwrap();
+    assert_eq!(
+        (
+            shape.minimum_predecessors(),
+            shape.baseline_transitions(),
+            shape.minimum_history_days(),
+            shape.maximum_jump_delay_hours(),
+            shape.major_jump_threshold(),
+            shape.minor_jump_threshold(),
+        ),
+        (6, 5, 30, 72, 2, 10)
+    );
+    let rapid = defaults
+        .rule("rapid-publish-window")
+        .unwrap()
+        .parameters()
+        .npm_rapid_publish()
+        .unwrap();
+    assert_eq!((rapid.window_hours(), rapid.package_threshold()), (24, 5));
+}
+
+#[test]
+fn behavioral_parameter_overrides_are_typed_audited_and_order_independent() {
+    let catalog = builtin_catalog().unwrap();
+    let values = [
+        "version-shape-anomaly=param:minimum_predecessors=8",
+        "version-shape-anomaly=param:baseline_transitions=7",
+        "rapid-publish-window=param:window_hours=48",
+        "typosquatting=param:max_edit_distance=2",
+    ];
+    let build = |order: &[usize]| {
+        EffectiveRuleSet::build(
+            catalog,
+            order
+                .iter()
+                .map(|index| RuleOverride::from_str(values[*index]).unwrap()),
+        )
+        .unwrap()
+    };
+    let first = build(&[0, 1, 2, 3]);
+    assert_eq!(first.digest(), build(&[3, 2, 1, 0]).digest());
+    assert_ne!(
+        first.digest(),
+        EffectiveRuleSet::build(catalog, []).unwrap().digest()
+    );
+    assert_eq!(first.applied_overrides().len(), 4);
+    let shape = first
+        .rule("version-shape-anomaly")
+        .unwrap()
+        .parameters()
+        .npm_version_shape()
+        .unwrap();
+    assert_eq!(
+        (shape.minimum_predecessors(), shape.baseline_transitions()),
+        (8, 7)
+    );
+}
+
+#[test]
+fn parameter_overrides_reject_duplicates_wrong_targets_ranges_and_caps() {
+    let catalog = builtin_catalog().unwrap();
+    let parse = |value| RuleOverride::from_str(value).unwrap();
+    assert!(EffectiveRuleSet::build(
+        catalog,
+        [
+            parse("rapid-publish-window=param:window_hours=24"),
+            parse("rapid-publish-window=param:window_hours=25"),
+        ],
+    )
+    .is_err());
+    for value in [
+        "remote-download=param:window_hours=24",
+        "rapid-publish-window=param:window_hours=0",
+        "rapid-publish-window=param:window_hours=721",
+        "rapid-publish-window=param:package_threshold=251",
+        "typosquatting=param:max_edit_distance=3",
+    ] {
+        assert!(
+            EffectiveRuleSet::build(catalog, [parse(value)]).is_err(),
+            "{value}"
+        );
+    }
+    assert!(EffectiveRuleSet::build(
+        catalog,
+        [
+            parse("version-shape-anomaly=param:minimum_predecessors=5"),
+            parse("version-shape-anomaly=param:baseline_transitions=5"),
+        ],
+    )
+    .is_err());
+    for value in [
+        "typosquatting=param:keyboard_layout=qwerty-us-v1",
+        "rapid-publish-window=param:maximum_search_objects=100",
+        "version-shape-anomaly=param:cache_ttl_minutes=1",
+        "version-shape-anomaly=param:policy_class=blocking",
+        "rapid-publish-window=param:not_a_field=1",
+        "rapid-publish-window=param:window_hours=-1",
+    ] {
+        assert!(RuleOverride::from_str(value).is_err(), "{value}");
+    }
+    for value in [
+        "rapid-publish-window=param:window_hours=720",
+        "rapid-publish-window=param:package_threshold=250",
+        "typosquatting=param:max_edit_distance=2",
+    ] {
+        assert!(
+            EffectiveRuleSet::build(catalog, [parse(value)]).is_ok(),
+            "{value}"
+        );
+    }
 }

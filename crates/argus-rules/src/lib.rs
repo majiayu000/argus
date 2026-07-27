@@ -20,10 +20,10 @@ mod decision;
 mod lifecycle;
 mod name;
 mod session;
+pub mod typosquat;
 
 pub use content::scan_text_file;
 pub use decision::derive_from_findings as derive_decision_from_findings;
-pub use name::{levenshtein, push_typosquat_findings};
 pub use session::{
     RuleSession, MAX_EXTERNAL_EVIDENCE_BYTES, MAX_EXTERNAL_FINDINGS, MAX_EXTERNAL_INPUT_BYTES,
     MAX_EXTERNAL_SCAN_FILES, MAX_RULE_DIRECTORY_BYTES, MAX_RULE_FILES, MAX_RULE_FILE_BYTES,
@@ -60,16 +60,14 @@ const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Top-level entry: scan a package directory, return a full report.
 pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
-    scan_package_dir_inner(path).map(|(report, _)| report)
-}
-
-fn scan_package_dir_inner(path: &Path) -> Result<(ScanReport, PackageJson)> {
-    scan_package_dir_inner_with_limit(path, None)
+    let rules = RuleSession::builtin()?;
+    scan_package_dir_with_rules(path, &rules)
 }
 
 fn scan_package_dir_inner_with_limit(
     path: &Path,
     package_json_limit: Option<usize>,
+    rules: &RuleSession,
 ) -> Result<(ScanReport, PackageJson)> {
     let pkg_json_path = path.join("package.json");
     let pkg_json_raw = match package_json_limit {
@@ -109,7 +107,7 @@ fn scan_package_dir_inner_with_limit(
     lifecycle::run(&ctx, &mut findings)?;
     content::run(&ctx, &mut findings)?;
     binary::run(&ctx, &mut findings);
-    name::run(&ctx, &mut findings);
+    name::run(&ctx, rules, &mut findings)?;
 
     let decision = decision::derive(&ctx, &findings);
 
@@ -135,7 +133,7 @@ pub fn scan_package_dir_with_rules(path: &Path, rules: &RuleSession) -> Result<S
     let package_json_limit = rules
         .has_enabled_external_rules()
         .then_some(MAX_EXTERNAL_INPUT_BYTES);
-    let (mut report, package) = scan_package_dir_inner_with_limit(path, package_json_limit)?;
+    let (mut report, package) = scan_package_dir_inner_with_limit(path, package_json_limit, rules)?;
     rules.scan_directory_with_virtual_inputs(
         path,
         package.scripts.len(),

@@ -36,7 +36,6 @@ mod scan;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{is_not_found, HttpTransport, Transport};
 pub use metadata::{escape_module_path, parse_go_mod_module, resolve_version, GoModInfo};
-pub use rules::POPULAR_GO_MODULES;
 pub use scan::{
     extract_module_zip, scan_extracted_module, scan_extracted_module_with_rules, ExtractedModule,
 };
@@ -247,7 +246,12 @@ pub fn fetch_and_scan_go_with_rules(
     }
 
     // 7. Name-based rules (typosquatting) on the module path.
-    rules::push_name_findings(&pkg.module_path, &mut all_findings);
+    rules.push_typosquat_findings(
+        Ecosystem::Go,
+        &pkg.module_path,
+        "Go module",
+        &mut all_findings,
+    )?;
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 

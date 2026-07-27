@@ -16,8 +16,12 @@ pub use catalog::{
     MAX_RULE_ID_BYTES, RULE_CATALOG_SCHEMA_VERSION,
 };
 pub use effective::{
-    AppliedRuleOverride, DisabledRule, EffectiveRule, EffectiveRuleSet, RuleOverride,
-    RuleOverrideAction, RuleSetDigest,
+    AppliedRuleOverride, ConfusablesProfileId, DisabledRule, EffectiveRule, EffectiveRuleSet,
+    KeyboardLayoutId, NpmRapidPublishParameters, NpmVersionShapeParameters, RuleOverride,
+    RuleOverrideAction, RuleParameterOverride, RuleSetDigest, TyposquatParameters,
+    MAXIMUM_SEARCH_OBJECTS, MAX_ANOMALY_COUNT, MAX_ANOMALY_THRESHOLD, MAX_EDIT_DISTANCE,
+    MAX_HISTORY_DAYS, MAX_IDENTITY_SCALARS, MAX_JUMP_DELAY_HOURS, MAX_RAPID_WINDOW_HOURS,
+    MIN_DISTANCE_TWO_LENGTH,
 };
 
 use std::sync::OnceLock;

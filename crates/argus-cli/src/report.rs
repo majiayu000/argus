@@ -98,6 +98,18 @@ pub(crate) fn render_rules_text(rules: &RuleExecutionMetadata) -> String {
         display_values(&rules.applied_overrides)
     )
     .expect("write String");
+    writeln!(
+        output,
+        "rules_parameter_overrides: {}",
+        display_values(&rules.parameter_overrides)
+    )
+    .expect("write String");
+    let data = rules
+        .data
+        .iter()
+        .map(|asset| format!("{}@{}={}", asset.id, asset.version, asset.sha256))
+        .collect::<Vec<_>>();
+    writeln!(output, "rules_data: {}", display_values(&data)).expect("write String");
     output
 }
 
@@ -185,6 +197,8 @@ mod tests {
             external_rule_count: 1,
             disabled_rule_ids: vec!["external-demo".to_string()],
             applied_overrides: vec!["external-demo=off".to_string()],
+            parameter_overrides: Vec::new(),
+            data: Vec::new(),
             external_rules: Vec::new(),
         });
         let text = render_report_text(&report);

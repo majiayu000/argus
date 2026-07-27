@@ -10,70 +10,19 @@
 //! - embedded build scripts (`.sh`/`.bat`/`.ps1`) inside the jar;
 //! - typosquats of popular Maven coordinates.
 
+#[cfg(test)]
 use argus_core::Finding;
-
-/// Popular Maven artifactIds that are common typosquat targets. Drawn from
-/// Maven Central download statistics + recent attack reports. We match on
-/// the artifactId (the trailing coordinate segment) since that is what a
-/// consumer typically types and misremembers.
-pub const POPULAR_MAVEN_ARTIFACTS: &[&str] = &[
-    // logging
-    "slf4j-api",
-    "logback-classic",
-    "log4j-core",
-    "log4j-api",
-    "commons-logging",
-    // apache commons
-    "commons-lang3",
-    "commons-io",
-    "commons-collections4",
-    "commons-codec",
-    "commons-text",
-    // json / serialization
-    "jackson-databind",
-    "jackson-core",
-    "jackson-annotations",
-    "gson",
-    "guava",
-    // web / spring
-    "spring-core",
-    "spring-context",
-    "spring-web",
-    "spring-boot",
-    "spring-boot-starter",
-    // testing
-    "junit",
-    "junit-jupiter-api",
-    "mockito-core",
-    "assertj-core",
-    "hamcrest",
-    // http / netty
-    "okhttp",
-    "httpclient",
-    "netty-all",
-    "retrofit",
-    // db
-    "mysql-connector-java",
-    "postgresql",
-    "h2",
-    "hikaricp",
-    // misc heavy hitters
-    "lombok",
-    "kotlin-stdlib",
-    "scala-library",
-    "protobuf-java",
-    "snakeyaml",
-];
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list, matching against the artifactId.
-pub fn push_name_findings(artifact: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(
-        artifact,
-        POPULAR_MAVEN_ARTIFACTS,
+#[cfg(test)]
+pub fn push_name_findings(artifact: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::Maven,
+        &format!("legacy:{artifact}"),
         "Maven artifactId",
         findings,
-    );
+    )
 }
 
 /// True if a jar entry path is an embedded build/launcher script we want to
@@ -93,7 +42,7 @@ mod tests {
     #[test]
     fn typosquat_guava_fires() {
         let mut f = Vec::new();
-        push_name_findings("guaava", &mut f);
+        push_name_findings("guaava", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
         assert!(rules.contains(&"low-reputation"), "got: {rules:?}");
@@ -102,11 +51,11 @@ mod tests {
     #[test]
     fn legitimate_artifact_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("guava", &mut f);
+        push_name_findings("guava", &mut f).unwrap();
         assert!(f.is_empty());
         // case-insensitive match too
         let mut f2 = Vec::new();
-        push_name_findings("Guava", &mut f2);
+        push_name_findings("Guava", &mut f2).unwrap();
         assert!(f2.is_empty());
     }
 
