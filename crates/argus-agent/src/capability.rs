@@ -12,14 +12,13 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 mod classify;
-mod syntax;
 
+use argus_syntax::FactKind;
 use classify::{
     is_destructive_fact, is_exec_fact, is_incomplete_fact, is_network_fact, is_obfuscation_fact,
     is_remote_shell_pipeline_fact, resolve_fact_host, resolved_payload_matches, sensitive_read,
     writes_agent_config,
 };
-use syntax::FactKind;
 
 const RULE_REMOTE_EXEC: &str = "AGT-03-remote-exec";
 const RULE_SECRET_EXFIL: &str = "AGT-03-secret-exfil";
@@ -177,7 +176,7 @@ pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
 fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
-    for fact in syntax::analyze(file)? {
+    for fact in argus_syntax::analyze(&file.rel, &file.content)? {
         if fact.kind == FactKind::Unsupported {
             push_hit(
                 &mut hits,

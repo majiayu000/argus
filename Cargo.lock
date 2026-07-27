@@ -116,16 +116,12 @@ dependencies = [
  "anyhow",
  "argus-core",
  "argus-rules",
+ "argus-syntax",
  "regex",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-typescript",
  "walkdir",
 ]
 
@@ -457,6 +453,18 @@ dependencies = [
  "serde",
  "serde_json",
  "walkdir",
+]
+
+[[package]]
+name = "argus-syntax"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
