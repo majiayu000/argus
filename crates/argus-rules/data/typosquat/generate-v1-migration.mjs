@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const argumentsByName = parseArguments(process.argv.slice(2));
@@ -343,8 +344,12 @@ const keyboard = {
 const keyboardBytes = encode(keyboard);
 await writeFile(join(outputDirectory, "keyboard-qwerty-us.json"), keyboardBytes);
 
-const confusablesSource = await readFile(confusablesInput, "utf8");
-const confusablesSourceHash = sha256(confusablesSource);
+const confusablesArchive = await readFile(confusablesInput);
+const confusablesSourceBytes = confusablesInput.endsWith(".gz")
+  ? gunzipSync(confusablesArchive)
+  : confusablesArchive;
+const confusablesSource = confusablesSourceBytes.toString("utf8");
+const confusablesSourceHash = sha256(confusablesSourceBytes);
 const expectedConfusablesHash =
   "091c7f82fc39ef208faf8f94d29c244de99254675e09de163160c810d13ef22a";
 if (confusablesSourceHash !== expectedConfusablesHash) {

@@ -215,7 +215,7 @@ Direct generation requires all inputs and an explicit output directory:
 node crates/argus-rules/data/typosquat/generate-v1-migration.mjs \
   --migration-source crates/argus-rules/data/typosquat/sources/migration-v1.json \
   --qwerty-source crates/argus-rules/data/typosquat/sources/qwerty-us-v1.json \
-  --confusables-source crates/argus-rules/data/typosquat/sources/unicode-17.0.0-confusables.txt \
+  --confusables-source crates/argus-rules/data/typosquat/sources/unicode-17.0.0-confusables.txt.gz \
   --output-dir /tmp/argus-typosquat-v1
 ```
 

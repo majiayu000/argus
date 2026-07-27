@@ -20,7 +20,7 @@ try {
   for (const file of [
     "migration-v1.json",
     "qwerty-us-v1.json",
-    "unicode-17.0.0-confusables.txt",
+    "unicode-17.0.0-confusables.txt.gz",
   ]) {
     await cp(join(sources, file), join(inputArchive, file));
   }
@@ -58,7 +58,7 @@ function generate(migrationSource, outputDirectory) {
       join(
         temporaryRoot,
         "input-archive",
-        "unicode-17.0.0-confusables.txt",
+        "unicode-17.0.0-confusables.txt.gz",
       ),
       "--output-dir",
       outputDirectory,
