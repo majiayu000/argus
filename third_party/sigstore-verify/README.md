@@ -23,6 +23,11 @@ The crates.io package's 1,264-line `tests/verification_tests.rs` is omitted:
 it exceeds Argus's 800-line hard limit and imports sibling
 `sigstore-bundle/tests/fixtures` files that the published crate does not
 contain. Argus's real npm fixture matrix replaces that non-runnable test entry.
+The archive's `Cargo.lock` is also omitted because this path dependency is
+resolved by Argus's workspace-root lockfile; retaining a nested lock would be
+ignored by workspace builds and misleadingly describe a separate dependency
+graph. Both omitted files remain recoverable from the checksum-pinned crates.io
+0.11.0 archive recorded above.
 
 Remove this path patch only when a later upstream release passes Argus's real
 npm positive fixture and the complete fail-closed mutation matrix.
