@@ -18,6 +18,7 @@ members = [
     "crates/argus-intel",
     "crates/argus-lockfile",
     "crates/argus-osv",
+    "crates/argus-syntax",
     "crates/argus-agent",
     "crates/argus-cli",
     "crates/argus-test-support",
@@ -69,6 +70,7 @@ argus-go = { path = "crates/argus-go", version = "0.1.0" }
 argus-intel = { path = "crates/argus-intel", version = "0.1.0" }
 argus-lockfile = { path = "crates/argus-lockfile", version = "0.1.0" }
 argus-osv = { path = "crates/argus-osv", version = "0.1.0" }
+argus-syntax = { path = "crates/argus-syntax", version = "0.1.0" }
 argus-test-support = { path = "crates/argus-test-support", version = "0.1.0" }
 argus-verify = { path = "crates/argus-verify", version = "0.1.0" }
 

@@ -1,9 +1,9 @@
-use super::syntax::{
+use super::{agent_config_write_re, resolve_host, sensitive_read_re};
+use argus_syntax::{
     bounded_command_invocation, bounded_shell_pipeline, effective_command_token, is_exec_wrapper,
     is_shell_wrapper, shell_wrapper_invocation, ArgumentShape, Fact, FactKind, ScriptLanguage,
     StaticValue,
 };
-use super::{agent_config_write_re, resolve_host, sensitive_read_re};
 use regex::Regex;
 
 mod curl;

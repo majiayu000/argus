@@ -2,7 +2,7 @@ use super::{ArgumentShape, ScriptLanguage, StaticValue};
 use std::collections::BTreeMap;
 use tree_sitter::Node;
 
-pub(in crate::capability) fn is_exec_wrapper(name: &str) -> bool {
+pub fn is_exec_wrapper(name: &str) -> bool {
     let name = exec_wrapper_key(name);
     matches!(
         name.as_str(),
@@ -23,7 +23,7 @@ fn exec_wrapper_key(name: &str) -> String {
     lower.strip_prefix("node:").unwrap_or(&lower).to_string()
 }
 
-pub(in crate::capability) fn is_shell_wrapper(name: &str) -> bool {
+pub fn is_shell_wrapper(name: &str) -> bool {
     matches!(shell_wrapper_key(name).as_str(), "sudo" | "env")
 }
 
@@ -39,7 +39,7 @@ pub(super) fn command_argument_shape(callee: &str, language: ScriptLanguage) -> 
     }
 }
 
-pub(in crate::capability) fn shell_wrapper_invocation(
+pub fn shell_wrapper_invocation(
     arguments: &[StaticValue],
     wrapper: &str,
 ) -> Option<(String, Vec<StaticValue>)> {
@@ -79,11 +79,11 @@ pub(in crate::capability) fn shell_wrapper_invocation(
     }
 }
 
-pub(in crate::capability) fn effective_command_token(segment: &str) -> Option<String> {
+pub fn effective_command_token(segment: &str) -> Option<String> {
     bounded_command_invocation(segment, true).map(|(command, _)| command)
 }
 
-pub(in crate::capability) fn bounded_command_invocation(
+pub fn bounded_command_invocation(
     segment: &str,
     allow_split_string: bool,
 ) -> Option<(String, Vec<StaticValue>)> {
@@ -499,15 +499,15 @@ fn expand_argv_node(node: Node<'_>) -> Vec<Node<'_>> {
     }
 }
 
-pub(super) fn language_for(rel: &str) -> ScriptLanguage {
+pub(crate) fn language_for(rel: &str) -> ScriptLanguage {
     let lower = rel.to_ascii_lowercase();
     if lower.ends_with(".sh") || lower.ends_with(".bash") || lower.ends_with(".zsh") {
         ScriptLanguage::Bash
     } else if lower.ends_with(".py") {
         ScriptLanguage::Python
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
+    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
         ScriptLanguage::JavaScript
-    } else if lower.ends_with(".ts") {
+    } else if lower.ends_with(".ts") || lower.ends_with(".mts") || lower.ends_with(".cts") {
         ScriptLanguage::TypeScript
     } else {
         ScriptLanguage::Unsupported

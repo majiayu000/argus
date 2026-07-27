@@ -1,0 +1,16 @@
+[package]
+name = "argus-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared tree-sitter fact extraction for Bash, Python, JavaScript, and TypeScript."
+
+[dependencies]
+anyhow = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-typescript = { workspace = true }
