@@ -90,12 +90,7 @@ pub(crate) fn require_tlog_inclusion_material(bundle: &Bundle) -> Result<()> {
         ));
     }
 
-    for (index, entry) in bundle
-        .verification_material
-        .tlog_entries
-        .iter()
-        .enumerate()
-    {
+    for (index, entry) in bundle.verification_material.tlog_entries.iter().enumerate() {
         let proof = entry.inclusion_proof.as_ref().ok_or_else(|| {
             Error::Verification(format!(
                 "tlog entry {index} is missing the inclusion proof required by policy"
@@ -344,10 +339,7 @@ mod tests {
         let mut bundle = v0_1_bundle();
         let mut unproven = bundle.verification_material.tlog_entries[0].clone();
         unproven.inclusion_proof = None;
-        bundle
-            .verification_material
-            .tlog_entries
-            .push(unproven);
+        bundle.verification_material.tlog_entries.push(unproven);
 
         let err = require_tlog_inclusion_material(&bundle).unwrap_err();
         assert!(err.to_string().contains("tlog entry 1"));
