@@ -735,8 +735,21 @@ fn parameter_overrides_reject_duplicates_wrong_targets_ranges_and_caps() {
     .is_err());
     for value in [
         "remote-download=param:window_hours=24",
+        "version-shape-anomaly=param:minimum_predecessors=0",
+        "version-shape-anomaly=param:minimum_predecessors=10001",
+        "version-shape-anomaly=param:baseline_transitions=0",
+        "version-shape-anomaly=param:baseline_transitions=10001",
+        "version-shape-anomaly=param:minimum_history_days=0",
+        "version-shape-anomaly=param:minimum_history_days=36501",
+        "version-shape-anomaly=param:maximum_jump_delay_hours=0",
+        "version-shape-anomaly=param:maximum_jump_delay_hours=8761",
+        "version-shape-anomaly=param:major_jump_threshold=0",
+        "version-shape-anomaly=param:major_jump_threshold=10001",
+        "version-shape-anomaly=param:minor_jump_threshold=0",
+        "version-shape-anomaly=param:minor_jump_threshold=10001",
         "rapid-publish-window=param:window_hours=0",
         "rapid-publish-window=param:window_hours=721",
+        "rapid-publish-window=param:package_threshold=0",
         "rapid-publish-window=param:package_threshold=251",
         "typosquatting=param:max_edit_distance=3",
     ] {
@@ -764,6 +777,12 @@ fn parameter_overrides_reject_duplicates_wrong_targets_ranges_and_caps() {
         assert!(RuleOverride::from_str(value).is_err(), "{value}");
     }
     for value in [
+        "version-shape-anomaly=param:minimum_predecessors=10000",
+        "version-shape-anomaly=param:baseline_transitions=1",
+        "version-shape-anomaly=param:minimum_history_days=36500",
+        "version-shape-anomaly=param:maximum_jump_delay_hours=8760",
+        "version-shape-anomaly=param:major_jump_threshold=10000",
+        "version-shape-anomaly=param:minor_jump_threshold=10000",
         "rapid-publish-window=param:window_hours=720",
         "rapid-publish-window=param:package_threshold=250",
         "typosquatting=param:max_edit_distance=2",

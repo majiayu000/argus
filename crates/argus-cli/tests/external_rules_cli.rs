@@ -367,33 +367,78 @@ fn malformed_unknown_and_duplicate_overrides_fail_without_a_report() {
 }
 
 #[test]
-fn typed_parameter_override_emits_sorted_data_audit_metadata() {
+fn zero_finding_typed_parameter_audit_is_consistent_in_all_formats() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(
         temp.path().join("package.json"),
         r#"{"name":"clean-demo","version":"1.0.0"}"#,
     )
     .unwrap();
-    let output = argus(&[
+    let path = temp.path().to_str().unwrap();
+    let rule_override = "typosquatting=param:max_edit_distance=2";
+
+    let json_output = argus(&[
         "scan",
-        temp.path().to_str().unwrap(),
+        path,
         "--format",
         "json",
         "--rule-override",
-        "typosquatting=param:max_edit_distance=2",
+        rule_override,
     ]);
     assert!(
-        output.status.success(),
+        json_output.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&json_output.stderr)
     );
-    let report = json(&output);
-    assert_eq!(
-        report["rules"]["parameter_overrides"][0],
-        "typosquatting=param:max_edit_distance=2"
-    );
+    let report = json(&json_output);
+    assert_eq!(report["findings"], serde_json::json!([]));
+    assert_eq!(report["rules"]["parameter_overrides"][0], rule_override);
     assert_eq!(report["rules"]["data"].as_array().unwrap().len(), 10);
-    assert_eq!(report["rules"]["digest"].as_str().unwrap().len(), 64);
+    let digest = report["rules"]["digest"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+
+    let text_output = argus(&["scan", path, "--rule-override", rule_override]);
+    assert!(
+        text_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&text_output.stderr)
+    );
+    let text = String::from_utf8(text_output.stdout).unwrap();
+    assert!(text.contains("findings: none"));
+    assert!(text.contains(&format!("rules_digest: {digest}")));
+    assert!(text.contains(&format!("rules_parameter_overrides: {rule_override}")));
+    for asset in report["rules"]["data"].as_array().unwrap() {
+        let rendered = format!(
+            "{}@{}={}",
+            asset["id"].as_str().unwrap(),
+            asset["version"].as_str().unwrap(),
+            asset["sha256"].as_str().unwrap()
+        );
+        assert!(
+            text.contains(&rendered),
+            "missing text audit asset {rendered}"
+        );
+    }
+
+    let sarif_output = argus(&[
+        "scan",
+        path,
+        "--format",
+        "sarif",
+        "--rule-override",
+        rule_override,
+    ]);
+    assert!(
+        sarif_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sarif_output.stderr)
+    );
+    let sarif = json(&sarif_output);
+    assert_eq!(sarif["runs"][0]["results"], serde_json::json!([]));
+    assert_eq!(
+        sarif["runs"][0]["properties"]["argusRules"],
+        report["rules"]
+    );
 }
 
 #[cfg(not(unix))]

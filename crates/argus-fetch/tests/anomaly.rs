@@ -1,6 +1,6 @@
 //! Offline npm metadata-anomaly integration coverage.
 
-use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
+use argus_fetch::{fetch_and_scan, fetch_and_scan_with_rules, FetchOptions, PackageRef};
 use argus_test_support::MockTransport;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -224,68 +224,51 @@ fn scan_version(
     )
 }
 
-#[test]
-fn rapid_publish_window_uses_exact_publisher_distinct_packages() {
-    let registry = "https://mock.registry/npm/private";
-    let mut objects = suspicious_search_objects();
-    objects.push(objects[0].clone());
-    objects.push(search_object(
-        "wrong-publisher",
-        "1.0.0",
-        "2025-02-20T12:00:00Z",
-        "alice-team",
-    ));
-    objects.push(search_object(
-        "outside-window",
-        "1.0.0",
-        "2025-02-19T23:59:59Z",
-        PUBLISHER,
-    ));
-    let transport = transport_with(registry, TARGET_TIME, Some(search_response(objects)));
-
-    let report = scan(registry, None, &transport).unwrap();
-    let finding = report
-        .findings
+fn scan_version_with_parameters(
+    registry: &str,
+    version: &str,
+    transport: &MockTransport,
+    overrides: &[&str],
+) -> anyhow::Result<argus_core::ScanReport> {
+    let overrides = overrides
         .iter()
-        .find(|finding| finding.rule_id == "rapid-publish-window")
-        .expect("rapid publish finding");
-    assert!(finding.detail.contains("distinct_packages=5"));
-    assert!(finding.detail.contains("publisher=alice"));
-    let evidence = finding.evidence.as_ref().expect("anomaly evidence");
-    assert!(evidence.iter().any(|item| item == "policy=npm-anomaly-v1"));
-    assert!(evidence.iter().any(|item| item == "distinct_packages=5"));
-    let report_json = serde_json::to_value(&report).expect("serialize report");
-    assert_eq!(
-        report_json["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["rule_id"] == "rapid-publish-window")
-            .unwrap()["evidence"][0],
-        "policy=npm-anomaly-v1"
-    );
-    assert_eq!(transport.request_count(&search_url(registry)), 1);
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    let rules = argus_rules::RuleSession::load(None, &overrides)?;
+    fetch_and_scan_with_rules(
+        &PackageRef::parse(&format!("{PACKAGE}@{version}")).unwrap(),
+        &options(registry, None),
+        transport,
+        &rules,
+    )
 }
 
-#[test]
-fn rapid_publish_benign_is_explicitly_unassessed() {
-    let registry = "https://mock.registry";
-    let transport = transport_with(
-        registry,
-        TARGET_TIME,
-        Some(search_response(
-            suspicious_search_objects().into_iter().take(4).collect(),
-        )),
-    );
-
-    let report = scan(registry, None, &transport).unwrap();
-    let finding = report
+fn has_finding(report: &argus_core::ScanReport, rule_id: &str) -> bool {
+    report
         .findings
         .iter()
-        .find(|finding| finding.rule_id == "npm-rapid-publish-unassessed")
-        .expect("unassessed finding");
-    assert_eq!(finding.severity, argus_core::Severity::Info);
-    assert!(finding.detail.contains("observed_distinct_packages=4"));
+        .any(|finding| finding.rule_id == rule_id)
+}
+
+fn shape_report(
+    registry: &str,
+    target: &str,
+    events: &[(&str, &str)],
+    parameter: &str,
+) -> argus_core::ScanReport {
+    let transport = transport_with_events(registry, target, events, search_response(Vec::new()));
+    scan_version_with_parameters(registry, target, &transport, &[parameter]).unwrap()
+}
+
+fn rapid_report(
+    registry: &str,
+    target: &str,
+    events: &[(&str, &str)],
+    objects: Vec<Value>,
+    parameter: &str,
+) -> argus_core::ScanReport {
+    let transport = transport_with_events(registry, target, events, search_response(objects));
+    scan_version_with_parameters(registry, target, &transport, &[parameter]).unwrap()
 }
 
 #[test]
@@ -561,88 +544,182 @@ fn anomaly_transport_conflicting_normalized_version_times_fail_closed() {
 }
 
 #[test]
-fn version_shape_matrix_freezes_minor_delay_and_baseline_boundaries() {
+fn version_shape_parameters_freeze_cardinality_history_and_delay_edges() {
     let registry = "https://mock.registry";
-    let prefix = [
-        ("1.0.0", "2025-01-01T00:00:00Z"),
-        ("1.1.0", "2025-01-05T00:00:00Z"),
-        ("1.2.0", "2025-01-10T00:00:00Z"),
-        ("1.3.0", "2025-01-15T00:00:00Z"),
-        ("1.4.0", "2025-01-20T00:00:00Z"),
-        ("1.5.0", "2025-02-01T00:00:00Z"),
+    let base = [
+        ("1.0.0", "2025-01-22T00:00:00Z"),
+        ("1.1.0", "2025-01-25T00:00:00Z"),
+        ("1.2.0", "2025-02-01T00:00:00Z"),
+        ("1.3.0", "2025-02-05T00:00:00Z"),
+        ("1.4.0", "2025-02-10T00:00:00Z"),
+        ("1.5.0", "2025-02-20T00:00:00Z"),
+        ("3.0.0", TARGET_TIME),
     ];
-    for (target_time, expected) in [
-        ("2025-02-04T00:00:00Z", true),
-        ("2025-02-04T00:00:01Z", false),
-    ] {
-        let mut events = prefix.to_vec();
-        events.push(("1.15.0", target_time));
-        let transport =
-            transport_with_events(registry, "1.15.0", &events, search_response(Vec::new()));
-        let report = scan_version(registry, "1.15.0", None, &transport).unwrap();
-        assert_eq!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.rule_id == "version-shape-anomaly"),
-            expected,
-            "target_time={target_time}"
+    for (events, expected) in [(&base[..], true), (&base[1..], false)] {
+        let report = shape_report(
+            registry,
+            TARGET_VERSION,
+            events,
+            "version-shape-anomaly=param:minimum_predecessors=6",
         );
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
     }
-
-    let established = [
-        ("1.0.0", "2025-01-01T00:00:00Z"),
-        ("1.10.0", "2025-01-05T00:00:00Z"),
-        ("1.11.0", "2025-01-10T00:00:00Z"),
-        ("1.12.0", "2025-01-15T00:00:00Z"),
-        ("1.13.0", "2025-01-20T00:00:00Z"),
-        ("1.14.0", "2025-02-01T00:00:00Z"),
-        ("1.24.0", "2025-02-02T00:00:00Z"),
-    ];
-    let transport = transport_with_events(
-        registry,
-        "1.24.0",
-        &established,
-        search_response(Vec::new()),
-    );
-    let report = scan_version(registry, "1.24.0", None, &transport).unwrap();
-    assert!(!report
-        .findings
-        .iter()
-        .any(|finding| finding.rule_id == "version-shape-anomaly"));
+    for (first, expected) in [
+        ("2025-01-22T00:00:00Z", true),
+        ("2025-01-22T00:00:01Z", false),
+    ] {
+        let mut events = base;
+        events[0].1 = first;
+        let report = shape_report(
+            registry,
+            TARGET_VERSION,
+            &events,
+            "version-shape-anomaly=param:minimum_history_days=30",
+        );
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
+    }
+    for (last, expected) in [
+        ("2025-02-19T00:00:00Z", true),
+        ("2025-02-18T23:59:59Z", false),
+    ] {
+        let mut events = base;
+        events[5].1 = last;
+        let report = shape_report(
+            registry,
+            TARGET_VERSION,
+            &events,
+            "version-shape-anomaly=param:maximum_jump_delay_hours=48",
+        );
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
+    }
 }
 
 #[test]
-fn rapid_publish_window_freezes_24h_250_and_order_boundaries() {
+fn version_shape_parameters_freeze_repeat_and_jump_threshold_edges() {
     let registry = "https://mock.registry";
-    let mut objects = vec![
-        search_object("alice-pkg-0", "1.0.0", "2025-02-20T00:00:00Z", PUBLISHER),
-        search_object("alice-pkg-0", "2.0.0", TARGET_TIME, PUBLISHER),
-        search_object("alice-pkg-1", "1.0.0", "2025-02-20T06:00:00Z", PUBLISHER),
-        search_object("alice-pkg-2", "1.0.0", "2025-02-20T12:00:00Z", PUBLISHER),
-        search_object("alice-pkg-3", "1.0.0", "2025-02-20T18:00:00Z", PUBLISHER),
-        search_object("alice-pkg-4", "1.0.0", "2025-02-20T23:59:59Z", PUBLISHER),
+    let repeat = [
+        ("0.0.0", "2025-01-01T00:00:00Z"),
+        ("2.0.0", "2025-01-10T00:00:00Z"),
+        ("2.1.0", "2025-01-20T00:00:00Z"),
+        ("2.2.0", "2025-02-01T00:00:00Z"),
+        ("2.3.0", "2025-02-10T00:00:00Z"),
+        ("2.4.0", "2025-02-20T00:00:00Z"),
+        ("4.0.0", TARGET_TIME),
     ];
-    while objects.len() < 250 {
-        objects.push(search_object(
-            &format!("other-pkg-{}", objects.len()),
-            "1.0.0",
-            "2025-02-20T12:00:00Z",
-            "other",
-        ));
+    for (window, expected) in [(1, true), (5, false)] {
+        let parameter = format!("version-shape-anomaly=param:baseline_transitions={window}");
+        let report = shape_report(registry, "4.0.0", &repeat, &parameter);
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
     }
-    objects.reverse();
-    let transport = transport_with(registry, TARGET_TIME, Some(search_response(objects)));
-    let report = scan(registry, None, &transport).unwrap();
+    let prefix = &[
+        ("1.0.0", "2025-01-01T00:00:00Z"),
+        ("1.1.0", "2025-01-10T00:00:00Z"),
+        ("1.2.0", "2025-01-20T00:00:00Z"),
+        ("1.3.0", "2025-02-01T00:00:00Z"),
+        ("1.4.0", "2025-02-10T00:00:00Z"),
+        ("1.5.0", "2025-02-20T00:00:00Z"),
+    ];
+    for (target, expected) in [("3.0.0", false), ("4.0.0", true), ("5.0.0", true)] {
+        let mut events = prefix.to_vec();
+        events.push((target, TARGET_TIME));
+        let report = shape_report(
+            registry,
+            target,
+            &events,
+            "version-shape-anomaly=param:major_jump_threshold=3",
+        );
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
+    }
+    for (target, expected) in [("1.11.0", false), ("1.12.0", true), ("1.13.0", true)] {
+        let mut events = prefix.to_vec();
+        events.push((target, TARGET_TIME));
+        let report = shape_report(
+            registry,
+            target,
+            &events,
+            "version-shape-anomaly=param:minor_jump_threshold=7",
+        );
+        assert_eq!(has_finding(&report, "version-shape-anomaly"), expected);
+    }
+}
+
+#[test]
+fn rapid_publish_parameters_freeze_inclusive_window_and_distinct_threshold() {
+    let registry = "https://mock.registry";
+    let target = "1.6.0";
+    let events = [(target, TARGET_TIME)];
+    let in_window = [
+        ("lower", "2025-02-20T12:00:00Z"),
+        ("middle-1", "2025-02-20T15:00:00Z"),
+        ("middle-2", "2025-02-20T18:00:00Z"),
+        ("middle-3", "2025-02-20T21:00:00Z"),
+        ("upper", TARGET_TIME),
+    ];
+    let mut objects = in_window
+        .map(|(name, date)| search_object(name, "1.0.0", date, PUBLISHER))
+        .to_vec();
+    objects.push(objects[0].clone());
+    objects.push(search_object(
+        "wrong-publisher",
+        "1.0.0",
+        "2025-02-20T18:00:00Z",
+        "alice-team",
+    ));
+    objects.push(search_object(
+        "outside",
+        "1.0.0",
+        "2025-02-20T11:59:59Z",
+        PUBLISHER,
+    ));
+    let report = rapid_report(
+        registry,
+        target,
+        &events,
+        objects,
+        "rapid-publish-window=param:window_hours=12",
+    );
     let finding = report
         .findings
         .iter()
         .find(|finding| finding.rule_id == "rapid-publish-window")
-        .expect("bounded rapid publish finding");
+        .unwrap();
+    assert_eq!(finding.severity, argus_core::Severity::Medium);
     assert!(finding.detail.contains("distinct_packages=5"));
-    assert!(finding
-        .detail
-        .contains("packages=alice-pkg-0,alice-pkg-1,alice-pkg-2,alice-pkg-3,alice-pkg-4"));
+    assert!(!finding.detail.contains("outside") && !finding.detail.contains("wrong-publisher"));
+    let evidence = finding.evidence.as_ref().unwrap();
+    assert!(evidence.iter().any(|item| item == "distinct_packages=5"));
+
+    for (count, expected) in [(2, false), (3, true)] {
+        let objects = in_window[..count]
+            .iter()
+            .map(|(name, date)| search_object(name, "1.0.0", date, PUBLISHER))
+            .collect();
+        let report = rapid_report(
+            registry,
+            target,
+            &events,
+            objects,
+            "rapid-publish-window=param:package_threshold=3",
+        );
+        assert_eq!(has_finding(&report, "rapid-publish-window"), expected);
+        if !expected {
+            let finding = report
+                .findings
+                .iter()
+                .find(|finding| finding.rule_id == "npm-rapid-publish-unassessed")
+                .unwrap();
+            assert_eq!(finding.severity, argus_core::Severity::Info);
+            assert!(finding.detail.contains("observed_distinct_packages=2"));
+        }
+        assert_eq!(
+            report.decision,
+            if expected {
+                argus_core::Decision::AllowWithApproval
+            } else {
+                argus_core::Decision::Allow
+            }
+        );
+    }
 }
 
 #[cfg(unix)]
