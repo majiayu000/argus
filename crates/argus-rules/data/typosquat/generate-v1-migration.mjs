@@ -6,14 +6,38 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const repository = resolve(scriptDirectory, "../../../..");
-const outputDirectory = join(scriptDirectory, "v1");
-const confusablesInput = process.argv[2];
+const argumentsByName = parseArguments(process.argv.slice(2));
+const migrationInput = requiredPath(argumentsByName, "--migration-source");
+const qwertyInput = requiredPath(argumentsByName, "--qwerty-source");
+const confusablesInput = requiredPath(argumentsByName, "--confusables-source");
+const outputDirectory = requiredPath(argumentsByName, "--output-dir");
 
-if (!confusablesInput) {
-  throw new Error(
-    "usage: generate-v1-migration.mjs /path/to/unicode-17.0.0-confusables.txt",
-  );
+for (const input of [migrationInput, qwertyInput, confusablesInput]) {
+  if (resolve(input) === resolve(outputDirectory)) {
+    throw new Error("an input source cannot also be the output directory");
+  }
+}
+
+function parseArguments(args) {
+  const parsed = new Map();
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (!name?.startsWith("--") || value === undefined || parsed.has(name)) {
+      throw new Error(
+        "usage: generate-v1-migration.mjs --migration-source FILE " +
+          "--qwerty-source FILE --confusables-source FILE --output-dir DIR",
+      );
+    }
+    parsed.set(name, value);
+  }
+  return parsed;
+}
+
+function requiredPath(args, name) {
+  const value = args.get(name);
+  if (!value) throw new Error(`missing required argument ${name}`);
+  return resolve(value);
 }
 
 const ecosystems = [
@@ -117,13 +141,7 @@ function canonicalKey(ecosystem, name) {
   return name.toLowerCase();
 }
 
-function keyboardEdges() {
-  const rows = [
-    { keys: "1234567890", offset: 0 },
-    { keys: "qwertyuiop", offset: 0.25 },
-    { keys: "asdfghjkl", offset: 0.5 },
-    { keys: "zxcvbnm", offset: 0.75 },
-  ];
+function keyboardEdges(rows, neighborDistance) {
   const keys = rows.flatMap(({ keys, offset }, row) =>
     [...keys].map((key, column) => ({ key, x: column + offset, y: row })),
   );
@@ -133,7 +151,7 @@ function keyboardEdges() {
       const dx = keys[left].x - keys[right].x;
       const dy = keys[left].y - keys[right].y;
       const distance = Math.sqrt(dx * dx + dy * dy);
-      if (distance <= 1.15) {
+      if (distance <= neighborDistance) {
         edges.push([keys[left].key, keys[right].key].sort());
       }
     }
@@ -169,17 +187,84 @@ function unicodeMappings(source) {
   return mappings;
 }
 
+const migrationSource = JSON.parse(await readFile(migrationInput, "utf8"));
+const expectedMigrationSourceHash =
+  "6488572effb7c8cd7ca00b8fa01ea670064e2252bdecfad2c89aa1bee0aff0c7";
+const canonicalMigrationSource = {
+  schema_version: migrationSource.schema_version,
+  snapshot_id: migrationSource.snapshot_id,
+  frozen_base_commit: migrationSource.frozen_base_commit,
+  captured_at: migrationSource.captured_at,
+  ecosystems: [...migrationSource.ecosystems]
+    .map((ecosystem) => ({
+      id: ecosystem.id,
+      provenance: ecosystem.provenance,
+      entries: [...ecosystem.entries].sort(
+        (left, right) => left.legacy_priority - right.legacy_priority,
+      ),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id, "en")),
+};
+if (
+  sha256(encode(canonicalMigrationSource)) !== expectedMigrationSourceHash ||
+  canonicalMigrationSource.schema_version !== 1 ||
+  canonicalMigrationSource.snapshot_id !==
+    "argus-legacy-typosquat-migration-v1" ||
+  canonicalMigrationSource.frozen_base_commit !==
+    "6aef7b19e703f03d62b3a97a5787436962951f96" ||
+  canonicalMigrationSource.ecosystems.length !== ecosystems.length
+) {
+  throw new Error("frozen migration source identity or semantic hash mismatch");
+}
+const migrationByEcosystem = new Map(
+  canonicalMigrationSource.ecosystems.map((ecosystem) => [
+    ecosystem.id,
+    ecosystem,
+  ]),
+);
+
+const qwertySource = JSON.parse(await readFile(qwertyInput, "utf8"));
+const expectedQwertySourceHash =
+  "19dbe77feab6d31a713fb316cb0f7775dd1a477701759b6e2a1ccae41a9811bd";
+if (
+  sha256(encode(qwertySource)) !== expectedQwertySourceHash ||
+  qwertySource.schema_version !== 1 ||
+  qwertySource.layout_id !== "qwerty-us-v1" ||
+  qwertySource.layout_version !== 1
+) {
+  throw new Error("QWERTY source identity or hash mismatch");
+}
+
 await mkdir(outputDirectory, { recursive: true });
 
 const manifestDatasets = [];
 let combinedSourceOrder = "";
 for (const ecosystem of ecosystems) {
-  const migrationSnapshot = JSON.parse(
-    await readFile(join(outputDirectory, ecosystem.file), "utf8"),
-  );
-  const names = [...migrationSnapshot.entries]
-    .sort((left, right) => left.popularity.value - right.popularity.value)
-    .map((entry) => entry.canonical_name);
+  const migrationSnapshot = migrationByEcosystem.get(ecosystem.id);
+  if (!migrationSnapshot) {
+    throw new Error(`${ecosystem.id}: missing frozen migration source`);
+  }
+  const { provenance } = migrationSnapshot;
+  if (
+    provenance.frozen_base_commit !==
+      "6aef7b19e703f03d62b3a97a5787436962951f96" ||
+    provenance.source_path !== ecosystem.source ||
+    provenance.constant !== ecosystem.constant ||
+    provenance.source_order_sha256 !== ecosystem.expectedHash ||
+    !/^[0-9a-f]{64}$/.test(provenance.source_blob_sha256)
+  ) {
+    throw new Error(`${ecosystem.id}: invalid frozen source provenance`);
+  }
+  const names = migrationSnapshot.entries.map((entry, index) => {
+    if (
+      entry.legacy_priority !== index + 1 ||
+      typeof entry.name !== "string" ||
+      entry.name.length === 0
+    ) {
+      throw new Error(`${ecosystem.id}: invalid frozen entry`);
+    }
+    return entry.name;
+  });
   const sourceOrderBytes = names.map((name) => `${name}\n`).join("");
   if (names.length !== ecosystem.expectedCount) {
     throw new Error(`${ecosystem.id}: expected ${ecosystem.expectedCount}, got ${names.length}`);
@@ -253,7 +338,7 @@ const keyboard = {
   layout_version: 1,
   alphabet: "1234567890abcdefghijklmnopqrstuvwxyz",
   edge_semantics: "unique-unordered-physical-neighbors-distance-lte-1.15",
-  edges: keyboardEdges(),
+  edges: keyboardEdges(qwertySource.rows, qwertySource.neighbor_distance),
 };
 const keyboardBytes = encode(keyboard);
 await writeFile(join(outputDirectory, "keyboard-qwerty-us.json"), keyboardBytes);

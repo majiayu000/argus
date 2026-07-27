@@ -197,11 +197,34 @@ not claims about current registry download rank. Dataset age, normalization,
 namespace semantics, source references, and raw SHA-256 digests live in the
 checked-in manifest under `crates/argus-rules/data/typosquat/v1/`.
 
+The migration source of truth is separate from runtime output:
+`sources/migration-v1.json` records the frozen base commit, source files,
+constant names, source-blob hashes, source-order hashes, and original
+priorities. `sources/qwerty-us-v1.json` and the pinned Unicode 17 UTS39 source
+are the other generator inputs. The generator never reads `v1/` to discover
+names. From the repository root, maintainers can verify a clean, byte-identical
+rebuild—including shuffled migration input—without deleting worktree files:
+
+```console
+node crates/argus-rules/data/typosquat/verify-v1-generation.mjs
+```
+
+Direct generation requires all inputs and an explicit output directory:
+
+```console
+node crates/argus-rules/data/typosquat/generate-v1-migration.mjs \
+  --migration-source crates/argus-rules/data/typosquat/sources/migration-v1.json \
+  --qwerty-source crates/argus-rules/data/typosquat/sources/qwerty-us-v1.json \
+  --confusables-source crates/argus-rules/data/typosquat/sources/unicode-17.0.0-confusables.txt \
+  --output-dir /tmp/argus-typosquat-v1
+```
+
 Updates are an offline maintainer operation and must provide reviewable source
 evidence. Generated files are sorted deterministically; a data change should
 show counts, added/removed canonical identities, source evidence, and manifest
 digest changes in the pull request. Runtime scans only validate and consume
-the committed assets.
+the committed `v1/` assets; the frozen source snapshot is not compiled into a
+second runtime table.
 
 ### Lockfile source and integrity policy
 
