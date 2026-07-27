@@ -101,6 +101,9 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
             scan_rust_source(&content, &rel, &mut findings);
         } else if rel.ends_with(".rs") {
             scan_rust_source(&content, &rel, &mut findings);
+            if is_proc_macro {
+                scan_proc_macro_source(&content, &rel, &mut findings);
+            }
         }
     }
 
@@ -235,6 +238,18 @@ fn scan_build_rs(content: &str, rel: &str, findings: &mut Vec<Finding>) {
             "build-rs-network",
             Severity::Critical,
             format!("`{rel}` reaches the network at compile time (reqwest/ureq/hyper/TcpStream)"),
+        ));
+    }
+}
+
+fn scan_proc_macro_source(content: &str, rel: &str, findings: &mut Vec<Finding>) {
+    if rules::build_rs_network_regex().is_match(content) {
+        findings.push(finding(
+            "proc-macro-network",
+            Severity::Critical,
+            format!(
+                "`{rel}` reaches the network from proc-macro source that runs at consumer compile time"
+            ),
         ));
     }
 }

@@ -213,6 +213,7 @@ pub const ALL_RULES: &[RuleDef] = &[
     rule!("build-rs-subprocess", Blocking, "build.rs spawns a subprocess"),
     rule!("embedded-binary-blob", InfoOnly, "Crate embeds binary blobs via include_bytes! (structural)"),
     rule!("proc-macro-crate", InfoOnly, "Crate is a proc-macro (compile-time execution surface, structural)"),
+    rule!("proc-macro-network", Blocking, "Proc-macro source performs network access during consumer compilation"),
     rule!("xor-decryption-loop", Blocking, "Contains an XOR-decryption loop over embedded data"),
     // --- PyPI (argus-pypi) ---
     rule!("import-time-hook", Blocking, "Rewrites Python builtins or import machinery at load time"),
