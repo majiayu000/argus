@@ -21,4 +21,5 @@ base64 = { workspace = true }
 subtle = { workspace = true }
 tempfile = { workspace = true }
 regex = { workspace = true }
+rayon = { workspace = true }
 yaml-rust2 = { workspace = true }
