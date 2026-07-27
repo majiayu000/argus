@@ -13,7 +13,8 @@ use argus_archive::extract_tarball;
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
 use argus_rules::{looks_binary, scan_text_file, TextFile};
 use serde::Deserialize;
-use std::path::{Component, Path};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -50,6 +51,11 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
         .as_ref()
         .map(cargo_manifest_is_proc_macro)
         .unwrap_or(false);
+    let proc_macro_source_files = manifest
+        .as_ref()
+        .map(|manifest| collect_proc_macro_source_files(pkg_dir, manifest))
+        .transpose()?
+        .unwrap_or_default();
     let build_script_rel = manifest
         .as_ref()
         .map(cargo_manifest_build_script)
@@ -101,7 +107,7 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
             scan_rust_source(&content, &rel, &mut findings);
         } else if rel.ends_with(".rs") {
             scan_rust_source(&content, &rel, &mut findings);
-            if is_proc_macro {
+            if proc_macro_source_files.contains(&rel) {
                 scan_proc_macro_source(&content, &rel, &mut findings);
             }
         }
@@ -147,6 +153,7 @@ struct CargoPackage {
 struct CargoLib {
     #[serde(rename = "proc-macro")]
     proc_macro: Option<bool>,
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +190,18 @@ fn cargo_manifest_is_proc_macro(manifest: &CargoManifest) -> bool {
         .unwrap_or(false)
 }
 
+fn cargo_manifest_proc_macro_lib_path(manifest: &CargoManifest) -> Result<Option<String>> {
+    if !cargo_manifest_is_proc_macro(manifest) {
+        return Ok(None);
+    }
+    let path = manifest
+        .lib
+        .as_ref()
+        .and_then(|lib| lib.path.as_deref())
+        .unwrap_or("src/lib.rs");
+    normalize_manifest_relative_path(path, "Cargo.toml lib.path").map(Some)
+}
+
 fn cargo_manifest_build_script(manifest: &CargoManifest) -> Result<Option<String>> {
     let Some(package) = manifest.package.as_ref() else {
         return Ok(Some("build.rs".to_string()));
@@ -190,20 +209,22 @@ fn cargo_manifest_build_script(manifest: &CargoManifest) -> Result<Option<String
     match package.build.as_ref() {
         Some(CargoBuildField::Bool(false)) => Ok(None),
         Some(CargoBuildField::Bool(true)) | None => Ok(Some("build.rs".to_string())),
-        Some(CargoBuildField::Path(path)) => normalize_manifest_relative_path(path).map(Some),
+        Some(CargoBuildField::Path(path)) => {
+            normalize_manifest_relative_path(path, "Cargo.toml package.build").map(Some)
+        }
     }
 }
 
-fn normalize_manifest_relative_path(raw: &str) -> Result<String> {
+fn normalize_manifest_relative_path(raw: &str, field: &str) -> Result<String> {
     if raw.is_empty() {
-        anyhow::bail!("Cargo.toml package.build path is empty");
+        anyhow::bail!("{field} path is empty");
     }
     if raw.contains('\\') {
-        anyhow::bail!("Cargo.toml package.build path must use forward slashes");
+        anyhow::bail!("{field} path must use forward slashes");
     }
     let path = Path::new(raw);
     if path.is_absolute() {
-        anyhow::bail!("Cargo.toml package.build path must be relative");
+        anyhow::bail!("{field} path must be relative");
     }
 
     let mut parts = Vec::new();
@@ -212,17 +233,86 @@ fn normalize_manifest_relative_path(raw: &str) -> Result<String> {
             Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
             Component::CurDir => {}
             Component::ParentDir => {
-                anyhow::bail!("Cargo.toml package.build path must not contain `..`")
+                anyhow::bail!("{field} path must not contain `..`")
             }
             Component::RootDir | Component::Prefix(_) => {
-                anyhow::bail!("Cargo.toml package.build path must be relative")
+                anyhow::bail!("{field} path must be relative")
             }
         }
     }
     if parts.is_empty() {
-        anyhow::bail!("Cargo.toml package.build path is empty");
+        anyhow::bail!("{field} path is empty");
     }
     Ok(parts.join("/"))
+}
+
+fn collect_proc_macro_source_files(
+    pkg_dir: &Path,
+    manifest: &CargoManifest,
+) -> Result<BTreeSet<String>> {
+    let Some(root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut source_files = BTreeSet::new();
+    let mut pending = vec![root_rel.clone()];
+
+    while let Some(rel) = pending.pop() {
+        if !source_files.insert(rel.clone()) {
+            continue;
+        }
+        let abs = pkg_dir.join(&rel);
+        let bytes = std::fs::read(&abs)
+            .with_context(|| format!("read proc-macro source {}", abs.display()))?;
+        if bytes.len() as u64 > TEXT_MAX_BYTES || looks_binary(&bytes) {
+            continue;
+        }
+        let content = String::from_utf8_lossy(&bytes);
+        let masked = rules::mask_rust_comments_and_literals(&content);
+        let module_base = rust_module_base(Path::new(&rel), &root_rel);
+
+        for captures in rules::rust_module_decl_regex().captures_iter(&masked) {
+            let Some(module_name) = captures.get(1).map(|capture| capture.as_str()) else {
+                continue;
+            };
+            let flat = module_base.join(format!("{module_name}.rs"));
+            let nested = module_base.join(module_name).join("mod.rs");
+            let flat_exists = pkg_dir.join(&flat).is_file();
+            let nested_exists = pkg_dir.join(&nested).is_file();
+            if flat_exists && nested_exists {
+                anyhow::bail!(
+                    "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
+                    flat.display(),
+                    nested.display()
+                );
+            }
+            let module = if flat_exists {
+                Some(flat)
+            } else if nested_exists {
+                Some(nested)
+            } else {
+                None
+            };
+            if let Some(module) = module {
+                pending.push(path_to_manifest_rel(&module)?);
+            }
+        }
+    }
+
+    Ok(source_files)
+}
+
+fn rust_module_base(current: &Path, root_rel: &str) -> PathBuf {
+    let parent = current.parent().unwrap_or_else(|| Path::new(""));
+    if current == Path::new(root_rel) || current.file_name().is_some_and(|name| name == "mod.rs") {
+        parent.to_path_buf()
+    } else {
+        parent.join(current.file_stem().unwrap_or_default())
+    }
+}
+
+fn path_to_manifest_rel(path: &Path) -> Result<String> {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    normalize_manifest_relative_path(&raw, "resolved proc-macro module")
 }
 
 fn scan_build_rs(content: &str, rel: &str, findings: &mut Vec<Finding>) {
@@ -233,7 +323,8 @@ fn scan_build_rs(content: &str, rel: &str, findings: &mut Vec<Finding>) {
             format!("`{rel}` invokes std::process::Command at compile time"),
         ));
     }
-    if rules::build_rs_network_regex().is_match(content) {
+    let executable_code = rules::mask_rust_comments_and_literals(content);
+    if rules::build_rs_network_regex().is_match(&executable_code) {
         findings.push(finding(
             "build-rs-network",
             Severity::Critical,
@@ -243,7 +334,8 @@ fn scan_build_rs(content: &str, rel: &str, findings: &mut Vec<Finding>) {
 }
 
 fn scan_proc_macro_source(content: &str, rel: &str, findings: &mut Vec<Finding>) {
-    if rules::build_rs_network_regex().is_match(content) {
+    let executable_code = rules::mask_rust_comments_and_literals(content);
+    if rules::build_rs_network_regex().is_match(&executable_code) {
         findings.push(finding(
             "proc-macro-network",
             Severity::Critical,
@@ -281,6 +373,18 @@ fn scan_rust_source(content: &str, rel: &str, findings: &mut Vec<Finding>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scan_test_tree(files: &[(&str, &str)]) -> Result<crate::ArtifactScan> {
+        let root = tempfile::tempdir()?;
+        for (rel, content) in files {
+            let path = root.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, content)?;
+        }
+        scan_extracted_crate(root.path())
+    }
 
     #[test]
     fn parse_cargo_basic() -> Result<()> {
@@ -360,11 +464,180 @@ build = false
 
     #[test]
     fn custom_build_script_path_rejects_traversal() -> Result<()> {
-        let err = match normalize_manifest_relative_path("../build.rs") {
+        let err = match normalize_manifest_relative_path("../build.rs", "Cargo.toml package.build")
+        {
             Ok(path) => anyhow::bail!("parent traversal was accepted as {path}"),
             Err(err) => err.to_string(),
         };
         assert!(err.contains(".."), "got: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_source_graph_excludes_disabled_build_and_auxiliary_targets() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "bounded-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+        let network = r#"fn probe() { reqwest::get("https://inert.example.invalid"); }"#;
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", "mod active;"),
+            ("src/active.rs", "pub fn expand() {}"),
+            ("src/unrelated.rs", network),
+            ("src/bin/tool.rs", network),
+            ("build.rs", network),
+            ("tests/network.rs", network),
+            ("examples/network.rs", network),
+            ("benches/network.rs", network),
+        ])?;
+        let rule_ids: Vec<&str> = scan
+            .findings
+            .iter()
+            .map(|finding| finding.rule_id.as_str())
+            .collect();
+
+        assert!(
+            !rule_ids.contains(&"proc-macro-network"),
+            "got: {rule_ids:?}"
+        );
+        assert!(!rule_ids.contains(&"build-rs-network"), "got: {rule_ids:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_custom_build_ignores_inactive_default_build_rs() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "custom-build-derive"
+version = "1.0.0"
+build = "tools/generate.rs"
+
+[lib]
+proc-macro = true
+"#;
+        let custom = r#"fn main() { reqwest::get("https://active-build.example.invalid"); }"#;
+        let inactive = r#"fn main() { reqwest::get("https://inactive-build.example.invalid"); }"#;
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", ""),
+            ("tools/generate.rs", custom),
+            ("build.rs", inactive),
+        ])?;
+        let build_findings: Vec<&Finding> = scan
+            .findings
+            .iter()
+            .filter(|finding| finding.rule_id == "build-rs-network")
+            .collect();
+
+        assert_eq!(build_findings.len(), 1, "got: {:?}", scan.findings);
+        assert!(build_findings[0].detail.contains("tools/generate.rs"));
+        assert!(
+            !scan
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "proc-macro-network"),
+            "got: {:?}",
+            scan.findings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_custom_lib_path_follows_only_declared_modules() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "custom-root-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+path = "macro/entry.rs"
+"#;
+        let network = r#"pub fn expand() { ureq::get("https://macro.example.invalid").call(); }"#;
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("macro/entry.rs", "mod support;"),
+            ("macro/support.rs", network),
+            ("macro/unrelated.rs", network),
+            ("src/lib.rs", network),
+        ])?;
+        let findings: Vec<&Finding> = scan
+            .findings
+            .iter()
+            .filter(|finding| finding.rule_id == "proc-macro-network")
+            .collect();
+
+        assert_eq!(findings.len(), 1, "got: {:?}", scan.findings);
+        assert!(findings[0].detail.contains("macro/support.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_inert_network_text_does_not_block() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "documented-derive"
+version = "1.0.0"
+
+[lib]
+proc-macro = true
+"#;
+        let source = r##"
+// reqwest::get("https://line.example.invalid");
+/* outer /* ureq::get("nested") */ block */
+const NORMAL: &str = "hyper::Client(\"normal\")";
+const RAW: &str = r#"std::net::TcpStream::connect("raw")"#;
+const BYTES: &[u8] = b"reqwest::blocking::get(\"bytes\")";
+const RAW_BYTES: &[u8] = br#"ureq::post("raw bytes")"#;
+const CHARACTER: char = 'r';
+"##;
+        let scan = scan_test_tree(&[("Cargo.toml", manifest), ("src/lib.rs", source)])?;
+
+        assert!(
+            !scan
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "proc-macro-network"),
+            "got: {:?}",
+            scan.findings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_script_inert_network_text_does_not_trigger_network_rule() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "documented-build"
+version = "1.0.0"
+"#;
+        let build_rs = r##"
+// reqwest::get("https://line.example.invalid");
+/* outer /* ureq::get("nested") */ block */
+const EXAMPLE: &str = r#"std::net::TcpStream::connect("raw")"#;
+fn main() {}
+"##;
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("build.rs", build_rs),
+            ("src/lib.rs", ""),
+        ])?;
+
+        assert!(
+            !scan
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "build-rs-network"),
+            "got: {:?}",
+            scan.findings
+        );
         Ok(())
     }
 }

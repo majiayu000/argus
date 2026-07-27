@@ -149,6 +149,152 @@ pub fn build_rs_network_regex() -> &'static Regex {
     })
 }
 
+/// Rust `mod name;` declarations after comments and literals have been
+/// masked. Used to follow the proc-macro library's actual module graph
+/// instead of scanning unrelated `.rs` files in the archive.
+pub fn rust_module_decl_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bmod\s+([A-Za-z_][A-Za-z_0-9]*)\s*;").unwrap())
+}
+
+/// Replace Rust comments and string/character literal bytes with spaces while
+/// preserving byte offsets and line breaks. The network rules only need code
+/// identifiers and punctuation, so masking inert text avoids regex matches in
+/// documentation, examples embedded in strings, and payload literals.
+pub fn mask_rust_comments_and_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            let end = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            mask_span(&mut masked, index, end);
+            index = end;
+        } else if bytes[index..].starts_with(b"/*") {
+            let mut cursor = index + 2;
+            let mut depth = 1_u32;
+            while cursor < bytes.len() && depth > 0 {
+                if bytes[cursor..].starts_with(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            mask_span(&mut masked, index, cursor);
+            index = cursor;
+        } else if let Some(end) = raw_string_end(bytes, index) {
+            mask_span(&mut masked, index, end);
+            index = end;
+        } else if bytes[index] == b'"' {
+            let end = cooked_string_end(bytes, index);
+            mask_span(&mut masked, index, end);
+            index = end;
+        } else if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'"') {
+            let end = cooked_string_end(bytes, index + 1);
+            mask_span(&mut masked, index, end);
+            index = end;
+        } else if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(source, index) {
+                mask_span(&mut masked, index, end);
+                index = end;
+            } else {
+                index += 1;
+            }
+        } else if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'\'') {
+            if let Some(end) = char_literal_end(source, index + 1) {
+                mask_span(&mut masked, index, end);
+                index = end;
+            } else {
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+
+    String::from_utf8_lossy(&masked).into_owned()
+}
+
+fn mask_span(masked: &mut [u8], start: usize, end: usize) {
+    for byte in &mut masked[start..end] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+}
+
+fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    if bytes.get(cursor) == Some(&b'b') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor += 1;
+    let hashes_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    let hashes = cursor - hashes_start;
+    if bytes.get(cursor) != Some(&b'"') {
+        return None;
+    }
+    cursor += 1;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"'
+            && bytes
+                .get(cursor + 1..cursor + 1 + hashes)
+                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+        {
+            return Some(cursor + 1 + hashes);
+        }
+        cursor += 1;
+    }
+    Some(bytes.len())
+}
+
+fn cooked_string_end(bytes: &[u8], quote: usize) -> usize {
+    let mut cursor = quote + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = (cursor + 2).min(bytes.len()),
+            b'"' => return cursor + 1,
+            _ => cursor += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn char_literal_end(source: &str, quote: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let value_start = quote + 1;
+    let first = *bytes.get(value_start)?;
+    let closing = if first == b'\\' {
+        match bytes.get(value_start + 1)? {
+            b'x' => value_start + 4,
+            b'u' if bytes.get(value_start + 2) == Some(&b'{') => bytes[value_start + 3..]
+                .iter()
+                .position(|byte| *byte == b'}')
+                .map(|offset| value_start + 4 + offset)?,
+            _ => value_start + 2,
+        }
+    } else {
+        let width = source[value_start..].chars().next()?.len_utf8();
+        value_start + width
+    };
+    (bytes.get(closing) == Some(&b'\'')).then_some(closing + 1)
+}
+
 /// `include_bytes!("...")` — common idiom for embedding fonts or default
 /// configs, but also the canonical way a malicious build.rs ships an
 /// encrypted payload. Severity is medium on its own; combined with the
@@ -200,6 +346,61 @@ mod tests {
         assert!(build_rs_network_regex().is_match("reqwest::blocking::get(\"http://x\")"));
         assert!(build_rs_network_regex().is_match("ureq::get(\"http://x\")"));
         assert!(build_rs_network_regex().is_match("std::net::TcpStream::connect(\"x:80\")"));
+    }
+
+    #[test]
+    fn network_ignores_comments_and_string_literals() {
+        let inert_sources = [
+            "// reqwest::get(\"https://comment.example.invalid\")",
+            "/* ureq::get(\"https://block.example.invalid\") */",
+            "/* outer /* hyper::Client(\"nested\") */ comment */",
+            r#"let example = "reqwest::blocking::get(\"literal\")";"#,
+            r##"let raw = r#"ureq::get("raw")"#;"##,
+            r##"let bytes = br#"std::net::TcpStream::connect("byte")"#;"##,
+            r#"let bytes = b"hyper::Client(\"byte string\")";"#,
+        ];
+
+        for source in inert_sources {
+            let masked = mask_rust_comments_and_literals(source);
+            assert!(
+                !build_rs_network_regex().is_match(&masked),
+                "matched inert source: {source:?}, masked: {masked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn masking_preserves_real_code_lifetimes_and_line_layout() {
+        let source = r#"
+fn expand<'a>(value: &'a str) {
+    let quote = '\'';
+    let byte = b'x';
+    let _ = reqwest::blocking::get("https://real.example.invalid");
+}
+"#;
+        let masked = mask_rust_comments_and_literals(source);
+
+        assert_eq!(masked.len(), source.len());
+        assert_eq!(masked.lines().count(), source.lines().count());
+        assert!(masked.contains("expand<'a>"));
+        assert!(masked.contains("&'a str"));
+        assert!(build_rs_network_regex().is_match(&masked));
+    }
+
+    #[test]
+    fn module_declarations_survive_masking_but_inert_ones_do_not() {
+        let source = r#"
+mod active;
+// mod commented;
+let example = "mod string_only;";
+"#;
+        let masked = mask_rust_comments_and_literals(source);
+        let modules: Vec<&str> = rust_module_decl_regex()
+            .captures_iter(&masked)
+            .filter_map(|captures| captures.get(1).map(|capture| capture.as_str()))
+            .collect();
+
+        assert_eq!(modules, ["active"]);
     }
 
     #[test]
