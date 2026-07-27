@@ -10,7 +10,9 @@ impl RuleSession {
         label: &str,
         findings: &mut Vec<Finding>,
     ) -> Result<()> {
-        if !self.rule_enabled("typosquatting") {
+        let typosquatting_enabled = self.rule_enabled("typosquatting");
+        let low_reputation_enabled = self.rule_enabled("low-reputation");
+        if !typosquatting_enabled && !low_reputation_enabled {
             return Ok(());
         }
         let parameters = self.typosquat_parameters()?;
@@ -50,21 +52,25 @@ impl RuleSession {
                 name_match.target
             )
         };
-        let mut finding = Finding::new("typosquatting", Severity::High, detail);
-        finding.evidence = Some(vec![
-            format!("signals={signal_names}"),
-            format!("dataset_id={}", name_match.dataset_id),
-            format!("dataset_version={}", name_match.dataset_version),
-            format!("dataset_sha256={}", name_match.dataset_sha256),
-            format!("canonical_candidate={}", name_match.canonical_candidate),
-            format!("canonical_target={}", name_match.canonical_target),
-        ]);
-        findings.push(finding);
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation"),
-        ));
+        if typosquatting_enabled {
+            let mut finding = Finding::new("typosquatting", Severity::High, detail);
+            finding.evidence = Some(vec![
+                format!("signals={signal_names}"),
+                format!("dataset_id={}", name_match.dataset_id),
+                format!("dataset_version={}", name_match.dataset_version),
+                format!("dataset_sha256={}", name_match.dataset_sha256),
+                format!("canonical_candidate={}", name_match.canonical_candidate),
+                format!("canonical_target={}", name_match.canonical_target),
+            ]);
+            findings.push(finding);
+        }
+        if low_reputation_enabled {
+            findings.push(Finding::new(
+                "low-reputation",
+                Severity::Medium,
+                format!("typosquat candidate `{name}` has no established reputation"),
+            ));
+        }
         Ok(())
     }
 }

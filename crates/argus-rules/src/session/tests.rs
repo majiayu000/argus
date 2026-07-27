@@ -426,22 +426,46 @@ fn typed_typosquat_parameters_drive_matching_and_audit_metadata() {
 }
 
 #[test]
-fn disabled_typosquat_rule_short_circuits_the_detector() {
-    let session = RuleSession::load(None, &["typosquatting=off".to_string()]).unwrap();
-    let mut findings = Vec::new();
-    session
-        .push_typosquat_findings(
-            argus_core::Ecosystem::Npm,
-            "reactt",
-            "npm name",
-            &mut findings,
-        )
-        .unwrap();
-    assert!(findings.is_empty());
-    assert_eq!(
-        session.metadata().unwrap().disabled_rule_ids,
-        ["typosquatting"]
-    );
+fn typosquat_and_low_reputation_switches_are_independent() {
+    for (overrides, expected_rule_ids) in [
+        (
+            Vec::<String>::new(),
+            vec!["typosquatting", "low-reputation"],
+        ),
+        (
+            vec!["typosquatting=off".to_string()],
+            vec!["low-reputation"],
+        ),
+        (
+            vec!["low-reputation=off".to_string()],
+            vec!["typosquatting"],
+        ),
+        (
+            vec![
+                "typosquatting=off".to_string(),
+                "low-reputation=off".to_string(),
+            ],
+            Vec::<&str>::new(),
+        ),
+    ] {
+        let session = RuleSession::load(None, &overrides).unwrap();
+        let mut findings = Vec::new();
+        session
+            .push_typosquat_findings(
+                argus_core::Ecosystem::Npm,
+                "reactt",
+                "npm name",
+                &mut findings,
+            )
+            .unwrap();
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_rule_ids
+        );
+    }
 }
 
 mod matcher_matrix;
