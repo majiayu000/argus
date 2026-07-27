@@ -407,6 +407,7 @@ dependencies = [
  "argus-core",
  "argus-pipeline",
  "argus-rules",
+ "argus-syntax",
  "argus-test-support",
  "argus-transport",
  "flate2",
@@ -449,6 +450,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-core",
+ "argus-syntax",
  "regex",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
 //! End-to-end tests for `fetch_and_scan_pypi` via MockTransport.
 
-use argus_core::Decision;
+use argus_core::{Decision, ScanReport};
 use argus_pypi::{fetch_and_scan_pypi, PreferredFormat, PypiFetchOptions, PypiPackageRef};
 use argus_test_support::MockTransport;
 use flate2::write::GzEncoder;
@@ -73,6 +73,34 @@ fn packument_for_artifact(
           }}
         }}"#
     )
+}
+
+fn fetch_sdist_fixture(files: &[(&str, &[u8])]) -> anyhow::Result<ScanReport> {
+    let registry = "https://mock.registry";
+    let name = "syntax-demo";
+    let version = "1.0.0";
+    let sdist = make_sdist(name, version, files);
+    let artifact_url = format!("{registry}/p/{name}-{version}.tar.gz");
+    let packument = packument_for_artifact(
+        name,
+        version,
+        &format!("{name}-{version}.tar.gz"),
+        &artifact_url,
+        "sdist",
+        &sha256_hex(&sdist),
+    );
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/pypi/{name}/json"),
+        packument.into_bytes(),
+    );
+    transport.insert(&artifact_url, sdist);
+    let opts = PypiFetchOptions {
+        registry: registry.to_string(),
+        prefer: PreferredFormat::Sdist,
+        ..PypiFetchOptions::default()
+    };
+    fetch_and_scan_pypi(&PypiPackageRef::parse(name)?, &opts, &transport)
 }
 
 fn fetch_error_for_artifact_filename(
@@ -562,4 +590,103 @@ fn pypi_rejects_sha256_mismatch() {
         fetch_and_scan_pypi(&pkg, &opts, &transport).unwrap_err()
     );
     assert!(err.contains("SHA-256 mismatch"), "got: {err}");
+}
+
+#[test]
+fn pypi_setup_ast_resolves_aliases_constants_and_deduplicates() -> anyhow::Result<()> {
+    let report = fetch_sdist_fixture(&[(
+        "setup.py",
+        br#"
+import requests as request_client
+from subprocess import run as execute
+from builtins import eval as evaluate
+BASE = "https://collector.example.invalid"
+send = request_client.get
+send(BASE + "/first")
+send(BASE + "/second")
+execute(["true"])
+evaluate("1 + 1")
+"#,
+    )])?;
+    for rule_id in [
+        "setup-remote-download",
+        "setup-subprocess",
+        "setup-eval",
+        "setup-py-execution",
+    ] {
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.rule_id == rule_id)
+                .count(),
+            1,
+            "{rule_id}: {:?}",
+            report.findings
+        );
+    }
+    assert_eq!(report.decision, Decision::Block);
+    Ok(())
+}
+
+#[test]
+fn pypi_setup_ast_ignores_docstrings_comments_and_strings() -> anyhow::Result<()> {
+    let report = fetch_sdist_fixture(&[(
+        "setup.py",
+        br#"
+"""Examples:
+subprocess.run(["curl", "https://collector.example.invalid"])
+requests.get("https://collector.example.invalid")
+eval(payload)
+"""
+# os.system("curl https://collector.example.invalid")
+docs = "urllib.request.urlopen('https://collector.example.invalid')"
+exec()
+eval()
+from setuptools import setup
+setup(name="syntax-demo", version="1.0.0")
+"#,
+    )])?;
+    assert!(
+        report.findings.iter().all(|finding| !matches!(
+            finding.rule_id.as_str(),
+            "setup-subprocess" | "setup-remote-download" | "setup-eval" | "setup-py-execution"
+        )),
+        "got: {:?}",
+        report.findings
+    );
+    assert_eq!(report.decision, Decision::Allow);
+    Ok(())
+}
+
+#[test]
+fn pypi_malformed_setup_source_fails_closed() {
+    let error = fetch_sdist_fixture(&[("setup.py", b"if True print('broken')")]).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing incomplete analysis"),
+        "got: {error:#}"
+    );
+}
+
+#[test]
+fn pypi_ordinary_module_network_call_is_not_setup_execution() -> anyhow::Result<()> {
+    let report = fetch_sdist_fixture(&[
+        (
+            "pyproject.toml",
+            b"[project]\nname='syntax-demo'\nversion='1.0.0'\n",
+        ),
+        (
+            "syntax_demo/client.py",
+            b"import requests\nrequests.get('https://collector.example.invalid')\n",
+        ),
+    ])?;
+    assert!(
+        report.findings.iter().all(|finding| !matches!(
+            finding.rule_id.as_str(),
+            "setup-remote-download" | "setup-py-execution"
+        )),
+        "got: {:?}",
+        report.findings
+    );
+    Ok(())
 }

