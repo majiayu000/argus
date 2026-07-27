@@ -1,13 +1,12 @@
-use super::data::{assets, dataset, DatasetEntry};
-use super::normalize::{segment_identity, SegmentedIdentity};
-use super::{
-    TyposquatError, TyposquatMatch, TyposquatMatchOptions, TyposquatSignal, MAX_MATCH_COMPARISONS,
-};
+use super::data::{assets, dataset, Assets, Dataset, DatasetEntry};
+use super::distance::EditWorkspace;
+#[cfg(test)]
+use super::index::DatasetIndex;
+use super::index::MatchWork;
+use super::normalize::segment_identity;
+use super::{TyposquatError, TyposquatMatch, TyposquatMatchOptions, TyposquatSignal};
 use argus_core::Ecosystem;
-use std::collections::BTreeSet;
-
-const MAX_SKELETON_BYTES: usize = 2_048;
-const MAX_SKELETON_EXPANSION: usize = 8;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn match_typosquat(
     ecosystem: Ecosystem,
@@ -29,136 +28,73 @@ pub fn match_typosquat_with_options(
     name: &str,
     options: TyposquatMatchOptions,
 ) -> Result<Option<TyposquatMatch>, TyposquatError> {
-    let options = options.validate()?;
-    let candidate = segment_identity(ecosystem, name)?;
-    let canonical_candidate = candidate.canonical();
-    let dataset = dataset(ecosystem)?;
+    let (result, _) = match_dataset(ecosystem, name, options, dataset(ecosystem)?, assets()?)?;
+    Ok(result)
+}
 
-    if dataset
-        .entries
-        .iter()
-        .any(|target| entry_identities(target).any(|identity| exact_identity(&candidate, identity)))
-    {
-        return Ok(None);
+fn match_dataset(
+    ecosystem: Ecosystem,
+    name: &str,
+    options: TyposquatMatchOptions,
+    dataset: &Dataset,
+    shared_assets: &Assets,
+) -> Result<(Option<TyposquatMatch>, MatchWork), TyposquatError> {
+    let options = options.validate()?;
+    let candidate_identity = segment_identity(ecosystem, name)?;
+    let canonical_candidate = candidate_identity.canonical();
+    if dataset.index.is_exact(&candidate_identity) {
+        return Ok((None, MatchWork::default()));
     }
 
-    let shared_assets = assets()?;
-    let unicode_allowed = matches!(
+    let prepared = dataset.index.prepare_candidate(
         ecosystem,
-        Ecosystem::Go | Ecosystem::RubyGems | Ecosystem::Maven
-    );
-    let mut comparisons = 0usize;
-    let mut matches = Vec::new();
-    for target in &dataset.entries {
-        let signals = signals_for_entry(
-            &candidate,
-            target,
+        &candidate_identity,
+        &shared_assets.confusables,
+    )?;
+    let mut work = MatchWork::default();
+    let candidates = dataset.index.candidates(&prepared, options, &mut work)?;
+    let mut workspace = EditWorkspace::new();
+    let mut matches = BTreeMap::<usize, BTreeSet<TyposquatSignal>>::new();
+    for candidate in candidates {
+        work.charge_candidate()?;
+        let (candidate_unit, target_unit) = dataset.index.units(candidate, &prepared);
+        let signals = workspace.signals(
+            candidate_unit,
+            target_unit,
             options,
-            unicode_allowed,
             &shared_assets.keyboard_edges,
-            &shared_assets.confusables,
-            &mut comparisons,
+            &mut work,
         )?;
         if !signals.is_empty() {
-            matches.push((target, signals.into_iter().collect::<Vec<_>>()));
+            matches
+                .entry(dataset.index.entry_index(candidate))
+                .or_default()
+                .extend(signals);
         }
     }
 
-    matches.sort_by(|(left, _), (right, _)| {
+    let selected = matches.into_iter().min_by(|(left, _), (right, _)| {
+        let left = &dataset.entries[*left];
+        let right = &dataset.entries[*right];
         left.legacy_priority
             .cmp(&right.legacy_priority)
             .then_with(|| left.canonical.cmp(&right.canonical))
     });
-    let Some((target, signals)) = matches.into_iter().next() else {
-        return Ok(None);
+    let Some((entry_index, signals)) = selected else {
+        return Ok((None, work));
     };
-    Ok(Some(build_match(
-        ecosystem,
-        name,
-        canonical_candidate,
-        target,
-        signals,
-        dataset,
-    )))
-}
-
-fn entry_identities(entry: &DatasetEntry) -> impl Iterator<Item = &SegmentedIdentity> {
-    std::iter::once(&entry.identity).chain(&entry.aliases)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn signals_for_entry(
-    candidate: &SegmentedIdentity,
-    target: &DatasetEntry,
-    options: TyposquatMatchOptions,
-    unicode_allowed: bool,
-    keyboard_edges: &BTreeSet<(char, char)>,
-    confusables: &std::collections::BTreeMap<char, String>,
-    comparisons: &mut usize,
-) -> Result<BTreeSet<TyposquatSignal>, TyposquatError> {
-    let mut signals = BTreeSet::new();
-    for target_identity in entry_identities(target) {
-        let Some((candidate_unit, target_unit)) = comparable_units(candidate, target_identity)
-        else {
-            continue;
-        };
-        *comparisons = comparisons
-            .checked_add(1)
-            .ok_or_else(|| TyposquatError::ResourceLimit("comparison counter overflow".into()))?;
-        if *comparisons > MAX_MATCH_COMPARISONS {
-            return Err(TyposquatError::ResourceLimit(format!(
-                "candidate requires more than {MAX_MATCH_COMPARISONS} comparisons"
-            )));
-        }
-        collect_signals(
-            candidate_unit,
-            target_unit,
-            options,
-            unicode_allowed,
-            keyboard_edges,
-            confusables,
-            &mut signals,
-        )?;
-    }
-    Ok(signals)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_signals(
-    candidate: &str,
-    target: &str,
-    options: TyposquatMatchOptions,
-    unicode_allowed: bool,
-    keyboard_edges: &BTreeSet<(char, char)>,
-    confusables: &std::collections::BTreeMap<char, String>,
-    signals: &mut BTreeSet<TyposquatSignal>,
-) -> Result<(), TyposquatError> {
-    let candidate_length = candidate.chars().count();
-    let target_length = target.chars().count();
-    if options.edit_distance_enabled {
-        if let Some(distance) = bounded_levenshtein(candidate, target, options.max_edit_distance) {
-            let distance_two_allowed = distance < 2
-                || (candidate_length >= options.min_length_for_distance_two
-                    && target_length >= options.min_length_for_distance_two);
-            if distance > 0 && distance_two_allowed {
-                signals.insert(TyposquatSignal::EditDistance { distance });
-            }
-        }
-        if is_adjacent_transposition(candidate, target) {
-            signals.insert(TyposquatSignal::Transposition);
-        }
-    }
-    if options.keyboard_enabled && is_keyboard_substitution(candidate, target, keyboard_edges) {
-        signals.insert(TyposquatSignal::KeyboardAdjacent);
-    }
-    if options.unicode_confusables_enabled
-        && unicode_allowed
-        && (!candidate.is_ascii() || !target.is_ascii())
-        && skeleton(candidate, confusables)? == skeleton(target, confusables)?
-    {
-        signals.insert(TyposquatSignal::UnicodeConfusable);
-    }
-    Ok(())
+    let target = &dataset.entries[entry_index];
+    Ok((
+        Some(build_match(
+            ecosystem,
+            name,
+            canonical_candidate,
+            target,
+            signals.into_iter().collect(),
+            dataset,
+        )),
+        work,
+    ))
 }
 
 fn build_match(
@@ -167,7 +103,7 @@ fn build_match(
     canonical_candidate: String,
     target: &DatasetEntry,
     signals: Vec<TyposquatSignal>,
-    dataset: &super::data::Dataset,
+    dataset: &Dataset,
 ) -> TyposquatMatch {
     TyposquatMatch {
         ecosystem,
@@ -182,189 +118,10 @@ fn build_match(
     }
 }
 
-fn exact_identity(candidate: &SegmentedIdentity, target: &SegmentedIdentity) -> bool {
-    match (candidate, target) {
-        (
-            SegmentedIdentity::Maven {
-                artifact: candidate,
-                ..
-            },
-            SegmentedIdentity::Maven {
-                group: None,
-                artifact: target,
-            },
-        ) => candidate == target,
-        _ => candidate == target,
-    }
-}
-
-fn comparable_units<'a>(
-    candidate: &'a SegmentedIdentity,
-    target: &'a SegmentedIdentity,
-) -> Option<(&'a str, &'a str)> {
-    match (candidate, target) {
-        (SegmentedIdentity::Whole(candidate), SegmentedIdentity::Whole(target)) => {
-            Some((candidate, target))
-        }
-        (
-            SegmentedIdentity::Npm {
-                scope: candidate_scope,
-                leaf: candidate_leaf,
-            },
-            SegmentedIdentity::Npm {
-                scope: target_scope,
-                leaf: target_leaf,
-            },
-        ) if candidate_scope == target_scope => Some((candidate_leaf, target_leaf)),
-        (SegmentedIdentity::Segments(candidate), SegmentedIdentity::Segments(target))
-            if candidate.len() == target.len() =>
-        {
-            let mut different = candidate
-                .iter()
-                .zip(target)
-                .filter(|(candidate, target)| candidate != target);
-            let first = different.next()?;
-            if different.next().is_none() {
-                Some((first.0, first.1))
-            } else {
-                None
-            }
-        }
-        (
-            SegmentedIdentity::Maven {
-                group: candidate_group,
-                artifact: candidate_artifact,
-            },
-            SegmentedIdentity::Maven {
-                group: target_group,
-                artifact: target_artifact,
-            },
-        ) if target_group.is_none() || candidate_group == target_group => {
-            Some((candidate_artifact, target_artifact))
-        }
-        _ => None,
-    }
-}
-
-fn bounded_levenshtein(left: &str, right: &str, maximum: u8) -> Option<u8> {
-    if left == right {
-        return Some(0);
-    }
-    let left: Vec<char> = left.chars().collect();
-    let right: Vec<char> = right.chars().collect();
-    let maximum = usize::from(maximum);
-    if left.len().abs_diff(right.len()) > maximum {
-        return None;
-    }
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    let mut current = vec![0; right.len() + 1];
-    for (left_index, left_character) in left.iter().enumerate() {
-        current[0] = left_index + 1;
-        let start = left_index.saturating_sub(maximum).saturating_add(1);
-        let end = (left_index + maximum + 2).min(right.len() + 1);
-        for value in current.iter_mut().take(start).skip(1) {
-            *value = maximum + 1;
-        }
-        let mut row_minimum = current[0];
-        for right_index in start..end {
-            let substitution = usize::from(*left_character != right[right_index - 1]);
-            current[right_index] = (current[right_index - 1] + 1)
-                .min(previous[right_index] + 1)
-                .min(previous[right_index - 1] + substitution);
-            row_minimum = row_minimum.min(current[right_index]);
-        }
-        for value in current.iter_mut().skip(end) {
-            *value = maximum + 1;
-        }
-        if row_minimum > maximum {
-            return None;
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    (previous[right.len()] <= maximum).then_some(previous[right.len()] as u8)
-}
-
-fn is_adjacent_transposition(left: &str, right: &str) -> bool {
-    let left: Vec<char> = left.chars().collect();
-    let right: Vec<char> = right.chars().collect();
-    if left.len() != right.len() || left.len() < 2 {
-        return false;
-    }
-    let differences: Vec<usize> = left
-        .iter()
-        .zip(&right)
-        .enumerate()
-        .filter_map(|(index, (left, right))| (left != right).then_some(index))
-        .collect();
-    differences.len() == 2
-        && differences[1] == differences[0] + 1
-        && left[differences[0]] == right[differences[1]]
-        && left[differences[1]] == right[differences[0]]
-}
-
-fn is_keyboard_substitution(left: &str, right: &str, edges: &BTreeSet<(char, char)>) -> bool {
-    let mut differences = left
-        .chars()
-        .zip(right.chars())
-        .filter(|(left, right)| left != right);
-    if left.chars().count() != right.chars().count() {
-        return false;
-    }
-    let Some((left, right)) = differences.next() else {
-        return false;
-    };
-    if differences.next().is_some() {
-        return false;
-    }
-    let edge = if left < right {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    edges.contains(&edge)
-}
-
-fn skeleton(
-    value: &str,
-    mappings: &std::collections::BTreeMap<char, String>,
-) -> Result<String, TyposquatError> {
-    let maximum = value
-        .len()
-        .checked_mul(MAX_SKELETON_EXPANSION)
-        .map(|value| value.min(MAX_SKELETON_BYTES))
-        .ok_or_else(|| TyposquatError::ResourceLimit("skeleton limit overflow".into()))?;
-    let mut output = String::with_capacity(value.len().min(maximum));
-    for scalar in value.chars() {
-        if let Some(mapped) = mappings.get(&scalar) {
-            if output
-                .len()
-                .checked_add(mapped.len())
-                .is_none_or(|size| size > maximum)
-            {
-                return Err(TyposquatError::ResourceLimit(
-                    "confusable skeleton expansion limit exceeded".into(),
-                ));
-            }
-            output.push_str(mapped);
-        } else {
-            if output
-                .len()
-                .checked_add(scalar.len_utf8())
-                .is_none_or(|size| size > maximum)
-            {
-                return Err(TyposquatError::ResourceLimit(
-                    "confusable skeleton output limit exceeded".into(),
-                ));
-            }
-            output.push(scalar);
-        }
-    }
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typosquat::MAX_MATCH_COMPARISONS;
 
     fn target(ecosystem: Ecosystem, name: &str) -> TyposquatMatch {
         match_typosquat(ecosystem, name, 1)
@@ -493,30 +250,101 @@ mod tests {
 
     #[test]
     fn aliases_are_exact_clean_and_participate_in_matching() {
-        let entry = DatasetEntry {
-            display: "canonical".into(),
-            identity: segment_identity(Ecosystem::Npm, "canonical").unwrap(),
-            aliases: vec![segment_identity(Ecosystem::Npm, "alternative").unwrap()],
-            canonical: "canonical".into(),
-            legacy_priority: 1,
-        };
-        let exact_alias = segment_identity(Ecosystem::Npm, "alternative").unwrap();
-        assert!(entry_identities(&entry).any(|identity| exact_identity(&exact_alias, identity)));
-
-        let candidate = segment_identity(Ecosystem::Npm, "alternativx").unwrap();
+        let entry = synthetic_entry(Ecosystem::Npm, "canonical", &["alternative"], 1);
+        let dataset = synthetic_dataset(Ecosystem::Npm, vec![entry]);
         let shared_assets = assets().unwrap();
-        let mut comparisons = 0;
-        let signals = signals_for_entry(
-            &candidate,
-            &entry,
+        assert!(match_dataset(
+            Ecosystem::Npm,
+            "alternative",
             TyposquatMatchOptions::default(),
-            false,
-            &shared_assets.keyboard_edges,
-            &shared_assets.confusables,
-            &mut comparisons,
+            &dataset,
+            shared_assets,
+        )
+        .unwrap()
+        .0
+        .is_none());
+        assert_eq!(
+            match_dataset(
+                Ecosystem::Npm,
+                "alternativx",
+                TyposquatMatchOptions::default(),
+                &dataset,
+                shared_assets,
+            )
+            .unwrap()
+            .0
+            .unwrap()
+            .target,
+            "canonical"
+        );
+    }
+
+    #[test]
+    fn maximum_supported_corpus_has_deterministic_bounded_work() {
+        let prefix = "a".repeat(251);
+        let mut entries = (0..MAX_MATCH_COMPARISONS)
+            .map(|index| {
+                synthetic_entry(
+                    Ecosystem::Npm,
+                    &format!("{prefix}{index:05}"),
+                    &[],
+                    index as u64 + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let dataset = synthetic_dataset(Ecosystem::Npm, entries);
+        let (_, work) = match_dataset(
+            Ecosystem::Npm,
+            &format!("{prefix}xxxxx"),
+            TyposquatMatchOptions::default(),
+            &dataset,
+            assets().unwrap(),
         )
         .unwrap();
-        assert!(signals.contains(&TyposquatSignal::EditDistance { distance: 1 }));
-        assert_eq!(comparisons, 2);
+        assert_eq!(work.candidate_evaluations, MAX_MATCH_COMPARISONS);
+        assert_eq!(work.index_posting_visits, MAX_MATCH_COMPARISONS);
+        assert!(work.dp_cells <= MAX_MATCH_COMPARISONS * 256 * 3);
+
+        entries = dataset.entries;
+        entries.push(synthetic_entry(
+            Ecosystem::Npm,
+            &format!("{prefix}extra"),
+            &[],
+            MAX_MATCH_COMPARISONS as u64 + 1,
+        ));
+        assert!(
+            DatasetIndex::build(Ecosystem::Npm, &entries, &BTreeMap::new()).is_err(),
+            "10,001 identities must fail before index construction"
+        );
+    }
+
+    fn synthetic_entry(
+        ecosystem: Ecosystem,
+        name: &str,
+        aliases: &[&str],
+        legacy_priority: u64,
+    ) -> DatasetEntry {
+        let identity = segment_identity(ecosystem, name).unwrap();
+        DatasetEntry {
+            display: name.into(),
+            canonical: identity.canonical(),
+            identity,
+            aliases: aliases
+                .iter()
+                .map(|alias| segment_identity(ecosystem, alias).unwrap())
+                .collect(),
+            legacy_priority,
+        }
+    }
+
+    fn synthetic_dataset(ecosystem: Ecosystem, entries: Vec<DatasetEntry>) -> Dataset {
+        let index = DatasetIndex::build(ecosystem, &entries, &BTreeMap::new()).unwrap();
+        Dataset {
+            id: "synthetic".into(),
+            version: 1,
+            raw_sha256: "0".repeat(64),
+            entries,
+            index,
+        }
     }
 }

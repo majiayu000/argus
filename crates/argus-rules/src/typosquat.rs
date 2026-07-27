@@ -4,6 +4,9 @@
 //! never download reputation data and never fall back to the legacy arrays.
 
 mod data;
+mod distance;
+mod index;
+mod limits;
 mod matcher;
 mod normalize;
 mod strict_json;

@@ -1,3 +1,9 @@
+use super::index::DatasetIndex;
+use super::limits::{
+    ensure_at_most, MAX_AGGREGATE_DATASET_BYTES, MAX_ALIASES_PER_ENTRY, MAX_CONFUSABLE_BYTES,
+    MAX_CONFUSABLE_MAPPINGS, MAX_CONFUSABLE_TARGET_BYTES, MAX_DATASET_BYTES, MAX_KEYBOARD_DEGREE,
+    MAX_KEYBOARD_EDGES, MAX_KEYBOARD_KEYS, MAX_SOURCES_PER_FILE,
+};
 use super::normalize::{segment_identity, SegmentedIdentity};
 use super::TyposquatError;
 use argus_core::Ecosystem;
@@ -6,18 +12,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-const MAX_DATASET_BYTES: usize = 4 * 1024 * 1024;
-const MAX_AGGREGATE_DATASET_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IDENTITIES_PER_ECOSYSTEM: usize = super::MAX_MATCH_COMPARISONS;
 const MAX_AGGREGATE_IDENTITIES: usize = MAX_IDENTITIES_PER_ECOSYSTEM * DATA_FILES.len();
-const MAX_ALIASES_PER_ENTRY: usize = 16;
-const MAX_SOURCES_PER_FILE: usize = 64;
-const MAX_KEYBOARD_KEYS: usize = 128;
-const MAX_KEYBOARD_EDGES: usize = 512;
-const MAX_KEYBOARD_DEGREE: usize = 16;
-const MAX_CONFUSABLE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CONFUSABLE_MAPPINGS: usize = 100_000;
-const MAX_CONFUSABLE_TARGET_BYTES: usize = 64;
 
 const MANIFEST_BYTES: &[u8] = include_bytes!("../../data/typosquat/v1/manifest.json");
 const NPM_BYTES: &[u8] = include_bytes!("../../data/typosquat/v1/npm.json");
@@ -80,6 +76,7 @@ pub(crate) struct Dataset {
     pub version: u32,
     pub raw_sha256: String,
     pub entries: Vec<DatasetEntry>,
+    pub index: DatasetIndex,
 }
 
 #[derive(Debug)]
@@ -261,20 +258,30 @@ pub(crate) fn dataset(ecosystem: Ecosystem) -> Result<&'static Dataset, Typosqua
 fn load_assets() -> Result<Assets, TyposquatError> {
     let manifest: ManifestFile = parse_json("manifest.json", MANIFEST_BYTES)?;
     validate_manifest_header(&manifest)?;
+    let keyboard_edges = validate_keyboard(&manifest.keyboard)?;
+    let confusables = validate_confusables(&manifest.confusables)?;
     let mut aggregate_bytes = 0usize;
     let mut aggregate_identities = 0usize;
     let mut datasets = BTreeMap::new();
     let mut source_order = String::new();
     let mut audit_assets = Vec::with_capacity(10);
+    audit_assets.push(AssetAudit {
+        id: manifest.keyboard.layout_id.clone(),
+        version: "1".into(),
+        sha256: manifest.keyboard.raw_sha256.clone(),
+    });
+    audit_assets.push(AssetAudit {
+        id: manifest.confusables.profile_id.clone(),
+        version: manifest.confusables.unicode_version.clone(),
+        sha256: manifest.confusables.raw_sha256.clone(),
+    });
 
     if manifest.datasets.len() != DATA_FILES.len() {
         return embedded("manifest must contain exactly eight datasets");
     }
     for (ecosystem, file, bytes) in DATA_FILES {
         aggregate_bytes = checked_add(aggregate_bytes, bytes.len(), "dataset bytes")?;
-        if bytes.len() > MAX_DATASET_BYTES {
-            return limit(format!("{file} exceeds {MAX_DATASET_BYTES} bytes"));
-        }
+        ensure_at_most(bytes.len(), MAX_DATASET_BYTES, &format!("{file} bytes"))?;
         let record = manifest
             .datasets
             .iter()
@@ -290,7 +297,7 @@ fn load_assets() -> Result<Assets, TyposquatError> {
             return embedded(format!("{file} manifest metadata mismatch"));
         }
         let raw: DatasetFile = parse_json(file, bytes)?;
-        let dataset = validate_dataset(ecosystem, file, &raw, record)?;
+        let dataset = validate_dataset(ecosystem, file, &raw, record, &confusables)?;
         let identity_count = dataset.entries.iter().try_fold(0usize, |count, entry| {
             checked_add(count, 1 + entry.aliases.len(), "dataset identities")
         })?;
@@ -320,26 +327,16 @@ fn load_assets() -> Result<Assets, TyposquatError> {
             return embedded("duplicate ecosystem dataset");
         }
     }
-    if aggregate_bytes > MAX_AGGREGATE_DATASET_BYTES {
-        return limit("aggregate dataset byte limit exceeded");
-    }
+    ensure_at_most(
+        aggregate_bytes,
+        MAX_AGGREGATE_DATASET_BYTES,
+        "aggregate dataset bytes",
+    )?;
     validate_aggregate_identity_count(aggregate_identities)?;
     if sha256(source_order.as_bytes()) != manifest.combined_legacy_source_order_sha256 {
         return embedded("combined frozen source-order hash mismatch");
     }
 
-    let keyboard_edges = validate_keyboard(&manifest.keyboard)?;
-    audit_assets.push(AssetAudit {
-        id: manifest.keyboard.layout_id.clone(),
-        version: "1".into(),
-        sha256: manifest.keyboard.raw_sha256.clone(),
-    });
-    let confusables = validate_confusables(&manifest.confusables)?;
-    audit_assets.push(AssetAudit {
-        id: manifest.confusables.profile_id.clone(),
-        version: manifest.confusables.unicode_version.clone(),
-        sha256: manifest.confusables.raw_sha256.clone(),
-    });
     audit_assets.sort_by(|left, right| left.id.cmp(&right.id));
 
     Ok(Assets {
@@ -375,6 +372,7 @@ fn validate_dataset(
     file: &str,
     raw: &DatasetFile,
     manifest: &ManifestDataset,
+    confusables: &BTreeMap<char, String>,
 ) -> Result<Dataset, TyposquatError> {
     if raw.schema_version != 1
         || raw.dataset_version != 1
@@ -386,9 +384,10 @@ fn validate_dataset(
     {
         return embedded(format!("{file} schema or identity mismatch"));
     }
-    if raw.entries.len() != manifest.count || raw.sources.len() > MAX_SOURCES_PER_FILE {
-        return embedded(format!("{file} count or source limit mismatch"));
+    if raw.entries.len() != manifest.count {
+        return embedded(format!("{file} count mismatch"));
     }
+    ensure_at_most(raw.sources.len(), MAX_SOURCES_PER_FILE, "dataset sources")?;
     if raw.sources.is_empty() {
         return embedded(format!("{file} has no provenance source"));
     }
@@ -415,8 +414,8 @@ fn validate_dataset(
     let mut priorities = BTreeSet::new();
     let mut entries = Vec::with_capacity(raw.entries.len());
     for entry in &raw.entries {
-        if entry.aliases.len() > MAX_ALIASES_PER_ENTRY
-            || entry.popularity.metric != PopularityMetric::LegacyPriority
+        ensure_at_most(entry.aliases.len(), MAX_ALIASES_PER_ENTRY, "entry aliases")?;
+        if entry.popularity.metric != PopularityMetric::LegacyPriority
             || entry.popularity.value == 0
             || !source_ids.contains(entry.popularity.source_id.as_str())
             || !priorities.insert(entry.popularity.value)
@@ -468,23 +467,27 @@ fn validate_dataset(
     {
         return embedded(format!("{file} legacy priorities are not contiguous"));
     }
+    let identity_count = entries.iter().try_fold(0usize, |count, entry| {
+        checked_add(count, 1 + entry.aliases.len(), "dataset identities")
+    })?;
+    validate_dataset_identity_count(file, identity_count)?;
+    let index = DatasetIndex::build(ecosystem, &entries, confusables)?;
     Ok(Dataset {
         id: raw.dataset_id.clone(),
         version: raw.dataset_version,
         raw_sha256: manifest.raw_sha256.clone(),
         entries,
+        index,
     })
 }
 
 fn validate_keyboard(
     manifest: &ManifestKeyboard,
 ) -> Result<BTreeSet<(char, char)>, TyposquatError> {
-    if manifest.file != "keyboard-qwerty-us.json"
-        || manifest.raw_sha256 != sha256(KEYBOARD_BYTES)
-        || KEYBOARD_BYTES.len() > MAX_DATASET_BYTES
-    {
+    if manifest.file != "keyboard-qwerty-us.json" || manifest.raw_sha256 != sha256(KEYBOARD_BYTES) {
         return embedded("keyboard manifest mismatch");
     }
+    ensure_at_most(KEYBOARD_BYTES.len(), MAX_DATASET_BYTES, "keyboard bytes")?;
     let raw: KeyboardFile = parse_json(&manifest.file, KEYBOARD_BYTES)?;
     if raw.schema_version != 1
         || raw.layout_version != 1
@@ -495,12 +498,14 @@ fn validate_keyboard(
         return embedded("unsupported keyboard asset");
     }
     let alphabet: BTreeSet<char> = raw.alphabet.chars().collect();
-    if alphabet.len() != raw.alphabet.chars().count() || alphabet.len() > MAX_KEYBOARD_KEYS {
-        return embedded("keyboard alphabet is duplicate or oversized");
+    if alphabet.len() != raw.alphabet.chars().count() {
+        return embedded("keyboard alphabet has duplicate keys");
     }
-    if raw.edges.len() != manifest.edge_count || raw.edges.len() > MAX_KEYBOARD_EDGES {
+    ensure_at_most(alphabet.len(), MAX_KEYBOARD_KEYS, "keyboard keys")?;
+    if raw.edges.len() != manifest.edge_count {
         return embedded("keyboard edge count mismatch");
     }
+    ensure_at_most(raw.edges.len(), MAX_KEYBOARD_EDGES, "keyboard edges")?;
     let mut edges = BTreeSet::new();
     let mut degree = BTreeMap::<char, usize>::new();
     for edge in raw.edges {
@@ -515,9 +520,7 @@ fn validate_keyboard(
         for key in [left, right] {
             let value = degree.entry(key).or_default();
             *value = checked_add(*value, 1, "keyboard degree")?;
-            if *value > MAX_KEYBOARD_DEGREE {
-                return limit("keyboard degree limit exceeded");
-            }
+            ensure_at_most(*value, MAX_KEYBOARD_DEGREE, "keyboard degree")?;
         }
     }
     Ok(edges)
@@ -528,10 +531,14 @@ fn validate_confusables(
 ) -> Result<BTreeMap<char, String>, TyposquatError> {
     if manifest.file != "unicode-confusables.json"
         || manifest.raw_sha256 != sha256(CONFUSABLES_BYTES)
-        || CONFUSABLES_BYTES.len() > MAX_CONFUSABLE_BYTES
     {
         return embedded("confusables manifest mismatch");
     }
+    ensure_at_most(
+        CONFUSABLES_BYTES.len(),
+        MAX_CONFUSABLE_BYTES,
+        "confusable bytes",
+    )?;
     let raw: ConfusablesFile = parse_json(&manifest.file, CONFUSABLES_BYTES)?;
     if raw.schema_version != 1
         || raw.profile_id != manifest.profile_id
@@ -546,17 +553,26 @@ fn validate_confusables(
         || raw.generator_version != "argus-typosquat-data-v1"
         || !raw.normalization.starts_with("Unicode scalar substitution")
         || raw.mappings.len() != manifest.mapping_count
-        || raw.mappings.len() > MAX_CONFUSABLE_MAPPINGS
     {
         return embedded("unsupported confusables asset");
     }
+    ensure_at_most(
+        raw.mappings.len(),
+        MAX_CONFUSABLE_MAPPINGS,
+        "confusable mappings",
+    )?;
     validate_sha256("confusables source hash", &raw.source_sha256)?;
     let mut mappings = BTreeMap::new();
     for mapping in raw.mappings {
         let source = one_scalar("confusable source", &mapping.source)?;
-        if mapping.target.is_empty() || mapping.target.len() > MAX_CONFUSABLE_TARGET_BYTES {
-            return limit("confusable target size limit exceeded");
+        if mapping.target.is_empty() {
+            return embedded("confusable target is empty");
         }
+        ensure_at_most(
+            mapping.target.len(),
+            MAX_CONFUSABLE_TARGET_BYTES,
+            "confusable target bytes",
+        )?;
         if mappings.insert(source, mapping.target).is_some() {
             return embedded("duplicate confusable source scalar");
         }

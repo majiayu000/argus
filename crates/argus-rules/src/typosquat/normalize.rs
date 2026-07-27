@@ -287,4 +287,20 @@ mod tests {
         assert!(canonicalize_typosquat_identity(Ecosystem::Packagist, "a/b/c").is_err());
         assert!(canonicalize_typosquat_identity(Ecosystem::Go, "github.com//repo").is_err());
     }
+
+    #[test]
+    fn candidate_byte_and_scalar_caps_accept_equality_and_reject_plus_one() {
+        let maximum = "é".repeat(MAX_CANDIDATE_SCALARS);
+        assert_eq!(maximum.len(), MAX_CANDIDATE_BYTES);
+        assert!(canonicalize_typosquat_identity(Ecosystem::RubyGems, &maximum).is_ok());
+        assert!(canonicalize_typosquat_identity(
+            Ecosystem::RubyGems,
+            &"a".repeat(MAX_CANDIDATE_SCALARS + 1)
+        )
+        .is_err());
+        let byte_overflow = format!("{}界", "é".repeat(MAX_CANDIDATE_SCALARS - 1));
+        assert_eq!(byte_overflow.chars().count(), MAX_CANDIDATE_SCALARS);
+        assert_eq!(byte_overflow.len(), MAX_CANDIDATE_BYTES + 1);
+        assert!(canonicalize_typosquat_identity(Ecosystem::RubyGems, &byte_overflow).is_err());
+    }
 }
