@@ -98,12 +98,22 @@ impl HelpUri {
                 "help_uri must contain between 1 and 2048 bytes",
             ));
         }
+        if value.chars().any(|character| character.is_ascii_control()) {
+            return Err(CatalogError::new(
+                "help_uri must not contain ASCII control characters",
+            ));
+        }
+        if value.trim() != value {
+            return Err(CatalogError::new(
+                "help_uri must not contain leading or trailing whitespace",
+            ));
+        }
         let parsed = Url::parse(value)
             .map_err(|error| CatalogError::new(format!("invalid help_uri: {error}")))?;
         if parsed.scheme() != "https" || parsed.host_str().is_none() {
             return Err(CatalogError::new("help_uri must be an absolute HTTPS URL"));
         }
-        Ok(Self(value.to_string()))
+        Ok(Self(parsed.to_string()))
     }
 
     pub fn as_str(&self) -> &str {

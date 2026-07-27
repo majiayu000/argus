@@ -241,6 +241,74 @@ fn invalid_catalog_shapes_fail_closed() {
 }
 
 #[test]
+fn help_uri_rejects_controls_and_whitespace_before_url_parsing() {
+    let record = external_rule(
+        "help-uri-validation",
+        r#"{ kind: literal, pattern: "needle" }"#,
+    );
+    for (name, invalid, expected) in [
+        (
+            "newline",
+            r"https://example.test/path\nfragment",
+            "ASCII control",
+        ),
+        (
+            "tab",
+            r"https://example.test/path\tfragment",
+            "ASCII control",
+        ),
+        (
+            "carriage-return",
+            r"https://example.test/path\rfragment",
+            "ASCII control",
+        ),
+        (
+            "embedded-control",
+            r"https://example.test/path\u001bfragment",
+            "ASCII control",
+        ),
+        (
+            "leading-whitespace",
+            " https://example.test/path",
+            "leading or trailing whitespace",
+        ),
+        (
+            "trailing-whitespace",
+            "https://example.test/path ",
+            "leading or trailing whitespace",
+        ),
+    ] {
+        let source = external_catalog(&[record.replace(GENERIC_HELP, invalid)]);
+        let error = RuleCatalog::parse_yaml(&source, CatalogOrigin::External).unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: expected `{expected}`, got `{error}`"
+        );
+    }
+}
+
+#[test]
+fn help_uri_is_canonical_and_fragment_preserving_for_stable_digests() {
+    let matcher = r#"{ kind: literal, pattern: "needle" }"#;
+    let canonical = external_catalog(&[external_rule("canonical-help", matcher)]);
+    let equivalent = external_catalog(&[external_rule("canonical-help", matcher).replace(
+        GENERIC_HELP,
+        "HTTPS://GITHUB.COM:443/majiayu000/argus#rule-coverage-milestone-0",
+    )]);
+    let canonical = RuleCatalog::parse_yaml(&canonical, CatalogOrigin::External).unwrap();
+    let equivalent = RuleCatalog::parse_yaml(&equivalent, CatalogOrigin::External).unwrap();
+    assert_eq!(
+        equivalent.rules()[0].help_uri.as_str(),
+        GENERIC_HELP,
+        "URL normalization must preserve the fragment"
+    );
+    assert_eq!(
+        EffectiveRuleSet::build(&canonical, []).unwrap().digest(),
+        EffectiveRuleSet::build(&equivalent, []).unwrap().digest()
+    );
+}
+
+#[test]
 fn invalid_ids_duplicates_languages_and_matchers_fail_closed() {
     for id in ["", "-starts-with-dash", "bad id", "bad/id"] {
         let source =
