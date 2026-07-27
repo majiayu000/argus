@@ -2,23 +2,24 @@ use argus_core::{Ecosystem, Severity};
 use argus_rules::typosquat::match_typosquat;
 use argus_rules::RuleSession;
 
+const POSITIVE_CASES: [(Ecosystem, &str, &str); 8] = [
+    (Ecosystem::Npm, "reactt", "react"),
+    (Ecosystem::PyPi, "rrequests", "requests"),
+    (Ecosystem::CratesIo, "toikio", "tokio"),
+    (
+        Ecosystem::Go,
+        "github.com/gorilla/muux",
+        "github.com/gorilla/mux",
+    ),
+    (Ecosystem::NuGet, "Newtonsoft.JSoon", "Newtonsoft.Json"),
+    (Ecosystem::Maven, "org.example:guaava", "guava"),
+    (Ecosystem::RubyGems, "bundelr", "bundler"),
+    (Ecosystem::Packagist, "monlog/monolog", "monolog/monolog"),
+];
+
 #[test]
 fn public_matcher_covers_all_ecosystems_and_registry_aliases() {
-    let positives = [
-        (Ecosystem::Npm, "reactt", "react"),
-        (Ecosystem::PyPi, "rrequests", "requests"),
-        (Ecosystem::CratesIo, "toikio", "tokio"),
-        (
-            Ecosystem::Go,
-            "github.com/gorilla/muux",
-            "github.com/gorilla/mux",
-        ),
-        (Ecosystem::NuGet, "Newtonsoft.JSoon", "Newtonsoft.Json"),
-        (Ecosystem::Maven, "org.example:guaava", "guava"),
-        (Ecosystem::RubyGems, "bundelr", "bundler"),
-        (Ecosystem::Packagist, "monlog/monolog", "monolog/monolog"),
-    ];
-    for (ecosystem, candidate, target) in positives {
+    for (ecosystem, candidate, target) in POSITIVE_CASES {
         let matched = match_typosquat(ecosystem, candidate, 1)
             .unwrap_or_else(|error| panic!("{ecosystem:?} `{candidate}` failed: {error}"))
             .unwrap_or_else(|| panic!("{ecosystem:?} `{candidate}` did not match"));
@@ -78,13 +79,16 @@ fn namespace_boundaries_avoid_unrelated_false_positives() {
 
 #[test]
 fn typed_distance_severity_and_rule_switches_drive_public_session_behavior() {
-    let mut findings = Vec::new();
-    RuleSession::builtin()
-        .unwrap()
-        .push_typosquat_findings(Ecosystem::Npm, "react-dxx", "npm name", &mut findings)
-        .unwrap();
-    assert!(findings.is_empty(), "distance two must be opt-in");
-
+    let distance_two_cases = [
+        (Ecosystem::Npm, "react-dxx"),
+        (Ecosystem::PyPi, "reqxxsts"),
+        (Ecosystem::CratesIo, "acxxx-web"),
+        (Ecosystem::Go, "github.com/aws/aws-sdk-xx"),
+        (Ecosystem::NuGet, "Newtonxxft.Json"),
+        (Ecosystem::Maven, "org.example:spring-xxre"),
+        (Ecosystem::RubyGems, "activexxcord"),
+        (Ecosystem::Packagist, "laravel/framewxxk"),
+    ];
     let distance_two = RuleSession::load(
         None,
         &[
@@ -93,16 +97,28 @@ fn typed_distance_severity_and_rule_switches_drive_public_session_behavior() {
         ],
     )
     .unwrap();
-    distance_two
-        .push_typosquat_findings(Ecosystem::Npm, "react-dxx", "npm name", &mut findings)
-        .unwrap();
-    assert_eq!(
-        findings
-            .iter()
-            .map(|finding| finding.rule_id.as_str())
-            .collect::<Vec<_>>(),
-        ["typosquatting"]
-    );
+    for (ecosystem, candidate) in distance_two_cases {
+        let mut findings = Vec::new();
+        RuleSession::builtin()
+            .unwrap()
+            .push_typosquat_findings(ecosystem, candidate, "package name", &mut findings)
+            .unwrap();
+        assert!(
+            findings.is_empty(),
+            "{ecosystem:?} distance two must be opt-in"
+        );
+        distance_two
+            .push_typosquat_findings(ecosystem, candidate, "package name", &mut findings)
+            .unwrap();
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            ["typosquatting"],
+            "{ecosystem:?} typed distance-two session was not applied"
+        );
+    }
     assert_eq!(
         distance_two
             .metadata()
@@ -132,19 +148,21 @@ fn typed_distance_severity_and_rule_switches_drive_public_session_behavior() {
             Vec::new(),
         ),
     ] {
-        let session = RuleSession::load(None, &overrides).unwrap();
-        let mut findings = Vec::new();
-        session
-            .push_typosquat_findings(Ecosystem::Npm, "reactt", "npm name", &mut findings)
-            .unwrap();
-        session.normalize_findings(&mut findings);
-        assert_eq!(
-            findings
-                .iter()
-                .map(|finding| (finding.rule_id.as_str(), finding.severity))
-                .collect::<Vec<_>>(),
-            expected,
-            "overrides: {overrides:?}"
-        );
+        for (ecosystem, candidate, _) in POSITIVE_CASES {
+            let session = RuleSession::load(None, &overrides).unwrap();
+            let mut findings = Vec::new();
+            session
+                .push_typosquat_findings(ecosystem, candidate, "package name", &mut findings)
+                .unwrap();
+            session.normalize_findings(&mut findings);
+            assert_eq!(
+                findings
+                    .iter()
+                    .map(|finding| (finding.rule_id.as_str(), finding.severity))
+                    .collect::<Vec<_>>(),
+                expected,
+                "{ecosystem:?} overrides: {overrides:?}"
+            );
+        }
     }
 }
