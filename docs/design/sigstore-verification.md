@@ -174,7 +174,7 @@ Total: ~3 days of focused work. This is the **honest** estimate; the "tracer bul
 
 ### Resolved by Day 1 (PR #29, merged 2026-05-28) and the Day 2 spike
 
-- **Crate library choice**: switched from the official `sigstore` crate to the modular `sigstore-verify` + `sigstore-trust-root` + `sigstore-types` family (0.8.0, from the prefix-dev/wolfv sigstore-rust fork). The modular crates are **synchronous**, verification-only, and offline-capable with a pre-loaded `TrustedRoot`. This retires the async-isolation concern: no tokio runtime needs to be spawned inside argus-fetch.
+- **Crate library choice**: switched from the official `sigstore` crate to the modular `sigstore-verify` + `sigstore-trust-root` + `sigstore-types` family (0.11.0, from prefix-dev/sigstore-rust). The modular crates are **synchronous**, verification-only, and offline-capable with a pre-loaded `TrustedRoot`. An audited path patch carries the npm v0.2 compatibility changes described in §10.
 - **Bundle version compatibility** (highest pre-Day-2 risk): a compile-spike using the real `sigstore@2.3.1` npm attestations fixture confirmed that `sigstore_types::Bundle::from_json` parses the npm `mediaType=application/vnd.dev.sigstore.bundle+json;version=0.2` bundle without modification, even though the fork's README emphasises v0.3. v0.2 → v0.3 is additive enough that the parser accepts both.
 - **DSSE signature-verification primitive**: implemented in argus-verify Day 1 *without* the sigstore crate at all (pure RustCrypto). The Day 2 sigstore-verify integration covers the higher layers (Fulcio chain + Rekor + identity policy) and the existing DSSE primitive remains as a backstop / duplicate check.
 
@@ -209,23 +209,16 @@ What M2 still does NOT prevent, even with full Sigstore verification:
 - **Builder-workflow compromise**: a malicious change to a reusable workflow in the allowlist would produce attestations that pass M2 but ship attacker code. This is the case M3 builder-workflow pinning would address.
 - **Trust-root rotation**: if the Sigstore Fulcio root is rotated and we have not pulled an updated trust bundle, valid signatures will fail M2 with `provenance-signature-invalid` until we ship an update.
 
-### Day 2 implementation gap (current, blocking real-npm Verified verdicts)
+### npm v0.2 compatibility patch
 
-`sigstore-verify` 0.8.0 cannot end-to-end verify the Sigstore bundle format that npm actually publishes today:
+The crates.io `sigstore-verify` 0.11.0 release still has three narrow incompatibilities with npm's captured `sigstore@2.3.1` SLSA bundle: it excludes `intoto/0.0.2` + SET from candidate integrated-time sources, binds in-toto subjects only with SHA-256, and requires the write-only Rekor envelope payload even though committed entries retain only `payloadHash`.
 
-- npm-published v0.2 bundles carry tlog entries with `kindVersion = {kind: "intoto", version: "0.0.2"}` AND zero `rfc3161Timestamps` — they instead rely on Rekor's SET over a non-zero `integratedTime`.
-- `sigstore-verify` 0.8.0's `helpers.rs:202` requires either an RFC3161 timestamp OR a V1 tlog entry (`version == "0.0.1"` AND `kind in {"hashedrekord", "dsse"}`). The `intoto/0.0.2` case falls into the gap and surfaces as `SignatureInvalid` with the diagnostic `"V2 bundle requires RFC3161 timestamp"`.
-- cosign hit the same shape ([sigstore/cosign#3926](https://github.com/sigstore/cosign/issues/3926)).
+Argus path-patches an exact, checksum-verified 0.11.0 source copy. The patch:
 
-**Current behaviour**: the wrapper, vendored trust root, and policy plumbing all work and stay shipped. The known npm shape (tlog `intoto/0.0.2`, zero `rfc3161Timestamps`) cannot complete every cryptographic check, so it remains fail-closed as `SignatureInvalid`, surfaced as Critical `provenance-signature-invalid` and a `Block` decision. This also applies to otherwise legitimate bundles: Argus does not downgrade an unverified shape based on an upstream error string because a forged DSSE signature can reach the same diagnostic before signature validation. The `npm_keyring_public_key_hint` path stays `Unsupported`; artifact tampering for npm packages is also caught independently by the fetch layer's subject-digest cross-check (`provenance-subject-mismatch`, Critical).
+- admits a positive `intoto/0.0.2` integrated time only when an inclusion promise is present; the original verifier must still validate the SET, inclusion proof/checkpoint, future-time bound, and certificate validity before success;
+- computes SHA-512 only from caller-supplied artifact bytes and matches it against in-toto subjects, while retaining SHA-256 support;
+- validates committed Rekor entries against payload type/hash plus the exact DSSE signature and Fulcio certificate. The non-canonical original envelope JSON hash cannot be reproduced from a bundle, but its declared value remains bound by the verified SET and inclusion proof.
 
-**Tests as living contract**: `tests/sigstore_real_fixture.rs` pins the current fail-closed verdict for both the captured bundle and the same bundle with a corrupted DSSE signature. The fetch integration pins the corresponding Critical finding and `Block` decision. If upstream adds complete `intoto/0.0.2` verification, the legitimate fixture can move to `Verified` only after that path is proven end to end.
+No error string or bundle shape is downgraded. Fulcio chain/EKU/time, SCT, issuer, identity, DSSE PAE signature, artifact binding, Rekor consistency, checkpoint/proof, and SET checks all remain mandatory. The real fixture reaches `Verified`; corrupt signatures, artifacts, SETs, proofs, Rekor bodies, chains, SCT keys, times, and identity policies remain invalid and block. The npm-keyring public-key-hint path remains `Unsupported`.
 
-**Resolution paths**, in order of preference:
-
-1. Wait for prefix-dev/sigstore-rust to widen the V1 fallback to accept `intoto/0.0.2`. Cheapest if it lands soon; the in-tree wrapper plus a future `s/include_str/include_str/` trust-root refresh is the entire migration.
-2. Fork `sigstore-verify` and patch `verify_impl/helpers.rs` to treat `intoto/0.0.2` + non-zero `integratedTime` + SET as a valid V1-equivalent timestamp source. Adds ongoing maintenance.
-3. Replace `sigstore-verify` with the official `sigstore` crate (async, heavier) once it gains the same wrapper-friendly API surface.
-4. Implement Fulcio chain + Rekor SET verification ourselves on top of the existing `argus-verify::dsse` primitive. Largest scope; largest security surface.
-
-This gap is the most honest statement of where M2 actually lands today: the architecture is in place and the vendored trust root is real, but otherwise legitimate npm `intoto/0.0.2` bundles remain blocked because they are not fully verified. Issue #128's end-to-end support goal is therefore not fully satisfied.
+The vendored crate README records the upstream tag, commit, crates.io checksum, license, patch scope, and removal condition. Remove the path patch only after an upstream release passes the same positive and negative fixture matrix.

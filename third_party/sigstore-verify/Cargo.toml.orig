@@ -1,0 +1,61 @@
+[package]
+name = "sigstore-verify"
+description = "Sigstore signature verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sigstore-types = { workspace = true }
+sigstore-crypto = { workspace = true }
+sigstore-merkle = { workspace = true }
+sigstore-trust-root = { workspace = true }
+sigstore-bundle = { workspace = true, default-features = false }
+sigstore-rekor = { workspace = true, default-features = false }
+sigstore-tsa = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+thiserror = { workspace = true }
+jiff = { workspace = true }
+base64 = { workspace = true }
+x509-cert = { workspace = true }
+hex = { workspace = true }
+cms = { workspace = true }
+const-oid = { workspace = true }
+tls_codec = { workspace = true }
+pem = { workspace = true }
+rustls-webpki = { workspace = true }
+rustls-pki-types = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+const-oid = { workspace = true }
+x509-cert = { workspace = true }
+sigstore-types = { workspace = true }
+regex = { workspace = true }
+sigstore-trust-root = { workspace = true, features = ["tuf"] }
+
+[features]
+default = ["rustls"]
+rustls = [
+  "sigstore-bundle/rustls",
+  "sigstore-rekor/rustls",
+  "sigstore-tsa/rustls",
+  "sigstore-trust-root/rustls",
+]
+native-tls = [
+  "sigstore-bundle/native-tls",
+  "sigstore-rekor/native-tls",
+  "sigstore-tsa/native-tls",
+  "sigstore-trust-root/native-tls",
+]
+tuf = ["sigstore-trust-root/tuf"]
