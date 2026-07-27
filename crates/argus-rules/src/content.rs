@@ -4,38 +4,30 @@
 //! Each rule below is intentionally narrow. False positives are paid for in
 //! review time, so a rule fires only when its real-attack pattern is present.
 
-use crate::{all_script_bodies, PackageContext, TextFile};
+use crate::{PackageContext, TextFile};
+use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
+use argus_syntax::{Fact, FactKind, ScriptLanguage};
 use regex::Regex;
 use std::sync::OnceLock;
 
-pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
-    let script_blob = all_script_bodies(&ctx.package);
-
+pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
     // Iterate over each text file once and apply per-file rules.
     for file in &ctx.text_files {
-        scan_file(file, findings);
+        let language = ScriptLanguage::from_path(&file.rel);
+        if matches!(
+            language,
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+        ) {
+            let facts = argus_syntax::analyze(&file.rel, &file.content)
+                .with_context(|| format!("parse npm source `{}`", file.rel))?;
+            scan_file(file, findings, NetworkScan::Syntax(&facts));
+        } else {
+            scan_file(file, findings, NetworkScan::Disabled);
+        }
     }
 
-    // Script-body rules (curl|sh, npm-publish lives in scripts too).
-    if let Some(matched) = curl_sh_pipe(&script_blob) {
-        findings.push(
-            Finding::new(
-                "remote-download",
-                Severity::High,
-                format!("script downloads remote payload: {matched}"),
-            )
-            .at("package.json:scripts"),
-        );
-        findings.push(
-            Finding::new(
-                "shell-pipe-execution",
-                Severity::High,
-                "script pipes downloaded content into a shell",
-            )
-            .at("package.json:scripts"),
-        );
-    }
+    Ok(())
 }
 
 /// Apply the ecosystem-agnostic content rules (credential-access,
@@ -48,10 +40,16 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
 /// or Rust file they extract — none of these rules are npm-specific in
 /// behaviour, only in the regex literals they look for (e.g. `.npmrc`).
 pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
-    scan_file(file, findings);
+    scan_file(file, findings, NetworkScan::Legacy);
 }
 
-fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
+enum NetworkScan<'a> {
+    Syntax(&'a [Fact]),
+    Legacy,
+    Disabled,
+}
+
+fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: NetworkScan<'_>) {
     let body = &file.content;
 
     // credential-access: targets host secret files by literal path.
@@ -148,7 +146,12 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>) {
     }
 
     // network-exfiltration: fetch/POST to external host, excluding api.github.com.
-    if let Some(host) = external_fetch(body) {
+    let external_host = match network_scan {
+        NetworkScan::Syntax(facts) => syntax_external_fetch(facts),
+        NetworkScan::Legacy => external_fetch(body),
+        NetworkScan::Disabled => None,
+    };
+    if let Some(host) = external_host {
         findings.push(
             Finding::new(
                 "network-exfiltration",
@@ -377,13 +380,6 @@ fn wallet_regex() -> &'static Regex {
     })
 }
 
-fn curl_sh_pipe(blob: &str) -> Option<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re =
-        RE.get_or_init(|| Regex::new(r#"(?i)(curl|wget)\s+[^\n]*\|\s*(sh|bash|zsh)\b"#).unwrap());
-    re.find(blob).map(|m| m.as_str().to_string())
-}
-
 /// Find a JS fetch/axios call to a non-local, non-github host. Returns the
 /// host portion so the finding detail can name it.
 ///
@@ -409,7 +405,7 @@ fn external_fetch(body: &str) -> Option<String> {
         if is_local_host(&host) {
             continue;
         }
-        if host == "api.github.com" {
+        if host_name(&host) == "api.github.com" {
             // covered by github-write-api
             continue;
         }
@@ -418,6 +414,51 @@ fn external_fetch(body: &str) -> Option<String> {
     None
 }
 
+fn syntax_external_fetch(facts: &[Fact]) -> Option<String> {
+    facts.iter().find_map(|fact| {
+        if fact.kind != FactKind::Call || !is_network_callee(fact.callee.as_deref()?) {
+            return None;
+        }
+        fact.arguments.first().and_then(|argument| {
+            [argument.resolved.as_deref(), Some(argument.raw.as_str())]
+                .into_iter()
+                .flatten()
+                .find_map(external_url_host)
+        })
+    })
+}
+
+fn is_network_callee(callee: &str) -> bool {
+    let callee = callee.to_ascii_lowercase();
+    callee.ends_with("fetch")
+        || matches!(
+            callee.as_str(),
+            "axios.post" | "axios.put" | "axios.patch" | "axios.request"
+        )
+}
+
+fn external_url_host(value: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"(?i)https?://([^\"'/\s]+)"#).unwrap());
+    for captures in re.captures_iter(value) {
+        let host = captures.get(1)?.as_str().to_ascii_lowercase();
+        if !is_local_host(&host) && host_name(&host) != "api.github.com" {
+            return Some(host);
+        }
+    }
+    None
+}
+
 fn is_local_host(host: &str) -> bool {
+    let host = host_name(host);
     matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
+fn host_name(host: &str) -> &str {
+    if let Some(bracketed) = host.strip_prefix('[') {
+        return bracketed
+            .split_once(']')
+            .map_or(bracketed, |(name, _)| name);
+    }
+    host.split_once(':').map_or(host, |(name, _)| name)
 }

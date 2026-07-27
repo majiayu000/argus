@@ -9,6 +9,7 @@ description = "Static detection rules for argus scans."
 
 [dependencies]
 argus-core = { workspace = true }
+argus-syntax = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }

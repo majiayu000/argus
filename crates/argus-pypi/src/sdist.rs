@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{Finding, Severity};
 use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_syntax::{FactKind, ScriptLanguage};
 use std::path::Path;
 
 /// Maximum size we attempt to read as text. Matches `argus-rules`.
@@ -75,7 +76,7 @@ pub fn scan_extracted_sdist(pkg_dir: &Path) -> Result<ArtifactScan> {
             .unwrap_or_default();
         if base == "setup.py" {
             setup_py_seen = true;
-            scan_setup_py(&content, &rel, &mut findings);
+            scan_setup_py(&content, &rel, &mut findings)?;
         } else if base == "pyproject.toml" {
             pyproject_seen = true;
             if let Some((n, v)) = parse_pyproject_name_version(&content) {
@@ -124,39 +125,96 @@ pub fn scan_extracted_sdist(pkg_dir: &Path) -> Result<ArtifactScan> {
     })
 }
 
-fn scan_setup_py(content: &str, rel: &str, findings: &mut Vec<Finding>) {
-    let mut imperative = false;
-    if rules::setup_subprocess_regex().is_match(content) {
-        imperative = true;
+fn scan_setup_py(content: &str, rel: &str, findings: &mut Vec<Finding>) -> Result<()> {
+    let facts = argus_syntax::analyze_with_language(rel, content, ScriptLanguage::Python)
+        .with_context(|| format!("parse PyPI setup source `{rel}`"))?;
+    let mut subprocess = false;
+    let mut remote_download = false;
+    let mut eval = false;
+    for fact in facts.iter().filter(|fact| fact.kind == FactKind::Call) {
+        let Some(callee) = fact.callee.as_deref() else {
+            continue;
+        };
+        let callee = callee.to_ascii_lowercase();
+        subprocess |= is_setup_subprocess(&callee);
+        remote_download |= is_setup_remote_download(&callee);
+        eval |= is_setup_eval(&callee) && !fact.arguments.is_empty();
+    }
+
+    if subprocess {
         findings.push(finding(
             "setup-subprocess",
             Severity::Critical,
             format!("`{rel}` invokes subprocess/os.system/os.popen at install time"),
         ));
     }
-    if rules::setup_remote_download_regex().is_match(content) {
-        imperative = true;
+    if remote_download {
         findings.push(finding(
             "setup-remote-download",
             Severity::Critical,
             format!("`{rel}` fetches a remote URL via urllib/requests/httpx at install time"),
         ));
     }
-    if rules::setup_eval_regex().is_match(content) {
-        imperative = true;
+    if eval {
         findings.push(finding(
             "setup-eval",
             Severity::Critical,
             format!("`{rel}` calls exec() or eval() on a runtime value — classic payload decryption pattern"),
         ));
     }
-    if imperative {
+    if subprocess || remote_download || eval {
         findings.push(finding(
             "setup-py-execution",
             Severity::High,
             format!("`{rel}` runs imperative code at `pip install` time; argus refuses to run setup.py to verify"),
         ));
     }
+    Ok(())
+}
+
+fn is_setup_subprocess(callee: &str) -> bool {
+    matches!(
+        callee,
+        "subprocess.run"
+            | "subprocess.call"
+            | "subprocess.popen"
+            | "subprocess.check_output"
+            | "subprocess.check_call"
+            | "os.system"
+            | "os.popen"
+            | "commands.getoutput"
+            | "pty.spawn"
+            | "shutil.run"
+            | "shutil.call"
+    )
+}
+
+fn is_setup_remote_download(callee: &str) -> bool {
+    matches!(
+        callee,
+        "urllib.request.urlopen"
+            | "urllib.request.urlretrieve"
+            | "urllib2.urlopen"
+            | "requests.get"
+            | "requests.post"
+            | "requests.put"
+            | "requests.patch"
+            | "requests.delete"
+            | "requests.request"
+            | "requests.head"
+            | "httpx.get"
+            | "httpx.post"
+            | "httpx.put"
+            | "httpx.patch"
+            | "httpx.delete"
+            | "httpx.request"
+            | "socket.create_connection"
+            | "socket.socket"
+    )
+}
+
+fn is_setup_eval(callee: &str) -> bool {
+    matches!(callee, "exec" | "eval" | "builtins.exec" | "builtins.eval")
 }
 
 /// Very small TOML scraper for `[project] name = "..."` + `version = "..."`.
@@ -243,5 +301,70 @@ description = "x"
         let (n, v) = parse_pkginfo_name_version(pkginfo).unwrap();
         assert_eq!(n, "demo");
         assert_eq!(v, "1.2.3");
+    }
+
+    #[test]
+    fn setup_ast_preserves_supported_api_families() {
+        let cases = [
+            ("subprocess.run(['true'])", "setup-subprocess"),
+            ("subprocess.call(['true'])", "setup-subprocess"),
+            ("subprocess.Popen(['true'])", "setup-subprocess"),
+            ("subprocess.check_output(['true'])", "setup-subprocess"),
+            ("subprocess.check_call(['true'])", "setup-subprocess"),
+            ("os.system('true')", "setup-subprocess"),
+            ("os.popen('true')", "setup-subprocess"),
+            ("commands.getoutput('true')", "setup-subprocess"),
+            ("pty.spawn('sh')", "setup-subprocess"),
+            ("shutil.run(['true'])", "setup-subprocess"),
+            ("shutil.call(['true'])", "setup-subprocess"),
+            (
+                "urllib.request.urlopen('https://x')",
+                "setup-remote-download",
+            ),
+            (
+                "urllib.request.urlretrieve('https://x')",
+                "setup-remote-download",
+            ),
+            ("urllib2.urlopen('https://x')", "setup-remote-download"),
+            ("requests.get('https://x')", "setup-remote-download"),
+            ("requests.post('https://x')", "setup-remote-download"),
+            ("requests.put('https://x')", "setup-remote-download"),
+            ("requests.patch('https://x')", "setup-remote-download"),
+            ("requests.delete('https://x')", "setup-remote-download"),
+            (
+                "requests.request('GET', 'https://x')",
+                "setup-remote-download",
+            ),
+            ("requests.head('https://x')", "setup-remote-download"),
+            ("httpx.get('https://x')", "setup-remote-download"),
+            ("httpx.post('https://x')", "setup-remote-download"),
+            ("httpx.put('https://x')", "setup-remote-download"),
+            ("httpx.patch('https://x')", "setup-remote-download"),
+            ("httpx.delete('https://x')", "setup-remote-download"),
+            ("httpx.request('GET', 'https://x')", "setup-remote-download"),
+            (
+                "socket.create_connection(('x', 443))",
+                "setup-remote-download",
+            ),
+            ("socket.socket()", "setup-remote-download"),
+            ("exec(payload)", "setup-eval"),
+            ("eval(payload)", "setup-eval"),
+        ];
+        for (source, expected) in cases {
+            let mut findings = Vec::new();
+            scan_setup_py(source, "setup.py", &mut findings).unwrap();
+            assert!(
+                findings.iter().any(|finding| finding.rule_id == expected),
+                "{source}: {findings:?}"
+            );
+            assert_eq!(
+                findings
+                    .iter()
+                    .filter(|finding| finding.rule_id == expected)
+                    .count(),
+                1,
+                "{source}: {findings:?}"
+            );
+        }
     }
 }
