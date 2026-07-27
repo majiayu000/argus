@@ -105,8 +105,10 @@ pub fn scan_extracted_crate(pkg_dir: &Path) -> Result<crate::ArtifactScan> {
             // hid it in a sibling module, so we run the source-level
             // checks against both declared build scripts and every other `.rs`.
             scan_rust_source(&content, &rel, &mut findings);
-        } else if rel.ends_with(".rs") {
-            scan_rust_source(&content, &rel, &mut findings);
+        } else {
+            if rel.ends_with(".rs") {
+                scan_rust_source(&content, &rel, &mut findings);
+            }
             if proc_macro_source_files.contains(&rel) {
                 scan_proc_macro_source(&content, &rel, &mut findings);
             }
@@ -253,6 +255,8 @@ fn collect_proc_macro_source_files(
     let Some(root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
         return Ok(BTreeSet::new());
     };
+    let canonical_pkg_dir = std::fs::canonicalize(pkg_dir)
+        .with_context(|| format!("canonicalize crate root {}", pkg_dir.display()))?;
     let mut source_files = BTreeSet::new();
     let mut pending = vec![root_rel.clone()];
 
@@ -266,39 +270,85 @@ fn collect_proc_macro_source_files(
         if bytes.len() as u64 > TEXT_MAX_BYTES || looks_binary(&bytes) {
             continue;
         }
-        let content = String::from_utf8_lossy(&bytes);
-        let masked = rules::mask_rust_comments_and_literals(&content);
+        let content = std::str::from_utf8(&bytes)
+            .with_context(|| format!("proc-macro source is not UTF-8: {}", abs.display()))?;
         let module_base = rust_module_base(Path::new(&rel), &root_rel);
 
-        for captures in rules::rust_module_decl_regex().captures_iter(&masked) {
-            let Some(module_name) = captures.get(1).map(|capture| capture.as_str()) else {
-                continue;
-            };
-            let flat = module_base.join(format!("{module_name}.rs"));
-            let nested = module_base.join(module_name).join("mod.rs");
-            let flat_exists = pkg_dir.join(&flat).is_file();
-            let nested_exists = pkg_dir.join(&nested).is_file();
-            if flat_exists && nested_exists {
-                anyhow::bail!(
-                    "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
-                    flat.display(),
-                    nested.display()
-                );
-            }
-            let module = if flat_exists {
-                Some(flat)
-            } else if nested_exists {
-                Some(nested)
+        for declaration in rules::rust_module_declarations(content)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?
+        {
+            let module = if let Some(explicit_path) = declaration.explicit_path {
+                resolve_explicit_module_path(&canonical_pkg_dir, Path::new(&rel), &explicit_path)?
             } else {
-                None
+                resolve_conventional_module_path(pkg_dir, &module_base, &declaration.name)?
             };
-            if let Some(module) = module {
-                pending.push(path_to_manifest_rel(&module)?);
-            }
+            pending.push(path_to_manifest_rel(&module)?);
         }
     }
 
     Ok(source_files)
+}
+
+fn resolve_conventional_module_path(
+    pkg_dir: &Path,
+    module_base: &Path,
+    module_name: &str,
+) -> Result<PathBuf> {
+    let flat = module_base.join(format!("{module_name}.rs"));
+    let nested = module_base.join(module_name).join("mod.rs");
+    let flat_exists = pkg_dir.join(&flat).is_file();
+    let nested_exists = pkg_dir.join(&nested).is_file();
+    match (flat_exists, nested_exists) {
+        (true, false) => Ok(flat),
+        (false, true) => Ok(nested),
+        (true, true) => anyhow::bail!(
+            "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
+            flat.display(),
+            nested.display()
+        ),
+        (false, false) => anyhow::bail!(
+            "proc-macro module `{module_name}` is missing: expected {} or {}",
+            flat.display(),
+            nested.display()
+        ),
+    }
+}
+
+fn resolve_explicit_module_path(
+    canonical_pkg_dir: &Path,
+    declaring_source: &Path,
+    explicit_path: &str,
+) -> Result<PathBuf> {
+    let explicit = Path::new(explicit_path);
+    if explicit.as_os_str().is_empty() || explicit.is_absolute() {
+        anyhow::bail!("proc-macro #[path] must be a non-empty relative path: `{explicit_path}`");
+    }
+    let declaring_dir = declaring_source.parent().unwrap_or_else(|| Path::new(""));
+    let candidate = canonical_pkg_dir.join(declaring_dir).join(explicit);
+    let canonical_candidate = std::fs::canonicalize(&candidate)
+        .with_context(|| format!("resolve proc-macro #[path] {}", candidate.display()))?;
+    if !canonical_candidate.starts_with(canonical_pkg_dir) {
+        anyhow::bail!(
+            "proc-macro #[path] escapes crate root: `{explicit_path}` from {}",
+            declaring_source.display()
+        );
+    }
+    if !canonical_candidate.is_file() {
+        anyhow::bail!(
+            "proc-macro #[path] is not a file: {}",
+            canonical_candidate.display()
+        );
+    }
+    canonical_candidate
+        .strip_prefix(canonical_pkg_dir)
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "make proc-macro #[path] relative to crate root: {}",
+                canonical_candidate.display()
+            )
+        })
 }
 
 fn rust_module_base(current: &Path, root_rel: &str) -> PathBuf {
@@ -638,6 +688,83 @@ fn main() {}
             "got: {:?}",
             scan.findings
         );
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_path_module_outside_lib_root_blocks() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "path-derive"
+version = "1.0.0"
+edition = "2021"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+        let lib_rs = r##"
+use proc_macro::TokenStream;
+#[path = r#"../shared/network.rs"#]
+mod r#network;
+#[proc_macro]
+pub fn expand(input: TokenStream) -> TokenStream {
+    r#network::probe();
+    input
+}
+"##;
+        let network_rs = r#"
+pub fn probe() {
+    let _connection =
+        std::net::TcpStream::connect("collector.example.invalid:443");
+}
+"#;
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", lib_rs),
+            ("shared/network.rs", network_rs),
+        ])?;
+        let finding = scan
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == "proc-macro-network")
+            .context("proc-macro-network finding")?;
+
+        assert_eq!(finding.severity, Severity::Critical);
+        assert!(finding.detail.contains("shared/network.rs"));
+        assert_eq!(
+            argus_rules::derive_decision_from_findings(&scan.findings),
+            argus_core::Decision::Block
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_path_module_errors_are_propagated() -> Result<()> {
+        let manifest = r#"
+[package]
+name = "broken-path-derive"
+version = "1.0.0"
+[lib]
+proc-macro = true
+"#;
+        let missing = match scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", "#[path = \"missing.rs\"] mod missing;"),
+        ]) {
+            Ok(_) => anyhow::bail!("missing #[path] unexpectedly scanned"),
+            Err(error) => error,
+        };
+        assert!(format!("{missing:#}").contains("resolve proc-macro #[path]"));
+
+        let invalid = match scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", "#[path = 42] mod invalid;"),
+        ]) {
+            Ok(_) => anyhow::bail!("non-string #[path] unexpectedly scanned"),
+            Err(error) => error,
+        };
+        assert!(format!("{invalid:#}").contains("parse proc-macro modules"));
         Ok(())
     }
 }
