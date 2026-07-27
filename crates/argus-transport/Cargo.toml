@@ -9,5 +9,6 @@ description = "Shared HTTP transport for argus registry fetchers: redirect-check
 
 [dependencies]
 anyhow = { workspace = true }
+rustls = { version = "0.23.19", default-features = false, features = ["std"] }
 ureq = { workspace = true }
 url = { workspace = true }
