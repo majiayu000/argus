@@ -105,25 +105,24 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
         );
     }
 
-    // pre-scan-execution-marker: script files that write host-side marker paths.
-    let re = marker_write_regex();
     for file in &ctx.text_files {
-        if !is_script_file(&file.rel) {
-            continue;
-        }
-        if re.is_match(&file.content) {
-            findings.push(
-                Finding::new(
-                    "pre-scan-execution-marker",
-                    Severity::High,
-                    "lifecycle script writes a host-controlled marker path",
-                )
-                .at(&file.rel),
-            );
-        }
+        scan_text_file(file, findings);
     }
 
     Ok(())
+}
+
+pub(crate) fn scan_text_file(file: &crate::TextFile, findings: &mut Vec<Finding>) {
+    if is_script_file(&file.rel) && marker_write_regex().is_match(&file.content) {
+        findings.push(
+            Finding::new(
+                "pre-scan-execution-marker",
+                Severity::High,
+                "lifecycle script writes a host-controlled marker path",
+            )
+            .at(&file.rel),
+        );
+    }
 }
 
 fn remote_shell_fact(fact: &Fact) -> bool {

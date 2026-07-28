@@ -37,7 +37,8 @@ pub use argus_core::ArtifactScan;
 pub use argus_transport::{is_not_found, HttpTransport, Transport};
 pub use metadata::{escape_module_path, parse_go_mod_module, resolve_version, GoModInfo};
 pub use scan::{
-    extract_module_zip, scan_extracted_module, scan_extracted_module_with_rules, ExtractedModule,
+    extract_module_zip, scan_extracted_module, scan_extracted_module_with_rules,
+    scan_extracted_module_with_rules_and_context, ExtractedModule,
 };
 
 /// proxy.golang.org serves both metadata AND the module zip from the same
@@ -121,6 +122,17 @@ pub fn fetch_and_scan_go_with_rules(
     opts: &GoFetchOptions,
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_go_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_go_with_rules_and_context(
+    pkg: &GoModuleRef,
+    opts: &GoFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(registry)
@@ -215,7 +227,7 @@ pub fn fetch_and_scan_go_with_rules(
     let recomputed_h1 = dirhash::compute_h1(module.files());
 
     // 6. Scan the extracted sources.
-    let mut scan_result = scan_extracted_module_with_rules(&module, rules)
+    let mut scan_result = scan_extracted_module_with_rules_and_context(&module, rules, execution)
         .context("scan extracted Go module with configured rules")?;
     let mut all_findings: Vec<Finding> = std::mem::take(&mut scan_result.findings);
 
@@ -341,13 +353,25 @@ impl argus_pipeline::EcosystemFetcher for GoFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = GoModuleRef::parse(spec)?;
         let opts = GoFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..GoFetchOptions::default()
         };
-        fetch_and_scan_go_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_go_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

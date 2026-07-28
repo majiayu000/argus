@@ -99,22 +99,35 @@ fn nine_formats_auto_detect_and_scan_without_process_or_network() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join(basename);
         write(&path, &raw);
-        let output = argus(&[
-            "scan",
-            path.to_str().expect("UTF-8 path"),
-            "--format",
-            "json",
-        ]);
-        assert!(
-            matches!(output.status.code(), Some(0..=2)),
-            "{basename}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stderr.is_empty(), "{basename}");
-        let report: Value = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|error| panic!("{basename}: {error}"));
-        assert_eq!(report["artifact"], "lockfile", "{basename}");
-        assert_ne!(report["decision"], Value::Null, "{basename}");
+        let mut baseline: Option<(Option<i32>, Vec<u8>)> = None;
+        for jobs in ["1", "2", "8", "64"] {
+            for _ in 0..2 {
+                let output = argus(&[
+                    "scan",
+                    path.to_str().expect("UTF-8 path"),
+                    "--format",
+                    "json",
+                    "--jobs",
+                    jobs,
+                ]);
+                assert!(
+                    matches!(output.status.code(), Some(0..=2)),
+                    "{basename}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stderr.is_empty(), "{basename}");
+                let report: Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|error| panic!("{basename}: {error}"));
+                assert_eq!(report["artifact"], "lockfile", "{basename}");
+                assert_ne!(report["decision"], Value::Null, "{basename}");
+                let actual = (output.status.code(), output.stdout);
+                if let Some(expected) = &baseline {
+                    assert_eq!(&actual, expected, "{basename}, jobs={jobs}");
+                } else {
+                    baseline = Some(actual);
+                }
+            }
+        }
     }
 }
 

@@ -6,11 +6,15 @@
 //! Shared URL + integrity helpers live in [`url`]; the per-artifact
 //! intermediate scan shape lives in [`scan`].
 
+pub mod execution;
 pub mod fs;
 pub mod rules;
 pub mod scan;
 pub mod url;
 
+pub use execution::{
+    ExecutionContext, ExecutionContextError, ScanConcurrency, ScanConcurrencyError,
+};
 pub use scan::ArtifactScan;
 
 use anyhow::{bail, Result};

@@ -2,10 +2,10 @@
 
 use crate::{corpus_path, EvaluationFormat};
 use anyhow::{bail, ensure, Context, Result};
-use argus_agent::scan_agent_surface;
-use argus_core::ScanReport;
+use argus_agent::scan_agent_surface_with_snapshot_and_rules_and_context;
+use argus_core::{ExecutionContext, ScanReport};
 use argus_lockfile::FormatHint;
-use argus_rules::scan_package_dir;
+use argus_rules::{scan_package_dir_with_rules_and_context, RuleSession};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ struct EvaluationReport {
     recall: f64,
 }
 
-pub(crate) fn cmd_test(corpus_root: &Path) -> Result<ExitCode> {
+pub(crate) fn cmd_test(corpus_root: &Path, execution: &ExecutionContext) -> Result<ExitCode> {
     let mut passed = 0usize;
     let mut total = 0usize;
     let mut failed: Vec<String> = Vec::new();
@@ -71,7 +71,7 @@ pub(crate) fn cmd_test(corpus_root: &Path) -> Result<ExitCode> {
 
         for case in &index.cases {
             total += 1;
-            let report = match scan_case(index_root, &index, case) {
+            let report = match scan_case(index_root, &index, case, execution) {
                 Ok(report) => report,
                 Err(error) => {
                     failed.push(format!("{} — {error:#}", case.id));
@@ -133,7 +133,11 @@ pub(crate) fn cmd_test(corpus_root: &Path) -> Result<ExitCode> {
     Ok(ExitCode::from(0))
 }
 
-pub(crate) fn cmd_eval(corpus_root: &Path, format: EvaluationFormat) -> Result<ExitCode> {
+pub(crate) fn cmd_eval(
+    corpus_root: &Path,
+    format: EvaluationFormat,
+    execution: &ExecutionContext,
+) -> Result<ExitCode> {
     let mut reports = Vec::new();
     for index_path in corpus_index_paths(corpus_root)? {
         let index = load_index(&index_path)?;
@@ -147,7 +151,7 @@ pub(crate) fn cmd_eval(corpus_root: &Path, format: EvaluationFormat) -> Result<E
         let mut labels_and_predictions = Vec::with_capacity(index.cases.len());
         for case in &index.cases {
             validate_decision(&case.expected_decision, &case.id)?;
-            let report = scan_case(index_root, &index, case)
+            let report = scan_case(index_root, &index, case, execution)
                 .with_context(|| format!("evaluate corpus case {}", case.id))?;
             labels_and_predictions.push((
                 case.expected_decision == contract.positive_decision,
@@ -277,7 +281,12 @@ fn load_index(path: &Path) -> Result<CorpusIndex> {
     serde_json::from_str(&raw).with_context(|| format!("parse corpus index {}", path.display()))
 }
 
-fn scan_case(index_root: &Path, index: &CorpusIndex, case: &CorpusCase) -> Result<ScanReport> {
+fn scan_case(
+    index_root: &Path,
+    index: &CorpusIndex,
+    case: &CorpusCase,
+    execution: &ExecutionContext,
+) -> Result<ScanReport> {
     let kind = match case.kind.as_str() {
         "fixture" => corpus_path::CaseKind::Fixture,
         "lockfile" => corpus_path::CaseKind::Lockfile,
@@ -286,16 +295,32 @@ fn scan_case(index_root: &Path, index: &CorpusIndex, case: &CorpusCase) -> Resul
     let case_path = corpus_path::resolve_case_path(index_root, Path::new(&case.path), kind)?;
     if matches!(kind, corpus_path::CaseKind::Fixture) {
         if index.surface.as_deref() == Some("agent-skill") {
-            scan_agent_surface(&case_path)
+            let rules = RuleSession::builtin()?;
+            scan_agent_surface_with_snapshot_and_rules_and_context(
+                &case_path,
+                argus_agent::BaselineMode::None,
+                argus_agent::SnapshotMode::None,
+                None,
+                &rules,
+                execution,
+            )
+            .map(|outcome| outcome.report)
         } else {
-            scan_package_dir(&case_path)
+            let rules = RuleSession::builtin()?;
+            scan_package_dir_with_rules_and_context(&case_path, &rules, execution)
         }
     } else {
         // The frozen corpus schema predates multi-format scans: its
         // `kind=lockfile` contract explicitly means package-lock. Future
         // lockfile corpus kinds need an explicit schema field.
         let rules = argus_rules::RuleSession::builtin()?;
-        crate::scan_lockfile_path(&case_path, Some(FormatHint::PackageLock), &[], &rules)
+        crate::scan_lockfile_path(
+            &case_path,
+            Some(FormatHint::PackageLock),
+            &[],
+            &rules,
+            execution,
+        )
     }
     .context("scan corpus case")
 }
@@ -410,9 +435,12 @@ mod tests {
 
     #[test]
     fn corpus_commands_execute_the_frozen_agent_dataset() {
-        cmd_test(&agent_corpus()).expect("corpus test command");
-        cmd_eval(&agent_corpus(), EvaluationFormat::Json).expect("JSON corpus eval command");
-        cmd_eval(&agent_corpus(), EvaluationFormat::Text).expect("text corpus eval command");
+        let execution = ExecutionContext::serial().unwrap();
+        cmd_test(&agent_corpus(), &execution).expect("corpus test command");
+        cmd_eval(&agent_corpus(), EvaluationFormat::Json, &execution)
+            .expect("JSON corpus eval command");
+        cmd_eval(&agent_corpus(), EvaluationFormat::Text, &execution)
+            .expect("text corpus eval command");
     }
 
     #[test]

@@ -6,18 +6,31 @@ use argus_core::{ArtifactKind, Finding, ScanReport};
 use argus_rules::RuleSession;
 use std::path::Path;
 
+#[cfg(test)]
 pub(super) fn scan_files(
     rules: &RuleSession,
     files: &[SurfaceFile],
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
+    let execution = argus_core::ExecutionContext::serial()
+        .context("build serial agent rule execution context")?;
+    scan_files_with_context(rules, files, findings, &execution)
+}
+
+pub(super) fn scan_files_with_context(
+    rules: &RuleSession,
+    files: &[SurfaceFile],
+    findings: &mut Vec<Finding>,
+    execution: &argus_core::ExecutionContext,
+) -> Result<()> {
     rules
-        .scan_virtual_inputs(
+        .scan_virtual_inputs_with_context(
             files.len(),
             files
                 .iter()
                 .map(|file| (file.rel.as_str(), file.content.as_bytes())),
             findings,
+            execution,
         )
         .context("run external rules on agent surfaces")?;
     rules.validate_external_limits(findings)?;

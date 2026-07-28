@@ -8,7 +8,6 @@ use argus_osv::model::MAX_LOCATOR_BYTES;
 use argus_osv::{CoordinateQuery, CoordinateSet, OsvError, OsvErrorKind};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 struct MockTransport {
     batches: Mutex<VecDeque<Result<TransportResponse, OsvError>>>,
@@ -93,32 +92,6 @@ impl OsvTransport for MockTransport {
             .get_mut(percent_encoded_id)
             .and_then(VecDeque::pop_front)
             .expect("unexpected detail request")
-    }
-}
-struct ConcurrencyTransport {
-    inner: MockTransport,
-    active: AtomicUsize,
-    maximum: AtomicUsize,
-}
-impl OsvTransport for ConcurrencyTransport {
-    fn post_query_batch(
-        &self,
-        body: &[u8],
-        limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError> {
-        self.inner.post_query_batch(body, limits)
-    }
-    fn get_advisory(
-        &self,
-        id: &str,
-        limits: ResponseLimits,
-    ) -> Result<TransportResponse, OsvError> {
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.maximum.fetch_max(active, Ordering::SeqCst);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let response = self.inner.get_advisory(id, limits);
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        response
     }
 }
 fn json_response(value: Value) -> TransportResponse {
@@ -733,37 +706,6 @@ fn advisory_ids_are_percent_encoded_for_the_fixed_detail_path() {
         OsvErrorKind::MalformedResponse
     );
     assert_eq!(transport.calls()[1], "detail:GHSA%3AENCODED");
-}
-#[test]
-fn detail_hydration_never_exceeds_eight_concurrent_requests() {
-    let ids = [
-        "GHSA-0", "GHSA-1", "GHSA-2", "GHSA-3", "GHSA-4", "GHSA-5", "GHSA-6", "GHSA-7", "GHSA-8",
-    ];
-    let inner = MockTransport::new(
-        vec![batch(vec![result(
-            ids.iter()
-                .map(|id| summary(id, "2026-07-19T00:00:00Z"))
-                .collect(),
-            None,
-        )])],
-        ids.iter()
-            .map(|id| {
-                (
-                    *id,
-                    vec![advisory(id, "2026-07-19T00:00:00Z", "demo", "1.0.0")],
-                )
-            })
-            .collect(),
-    );
-    let transport = ConcurrencyTransport {
-        inner,
-        active: AtomicUsize::new(0),
-        maximum: AtomicUsize::new(0),
-    };
-    OsvClient::new(&transport)
-        .query(&set(vec![query("demo", "1.0.0")]))
-        .unwrap();
-    assert_eq!(transport.maximum.load(Ordering::SeqCst), 8);
 }
 #[test]
 fn aggregate_known_evidence_limit_fails_before_network() {

@@ -13,7 +13,7 @@ use crate::metadata::{ComposerManifest, ComposerVersionObj, ScriptValue};
 use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -87,6 +87,25 @@ pub fn scan_composer_zip_with_rules(
     version_obj: &ComposerVersionObj,
     rules: &RuleSession,
 ) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_composer_zip_with_rules_and_context(
+        zip_bytes,
+        dest_root,
+        max_extracted_bytes,
+        version_obj,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_composer_zip_with_rules_and_context(
+    zip_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    version_obj: &ComposerVersionObj,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ScanReport> {
     // --- 1. Safe ZIP extraction (copied from wheel.rs) ---
     argus_archive::extract_zip(zip_bytes, dest_root, max_extracted_bytes, "zip entry")
         .context("safe-extract Composer zip")?;
@@ -98,62 +117,35 @@ pub fn scan_composer_zip_with_rules(
     // Track the shallowest composer.json depth seen so we only capture the root manifest.
     let mut composer_json_depth: Option<usize> = None;
 
-    for entry in walkdir::WalkDir::new(dest_root).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(dest_root)
-            .unwrap_or(abs)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // Capture the shallowest composer.json as the root manifest.
-        // depth = number of '/' separators in the rel path.
-        if rel == "composer.json" || rel.ends_with("/composer.json") {
-            let depth = rel.chars().filter(|&c| c == '/').count();
-            let is_shallowest = match composer_json_depth {
-                None => true,
-                Some(d) => depth < d,
-            };
-            if is_shallowest {
-                composer_json_depth = Some(depth);
-                composer_json_content = Some(content.clone());
+    let (file_results, _) =
+        scan_text_files_with_context(dest_root, TEXT_MAX_BYTES, execution, |file| {
+            let manifest = (file.rel == "composer.json" || file.rel.ends_with("/composer.json"))
+                .then(|| {
+                    (
+                        file.rel
+                            .chars()
+                            .filter(|character| *character == '/')
+                            .count(),
+                        file.content.clone(),
+                    )
+                });
+            let mut per_file = Vec::new();
+            if manifest.is_none() {
+                scan_text_file(file, &mut per_file);
+                if is_php_source(&file.rel) {
+                    rules::scan_php_file(&file.content, &file.rel, &mut per_file);
+                }
             }
-            continue; // processed separately below
+            Ok::<_, anyhow::Error>((per_file, manifest))
+        })?;
+    for (mut per_file, manifest) in file_results {
+        if let Some((depth, content)) = manifest {
+            if composer_json_depth.is_none_or(|current| depth < current) {
+                composer_json_depth = Some(depth);
+                composer_json_content = Some(content);
+            }
         }
-
-        // Ecosystem-agnostic content rules on every text file.
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
-
-        // PHP-specific dynamic-exec rules. Composer packages ship executable
-        // PHP under several extensions beyond `.php` (Drupal `.module` /
-        // `.install` / `.inc`, templates `.phtml`, legacy `.php4` / `.php5`,
-        // and `.phps`). Scan all of them so `system(...)` / `eval(...)` in a
-        // non-`.php` file cannot evade `php-dynamic-exec`.
-        if is_php_source(&rel) {
-            rules::scan_php_file(&content, &rel, &mut findings);
-        }
+        findings.append(&mut per_file);
     }
 
     // --- 3. Parse and scan composer.json ---
@@ -175,7 +167,7 @@ pub fn scan_composer_zip_with_rules(
     }
 
     rules
-        .scan_directory(dest_root, &mut findings)
+        .scan_directory_with_context(dest_root, &mut findings, execution)
         .context("run configured rules on extracted Composer zip")?;
     rules.validate_external_limits(&findings)?;
 

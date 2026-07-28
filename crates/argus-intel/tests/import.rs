@@ -363,12 +363,46 @@ fn http_download(
 
 #[test]
 fn production_http_rejection_matrix() {
+    let retryable_status =
+        "HTTP/1.1 500 Error\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     let (status, _) = http_download(
-        vec!["HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()],
+        vec![
+            retryable_status.into(),
+            retryable_status.into(),
+            retryable_status.into(),
+        ],
         "/final",
         10,
     );
-    assert!(status.unwrap_err().to_string().contains("status 500"));
+    let status_error = status.unwrap_err();
+    assert!(status_error.to_string().contains("status 500"));
+    assert_eq!(
+        status_error
+            .downcast_ref::<argus_transport::GetRetryError<anyhow::Error>>()
+            .expect("Intel must preserve typed GET retry metadata")
+            .attempts(),
+        3
+    );
+
+    for status in [404, 410] {
+        let (missing, output) = http_download(
+            vec![format!(
+                "HTTP/1.1 {status} Missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )],
+            "/final",
+            10,
+        );
+        let error = missing.unwrap_err();
+        assert!(argus_transport::is_not_found(&error));
+        assert_eq!(
+            error
+                .downcast_ref::<argus_transport::GetRetryError<anyhow::Error>>()
+                .expect("Intel fatal absence must preserve typed GET retry metadata")
+                .attempts(),
+            1
+        );
+        assert!(output.is_empty());
+    }
 
     let (wrong_redirect, _) = http_download(
         vec![

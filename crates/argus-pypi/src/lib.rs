@@ -36,10 +36,11 @@ pub use metadata::{resolve_version, PypiPackument, PypiUrl};
 /// entry accepts every legitimate Warehouse CDN host.
 const PYPI_CDN_ALLOWLIST: &[&str] = &[".pythonhosted.org"];
 pub use sdist::{
-    scan_extracted_sdist, scan_extracted_sdist_with_rules, scan_sdist_dir,
-    scan_sdist_dir_with_rules,
+    scan_extracted_sdist, scan_extracted_sdist_with_rules,
+    scan_extracted_sdist_with_rules_and_context, scan_sdist_dir, scan_sdist_dir_with_rules,
+    scan_sdist_dir_with_rules_and_context,
 };
-pub use wheel::{scan_wheel_zip, scan_wheel_zip_with_rules};
+pub use wheel::{scan_wheel_zip, scan_wheel_zip_with_rules, scan_wheel_zip_with_rules_and_context};
 
 /// Cap for the PyPI JSON packument body. Real PyPI packuments are large
 /// (Django ships ~5 MB of versions/releases history), so we allow a bit
@@ -122,6 +123,17 @@ pub fn fetch_and_scan_pypi_with_rules(
     opts: &PypiFetchOptions,
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_pypi_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_pypi_with_rules_and_context(
+    pkg: &PypiPackageRef,
+    opts: &PypiFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     // 1. Fetch packument.
     let registry_host = host_of(&opts.registry)
@@ -216,6 +228,7 @@ pub fn fetch_and_scan_pypi_with_rules(
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut last_name: Option<String> = None;
     let mut last_version: Option<String> = None;
+    let mut external_budget = argus_rules::ExternalScanBudget::default();
     for (index, art) in artifacts.iter().enumerate() {
         validate_artifact_filename(&art.filename)
             .with_context(|| format!("invalid PyPI artifact filename {:?}", art.filename))?;
@@ -241,15 +254,27 @@ pub fn fetch_and_scan_pypi_with_rules(
             .with_context(|| format!("mkdir {}", art_dir.display()))?;
         let (findings, name, version_str) = match artifact_kind {
             "sdist" => {
-                let report =
-                    scan_sdist_dir_with_rules(&bytes, &art_dir, opts.max_extracted_bytes, rules)
-                        .with_context(|| format!("scan sdist {}", art.filename))?;
+                let report = sdist::scan_sdist_dir_with_rules_budget_and_context(
+                    &bytes,
+                    &art_dir,
+                    opts.max_extracted_bytes,
+                    rules,
+                    execution,
+                    &mut external_budget,
+                )
+                .with_context(|| format!("scan sdist {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
             "wheel" => {
-                let report =
-                    scan_wheel_zip_with_rules(&bytes, &art_dir, opts.max_extracted_bytes, rules)
-                        .with_context(|| format!("scan wheel {}", art.filename))?;
+                let report = wheel::scan_wheel_zip_with_rules_budget_and_context(
+                    &bytes,
+                    &art_dir,
+                    opts.max_extracted_bytes,
+                    rules,
+                    execution,
+                    &mut external_budget,
+                )
+                .with_context(|| format!("scan wheel {}", art.filename))?;
                 (report.findings, report.name, report.version)
             }
             _ => unreachable!("artifact_kind is normalized above"),
@@ -327,13 +352,25 @@ impl argus_pipeline::EcosystemFetcher for PypiFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = PypiPackageRef::parse(spec)?;
         let opts = PypiFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..PypiFetchOptions::default()
         };
-        fetch_and_scan_pypi_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_pypi_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

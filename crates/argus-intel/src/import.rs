@@ -12,7 +12,8 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 use tar::EntryType;
-use url::Url;
+
+pub use crate::http_archive::HttpArchiveTransport;
 
 pub const CANONICAL_SOURCE: &str = "https://github.com/ossf/malicious-packages";
 
@@ -68,102 +69,6 @@ pub trait ArchiveTransport {
         max_bytes: u64,
         output: &mut dyn Write,
     ) -> Result<DownloadMetadata>;
-}
-
-pub struct HttpArchiveTransport {
-    agent: ureq::Agent,
-    user_agent: String,
-}
-
-impl HttpArchiveTransport {
-    pub fn new() -> Self {
-        Self {
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirects(0)
-                .build(),
-            user_agent: format!("argus/{}", env!("CARGO_PKG_VERSION")),
-        }
-    }
-
-    fn get_once(&self, url: &str) -> Result<ureq::Response> {
-        match self
-            .agent
-            .get(url)
-            .set("User-Agent", &self.user_agent)
-            .call()
-        {
-            Ok(response) => Ok(response),
-            Err(ureq::Error::Status(status, response)) if is_redirect(status) => Ok(response),
-            Err(ureq::Error::Status(status, _)) => bail!("HTTP GET {url} returned status {status}"),
-            Err(error) => Err(anyhow::Error::new(error).context(format!("HTTP GET {url}"))),
-        }
-    }
-}
-
-impl Default for HttpArchiveTransport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ArchiveTransport for HttpArchiveTransport {
-    fn download_to(
-        &self,
-        initial_url: &str,
-        expected_redirect: &str,
-        max_bytes: u64,
-        output: &mut dyn Write,
-    ) -> Result<DownloadMetadata> {
-        let mut current = initial_url.to_string();
-        let mut redirects = 0;
-        loop {
-            let response = self.get_once(&current)?;
-            if is_redirect(response.status()) {
-                if redirects == 1 {
-                    bail!("archive download attempted more than one redirect");
-                }
-                let location = response
-                    .header("Location")
-                    .ok_or_else(|| anyhow!("archive redirect is missing Location"))?;
-                let resolved = Url::parse(&current)
-                    .context("parse archive redirect base")?
-                    .join(location)
-                    .context("resolve archive redirect Location")?;
-                if resolved.as_str() != expected_redirect {
-                    bail!(
-                        "archive redirect target `{}` is not exact expected target `{expected_redirect}`",
-                        resolved.as_str()
-                    );
-                }
-                current = expected_redirect.to_string();
-                redirects += 1;
-                continue;
-            }
-            if !(200..300).contains(&response.status()) {
-                bail!(
-                    "archive download returned unexpected status {}",
-                    response.status()
-                );
-            }
-            if current != initial_url && current != expected_redirect {
-                bail!("archive final URL escaped the fixed source contract");
-            }
-            if let Some(length) = response.header("Content-Length") {
-                if let Ok(length) = length.parse::<u64>() {
-                    if length > max_bytes {
-                        bail!("archive Content-Length {length} exceeds cap {max_bytes}");
-                    }
-                }
-            }
-            let bytes_written = copy_capped(response.into_reader(), output, max_bytes)?;
-            return Ok(DownloadMetadata {
-                final_url: current,
-                redirect_count: redirects,
-                bytes_written,
-            });
-        }
-    }
 }
 
 pub fn archive_url(source: &str, revision: &str) -> Result<String> {
@@ -335,26 +240,6 @@ fn validate_limits(limits: ImportLimits) -> Result<()> {
         bail!("all import limits must be positive");
     }
     Ok(())
-}
-
-fn copy_capped(mut input: impl Read, output: &mut dyn Write, max_bytes: u64) -> Result<u64> {
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = input.read(&mut buffer).context("read archive response")?;
-        if read == 0 {
-            return Ok(total);
-        }
-        total = total
-            .checked_add(read as u64)
-            .ok_or_else(|| anyhow!("archive byte counter overflow"))?;
-        if total > max_bytes {
-            bail!("archive response exceeds compressed cap {max_bytes}");
-        }
-        output
-            .write_all(&buffer[..read])
-            .context("write temporary archive")?;
-    }
 }
 
 fn read_archive(
@@ -549,10 +434,6 @@ fn guard_real_directory(path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn is_redirect(status: u16) -> bool {
-    matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
 #[cfg(test)]

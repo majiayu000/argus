@@ -9,8 +9,18 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Read;
+use std::sync::Arc;
 
 const MAX_REDIRECTS: usize = 3;
+
+mod retry;
+
+pub use retry::{
+    checked_retry_byte_budget, classify_io_error, classify_ureq_transport, is_retryable_status,
+    parse_retry_after, AttemptContext, GetRetryError, GetRetryPolicy, RetryDisposition,
+    RetryFailure, RetryRuntime, SystemRetryRuntime, GET_ATTEMPT_TIMEOUT, GET_MAX_ATTEMPTS,
+    GET_MAX_RETRY_AFTER, GET_TOTAL_TIMEOUT,
+};
 
 /// Maximum size we will accept for a single response body, in bytes.
 ///
@@ -66,25 +76,42 @@ impl std::error::Error for HttpStatusError {}
 /// (transient network, 5xx, parse, cap) returns false and must be treated as a
 /// hard failure by integrity-sensitive callers.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<HttpStatusError>()
-        .is_some_and(|e| matches!(e.status, 404 | 410))
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|status| matches!(status.status, 404 | 410))
+    })
 }
 
 /// Default ureq-backed transport used by the CLI.
 pub struct HttpTransport {
     agent: ureq::Agent,
     user_agent: String,
+    retry_runtime: Arc<dyn RetryRuntime>,
 }
 
 impl HttpTransport {
     pub fn new() -> Self {
         let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(GET_ATTEMPT_TIMEOUT)
             .redirects(0)
             .build();
         Self {
             agent,
             user_agent: format!("argus/{}", env!("CARGO_PKG_VERSION")),
+            retry_runtime: Arc::new(SystemRetryRuntime::default()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_retry_runtime(retry_runtime: Arc<dyn RetryRuntime>) -> Self {
+        Self {
+            agent: ureq::AgentBuilder::new()
+                .timeout(GET_ATTEMPT_TIMEOUT)
+                .redirects(0)
+                .build(),
+            user_agent: "argus-test".to_string(),
+            retry_runtime,
         }
     }
 }
@@ -108,38 +135,84 @@ impl Transport for HttpTransport {
         max_bytes: u64,
         allow: &dyn Fn(&str) -> Result<()>,
     ) -> Result<Vec<u8>> {
-        let mut current_url = url.to_string();
-
-        for redirect_count in 0..=MAX_REDIRECTS {
-            let resp = self.get_once(&current_url)?;
-            if is_redirect_status(resp.status()) {
-                if redirect_count == MAX_REDIRECTS {
-                    bail!("too many HTTP redirects while fetching {current_url} (origin: {url})");
-                }
-                let location = resp.header("Location").ok_or_else(|| {
-                    anyhow!("redirect response from {current_url} missing Location header")
-                })?;
-                let next_url = resolve_redirect_url(&current_url, location)?;
-                check_no_scheme_downgrade(&current_url, &next_url)?;
-                // Re-validate the redirect target against the caller's host
-                // policy BEFORE requesting it, so an allowed host cannot bounce
-                // the download to an unallowlisted one.
-                allow(&next_url).with_context(|| {
-                    format!("redirect target {next_url} rejected by host allowlist (from {current_url})")
-                })?;
-                current_url = next_url;
-                continue;
-            }
-
-            return read_capped_body(resp, max_bytes, &current_url);
-        }
-
-        bail!("too many HTTP redirects while fetching {current_url} (origin: {url})")
+        checked_retry_byte_budget(max_bytes).ok_or_else(|| {
+            anyhow!(
+                "response cap {max_bytes} overflows the {}-attempt amplification bound",
+                GET_MAX_ATTEMPTS
+            )
+        })?;
+        validate_request_url(url)?;
+        GetRetryPolicy
+            .execute(self.retry_runtime.as_ref(), |attempt| {
+                self.get_attempt(url, max_bytes, allow, attempt)
+            })
+            .map_err(anyhow::Error::new)
     }
 }
 
 impl HttpTransport {
-    fn get_once(&self, url: &str) -> Result<ureq::Response> {
+    fn get_attempt(
+        &self,
+        origin_url: &str,
+        max_bytes: u64,
+        allow: &dyn Fn(&str) -> Result<()>,
+        attempt: AttemptContext,
+    ) -> std::result::Result<Vec<u8>, RetryFailure<anyhow::Error>> {
+        validate_request_url(origin_url).map_err(RetryFailure::fatal)?;
+        allow(origin_url)
+            .with_context(|| {
+                format!("origin URL {origin_url} rejected by host allowlist before GET attempt")
+            })
+            .map_err(RetryFailure::fatal)?;
+        let mut current_url = origin_url.to_string();
+        for redirect_count in 0..=MAX_REDIRECTS {
+            validate_request_url(&current_url).map_err(RetryFailure::fatal)?;
+            if attempt.remaining(self.retry_runtime.as_ref()).is_zero() {
+                return Err(attempt_timeout_failure(&current_url));
+            }
+            let response = self.get_once(&current_url, attempt)?;
+            if is_redirect_status(response.status()) {
+                if redirect_count == MAX_REDIRECTS {
+                    return Err(RetryFailure::fatal(anyhow!(
+                        "too many HTTP redirects while fetching {current_url} (origin: {origin_url})"
+                    )));
+                }
+                let location = response.header("Location").ok_or_else(|| {
+                    RetryFailure::fatal(anyhow!(
+                        "redirect response from {current_url} missing Location header"
+                    ))
+                })?;
+                let next_url =
+                    resolve_redirect_url(&current_url, location).map_err(RetryFailure::fatal)?;
+                check_no_scheme_downgrade(&current_url, &next_url).map_err(RetryFailure::fatal)?;
+                allow(&next_url)
+                    .with_context(|| {
+                        format!(
+                            "redirect target {next_url} rejected by host allowlist (from {current_url})"
+                        )
+                    })
+                    .map_err(RetryFailure::fatal)?;
+                current_url = next_url;
+                continue;
+            }
+            return read_capped_body(
+                response,
+                max_bytes,
+                &current_url,
+                attempt,
+                self.retry_runtime.as_ref(),
+            );
+        }
+        Err(RetryFailure::fatal(anyhow!(
+            "too many HTTP redirects while fetching {current_url} (origin: {origin_url})"
+        )))
+    }
+
+    fn get_once(
+        &self,
+        url: &str,
+        attempt: AttemptContext,
+    ) -> std::result::Result<ureq::Response, RetryFailure<anyhow::Error>> {
         // Redirects are disabled on the agent so the caller can inspect
         // each `Location` before opening the next URL. ureq still surfaces
         // non-redirect non-2xx responses as errors.
@@ -158,40 +231,59 @@ impl HttpTransport {
             .agent
             .get(url)
             .set("User-Agent", &self.user_agent)
+            .timeout(attempt.request_timeout(self.retry_runtime.as_ref()))
             .call()
         {
             Ok(resp) => Ok(resp),
-            // A 4xx/5xx (ureq surfaces these as `Status`, while 3xx are returned
-            // as `Ok` because the agent is built with `redirects(0)`). Attach a
-            // typed `HttpStatusError` so integrity-sensitive callers can tell a
-            // confirmed 404 from a transient failure.
-            Err(ureq::Error::Status(code, _resp)) => {
-                Err(anyhow::Error::new(HttpStatusError { status: code })
-                    .context(format!("HTTP GET {url} returned status {code}")))
+            Err(ureq::Error::Status(code, response)) => {
+                let retry_after = response.header("Retry-After");
+                let error = anyhow::Error::new(HttpStatusError { status: code })
+                    .context(format!("HTTP GET {url} returned status {code}"));
+                if is_retryable_status(code) {
+                    Err(RetryFailure::retryable(error, retry_after))
+                } else {
+                    Err(RetryFailure::fatal(error))
+                }
             }
-            Err(e) => Err(anyhow::Error::new(e).context(format!("HTTP GET {url}"))),
+            Err(ureq::Error::Transport(transport)) => {
+                let disposition = classify_ureq_transport(&transport);
+                let error = anyhow::Error::new(transport).context(format!("HTTP GET {url}"));
+                match disposition {
+                    RetryDisposition::Retryable => Err(RetryFailure::retryable(error, None)),
+                    RetryDisposition::Fatal => Err(RetryFailure::fatal(error)),
+                }
+            }
         }
     }
 }
 
-fn read_capped_body(resp: ureq::Response, max_bytes: u64, url: &str) -> Result<Vec<u8>> {
+fn read_capped_body(
+    resp: ureq::Response,
+    max_bytes: u64,
+    url: &str,
+    attempt: AttemptContext,
+    runtime: &dyn RetryRuntime,
+) -> std::result::Result<Vec<u8>, RetryFailure<anyhow::Error>> {
     // ureq 2.x returns Err for non-2xx, so a response that reaches here is
     // either 2xx or a manually handled redirect. Anything else is unexpected.
     if !(200..300).contains(&resp.status()) {
-        bail!(
+        return Err(RetryFailure::fatal(anyhow!(
             "HTTP GET {url} returned unexpected status {}",
             resp.status()
-        );
+        )));
     }
 
     // If the server announces Content-Length, refuse early rather than
     // reading the body. Some registries omit this header on chunked
     // responses, so this is a fast-path, not the only guard.
     if let Some(len_str) = resp.header("Content-Length") {
-        if let Ok(len) = len_str.parse::<u64>() {
-            if len > max_bytes {
-                bail!("Content-Length {len} exceeds cap {max_bytes} for {url}");
-            }
+        let len = len_str.parse::<u64>().map_err(|_| {
+            RetryFailure::fatal(anyhow!("malformed Content-Length {len_str:?} for {url}"))
+        })?;
+        if len > max_bytes {
+            return Err(RetryFailure::fatal(anyhow!(
+                "Content-Length {len} exceeds cap {max_bytes} for {url}"
+            )));
         }
     }
 
@@ -199,14 +291,38 @@ fn read_capped_body(resp: ureq::Response, max_bytes: u64, url: &str) -> Result<V
     // we actually consume that one extra byte (meaning the server tried
     // to deliver more than max_bytes).
     let mut body = Vec::new();
-    resp.into_reader()
+    let read_result = resp
+        .into_reader()
         .take(max_bytes + 1)
-        .read_to_end(&mut body)
-        .with_context(|| format!("read body of {url}"))?;
+        .read_to_end(&mut body);
+    if let Err(error) = read_result {
+        let disposition = classify_io_error(&error);
+        let error = anyhow::Error::new(error).context(format!("read body of {url}"));
+        return Err(match disposition {
+            RetryDisposition::Retryable => RetryFailure::retryable(error, None),
+            RetryDisposition::Fatal => RetryFailure::fatal(error),
+        });
+    }
     if body.len() as u64 > max_bytes {
-        return Err(anyhow!("response body for {url} exceeded cap {max_bytes}"));
+        return Err(RetryFailure::fatal(anyhow!(
+            "response body for {url} exceeded cap {max_bytes}"
+        )));
+    }
+    if attempt.remaining(runtime).is_zero() {
+        return Err(attempt_timeout_failure(url));
     }
     Ok(body)
+}
+
+fn attempt_timeout_failure(url: &str) -> RetryFailure<anyhow::Error> {
+    RetryFailure::retryable(
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "logical GET attempt deadline reached",
+        ))
+        .context(format!("HTTP GET {url}")),
+        None,
+    )
 }
 
 fn is_redirect_status(status: u16) -> bool {
@@ -222,6 +338,14 @@ fn resolve_redirect_url(current_url: &str, location: &str) -> Result<String> {
     match next.scheme() {
         "http" | "https" => Ok(next.to_string()),
         other => bail!("unsupported redirect scheme `{other}` in Location {location:?}"),
+    }
+}
+
+fn validate_request_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).with_context(|| format!("parse HTTP GET URL {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        other => bail!("unsupported HTTP GET scheme `{other}` for {url}"),
     }
 }
 
@@ -368,6 +492,38 @@ mod tests {
     }
 
     #[test]
+    fn content_length_and_streaming_caps_fail_without_retry() -> Result<()> {
+        let (announced_url, announced_hits, announced_handle) = spawn_response_server(
+            "http",
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".to_string(),
+        )?;
+        let announced_error = HttpTransport::new()
+            .get(&announced_url, 2)
+            .expect_err("announced oversized body must fail");
+        join_server(announced_handle)?;
+        assert!(
+            announced_error.to_string().contains("Content-Length"),
+            "got: {announced_error:#}"
+        );
+        assert_eq!(announced_hits.load(Ordering::SeqCst), 1);
+
+        let (streamed_url, streamed_hits, streamed_handle) = spawn_response_server(
+            "http",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc".to_string(),
+        )?;
+        let streamed_error = HttpTransport::new()
+            .get(&streamed_url, 2)
+            .expect_err("streamed oversized body must fail");
+        join_server(streamed_handle)?;
+        assert!(
+            streamed_error.to_string().contains("exceeded cap"),
+            "got: {streamed_error:#}"
+        );
+        assert_eq!(streamed_hits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
     fn redirect_limit_error_includes_current_and_origin_urls() -> Result<()> {
         let redirect_response = |location: &str| {
             format!(
@@ -387,15 +543,19 @@ mod tests {
 
         let err = match HttpTransport::new().get(&origin_url, 16) {
             Ok(body) => bail!("expected redirect limit error, got body {:?}", body),
-            Err(err) => err.to_string(),
+            Err(err) => err,
         };
 
         join_server(origin_handle)?;
         join_server(first_hop_handle)?;
         join_server(second_hop_handle)?;
         join_server(limit_handle)?;
+        let retry = err
+            .downcast_ref::<GetRetryError<anyhow::Error>>()
+            .context("redirect limit error lost typed retry metadata")?;
+        assert_eq!(retry.attempts(), 1);
         assert_eq!(
-            err,
+            retry.last_cause().to_string(),
             format!("too many HTTP redirects while fetching {limit_url} (origin: {origin_url})")
         );
         assert_eq!(origin_hits.load(Ordering::SeqCst), 1);
@@ -463,6 +623,7 @@ mod tests {
         let transport = HttpTransport {
             agent,
             user_agent: "argus-test".to_string(),
+            retry_runtime: Arc::new(SystemRetryRuntime::default()),
         };
 
         let err = match transport.get(&redirect_url, 16) {

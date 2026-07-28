@@ -32,6 +32,8 @@ pub(crate) enum VulnsOp {
 
 #[derive(Args, Debug)]
 pub(crate) struct VulnsCommonArgs {
+    #[command(flatten)]
+    pub(crate) execution: crate::execution::ExecutionArgs,
     /// Required secure OSV cache directory.
     #[arg(long, value_name = "DIR", required = true)]
     pub(crate) cache_dir: PathBuf,

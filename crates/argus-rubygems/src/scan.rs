@@ -18,7 +18,7 @@ use crate::{finding, rules};
 use anyhow::{anyhow, bail, Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::path::{Component, Path};
@@ -129,9 +129,21 @@ pub fn scan_gem_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_gem_with_rules_and_context(gem_bytes, dest_root, max_extracted_bytes, rules, &execution)
+}
+
+pub fn scan_gem_with_rules_and_context(
+    gem_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
+    let mut external_budget = argus_rules::ExternalScanBudget::default();
 
     // 1. Read the gemspec manifest (metadata.gz). Missing manifest is an
     //    error -- a .gem without metadata.gz is malformed (U-29: do not
@@ -144,7 +156,13 @@ pub fn scan_gem_with_rules(
     // The gemspec is itself a trigger surface, scanned as raw text.
     scan_gemspec(&gemspec, &mut findings);
     rules
-        .scan_bytes("metadata.yml", gemspec.as_bytes(), &mut findings)
+        .scan_virtual_inputs_with_budget_and_context(
+            1,
+            [("metadata.yml", gemspec.as_bytes())],
+            &mut findings,
+            execution,
+            &mut external_budget,
+        )
         .context("run configured rules on RubyGems metadata")?;
     if let Some((n, v)) = parse_gemspec_name_version(&gemspec) {
         name = name.or(Some(n));
@@ -170,69 +188,41 @@ pub fn scan_gem_with_rules(
     let env_cred_re = rules::env_credential_read_regex();
     let env_bulk_re = rules::env_bulk_read_regex();
     let net_egress_re = rules::extconf_remote_download_regex();
-    for entry in walkdir::WalkDir::new(&pkg_dir).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(&pkg_dir)
-            .unwrap_or(abs)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // Ecosystem-agnostic content rules (credential-access,
-        // network-exfiltration, ai-context-poisoning, runtime-hook, ...).
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
-
-        // ENV-token harvester: a credential-shaped ENV read OR a bulk env dump
-        // (ENV.to_h/each/select/...) AND network egress in the same file (2022
-        // RubyGems incident class). The shared credential-access rule only
-        // matches secret-file paths, so detect the Ruby env-read idiom here.
-        // File-level proximity, not data-flow.
-        let env_harvest = env_cred_re.is_match(&content) || env_bulk_re.is_match(&content);
-        if env_harvest && net_egress_re.is_match(&content) {
-            findings.push(finding(
-                "gem-env-token-exfil",
-                Severity::High,
-                format!(
-                    "`{rel}` reads a credential-shaped environment variable and performs network egress in the same file (env-token harvester)"
-                ),
-            ));
-        }
-
-        // Build-time surface: extconf.rb or anything under ext/.
-        let base = Path::new(&rel)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let is_build_file =
-            base == "extconf.rb" || rel.starts_with("ext/") || rel.contains("/ext/");
-        if base == "extconf.rb" {
-            extconf_on_disk = true;
-        }
-        if is_build_file {
-            scan_build_file(&content, &rel, &mut findings);
-        }
+    let (file_results, _) = scan_text_files_with_context(
+        &pkg_dir,
+        TEXT_MAX_BYTES,
+        execution,
+        |file| {
+            let mut per_file = Vec::new();
+            scan_text_file(file, &mut per_file);
+            let env_harvest =
+                env_cred_re.is_match(&file.content) || env_bulk_re.is_match(&file.content);
+            if env_harvest && net_egress_re.is_match(&file.content) {
+                per_file.push(finding(
+                    "gem-env-token-exfil",
+                    Severity::High,
+                    format!(
+                        "`{}` reads a credential-shaped environment variable and performs network egress in the same file (env-token harvester)",
+                        file.rel
+                    ),
+                ));
+            }
+            let base = Path::new(&file.rel)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_extconf = base == "extconf.rb";
+            let is_build_file =
+                is_extconf || file.rel.starts_with("ext/") || file.rel.contains("/ext/");
+            if is_build_file {
+                scan_build_file(&file.content, &file.rel, &mut per_file);
+            }
+            Ok::<_, anyhow::Error>((per_file, is_extconf))
+        },
+    )?;
+    for (mut per_file, is_extconf) in file_results {
+        extconf_on_disk |= is_extconf;
+        findings.append(&mut per_file);
     }
 
     // 4. Native extension present? Either a declared `extensions:` array in
@@ -256,7 +246,12 @@ pub fn scan_gem_with_rules(
     }
 
     rules
-        .scan_directory(dest_root, &mut findings)
+        .scan_directory_with_budget_and_context(
+            dest_root,
+            &mut findings,
+            execution,
+            &mut external_budget,
+        )
         .context("run configured rules on extracted gem")?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);

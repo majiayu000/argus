@@ -35,7 +35,7 @@ pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, GemVersion, ResolvedVersion};
 pub use scan::{
     parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem,
-    scan_gem_with_rules,
+    scan_gem_with_rules, scan_gem_with_rules_and_context,
 };
 
 /// RubyGems serves both metadata and `.gem` downloads from `rubygems.org`
@@ -114,6 +114,17 @@ pub fn fetch_and_scan_gems_with_rules(
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_gems_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_gems_with_rules_and_context(
+    pkg: &GemRef,
+    opts: &GemFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ScanReport> {
     // 1. Fetch the version list and resolve the requested version + sha.
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(registry)
@@ -177,8 +188,14 @@ pub fn fetch_and_scan_gems_with_rules(
     std::fs::create_dir_all(&art_dir).with_context(|| format!("mkdir {}", art_dir.display()))?;
 
     // 5. Parse + scan the nested archive.
-    let scanned = scan_gem_with_rules(&gem_bytes, &art_dir, opts.max_extracted_bytes, rules)
-        .with_context(|| format!("scan .gem {}-{version}", pkg.name))?;
+    let scanned = scan_gem_with_rules_and_context(
+        &gem_bytes,
+        &art_dir,
+        opts.max_extracted_bytes,
+        rules,
+        execution,
+    )
+    .with_context(|| format!("scan .gem {}-{version}", pkg.name))?;
     let mut all_findings: Vec<Finding> = scanned.findings;
 
     // 6. Name-based rules (typosquatting) on the gem name itself.
@@ -233,13 +250,25 @@ impl argus_pipeline::EcosystemFetcher for GemsFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = GemRef::parse(spec)?;
         let opts = GemFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..GemFetchOptions::default()
         };
-        fetch_and_scan_gems_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_gems_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

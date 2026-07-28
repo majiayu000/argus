@@ -37,11 +37,6 @@ pub struct RuleSession {
     external_rule_count: usize,
 }
 
-enum ExternalScanInput<'a> {
-    File(PathBuf),
-    Virtual(&'a [u8]),
-}
-
 impl RuleSession {
     /// Build and validate the complete rule configuration before scanning.
     pub fn load(rules_dir: Option<&Path>, override_values: &[String]) -> Result<Self> {
@@ -242,12 +237,9 @@ impl RuleSession {
 
     /// Recursively scan eligible regular files in deterministic path order.
     pub fn scan_directory(&self, root: &Path, findings: &mut Vec<Finding>) -> Result<()> {
-        self.scan_directory_with_virtual_inputs(
-            root,
-            0,
-            std::iter::empty::<(String, &[u8])>(),
-            findings,
-        )
+        let execution = argus_core::ExecutionContext::serial()
+            .context("build serial external-rule execution context")?;
+        self.scan_directory_with_context(root, findings, &execution)
     }
 
     /// Scan real files and caller-declared virtual inputs under one shared
@@ -259,41 +251,15 @@ impl RuleSession {
         virtual_inputs: impl IntoIterator<Item = (String, &'a [u8])>,
         findings: &mut Vec<Finding>,
     ) -> Result<()> {
-        if !self.has_enabled_external_rules() {
-            return Ok(());
-        }
-        let mut inputs = Vec::new();
-        for entry in walkdir::WalkDir::new(root).follow_links(false) {
-            let entry = entry
-                .with_context(|| format!("walk external-rule scan root {}", root.display()))?;
-            if entry.file_type().is_file() {
-                let rel = entry
-                    .path()
-                    .strip_prefix(root)
-                    .context("derive external-rule relative path")?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("external-rule path is not valid UTF-8"))?
-                    .replace('\\', "/");
-                inputs.push((rel, ExternalScanInput::File(entry.path().to_path_buf())));
-                if inputs.len() > MAX_EXTERNAL_SCAN_FILES {
-                    bail!("external-rule scan exceeds {MAX_EXTERNAL_SCAN_FILES} inputs");
-                }
-            }
-        }
-        validate_external_input_count(inputs.len(), virtual_input_count)?;
-        let virtual_inputs = virtual_inputs
-            .into_iter()
-            .take(virtual_input_count + 1)
-            .collect::<Vec<_>>();
-        if virtual_inputs.len() != virtual_input_count {
-            bail!("external-rule virtual input count does not match declared count");
-        }
-        inputs.extend(
-            virtual_inputs
-                .into_iter()
-                .map(|(rel, bytes)| (rel, ExternalScanInput::Virtual(bytes))),
-        );
-        self.scan_inputs(inputs, findings)
+        let execution = argus_core::ExecutionContext::serial()
+            .context("build serial external-rule execution context")?;
+        self.scan_directory_with_virtual_inputs_and_context(
+            root,
+            virtual_input_count,
+            virtual_inputs,
+            findings,
+            &execution,
+        )
     }
 
     /// Scan an in-memory batch under the shared pre-match surface budget.
@@ -303,61 +269,9 @@ impl RuleSession {
         inputs: impl IntoIterator<Item = (&'a str, &'a [u8])>,
         findings: &mut Vec<Finding>,
     ) -> Result<()> {
-        if !self.has_enabled_external_rules() {
-            return Ok(());
-        }
-        validate_external_input_count(0, input_count)?;
-        let inputs = inputs
-            .into_iter()
-            .take(input_count + 1)
-            .map(|(rel, bytes)| (rel.to_string(), ExternalScanInput::Virtual(bytes)))
-            .collect::<Vec<_>>();
-        if inputs.len() != input_count {
-            bail!("external-rule virtual input count does not match declared count");
-        }
-        self.scan_inputs(inputs, findings)
-    }
-
-    fn scan_inputs(
-        &self,
-        mut inputs: Vec<(String, ExternalScanInput<'_>)>,
-        findings: &mut Vec<Finding>,
-    ) -> Result<()> {
-        inputs.sort_by(|left, right| left.0.cmp(&right.0));
-        let initial_len = findings.len();
-        let mut evidence_bytes = 0usize;
-        for (rel, input) in inputs {
-            if !has_relevant_language(self, &rel) {
-                continue;
-            }
-            let owned;
-            let bytes = match input {
-                ExternalScanInput::File(path) => {
-                    owned = read_bounded(&path, MAX_EXTERNAL_INPUT_BYTES)
-                        .with_context(|| format!("read external-rule input `{rel}`"))?;
-                    owned.as_slice()
-                }
-                ExternalScanInput::Virtual(bytes) => bytes,
-            };
-            let previous_len = findings.len();
-            self.scan_bytes(&rel, bytes, findings)?;
-            if findings.len() - initial_len > MAX_EXTERNAL_FINDINGS {
-                bail!("external-rule findings exceed {MAX_EXTERNAL_FINDINGS}");
-            }
-            for evidence in findings[previous_len..]
-                .iter()
-                .filter_map(|finding| finding.evidence.as_ref())
-                .flatten()
-            {
-                evidence_bytes = evidence_bytes
-                    .checked_add(evidence.len())
-                    .ok_or_else(|| anyhow::anyhow!("external-rule evidence byte count overflow"))?;
-            }
-            if evidence_bytes > MAX_EXTERNAL_EVIDENCE_BYTES {
-                bail!("external-rule evidence exceeds {MAX_EXTERNAL_EVIDENCE_BYTES} bytes");
-            }
-        }
-        Ok(())
+        let execution = argus_core::ExecutionContext::serial()
+            .context("build serial external-rule execution context")?;
+        self.scan_virtual_inputs_with_context(input_count, inputs, findings, &execution)
     }
 
     /// Enforce per-artifact output bounds after all external scan surfaces
@@ -633,7 +547,7 @@ impl SecureRuleDirectory {
     }
 }
 
-fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     read_bounded_file(File::open(path)?, maximum)
 }
 
@@ -644,16 +558,6 @@ fn read_bounded_file(file: File, maximum: usize) -> Result<Vec<u8>> {
         bail!("file exceeds {maximum} bytes");
     }
     Ok(bytes)
-}
-
-fn validate_external_input_count(real: usize, virtual_count: usize) -> Result<()> {
-    let total = real
-        .checked_add(virtual_count)
-        .ok_or_else(|| anyhow::anyhow!("external-rule input count overflow"))?;
-    if total > MAX_EXTERNAL_SCAN_FILES {
-        bail!("external-rule scan exceeds {MAX_EXTERNAL_SCAN_FILES} inputs");
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -710,7 +614,7 @@ fn language_matches(declared: &[RuleLanguage], actual: &[RuleLanguage]) -> bool 
     declared.iter().any(|language| actual.contains(language))
 }
 
-fn has_relevant_language(session: &RuleSession, rel: &str) -> bool {
+pub(crate) fn has_relevant_language(session: &RuleSession, rel: &str) -> bool {
     let actual = languages_for_path(rel);
     session.effective.rules().iter().any(|rule| {
         rule.enabled()

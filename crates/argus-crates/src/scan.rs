@@ -11,9 +11,10 @@ use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{looks_binary, scan_text_file, scan_text_files_with_context, RuleSession};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -34,11 +35,29 @@ pub fn scan_crate_archive_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_crate_archive_with_rules_and_context(
+        crate_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_crate_archive_with_rules_and_context(
+    crate_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ScanReport> {
     let pkg_dir = extract_tarball(crate_bytes, dest_root, max_extracted_bytes)
         .context("safe-extract .crate")?;
-    let mut scan = scan_extracted_crate(&pkg_dir)?;
+    let builtin = RuleSession::builtin()?;
+    let mut scan = scan_extracted_crate_with_rules_and_context(&pkg_dir, &builtin, execution)?;
     rules
-        .scan_directory(dest_root, &mut scan.findings)
+        .scan_directory_with_context(dest_root, &mut scan.findings, execution)
         .context("run configured rules on extracted .crate archive")?;
     rules.validate_external_limits(&scan.findings)?;
     rules.normalize_findings(&mut scan.findings);
@@ -67,6 +86,15 @@ pub fn scan_extracted_crate_with_rules(
     pkg_dir: &Path,
     rules: &RuleSession,
 ) -> Result<crate::ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_extracted_crate_with_rules_and_context(pkg_dir, rules, &execution)
+}
+
+pub fn scan_extracted_crate_with_rules_and_context(
+    pkg_dir: &Path,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<crate::ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let manifest = read_top_level_manifest(pkg_dir)?;
     let (name, version) = manifest
@@ -89,56 +117,27 @@ pub fn scan_extracted_crate_with_rules(
         .flatten();
     let mut build_script_seen: Option<String> = None;
 
-    for entry in walkdir::WalkDir::new(pkg_dir).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(pkg_dir)
-            .unwrap_or(abs)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // Generic content rules everywhere.
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
-
-        if build_script_rel.as_deref() == Some(rel.as_str()) {
-            build_script_seen = Some(rel.clone());
-            scan_build_rs(&content, &rel, &mut findings);
-            // build.rs is also a Rust source file — apply the
-            // include_bytes! + XOR-loop detectors. The first version of
-            // TrapDoor's payload sat in build.rs itself, the second
-            // hid it in a sibling module, so we run the source-level
-            // checks against both declared build scripts and every other `.rs`.
-            scan_rust_source(&content, &rel, &mut findings);
-        } else {
-            if rel.ends_with(".rs") {
-                scan_rust_source(&content, &rel, &mut findings);
+    let (file_results, _) =
+        scan_text_files_with_context(pkg_dir, TEXT_MAX_BYTES, execution, |file| {
+            let mut per_file = Vec::new();
+            scan_text_file(file, &mut per_file);
+            let is_build_script = build_script_rel.as_deref() == Some(file.rel.as_str());
+            if is_build_script {
+                scan_build_rs(&file.content, &file.rel, &mut per_file);
+                scan_rust_source(&file.content, &file.rel, &mut per_file);
+            } else {
+                if file.rel.ends_with(".rs") {
+                    scan_rust_source(&file.content, &file.rel, &mut per_file);
+                }
+                if proc_macro_source_files.contains(&file.rel) {
+                    scan_proc_macro_source(&file.content, &file.rel, &mut per_file);
+                }
             }
-            if proc_macro_source_files.contains(&rel) {
-                scan_proc_macro_source(&content, &rel, &mut findings);
-            }
-        }
+            Ok::<_, anyhow::Error>((per_file, is_build_script.then(|| file.rel.clone())))
+        })?;
+    for (mut per_file, build_script) in file_results {
+        build_script_seen = build_script_seen.take().or(build_script);
+        findings.append(&mut per_file);
     }
 
     // Structural meta-findings.
@@ -158,7 +157,7 @@ pub fn scan_extracted_crate_with_rules(
     }
 
     rules
-        .scan_directory(pkg_dir, &mut findings)
+        .scan_directory_with_context(pkg_dir, &mut findings, execution)
         .context("run configured rules on extracted .crate")?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);
@@ -199,13 +198,25 @@ enum CargoBuildField {
 
 fn read_top_level_manifest(pkg_dir: &Path) -> Result<Option<CargoManifest>> {
     let manifest_path = pkg_dir.join("Cargo.toml");
-    let content = match std::fs::read_to_string(&manifest_path) {
-        Ok(content) => content,
+    let file = match std::fs::File::open(&manifest_path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(e).with_context(|| format!("read {}", manifest_path.display()));
+            return Err(e).with_context(|| format!("open {}", manifest_path.display()));
         }
     };
+    let mut bytes = Vec::new();
+    file.take(TEXT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    if bytes.len() as u64 > TEXT_MAX_BYTES {
+        anyhow::bail!(
+            "{} exceeds text input cap {TEXT_MAX_BYTES} bytes",
+            manifest_path.display()
+        );
+    }
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("{} is not valid UTF-8", manifest_path.display()))?;
     toml::from_str(&content).with_context(|| format!("parse {}", manifest_path.display()))
 }
 

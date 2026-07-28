@@ -3,29 +3,30 @@
 mod agent;
 mod corpus;
 mod corpus_path;
+mod execution;
 mod intel;
 mod report;
 mod router;
+mod rule_args;
 mod sarif;
 mod sarif_vulns;
 mod vulns;
 
 use anyhow::{bail, Context, Result};
 use argus_composer::ComposerFetcher;
-use argus_core::{rules::RuleOverride, ScanReport};
+use argus_core::{ExecutionContext, ScanReport};
 use argus_crates::CratesFetcher;
 use argus_fetch::{FetchOptions, PackageRef};
 use argus_go::GoFetcher;
 use argus_lockfile::{
-    evaluate_with_rules as evaluate_lockfile, parse_lockfile, BoundedInput, DetectionRequest,
-    FormatHint, PolicyOptions, MAX_INPUT_BYTES,
+    parse_lockfile, BoundedInput, DetectionRequest, FormatHint, PolicyOptions, MAX_INPUT_BYTES,
 };
 use argus_maven::MavenFetcher;
 use argus_nuget::NugetFetcher;
 use argus_pipeline::{CommonFetchOptions, EcosystemFetcher};
 use argus_pypi::{PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiPackageRef};
 use argus_rubygems::GemsFetcher;
-use argus_rules::{scan_package_dir_with_rules, RuleSession};
+use argus_rules::RuleSession;
 use argus_transport::HttpTransport;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -35,6 +36,7 @@ use std::process::ExitCode;
 
 use report::emit_report;
 pub(crate) use report::print_report_text;
+use rule_args::RuleArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,6 +68,8 @@ enum Cmd {
         vulns: vulns::ScanVulnsArgs,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
     /// Agent supply-chain surface commands (MCP configs, skills, hooks, AGENTS.md).
     Agent {
@@ -138,6 +142,8 @@ enum Cmd {
         vulns: vulns::ScanVulnsArgs,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
     /// Fetch a package from PyPI, verify SHA-256, safe-extract sdist/wheel, scan.
     PypiFetch {
@@ -160,6 +166,8 @@ enum Cmd {
         vulns: vulns::ScanVulnsArgs,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
     /// Fetch a crate from crates.io, verify SHA-256, safe-extract, scan build.rs + Rust sources. Spec: `<name>` or `<name>@<version>`.
     CratesFetch(EcosystemFetchArgs),
@@ -201,26 +209,8 @@ struct EcosystemFetchArgs {
     vulns: vulns::ScanVulnsArgs,
     #[command(flatten)]
     rules: RuleArgs,
-}
-
-#[derive(clap::Args, Debug, Clone)]
-pub(crate) struct RuleArgs {
-    /// Explicit trusted directory of versioned external YAML rules (Unix only in v1).
-    #[arg(long, value_name = "DIR")]
-    rules_dir: Option<PathBuf>,
-    /// Disable a rule, replace its severity, or set one typed detector parameter.
-    #[arg(
-        long = "rule-override",
-        value_name = "ID=off|severity:LEVEL|param:KEY=VALUE"
-    )]
-    rule_override: Vec<RuleOverride>,
-}
-
-impl RuleArgs {
-    fn load(self) -> Result<RuleSession> {
-        RuleSession::load_typed(self.rules_dir.as_deref(), self.rule_override)
-            .context("load effective rules")
-    }
+    #[command(flatten)]
+    execution: execution::ExecutionArgs,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -290,6 +280,8 @@ enum AgentOp {
         llm_judge_command: Option<PathBuf>,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
 }
 
@@ -300,6 +292,8 @@ enum CorpusOp {
         /// Path to the corpus directory (must contain `index.json`).
         #[arg(long, default_value = "corpus")]
         corpus: PathBuf,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
     /// Compute explicitly scoped metrics for a frozen corpus evaluation contract.
     Eval {
@@ -308,6 +302,8 @@ enum CorpusOp {
         corpus: PathBuf,
         #[arg(long, value_enum, default_value_t = EvaluationFormat::Text)]
         format: EvaluationFormat,
+        #[command(flatten)]
+        execution: execution::ExecutionArgs,
     },
 }
 
@@ -375,16 +371,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
-        } => cmd_scan(
-            &path,
-            format,
-            lockfile_format,
-            &allow_registry_host,
-            intel,
-            vulns,
-            scan_started_at,
-            rules.load()?,
-        ),
+            execution,
+        } => {
+            let execution = execution.resolve()?;
+            cmd_scan(
+                &path,
+                format,
+                lockfile_format,
+                &allow_registry_host,
+                intel,
+                vulns,
+                scan_started_at,
+                rules.load()?,
+                &execution,
+            )
+        }
         Cmd::Intel { op } => intel::cmd_intel(op),
         Cmd::Vulns { op } => vulns::cmd_vulns(op),
         Cmd::Fetch {
@@ -401,22 +402,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
-        } => cmd_fetch(
-            &pkg,
-            registry,
-            cache_dir,
-            metadata_anomaly,
-            metadata_cache_dir,
-            allow_tarball_host,
-            verify_sigstore,
-            sigstore_issuer,
-            sigstore_identity,
-            format,
-            intel,
-            vulns,
-            scan_started_at,
-            rules.load()?,
-        ),
+            execution,
+        } => {
+            let execution = execution.resolve()?;
+            cmd_fetch(
+                &pkg,
+                registry,
+                cache_dir,
+                metadata_anomaly,
+                metadata_cache_dir,
+                allow_tarball_host,
+                verify_sigstore,
+                sigstore_issuer,
+                sigstore_identity,
+                format,
+                intel,
+                vulns,
+                scan_started_at,
+                rules.load()?,
+                &execution,
+            )
+        }
         Cmd::PypiFetch {
             pkg,
             registry,
@@ -426,17 +432,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
-        } => cmd_pypi_fetch(
-            &pkg,
-            registry,
-            cache_dir,
-            prefer.into(),
-            format,
-            intel,
-            vulns,
-            scan_started_at,
-            rules.load()?,
-        ),
+            execution,
+        } => {
+            let execution = execution.resolve()?;
+            cmd_pypi_fetch(
+                &pkg,
+                registry,
+                cache_dir,
+                prefer.into(),
+                format,
+                intel,
+                vulns,
+                scan_started_at,
+                rules.load()?,
+                &execution,
+            )
+        }
         Cmd::CratesFetch(args) => {
             cmd_ecosystem_fetch(&CratesFetcher, "crates-fetch", args, scan_started_at)
         }
@@ -465,24 +476,40 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     llm_judge,
                     llm_judge_command,
                     rules,
+                    execution,
                 },
-        } => agent::cmd_agent_scan(
-            &paths,
-            format,
-            baseline.as_deref(),
-            update_baseline.as_deref(),
-            check_snapshot.as_deref(),
-            update_snapshot.as_deref(),
-            llm_judge,
-            llm_judge_command.as_deref(),
-            rules.load()?,
-        ),
+        } => {
+            let execution = execution.resolve()?;
+            agent::cmd_agent_scan(
+                &paths,
+                format,
+                baseline.as_deref(),
+                update_baseline.as_deref(),
+                check_snapshot.as_deref(),
+                update_snapshot.as_deref(),
+                llm_judge,
+                llm_judge_command.as_deref(),
+                rules.load()?,
+                &execution,
+            )
+        }
         Cmd::Corpus {
-            op: CorpusOp::Test { corpus },
-        } => corpus::cmd_test(&corpus),
+            op: CorpusOp::Test { corpus, execution },
+        } => {
+            let execution = execution.resolve()?;
+            corpus::cmd_test(&corpus, &execution)
+        }
         Cmd::Corpus {
-            op: CorpusOp::Eval { corpus, format },
-        } => corpus::cmd_eval(&corpus, format),
+            op:
+                CorpusOp::Eval {
+                    corpus,
+                    format,
+                    execution,
+                },
+        } => {
+            let execution = execution.resolve()?;
+            corpus::cmd_eval(&corpus, format, &execution)
+        }
     }
 }
 
@@ -496,9 +523,24 @@ fn cmd_scan(
     vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ExitCode> {
-    let report = scan_path(path, lockfile_format, allow_registry_hosts, &rules)?;
-    finish_scan(report, format, intel, vulns, scan_started_at, &rules)
+    let report = scan_path(
+        path,
+        lockfile_format,
+        allow_registry_hosts,
+        &rules,
+        execution,
+    )?;
+    finish_scan(
+        report,
+        format,
+        intel,
+        vulns,
+        scan_started_at,
+        &rules,
+        execution,
+    )
 }
 
 fn cmd_ecosystem_fetch(
@@ -507,6 +549,7 @@ fn cmd_ecosystem_fetch(
     args: EcosystemFetchArgs,
     scan_started_at: DateTime<Utc>,
 ) -> Result<ExitCode> {
+    let execution = args.execution.resolve()?;
     let rules = args.rules.load()?;
     let registry = args
         .registry
@@ -517,7 +560,7 @@ fn cmd_ecosystem_fetch(
     };
     let transport = HttpTransport::new();
     let report = fetcher
-        .fetch_and_scan(&args.pkg, &opts, &transport, &rules)
+        .fetch_and_scan_with_context(&args.pkg, &opts, &transport, &rules, &execution)
         .with_context(|| format!("{label} + scan {}", args.pkg))?;
     finish_scan(
         report,
@@ -526,6 +569,7 @@ fn cmd_ecosystem_fetch(
         args.vulns,
         scan_started_at,
         &rules,
+        &execution,
     )
 }
 
@@ -540,6 +584,7 @@ fn cmd_pypi_fetch(
     vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ExitCode> {
     let pkg_ref =
         PypiPackageRef::parse(pkg).with_context(|| format!("parse PyPI package spec `{pkg}`"))?;
@@ -550,9 +595,19 @@ fn cmd_pypi_fetch(
         ..PypiFetchOptions::default()
     };
     let transport = HttpTransport::new();
-    let report = argus_pypi::fetch_and_scan_pypi_with_rules(&pkg_ref, &opts, &transport, &rules)
-        .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, vulns, scan_started_at, &rules)
+    let report = argus_pypi::fetch_and_scan_pypi_with_rules_and_context(
+        &pkg_ref, &opts, &transport, &rules, execution,
+    )
+    .with_context(|| format!("pypi-fetch + scan {pkg}"))?;
+    finish_scan(
+        report,
+        format,
+        intel,
+        vulns,
+        scan_started_at,
+        &rules,
+        execution,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -571,6 +626,7 @@ fn cmd_fetch(
     vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ExitCode> {
     let pkg_ref = PackageRef::parse(pkg).with_context(|| format!("parse package spec `{pkg}`"))?;
     if metadata_cache_dir.is_some() && !metadata_anomaly {
@@ -593,9 +649,19 @@ fn cmd_fetch(
         ..FetchOptions::default()
     };
     let transport = HttpTransport::new();
-    let report = argus_fetch::fetch_and_scan_with_rules(&pkg_ref, &opts, &transport, &rules)
-        .with_context(|| format!("fetch + scan {pkg}"))?;
-    finish_scan(report, format, intel, vulns, scan_started_at, &rules)
+    let report = argus_fetch::fetch_and_scan_with_rules_and_context(
+        &pkg_ref, &opts, &transport, &rules, execution,
+    )
+    .with_context(|| format!("fetch + scan {pkg}"))?;
+    finish_scan(
+        report,
+        format,
+        intel,
+        vulns,
+        scan_started_at,
+        &rules,
+        execution,
+    )
 }
 
 fn finish_scan(
@@ -605,10 +671,11 @@ fn finish_scan(
     vulns: vulns::ScanVulnsArgs,
     scan_started_at: DateTime<Utc>,
     rules: &RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ExitCode> {
     intel::apply_malicious_snapshot(&mut report, intel.malicious_db.as_deref(), scan_started_at)?;
     rules.finalize_package(&mut report);
-    vulns::apply_osv_query(&mut report, &vulns, rules)?;
+    vulns::apply_osv_query(&mut report, &vulns, rules, execution)?;
     emit_report(&report, format)
 }
 
@@ -617,6 +684,7 @@ fn scan_path(
     lockfile_format: Option<LockfileFormatArg>,
     allow_registry_hosts: &[String],
     rules: &RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ScanReport> {
     if path.is_dir() {
         if lockfile_format.is_some() || !allow_registry_hosts.is_empty() {
@@ -624,7 +692,7 @@ fn scan_path(
                 "--lockfile-format and --allow-registry-host are valid only when scanning one lockfile"
             );
         }
-        scan_package_dir_with_rules(path, rules)
+        argus_rules::scan_package_dir_with_rules_and_context(path, rules, execution)
             .with_context(|| format!("scan dir {}", path.display()))
     } else if path.is_file() {
         scan_lockfile_path(
@@ -632,6 +700,7 @@ fn scan_path(
             lockfile_format.map(FormatHint::from),
             allow_registry_hosts,
             rules,
+            execution,
         )
     } else {
         bail!("path is neither a directory nor a file: {}", path.display());
@@ -643,6 +712,7 @@ pub(crate) fn scan_lockfile_path(
     explicit_format: Option<FormatHint>,
     allow_registry_hosts: &[String],
     rules: &RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<ScanReport> {
     let (bytes, parsed) = read_and_parse_lockfile_bytes(path, explicit_format)?;
     let policy = PolicyOptions::new(allow_registry_hosts)
@@ -653,8 +723,10 @@ pub(crate) fn scan_lockfile_path(
         .ok_or_else(|| anyhow::anyhow!("lockfile path is not valid UTF-8"))?;
     let input = BoundedInput::new(&bytes, rel)
         .with_context(|| format!("bound lockfile {}", path.display()))?;
-    evaluate_lockfile(&parsed, path, &policy, &input, rules)
-        .with_context(|| format!("evaluate lockfile {}", path.display()))
+    argus_lockfile::evaluate_with_rules_and_context(
+        &parsed, path, &policy, &input, rules, execution,
+    )
+    .with_context(|| format!("evaluate lockfile {}", path.display()))
 }
 
 /// Security-sensitive lockfile input boundary shared by `scan` and the

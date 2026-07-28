@@ -4,30 +4,27 @@
 //! Each rule below is intentionally narrow. False positives are paid for in
 //! review time, so a rule fires only when its real-attack pattern is present.
 
-use crate::{PackageContext, TextFile};
+use crate::TextFile;
 use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
 use argus_syntax::{Fact, FactKind, ScriptLanguage};
 use regex::Regex;
 use std::sync::OnceLock;
 
-pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
-    // Iterate over each text file once and apply per-file rules.
-    for file in &ctx.text_files {
-        let language = ScriptLanguage::from_path(&file.rel);
-        if matches!(
-            language,
-            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
-        ) {
-            let facts = argus_syntax::analyze(&file.rel, &file.content)
-                .with_context(|| format!("parse npm source `{}`", file.rel))?;
-            scan_file(file, findings, NetworkScan::Syntax(&facts));
-        } else {
-            scan_file(file, findings, NetworkScan::Disabled);
-        }
+pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+    let language = ScriptLanguage::from_path(&file.rel);
+    if matches!(
+        language,
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+    ) {
+        let facts = argus_syntax::analyze(&file.rel, &file.content)
+            .with_context(|| format!("parse npm source `{}`", file.rel))?;
+        scan_file(file, &mut findings, NetworkScan::Syntax(&facts));
+    } else {
+        scan_file(file, &mut findings, NetworkScan::Disabled);
     }
-
-    Ok(())
+    Ok(findings)
 }
 
 /// Apply the ecosystem-agnostic content rules (credential-access,

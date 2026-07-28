@@ -3,6 +3,7 @@
 //! Import is the only network-capable path in this crate. [`IntelDatabase::load`]
 //! and matching operate exclusively on a previously verified local snapshot.
 
+mod http_archive;
 mod import;
 mod matcher;
 mod normalize;

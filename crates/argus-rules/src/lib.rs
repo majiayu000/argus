@@ -8,7 +8,7 @@
 //! bytes.
 
 use anyhow::{Context, Result};
-use argus_core::{ArtifactKind, Decision, Finding, ScanReport};
+use argus_core::{ArtifactKind, Decision, ExecutionContext, Finding, ScanReport};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -20,6 +20,7 @@ mod decision;
 mod lifecycle;
 mod name;
 mod session;
+mod session_execution;
 pub mod typosquat;
 
 pub use content::scan_text_file;
@@ -28,6 +29,7 @@ pub use session::{
     RuleSession, MAX_EXTERNAL_EVIDENCE_BYTES, MAX_EXTERNAL_FINDINGS, MAX_EXTERNAL_INPUT_BYTES,
     MAX_EXTERNAL_SCAN_FILES, MAX_RULE_DIRECTORY_BYTES, MAX_RULE_FILES, MAX_RULE_FILE_BYTES,
 };
+pub use session_execution::ExternalScanBudget;
 
 /// Parsed `package.json` view used by rules. Only fields the rules need.
 #[derive(Debug, Clone, Deserialize)]
@@ -66,47 +68,66 @@ pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
 
 fn scan_package_dir_inner_with_limit(
     path: &Path,
-    package_json_limit: Option<usize>,
+    package_json_limit: usize,
     rules: &RuleSession,
+    execution: &ExecutionContext,
 ) -> Result<(ScanReport, PackageJson)> {
     let pkg_json_path = path.join("package.json");
-    let pkg_json_raw = match package_json_limit {
-        Some(maximum) => {
-            let file = std::fs::File::open(&pkg_json_path)
-                .with_context(|| format!("open package.json at {}", pkg_json_path.display()))?;
-            let mut bytes = Vec::new();
-            file.take(maximum as u64 + 1)
-                .read_to_end(&mut bytes)
-                .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
-            if bytes.len() > maximum {
-                anyhow::bail!("external-rule package manifest exceeds {maximum} bytes");
-            }
-            String::from_utf8(bytes).with_context(|| {
-                format!(
-                    "package.json is not valid UTF-8 at {}",
-                    pkg_json_path.display()
-                )
-            })?
-        }
-        None => std::fs::read_to_string(&pkg_json_path)
-            .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?,
-    };
+    let file = std::fs::File::open(&pkg_json_path)
+        .with_context(|| format!("open package.json at {}", pkg_json_path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(package_json_limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
+    if bytes.len() > package_json_limit {
+        anyhow::bail!("package manifest exceeds {package_json_limit} bytes");
+    }
+    let pkg_json_raw = String::from_utf8(bytes).with_context(|| {
+        format!(
+            "package.json is not valid UTF-8 at {}",
+            pkg_json_path.display()
+        )
+    })?;
     let package: PackageJson = serde_json::from_str(&pkg_json_raw)
         .with_context(|| format!("parse package.json at {}", pkg_json_path.display()))?;
 
-    let (text_files, binary_files) = collect_files(path)?;
+    let (per_file, mut binary_files) =
+        scan_text_files_with_context(path, TEXT_MAX_BYTES, execution, |file| {
+            let mut lifecycle_findings = Vec::new();
+            lifecycle::scan_text_file(file, &mut lifecycle_findings);
+            let content_findings = content::scan_npm_text_file(file)?;
+            Ok((
+                lifecycle_findings,
+                content_findings,
+                has_native_bin_ext(&file.rel).then(|| file.rel.clone()),
+            ))
+        })?;
 
     let ctx = PackageContext {
         root: path.to_path_buf(),
         package: package.clone(),
-        text_files,
-        binary_files,
+        text_files: Vec::new(),
+        binary_files: Vec::new(),
     };
 
     let mut findings: Vec<Finding> = Vec::new();
     lifecycle::run(&ctx, &mut findings)?;
-    content::run(&ctx, &mut findings)?;
-    binary::run(&ctx, &mut findings);
+    let mut content_findings = Vec::new();
+    for (mut lifecycle_findings, mut per_file_findings, native_path) in per_file {
+        findings.append(&mut lifecycle_findings);
+        content_findings.append(&mut per_file_findings);
+        if let Some(rel) = native_path {
+            binary_files.push(rel);
+        }
+    }
+    findings.append(&mut content_findings);
+    let binary_ctx = PackageContext {
+        root: path.to_path_buf(),
+        package: package.clone(),
+        text_files: Vec::new(),
+        binary_files,
+    };
+    binary::run(&binary_ctx, &mut findings);
     name::run(&ctx, rules, &mut findings)?;
 
     let decision = decision::derive(&ctx, &findings);
@@ -130,11 +151,28 @@ fn scan_package_dir_inner_with_limit(
 /// Scan a package directory with one explicitly constructed immutable rule
 /// session. External matching and overrides are completed before return.
 pub fn scan_package_dir_with_rules(path: &Path, rules: &RuleSession) -> Result<ScanReport> {
-    let package_json_limit = rules
-        .has_enabled_external_rules()
-        .then_some(MAX_EXTERNAL_INPUT_BYTES);
-    let (mut report, package) = scan_package_dir_inner_with_limit(path, package_json_limit, rules)?;
-    rules.scan_directory_with_virtual_inputs(
+    let execution = ExecutionContext::serial().context("build serial scan execution context")?;
+    scan_package_dir_with_rules_and_context(path, rules, &execution)
+}
+
+/// Scan a package directory in an invocation-local execution context.
+pub fn scan_package_dir_with_context(
+    path: &Path,
+    execution: &ExecutionContext,
+) -> Result<ScanReport> {
+    let rules = RuleSession::builtin()?;
+    scan_package_dir_with_rules_and_context(path, &rules, execution)
+}
+
+/// Scan a package directory with explicit rules and invocation-local workers.
+pub fn scan_package_dir_with_rules_and_context(
+    path: &Path,
+    rules: &RuleSession,
+    execution: &ExecutionContext,
+) -> Result<ScanReport> {
+    let (mut report, package) =
+        scan_package_dir_inner_with_limit(path, MAX_EXTERNAL_INPUT_BYTES, rules, execution)?;
+    rules.scan_directory_with_virtual_inputs_and_context(
         path,
         package.scripts.len(),
         package.scripts.iter().map(|(name, body)| {
@@ -147,6 +185,7 @@ pub fn scan_package_dir_with_rules(path: &Path, rules: &RuleSession) -> Result<S
             )
         }),
         &mut report.findings,
+        execution,
     )?;
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);
@@ -168,9 +207,23 @@ fn encode_virtual_path_segment(value: &str) -> String {
     encoded
 }
 
-fn collect_files(root: &Path) -> Result<(Vec<TextFile>, Vec<String>)> {
-    let mut texts = Vec::new();
-    let mut bins = Vec::new();
+/// Discover regular files serially, then bounded-read, classify, and process
+/// them in stable path order through the invocation-local worker pool.
+///
+/// Only each worker's small owned result is retained. File contents remain
+/// live for the duration of that worker call and are dropped before the next
+/// bounded window starts.
+pub fn scan_text_files_with_context<O, Work>(
+    root: &Path,
+    text_max_bytes: u64,
+    execution: &ExecutionContext,
+    work: Work,
+) -> Result<(Vec<O>, Vec<String>)>
+where
+    O: Send,
+    Work: Fn(&TextFile) -> Result<O> + Sync,
+{
+    let mut inputs = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -182,26 +235,62 @@ fn collect_files(root: &Path) -> Result<(Vec<TextFile>, Vec<String>)> {
             .unwrap_or(abs)
             .to_string_lossy()
             .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            bins.push(rel);
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => {
-                bins.push(rel);
-                continue;
-            }
-        };
-        if looks_binary(&bytes) {
-            bins.push(rel);
-        } else {
-            let content = String::from_utf8_lossy(&bytes).into_owned();
-            texts.push(TextFile { rel, content });
-        }
+        inputs.push((rel, abs.to_path_buf()));
     }
-    Ok((texts, bins))
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+
+    enum Processed<O> {
+        Text(O),
+        Binary(String),
+    }
+    let mut outputs = Vec::new();
+    let mut bins = Vec::new();
+    execution.execute_ordered(
+        &inputs,
+        None,
+        |_index, (rel, abs)| -> Result<Processed<O>> {
+            match read_text_file_bounded(rel, abs, text_max_bytes)? {
+                Some(file) => Ok(Processed::Text(work(&file)?)),
+                None => Ok(Processed::Binary(rel.clone())),
+            }
+        },
+        |_index, processed| {
+            match processed {
+                Processed::Text(output) => outputs.push(output),
+                Processed::Binary(rel) => bins.push(rel),
+            }
+            Ok(())
+        },
+    )?;
+    Ok((outputs, bins))
+}
+
+/// Read at most `text_max_bytes + 1` bytes and classify a single discovered
+/// path. Returning `None` preserves the existing unreadable, oversized, and
+/// binary-file treatment while closing metadata/read TOCTOU gaps.
+pub fn read_text_file_bounded(
+    rel: &str,
+    path: &Path,
+    text_max_bytes: u64,
+) -> Result<Option<TextFile>> {
+    let read_limit = text_max_bytes
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("text input byte limit overflow"))?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let mut bytes = Vec::new();
+    if file.take(read_limit).read_to_end(&mut bytes).is_err() {
+        return Ok(None);
+    }
+    if bytes.len() as u64 > text_max_bytes || looks_binary(&bytes) {
+        return Ok(None);
+    }
+    Ok(Some(TextFile {
+        rel: rel.to_string(),
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+    }))
 }
 
 /// Cheap binary heuristic: NUL byte in first 4 KiB. Exposed so

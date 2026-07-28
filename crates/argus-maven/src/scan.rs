@@ -16,7 +16,7 @@
 use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{read_text_file_bounded, scan_text_file, RuleSession, TextFile};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -40,6 +40,42 @@ pub fn scan_maven_jar_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_maven_jar_with_rules_and_context(
+        jar_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_maven_jar_with_rules_and_context(
+    jar_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
+    let mut budget = argus_rules::ExternalScanBudget::default();
+    scan_maven_jar_with_rules_budget_and_context(
+        jar_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        execution,
+        &mut budget,
+    )
+}
+
+pub(crate) fn scan_maven_jar_with_rules_budget_and_context(
+    jar_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+    external_budget: &mut argus_rules::ExternalScanBudget,
+) -> Result<ArtifactScan> {
     argus_archive::extract_zip(jar_bytes, dest_root, max_extracted_bytes, "jar entry")
         .context("extract jar")?;
 
@@ -51,6 +87,7 @@ pub fn scan_maven_jar_with_rules(
     let mut main_class: Option<String> = None;
     let mut has_launcher_script = false;
 
+    let mut inputs = Vec::new();
     for entry in walkdir::WalkDir::new(dest_root).follow_links(false) {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -63,57 +100,57 @@ pub fn scan_maven_jar_with_rules(
             .to_string_lossy()
             .replace('\\', "/");
 
-        // The presence of an embedded build/launcher script is structurally
-        // unusual for a jar — flag it regardless of whether it is text.
-        if rules::is_embedded_build_script(&rel) {
-            has_launcher_script = true;
-            findings.push(
-                finding(
-                    "maven-embedded-build-script",
-                    Severity::Medium,
-                    format!("jar bundles an embedded build/launcher script `{rel}`"),
-                )
-                .at(rel.clone()),
-            );
-        }
-
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue;
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        // MANIFEST.MF gives Main-Class + Implementation-Title/Version.
-        if rel == "META-INF/MANIFEST.MF" || rel.ends_with("/META-INF/MANIFEST.MF") {
-            let parsed = parse_jar_manifest(&content);
-            if let Some(mc) = parsed.main_class {
-                main_class = Some(mc);
-            }
-            if name.is_none() {
-                name = parsed.implementation_title;
-            }
-            if version.is_none() {
-                version = parsed.implementation_version;
-            }
-            continue;
-        }
-
-        // Ecosystem-agnostic content rules on every text resource.
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
+        inputs.push((rel, abs.to_path_buf()));
     }
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    execution.execute_ordered(
+        &inputs,
+        None,
+        |_index, (rel, abs)| -> Result<(Vec<Finding>, Option<JarManifest>, bool)> {
+            let mut per_file = Vec::new();
+            let has_launcher = rules::is_embedded_build_script(rel);
+            if has_launcher {
+                per_file.push(
+                    finding(
+                        "maven-embedded-build-script",
+                        Severity::Medium,
+                        format!("jar bundles an embedded build/launcher script `{rel}`"),
+                    )
+                    .at(rel.clone()),
+                );
+            }
+            let Some(file) = read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? else {
+                return Ok((per_file, None, has_launcher));
+            };
+            let content = file.content;
+            let manifest =
+                if rel == "META-INF/MANIFEST.MF" || rel.ends_with("/META-INF/MANIFEST.MF") {
+                    Some(parse_jar_manifest(&content))
+                } else {
+                    scan_text_file(
+                        &TextFile {
+                            rel: rel.clone(),
+                            content,
+                        },
+                        &mut per_file,
+                    );
+                    None
+                };
+            Ok((per_file, manifest, has_launcher))
+        },
+        |_index, (mut per_file, manifest, has_launcher)| {
+            has_launcher_script |= has_launcher;
+            if let Some(parsed) = manifest {
+                if let Some(found_main) = parsed.main_class {
+                    main_class = Some(found_main);
+                }
+                name = name.take().or(parsed.implementation_title);
+                version = version.take().or(parsed.implementation_version);
+            }
+            findings.append(&mut per_file);
+            Ok(())
+        },
+    )?;
 
     // Structural meta-finding: an executable jar (Main-Class declared) that
     // also ships a top-level launcher script. Info-only.
@@ -135,7 +172,12 @@ pub fn scan_maven_jar_with_rules(
     ));
 
     rules
-        .scan_directory(dest_root, &mut findings)
+        .scan_directory_with_budget_and_context(
+            dest_root,
+            &mut findings,
+            execution,
+            external_budget,
+        )
         .context("run configured rules on extracted Maven jar")?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);

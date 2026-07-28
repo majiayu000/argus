@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use argus_core::{
-    Decision, Ecosystem, PackageCoordinate, Severity, VulnerabilityQueryStatus,
-    VulnerabilitySourceMode,
+    Decision, Ecosystem, ExecutionContext, PackageCoordinate, ScanConcurrency, Severity,
+    VulnerabilityQueryStatus, VulnerabilitySourceMode,
 };
 use argus_osv::cache::{SecureCache, CACHE_FILE_NAME};
 use argus_osv::client::{OsvTransport, ResponseLimits, TransportResponse};
@@ -335,10 +335,12 @@ fn online_refresh_failure_never_falls_back_or_commits_partial_data() {
         .unwrap();
     let target = root.path().join("cache").join(CACHE_FILE_NAME);
     let before = fs::read(&target).unwrap();
+    let execution = ExecutionContext::new(ScanConcurrency::new(8).unwrap()).unwrap();
     let error = resolver
-        .resolve(
+        .resolve_with_context(
             request(&set, time(10), false, false, 1),
             Some(&MockTransport::failing("timeout")),
+            &execution,
         )
         .unwrap_err();
     assert_eq!(error.kind, OsvErrorKind::Transport);
@@ -347,9 +349,10 @@ fn online_refresh_failure_never_falls_back_or_commits_partial_data() {
     let missing_root = TempRoot::new("missing-failure");
     let missing_resolver = make_resolver(&missing_root);
     assert!(missing_resolver
-        .resolve(
+        .resolve_with_context(
             request(&set, time(10), false, false, 1),
             Some(&MockTransport::failing("DNS")),
+            &execution,
         )
         .is_err());
     assert!(!missing_root

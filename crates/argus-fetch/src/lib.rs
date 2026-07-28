@@ -177,6 +177,17 @@ pub fn fetch_and_scan_with_rules(
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_with_rules_and_context(
+    pkg: &PackageRef,
+    opts: &FetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ScanReport> {
     // Fail closed: the caller explicitly asked for signature verification,
     // so a build that cannot perform it must refuse to scan rather than
     // emit an Info finding and allow ("thought it was verified, it wasn't").
@@ -289,8 +300,9 @@ pub fn fetch_and_scan_with_rules(
     .context("safe-extract tarball")?;
 
     // 7. Scan with existing rules.
-    let mut report = argus_rules::scan_package_dir_with_rules(&pkg_dir, rules)
-        .context("scan extracted package")?;
+    let mut report =
+        argus_rules::scan_package_dir_with_rules_and_context(&pkg_dir, rules, execution)
+            .context("scan extracted package")?;
 
     // 8. Provenance cross-check. We compute the tarball SHA-512 (already
     //    proved equal to `dist.integrity` in step 5), fetch the attestations

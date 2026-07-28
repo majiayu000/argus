@@ -104,15 +104,25 @@ pub fn scan_extracted_module_with_rules(
     module: &ExtractedModule,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_extracted_module_with_rules_and_context(module, rules, &execution)
+}
+
+pub fn scan_extracted_module_with_rules_and_context(
+    module: &ExtractedModule,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     rules
-        .scan_virtual_inputs(
+        .scan_virtual_inputs_with_context(
             module.files.len(),
             module
                 .files
                 .iter()
                 .map(|(zip_name, bytes)| (zip_name.as_str(), bytes.as_slice())),
             &mut findings,
+            execution,
         )
         .context("run configured rules on Go module files")?;
 
@@ -124,38 +134,35 @@ pub fn scan_extracted_module_with_rules(
     let cgo_re = rules::cgo_import_regex();
     let c_sys_re = rules::c_system_regex();
 
-    for (zip_name, bytes) in &module.files {
-        let rel = strip_module_prefix(zip_name);
-        if bytes.len() as u64 > TEXT_MAX_BYTES {
-            continue;
-        }
-        if looks_binary(bytes) {
-            continue; // e.g. `.syso` object blobs — a genuine blind spot.
-        }
-        let content = String::from_utf8_lossy(bytes).into_owned();
+    execution.execute_ordered(
+        &module.files,
+        None,
+        |_index, (zip_name, bytes)| -> Result<Vec<Finding>> {
+            let mut per_file = Vec::new();
+            let rel = strip_module_prefix(zip_name);
+            if bytes.len() as u64 > TEXT_MAX_BYTES || looks_binary(bytes) {
+                return Ok(per_file);
+            }
+            let content = String::from_utf8_lossy(bytes).into_owned();
 
-        // Ecosystem-agnostic content rules first (credential-access,
-        // ai-context-poisoning, runtime-hook, …).
-        scan_text_file(
-            &TextFile {
-                rel: rel.clone(),
-                content: content.clone(),
-            },
-            &mut findings,
-        );
+            scan_text_file(
+                &TextFile {
+                    rel: rel.clone(),
+                    content: content.clone(),
+                },
+                &mut per_file,
+            );
 
-        // The Go-specific trigger surface only applies to `.go` source.
-        if !rel.ends_with(".go") {
-            continue;
-        }
+            if !rel.ends_with(".go") {
+                return Ok(per_file);
+            }
 
-        let has_init = init_re.is_match(&content);
-        let has_var_exec = var_re.is_match(&content);
-        let import_context = has_init || has_var_exec;
+            let has_init = init_re.is_match(&content);
+            let has_var_exec = var_re.is_match(&content);
+            let import_context = has_init || has_var_exec;
 
-        // Structural meta-findings: Info-only, MUST be in INFO_ONLY_RULES.
-        if has_init {
-            findings.push(
+            if has_init {
+                per_file.push(
                 finding(
                     "go-init-function",
                     Severity::Info,
@@ -163,9 +170,9 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
-        if has_var_exec {
-            findings.push(
+            }
+            if has_var_exec {
+                per_file.push(
                 finding(
                     "go-package-var-exec",
                     Severity::Info,
@@ -175,18 +182,15 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
+            }
 
-        let has_exec = rules::detect_exec_call(&content);
-        let has_net = net_re.is_match(&content);
-        let has_env = env_re.is_match(&content);
-        let has_decode = decode_re.is_match(&content);
+            let has_exec = rules::detect_exec_call(&content);
+            let has_net = net_re.is_match(&content);
+            let has_env = env_re.is_match(&content);
+            let has_decode = decode_re.is_match(&content);
 
-        // Dangerous calls only escalate when they co-occur with an
-        // import-time execution context in the SAME file (file-level
-        // proximity heuristic — see rules.rs disclaimer).
-        if import_context && has_exec {
-            findings.push(
+            if import_context && has_exec {
+                per_file.push(
                 finding(
                     "go-init-exec",
                     Severity::Critical,
@@ -194,9 +198,9 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
-        if import_context && has_net {
-            findings.push(
+            }
+            if import_context && has_net {
+                per_file.push(
                 finding(
                     "go-init-network",
                     Severity::Critical,
@@ -204,9 +208,9 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
-        if import_context && has_env && (has_net || has_exec) {
-            findings.push(
+            }
+            if import_context && has_env && (has_net || has_exec) {
+                per_file.push(
                 finding(
                     "go-init-env-exfil",
                     Severity::High,
@@ -214,9 +218,9 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
-        if import_context && has_decode && (has_exec || content.contains("reflect.")) {
-            findings.push(
+            }
+            if import_context && has_decode && (has_exec || content.contains("reflect.")) {
+                per_file.push(
                 finding(
                     "go-obfuscated-payload",
                     Severity::Critical,
@@ -224,11 +228,10 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
+            }
 
-        // cgo with embedded C calling system()/popen() in the preamble.
-        if cgo_re.is_match(&content) && c_sys_re.is_match(&content) {
-            findings.push(
+            if cgo_re.is_match(&content) && c_sys_re.is_match(&content) {
+                per_file.push(
                 finding(
                     "go-cgo-system",
                     Severity::High,
@@ -236,8 +239,14 @@ pub fn scan_extracted_module_with_rules(
                 )
                 .at(rel.clone()),
             );
-        }
-    }
+            }
+            Ok(per_file)
+        },
+        |_index, mut per_file| {
+            findings.append(&mut per_file);
+            Ok(())
+        },
+    )?;
 
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);

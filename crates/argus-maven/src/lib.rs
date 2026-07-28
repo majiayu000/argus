@@ -43,7 +43,10 @@ pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{
     parse_maven_metadata, parse_pom_plugins, resolve_version, MavenMetadata, MavenRef, PomPlugins,
 };
-pub use scan::{parse_jar_manifest, scan_maven_jar, scan_maven_jar_with_rules, JarManifest};
+pub use scan::{
+    parse_jar_manifest, scan_maven_jar, scan_maven_jar_with_rules,
+    scan_maven_jar_with_rules_and_context, JarManifest,
+};
 
 /// Maven Central + its mirrors live under `*.maven.org`. The default
 /// registry host is `repo1.maven.org`; the suffix entry accepts the
@@ -93,6 +96,17 @@ pub fn fetch_and_scan_maven_with_rules(
     opts: &MavenFetchOptions,
     transport: &dyn Transport,
     rules: &argus_rules::RuleSession,
+) -> Result<ScanReport> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    fetch_and_scan_maven_with_rules_and_context(pkg, opts, transport, rules, &execution)
+}
+
+pub fn fetch_and_scan_maven_with_rules_and_context(
+    pkg: &MavenRef,
+    opts: &MavenFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/').to_string();
     let registry_host = host_of(&registry)
@@ -166,8 +180,16 @@ pub fn fetch_and_scan_maven_with_rules(
     let jar_dir = extract_root.path().join("jar");
     std::fs::create_dir_all(&jar_dir).with_context(|| format!("mkdir {}", jar_dir.display()))?;
 
-    let scan = scan_maven_jar_with_rules(&jar_bytes, &jar_dir, opts.max_extracted_bytes, rules)
-        .with_context(|| format!("scan jar {jar_url}"))?;
+    let mut external_budget = argus_rules::ExternalScanBudget::default();
+    let scan = scan::scan_maven_jar_with_rules_budget_and_context(
+        &jar_bytes,
+        &jar_dir,
+        opts.max_extracted_bytes,
+        rules,
+        execution,
+        &mut external_budget,
+    )
+    .with_context(|| format!("scan jar {jar_url}"))?;
 
     let mut all_findings: Vec<Finding> = scan.findings;
     all_findings.extend(integrity_findings);
@@ -183,7 +205,13 @@ pub fn fetch_and_scan_maven_with_rules(
     }) {
         Ok(pom_bytes) => {
             rules
-                .scan_bytes("pom.xml", &pom_bytes, &mut all_findings)
+                .scan_virtual_inputs_with_budget_and_context(
+                    1,
+                    [("pom.xml", pom_bytes.as_slice())],
+                    &mut all_findings,
+                    execution,
+                    &mut external_budget,
+                )
                 .context("run external rules on standalone Maven pom")?;
             let pom_xml = String::from_utf8_lossy(&pom_bytes);
             let plugins =
@@ -370,13 +398,25 @@ impl argus_pipeline::EcosystemFetcher for MavenFetcher {
         transport: &dyn Transport,
         rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = MavenRef::parse(spec)?;
         let opts = MavenFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
             ..MavenFetchOptions::default()
         };
-        fetch_and_scan_maven_with_rules(&pkg, &opts, transport, rules)
+        fetch_and_scan_maven_with_rules_and_context(&pkg, &opts, transport, rules, execution)
     }
 }
 

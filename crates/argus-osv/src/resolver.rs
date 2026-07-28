@@ -3,7 +3,7 @@ use crate::cache::{
 };
 use crate::client::{CompleteSnapshot, OsvClient, OsvTransport};
 use crate::model::{CoordinateQuery, CoordinateSet, NormalizedAdvisory, OsvError, OsvErrorKind};
-use argus_core::VulnerabilitySourceMode;
+use argus_core::{ExecutionContext, VulnerabilitySourceMode};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,15 @@ pub trait AdvisoryResolver {
         request: ResolveRequest<'_>,
         transport: Option<&dyn OsvTransport>,
     ) -> Result<ResolvedSnapshot, OsvError>;
+
+    fn resolve_with_context(
+        &self,
+        request: ResolveRequest<'_>,
+        transport: Option<&dyn OsvTransport>,
+        _execution: &ExecutionContext,
+    ) -> Result<ResolvedSnapshot, OsvError> {
+        self.resolve(request, transport)
+    }
 }
 
 #[derive(Clone)]
@@ -72,9 +81,10 @@ impl OsvResolver {
         refresh: Vec<CoordinateQuery>,
         transport: &dyn OsvTransport,
         now: DateTime<Utc>,
+        execution: &ExecutionContext,
     ) -> Result<(CompleteSnapshot, Vec<CacheEntry>), OsvError> {
         let refresh_set = CoordinateSet::new(refresh, 0)?;
-        let snapshot = OsvClient::new(transport).query(&refresh_set)?;
+        let snapshot = OsvClient::new(transport).query_with_context(&refresh_set, execution)?;
         if snapshot.queries.len() != refresh_set.queries.len() {
             return Err(internal("network snapshot lost a queried coordinate"));
         }
@@ -110,6 +120,21 @@ impl AdvisoryResolver for OsvResolver {
         request: ResolveRequest<'_>,
         transport: Option<&dyn OsvTransport>,
     ) -> Result<ResolvedSnapshot, OsvError> {
+        let execution = ExecutionContext::serial().map_err(|error| {
+            OsvError::new(
+                OsvErrorKind::Internal,
+                format!("construct serial OSV execution context: {error}"),
+            )
+        })?;
+        self.resolve_with_context(request, transport, &execution)
+    }
+
+    fn resolve_with_context(
+        &self,
+        request: ResolveRequest<'_>,
+        transport: Option<&dyn OsvTransport>,
+        execution: &ExecutionContext,
+    ) -> Result<ResolvedSnapshot, OsvError> {
         request.coordinates.validate()?;
         let envelope = self.cache.load_at(&self.cache_dir, request.now)?;
         let lookup = lookup_cache(
@@ -136,7 +161,7 @@ impl AdvisoryResolver for OsvResolver {
                     "online cache refresh requires the fixed OSV transport",
                 )
             })?;
-            let (_, incoming) = self.network_entries(refresh, transport, request.now)?;
+            let (_, incoming) = self.network_entries(refresh, transport, request.now, execution)?;
             let committed = self.cache.commit(&self.cache_dir, incoming, request.now)?;
             for key in &refreshed_keys {
                 let entry = committed

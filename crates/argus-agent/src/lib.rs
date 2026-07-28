@@ -92,7 +92,8 @@ enum CandidateState {
 /// identical to GH-57 behavior.
 pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
     let rules = argus_rules::RuleSession::builtin()?;
-    scan_agent_surface_inner(path, BaselineMode::None, None, &rules)
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_agent_surface_inner(path, BaselineMode::None, None, &rules, &execution)
 }
 
 /// Scan an agent surface, optionally checking or updating an AGT-02 baseline.
@@ -103,7 +104,8 @@ pub fn scan_agent_surface(path: &Path) -> Result<ScanReport> {
 /// other rules still run (no panic, no silent "no drift").
 pub fn scan_agent_surface_with_baseline(path: &Path, mode: BaselineMode) -> Result<ScanReport> {
     let rules = argus_rules::RuleSession::builtin()?;
-    scan_agent_surface_inner(path, mode, None, &rules)
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_agent_surface_inner(path, mode, None, &rules, &execution)
 }
 
 /// Scan an agent surface and run an explicitly supplied semantic judge after
@@ -115,7 +117,8 @@ pub fn scan_agent_surface_with_judge(
     judge: &dyn LlmJudge,
 ) -> Result<ScanReport> {
     let rules = argus_rules::RuleSession::builtin()?;
-    scan_agent_surface_inner(path, mode, Some(judge), &rules)
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_agent_surface_inner(path, mode, Some(judge), &rules, &execution)
 }
 
 /// Scan with optional AGT-04 comparison or approval.
@@ -136,16 +139,35 @@ pub fn scan_agent_surface_with_snapshot_and_rules(
     judge: Option<&dyn LlmJudge>,
     rules: &argus_rules::RuleSession,
 ) -> Result<AgentScanOutcome> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_agent_surface_with_snapshot_and_rules_and_context(
+        path,
+        baseline_mode,
+        snapshot_mode,
+        judge,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_agent_surface_with_snapshot_and_rules_and_context(
+    path: &Path,
+    baseline_mode: BaselineMode<'_>,
+    snapshot_mode: SnapshotMode<'_>,
+    judge: Option<&dyn LlmJudge>,
+    rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<AgentScanOutcome> {
     if matches!(snapshot_mode, SnapshotMode::None) {
-        return scan_agent_surface_inner(path, baseline_mode, judge, rules).map(|report| {
-            AgentScanOutcome {
+        return scan_agent_surface_inner(path, baseline_mode, judge, rules, execution).map(
+            |report| AgentScanOutcome {
                 report,
                 operational_error: None,
                 snapshot_entry_count: None,
-            }
-        });
+            },
+        );
     }
-    scan_snapshot_mode(path, baseline_mode, snapshot_mode, judge, rules)
+    scan_snapshot_mode(path, baseline_mode, snapshot_mode, judge, rules, execution)
 }
 
 fn scan_agent_surface_inner(
@@ -153,6 +175,7 @@ fn scan_agent_surface_inner(
     mode: BaselineMode,
     judge: Option<&dyn LlmJudge>,
     rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<ScanReport> {
     // Exclude the baseline file itself from the scanned tree so it is never
     // self-hashed (product edge case: baseline may live inside the tree).
@@ -163,7 +186,7 @@ fn scan_agent_surface_inner(
     let files = collect_surface_files(path, exclude.as_deref())?;
 
     let mut findings: Vec<Finding> = Vec::new();
-    rule_runtime::scan_files(rules, &files, &mut findings)?;
+    rule_runtime::scan_files_with_context(rules, &files, &mut findings, execution)?;
     injection::run(&files, &mut findings);
     capability::run(&files, &mut findings)?;
     config::run(path, &files, &mut findings);
@@ -216,6 +239,7 @@ fn scan_snapshot_mode(
     snapshot_mode: SnapshotMode<'_>,
     judge: Option<&dyn LlmJudge>,
     rules: &argus_rules::RuleSession,
+    execution: &argus_core::ExecutionContext,
 ) -> Result<AgentScanOutcome> {
     let (context, discovered, canonical_root) = discover_complete(path)?;
     let target = match snapshot_mode {
@@ -240,7 +264,7 @@ fn scan_snapshot_mode(
             excluded.as_deref(),
             baseline_excluded.as_deref(),
         )?;
-        rule_runtime::scan_files(rules, &files, &mut semantic_findings)?;
+        rule_runtime::scan_files_with_context(rules, &files, &mut semantic_findings, execution)?;
         injection::run(&files, &mut semantic_findings);
         capability::run(&files, &mut semantic_findings)?;
         config::run(path, &files, &mut semantic_findings);

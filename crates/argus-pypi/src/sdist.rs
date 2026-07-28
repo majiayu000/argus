@@ -9,7 +9,7 @@ use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
+use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use argus_syntax::{FactKind, ScriptLanguage};
 use std::path::Path;
 
@@ -32,11 +32,53 @@ pub fn scan_sdist_dir_with_rules(
     max_extracted_bytes: u64,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_sdist_dir_with_rules_and_context(
+        tarball_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        &execution,
+    )
+}
+
+pub fn scan_sdist_dir_with_rules_and_context(
+    tarball_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
+    let mut budget = argus_rules::ExternalScanBudget::default();
+    scan_sdist_dir_with_rules_budget_and_context(
+        tarball_bytes,
+        dest_root,
+        max_extracted_bytes,
+        rules,
+        execution,
+        &mut budget,
+    )
+}
+
+pub(crate) fn scan_sdist_dir_with_rules_budget_and_context(
+    tarball_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+    external_budget: &mut argus_rules::ExternalScanBudget,
+) -> Result<ArtifactScan> {
     let pkg_dir = extract_tarball(tarball_bytes, dest_root, max_extracted_bytes)
         .context("safe-extract PyPI sdist")?;
-    let mut scan = scan_extracted_sdist(&pkg_dir)?;
+    let builtin = RuleSession::builtin()?;
+    let mut scan = scan_extracted_sdist_with_rules_and_context(&pkg_dir, &builtin, execution)?;
     rules
-        .scan_directory(dest_root, &mut scan.findings)
+        .scan_directory_with_budget_and_context(
+            dest_root,
+            &mut scan.findings,
+            execution,
+            external_budget,
+        )
         .context("run configured rules on extracted PyPI sdist archive")?;
     rules.validate_external_limits(&scan.findings)?;
     rules.normalize_findings(&mut scan.findings);
@@ -54,6 +96,15 @@ pub fn scan_extracted_sdist_with_rules(
     pkg_dir: &Path,
     rules: &RuleSession,
 ) -> Result<ArtifactScan> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    scan_extracted_sdist_with_rules_and_context(pkg_dir, rules, &execution)
+}
+
+pub fn scan_extracted_sdist_with_rules_and_context(
+    pkg_dir: &Path,
+    rules: &RuleSession,
+    execution: &argus_core::ExecutionContext,
+) -> Result<ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
@@ -61,75 +112,49 @@ pub fn scan_extracted_sdist_with_rules(
     let mut setup_py_seen = false;
     let mut pyproject_seen = false;
 
-    for entry in walkdir::WalkDir::new(pkg_dir).follow_links(false) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(pkg_dir)
-            .unwrap_or(abs)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let meta = entry.metadata()?;
-        if meta.len() > TEXT_MAX_BYTES {
-            continue; // not text, skip
-        }
-        let bytes = match std::fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-        let text = TextFile {
-            rel: rel.clone(),
-            content: content.clone(),
-        };
-
-        // Ecosystem-agnostic content rules first: credential-access,
-        // network-exfiltration, runtime-hook, ai-context-poisoning, …
-        scan_text_file(&text, &mut findings);
-
-        // Per-file PyPI-specific checks.
-        let base = std::path::Path::new(&rel)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if base == "setup.py" {
-            setup_py_seen = true;
-            scan_setup_py(&content, &rel, &mut findings)?;
-        } else if base == "pyproject.toml" {
-            pyproject_seen = true;
-            if let Some((n, v)) = parse_pyproject_name_version(&content) {
-                name = name.or(Some(n));
-                version = version.or(Some(v));
-            }
-        } else if base == "setup.cfg" {
-            if let Some((n, v)) = parse_setupcfg_name_version(&content) {
-                name = name.or(Some(n));
-                version = version.or(Some(v));
-            }
-        } else if base == "PKG-INFO" {
-            if let Some((n, v)) = parse_pkginfo_name_version(&content) {
-                name = name.or(Some(n));
-                version = version.or(Some(v));
-            }
-        } else if rel.ends_with(".py") || rel.ends_with(".pyi") {
-            // Apply `import-time-hook` to any Python source, not just setup.py
-            // — the wheel pattern can leak into sdists too.
-            if rules::import_time_hook_regex().is_match(&content) {
-                findings.push(finding(
+    let (file_results, _) =
+        scan_text_files_with_context(pkg_dir, TEXT_MAX_BYTES, execution, |file| {
+            let mut per_file = Vec::new();
+            scan_text_file(file, &mut per_file);
+            let mut metadata = None;
+            let mut saw_setup = false;
+            let mut saw_pyproject = false;
+            let base = std::path::Path::new(&file.rel)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if base == "setup.py" {
+                saw_setup = true;
+                scan_setup_py(&file.content, &file.rel, &mut per_file)?;
+            } else if base == "pyproject.toml" {
+                saw_pyproject = true;
+                metadata = parse_pyproject_name_version(&file.content);
+            } else if base == "setup.cfg" {
+                metadata = parse_setupcfg_name_version(&file.content);
+            } else if base == "PKG-INFO" {
+                metadata = parse_pkginfo_name_version(&file.content);
+            } else if (file.rel.ends_with(".py") || file.rel.ends_with(".pyi"))
+                && rules::import_time_hook_regex().is_match(&file.content)
+            {
+                per_file.push(finding(
                     "import-time-hook",
                     Severity::Critical,
                     format!(
-                        "Python file `{rel}` rewrites sys.modules or __builtins__ at module load"
+                        "Python file `{}` rewrites sys.modules or __builtins__ at module load",
+                        file.rel
                     ),
                 ));
             }
+            Ok((per_file, metadata, saw_setup, saw_pyproject))
+        })?;
+    for (mut per_file, metadata, saw_setup, saw_pyproject) in file_results {
+        setup_py_seen |= saw_setup;
+        pyproject_seen |= saw_pyproject;
+        if let Some((found_name, found_version)) = metadata {
+            name = name.take().or(Some(found_name));
+            version = version.take().or(Some(found_version));
         }
+        findings.append(&mut per_file);
     }
 
     // sdist with no manifest at all is suspicious in its own right; flag it
@@ -143,7 +168,7 @@ pub fn scan_extracted_sdist_with_rules(
     }
 
     rules
-        .scan_directory(pkg_dir, &mut findings)
+        .scan_directory_with_context(pkg_dir, &mut findings, execution)
         .context("run configured rules on extracted PyPI sdist")?;
     rules.validate_external_limits(&findings)?;
     rules.normalize_findings(&mut findings);

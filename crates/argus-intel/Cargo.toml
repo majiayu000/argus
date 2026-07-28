@@ -10,6 +10,7 @@ description = "Bounded offline malicious-package intelligence import and matchin
 [dependencies]
 argus-core = { workspace = true }
 argus-osv-schema = { workspace = true }
+argus-transport = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
