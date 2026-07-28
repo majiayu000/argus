@@ -43,7 +43,6 @@ pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{
     parse_maven_metadata, parse_pom_plugins, resolve_version, MavenMetadata, MavenRef, PomPlugins,
 };
-pub use rules::POPULAR_MAVEN_ARTIFACTS;
 pub use scan::{parse_jar_manifest, scan_maven_jar, scan_maven_jar_with_rules, JarManifest};
 
 /// Maven Central + its mirrors live under `*.maven.org`. The default
@@ -213,7 +212,13 @@ pub fn fetch_and_scan_maven_with_rules(
     }
 
     // 6. Name-based rules (typosquatting) on the artifactId.
-    rules::push_name_findings(&pkg.artifact, &mut all_findings);
+    let maven_name = format!("{}:{}", pkg.group, pkg.artifact);
+    rules.push_typosquat_findings(
+        Ecosystem::Maven,
+        &maven_name,
+        "Maven coordinate",
+        &mut all_findings,
+    )?;
 
     // 7. Identity. The report's package_name/version MUST reflect the
     //    REQUESTED Maven coordinate (artifactId + resolved version), never the

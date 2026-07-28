@@ -208,8 +208,11 @@ pub(crate) struct RuleArgs {
     /// Explicit trusted directory of versioned external YAML rules (Unix only in v1).
     #[arg(long, value_name = "DIR")]
     rules_dir: Option<PathBuf>,
-    /// Disable a rule or replace its emitted severity. Repeatable.
-    #[arg(long = "rule-override", value_name = "ID=off|severity:LEVEL")]
+    /// Disable a rule, replace its severity, or set one typed detector parameter.
+    #[arg(
+        long = "rule-override",
+        value_name = "ID=off|severity:LEVEL|param:KEY=VALUE"
+    )]
     rule_override: Vec<RuleOverride>,
 }
 

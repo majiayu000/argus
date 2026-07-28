@@ -1,84 +1,22 @@
 //! Name-based rules: typosquatting, dependency confusion, native-build pattern.
 
-use crate::PackageContext;
-use argus_core::{Finding, Severity};
-
-/// Popular npm package names that are common typosquat targets. Kept tiny on
-/// purpose — full reputation data belongs in the registry-intelligence phase.
-///
-/// The crypto / web3 cluster is included because 2025–2026 supply-chain
-/// attacks (galedonovan crypto stealer in 2026-03, chalk/debug wallet
-/// rewriter in 2025-09, @solana/web3.js compromise in 2024-12) all routed
-/// through typosquats of these names. See
-/// `docs/supply-chain-attacks.md`.
-pub const POPULAR_PACKAGES: &[&str] = &[
-    // general
-    "react",
-    "react-dom",
-    "react-native",
-    "lodash",
-    "express",
-    "axios",
-    "vue",
-    "next",
-    "webpack",
-    "eslint",
-    "prettier",
-    "typescript",
-    "tslib",
-    "chalk",
-    "commander",
-    "moment",
-    "request",
-    "rxjs",
-    "uuid",
-    "minimist",
-    "ua-parser-js",
-    "debug",
-    // crypto / web3 (heavy 2025–2026 attack target)
-    "ethers",
-    "web3",
-    "viem",
-    "wagmi",
-    "hardhat",
-    "truffle",
-    "bs58",
-    "ethereumjs-tx",
-    "ethereumjs-util",
-    "secp256k1",
-    "tweetnacl",
-    "elliptic",
-    "bitcoinjs-lib",
-];
+use crate::{PackageContext, RuleSession};
+use anyhow::Result;
+use argus_core::{Ecosystem, Finding, Severity};
 
 /// Substrings that strongly suggest an unscoped, internal-looking package name.
 pub const INTERNAL_HINTS: &[&str] = &["internal", "corp", "company", "private", "intranet"];
 
-pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
+pub fn run(ctx: &PackageContext, rules: &RuleSession, findings: &mut Vec<Finding>) -> Result<()> {
     let name = match ctx.package.name.as_deref() {
         Some(n) if !n.is_empty() => n,
-        _ => return,
+        _ => return Ok(()),
     };
 
-    // typosquatting: edit distance <= 1 against a popular name, and not the
-    // popular name itself.
-    if let Some(target) = closest_within(name, 1) {
-        findings.push(
-            Finding::new(
-                "typosquatting",
-                Severity::High,
-                format!("name `{name}` is one edit away from popular package `{target}`"),
-            )
-            .at("package.json"),
-        );
-        findings.push(
-            Finding::new(
-                "low-reputation",
-                Severity::Medium,
-                format!("typosquat candidate `{name}` has no established reputation"),
-            )
-            .at("package.json"),
-        );
+    let initial_len = findings.len();
+    rules.push_typosquat_findings(Ecosystem::Npm, name, "name", findings)?;
+    for finding in &mut findings[initial_len..] {
+        finding.location = Some("package.json".to_string());
     }
 
     // dependency-confusion: unscoped, internal-looking name on a public-registry
@@ -114,52 +52,7 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) {
             .at("package.json"),
         );
     }
-}
-
-/// Shared typosquat detector used by every ecosystem crate: `name` within
-/// edit distance 1 of a `dictionary` entry (and not an exact entry) yields
-/// the `typosquatting` + `low-reputation` pair. Comparison is
-/// case-insensitive on both sides — this unifies three drifted variants
-/// (#132): pre-lowered dictionaries, `eq_ignore_ascii_case`, and per-entry
-/// lowering all collapse to the same semantics. `label` names the
-/// ecosystem's identifier kind in the message (for example "PyPI name").
-pub fn push_typosquat_findings(
-    name: &str,
-    dictionary: &[&str],
-    label: &str,
-    findings: &mut Vec<Finding>,
-) {
-    let lower = name.to_ascii_lowercase();
-    if dictionary.iter().any(|p| p.eq_ignore_ascii_case(&lower)) {
-        return; // exact popular name: legitimate package
-    }
-    if let Some(target) = dictionary
-        .iter()
-        .copied()
-        .find(|p| levenshtein(&lower, &p.to_ascii_lowercase()) <= 1)
-    {
-        findings.push(Finding::new(
-            "typosquatting",
-            Severity::High,
-            format!("{label} `{name}` is one edit away from popular package `{target}`"),
-        ));
-        findings.push(Finding::new(
-            "low-reputation",
-            Severity::Medium,
-            format!("typosquat candidate `{name}` has no established reputation"),
-        ));
-    }
-}
-
-fn closest_within(name: &str, max_distance: usize) -> Option<&'static str> {
-    let name_l = name.to_ascii_lowercase();
-    if POPULAR_PACKAGES.iter().any(|p| *p == name_l) {
-        return None;
-    }
-    POPULAR_PACKAGES
-        .iter()
-        .copied()
-        .find(|p| levenshtein(&name_l, p) <= max_distance)
+    Ok(())
 }
 
 fn is_dep_confusion(name: &str) -> bool {
@@ -181,50 +74,9 @@ fn has_platform_optdeps(ctx: &PackageContext) -> bool {
     })
 }
 
-/// Iterative Levenshtein distance. Inputs are short package names, so the
-/// O(n*m) table is fine. Exposed publicly so per-ecosystem crates
-/// (`argus-pypi`, future `argus-crates`) can reuse it for their own
-/// typosquat dictionaries without duplicating the algorithm.
-pub fn levenshtein(a: &str, b: &str) -> usize {
-    if a == b {
-        return 0;
-    }
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let (n, m) = (a.len(), b.len());
-    if n == 0 {
-        return m;
-    }
-    if m == 0 {
-        return n;
-    }
-    let mut prev: Vec<usize> = (0..=m).collect();
-    let mut curr: Vec<usize> = vec![0; m + 1];
-    for i in 1..=n {
-        curr[0] = i;
-        for j in 1..=m {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[m]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn typosquat_react_domm() {
-        assert_eq!(levenshtein("react-domm", "react-dom"), 1);
-        assert_eq!(closest_within("react-domm", 1), Some("react-dom"));
-    }
-
-    #[test]
-    fn popular_name_itself_is_not_typosquat() {
-        assert_eq!(closest_within("react", 1), None);
-    }
 
     #[test]
     fn internal_unscoped_name_is_dep_confusion() {

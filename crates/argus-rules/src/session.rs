@@ -2,19 +2,25 @@
 
 use anyhow::{bail, Context, Result};
 use argus_core::rules::{
-    builtin_catalog, DefaultSeverity, EffectiveRuleSet, RuleLanguage, RuleMatcher, RuleOverride,
-    RuleOverrideAction,
+    builtin_catalog, DefaultSeverity, EffectiveRuleSet, NpmRapidPublishParameters,
+    NpmVersionShapeParameters, RuleLanguage, RuleMatcher, RuleOverride, RuleOverrideAction,
+    RuleParameters, TyposquatParameters,
 };
 #[cfg(unix)]
 use argus_core::rules::{CatalogOrigin, RuleCatalog};
-use argus_core::{ExternalRuleMetadata, Finding, RuleExecutionMetadata, ScanReport, Severity};
+use argus_core::{
+    ExternalRuleMetadata, Finding, RuleDataMetadata, RuleExecutionMetadata, ScanReport, Severity,
+};
 use argus_syntax::ScriptLanguage;
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
+
+mod typosquat;
 
 pub const MAX_RULE_FILES: usize = 1_024;
 pub const MAX_RULE_FILE_BYTES: usize = 1024 * 1024;
@@ -51,6 +57,8 @@ impl RuleSession {
     }
 
     pub fn load_typed(rules_dir: Option<&Path>, overrides: Vec<RuleOverride>) -> Result<Self> {
+        let data_audit =
+            crate::typosquat::asset_audit().context("validate embedded typosquat assets")?;
         let mut catalog = builtin_catalog()
             .context("validate embedded rule catalog")?
             .clone();
@@ -90,8 +98,9 @@ impl RuleSession {
             })
             .collect::<Vec<_>>();
         let external_rule_count = external_rules.len();
+        let digest = effective_digest_with_data(effective.digest().as_bytes(), &data_audit.assets);
         let metadata = configured.then(|| RuleExecutionMetadata {
-            digest: effective.digest().to_hex(),
+            digest,
             loaded_external_files,
             external_rule_count,
             disabled_rule_ids: effective
@@ -102,12 +111,36 @@ impl RuleSession {
             applied_overrides: effective
                 .applied_overrides()
                 .iter()
+                .filter(|rule_override| {
+                    !matches!(rule_override.action, RuleOverrideAction::Parameter(_))
+                })
                 .map(|rule_override| {
                     format!(
                         "{}={}",
                         rule_override.id,
                         override_action_name(rule_override.action)
                     )
+                })
+                .collect(),
+            parameter_overrides: effective
+                .applied_overrides()
+                .iter()
+                .filter_map(|rule_override| match rule_override.action {
+                    RuleOverrideAction::Parameter(parameter) => Some(format!(
+                        "{}=param:{}",
+                        rule_override.id,
+                        parameter_override_name(parameter)
+                    )),
+                    RuleOverrideAction::Off | RuleOverrideAction::Severity(_) => None,
+                })
+                .collect(),
+            data: data_audit
+                .assets
+                .iter()
+                .map(|asset| RuleDataMetadata {
+                    id: asset.id.clone(),
+                    version: asset.version.clone(),
+                    sha256: asset.sha256.clone(),
                 })
                 .collect(),
             external_rules,
@@ -379,6 +412,34 @@ impl RuleSession {
 
     pub fn rule_enabled(&self, id: &str) -> bool {
         self.effective.rule(id).is_none_or(|rule| rule.enabled())
+    }
+
+    pub fn typosquat_parameters(&self) -> Result<TyposquatParameters> {
+        match self.parameters("typosquatting")? {
+            RuleParameters::Typosquat(parameters) => Ok(*parameters),
+            _ => bail!("built-in typosquatting rule has the wrong parameter type"),
+        }
+    }
+
+    pub fn npm_version_shape_parameters(&self) -> Result<NpmVersionShapeParameters> {
+        match self.parameters("version-shape-anomaly")? {
+            RuleParameters::NpmVersionShape(parameters) => Ok(*parameters),
+            _ => bail!("built-in version-shape-anomaly rule has the wrong parameter type"),
+        }
+    }
+
+    pub fn npm_rapid_publish_parameters(&self) -> Result<NpmRapidPublishParameters> {
+        match self.parameters("rapid-publish-window")? {
+            RuleParameters::NpmRapidPublish(parameters) => Ok(*parameters),
+            _ => bail!("built-in rapid-publish-window rule has the wrong parameter type"),
+        }
+    }
+
+    fn parameters(&self, id: &str) -> Result<&RuleParameters> {
+        self.effective
+            .rule(id)
+            .map(|rule| rule.parameters())
+            .ok_or_else(|| anyhow::anyhow!("embedded rule catalog is missing `{id}`"))
     }
 }
 
@@ -658,15 +719,57 @@ fn has_relevant_language(session: &RuleSession, rel: &str) -> bool {
     })
 }
 
-fn override_action_name(action: RuleOverrideAction) -> &'static str {
+fn override_action_name(action: RuleOverrideAction) -> String {
     match action {
-        RuleOverrideAction::Off => "off",
-        RuleOverrideAction::Severity(Severity::Critical) => "severity:critical",
-        RuleOverrideAction::Severity(Severity::High) => "severity:high",
-        RuleOverrideAction::Severity(Severity::Medium) => "severity:medium",
-        RuleOverrideAction::Severity(Severity::Low) => "severity:low",
-        RuleOverrideAction::Severity(Severity::Info) => "severity:info",
+        RuleOverrideAction::Off => "off".to_string(),
+        RuleOverrideAction::Severity(Severity::Critical) => "severity:critical".to_string(),
+        RuleOverrideAction::Severity(Severity::High) => "severity:high".to_string(),
+        RuleOverrideAction::Severity(Severity::Medium) => "severity:medium".to_string(),
+        RuleOverrideAction::Severity(Severity::Low) => "severity:low".to_string(),
+        RuleOverrideAction::Severity(Severity::Info) => "severity:info".to_string(),
+        RuleOverrideAction::Parameter(parameter) => {
+            format!("param:{}", parameter_override_name(parameter))
+        }
     }
+}
+
+fn parameter_override_name(parameter: argus_core::rules::RuleParameterOverride) -> String {
+    use argus_core::rules::RuleParameterOverride::*;
+    match parameter {
+        MaxEditDistance(value) => format!("max_edit_distance={value}"),
+        MinLengthForDistanceTwo(value) => format!("min_length_for_distance_two={value}"),
+        EditDistanceEnabled(value) => format!("edit_distance_enabled={value}"),
+        KeyboardEnabled(value) => format!("keyboard_enabled={value}"),
+        UnicodeConfusablesEnabled(value) => {
+            format!("unicode_confusables_enabled={value}")
+        }
+        MinimumPredecessors(value) => format!("minimum_predecessors={value}"),
+        BaselineTransitions(value) => format!("baseline_transitions={value}"),
+        MinimumHistoryDays(value) => format!("minimum_history_days={value}"),
+        MaximumJumpDelayHours(value) => format!("maximum_jump_delay_hours={value}"),
+        MajorJumpThreshold(value) => format!("major_jump_threshold={value}"),
+        MinorJumpThreshold(value) => format!("minor_jump_threshold={value}"),
+        WindowHours(value) => format!("window_hours={value}"),
+        PackageThreshold(value) => format!("package_threshold={value}"),
+    }
+}
+
+fn effective_digest_with_data(
+    effective_digest: &[u8; 32],
+    assets: &[crate::typosquat::AssetAudit],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"argus-effective-ruleset-with-data-v1");
+    hasher.update(effective_digest);
+    for asset in assets {
+        hasher.update((asset.id.len() as u64).to_be_bytes());
+        hasher.update(asset.id.as_bytes());
+        hasher.update((asset.version.len() as u64).to_be_bytes());
+        hasher.update(asset.version.as_bytes());
+        hasher.update((asset.sha256.len() as u64).to_be_bytes());
+        hasher.update(asset.sha256.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

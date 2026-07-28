@@ -11,74 +11,10 @@
 //! `postinstall`. The regex SHAPES mirror `argus-pypi::rules`, translated to
 //! Ruby idioms.
 
+#[cfg(test)]
 use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// Ruby gems that are common typosquat targets. Mirrors the hand-curated
-/// approach in `argus-pypi::POPULAR_PYTHON_PACKAGES`, drawn from RubyGems
-/// download stats + recent attack reports.
-pub const POPULAR_RUBY_GEMS: &[&str] = &[
-    // framework + web
-    "rails",
-    "railties",
-    "activesupport",
-    "activerecord",
-    "actionpack",
-    "actionview",
-    "activemodel",
-    "activejob",
-    "actionmailer",
-    "actioncable",
-    "sinatra",
-    "rack",
-    "puma",
-    "unicorn",
-    "thin",
-    // common libraries
-    "nokogiri",
-    "json",
-    "rake",
-    "bundler",
-    "rspec",
-    "minitest",
-    "faraday",
-    "httparty",
-    "rest-client",
-    "typhoeus",
-    "concurrent-ruby",
-    "i18n",
-    "tzinfo",
-    "builder",
-    "multi_json",
-    "ffi",
-    "mime-types",
-    "addressable",
-    // db / infra
-    "pg",
-    "mysql2",
-    "sqlite3",
-    "redis",
-    "sidekiq",
-    "dalli",
-    "sequel",
-    "mongo",
-    // dev tools
-    "pry",
-    "rubocop",
-    "simplecov",
-    "factory_bot",
-    "capybara",
-    "webmock",
-    "vcr",
-    "dotenv",
-    // cloud / auth
-    "aws-sdk-core",
-    "devise",
-    "omniauth",
-    "jwt",
-    "oauth2",
-];
 
 /// Build-time subprocess / shell invocation from an `extconf.rb` (or any
 /// `ext/` file). Ruby has several spawn idioms; this regex covers the common
@@ -185,8 +121,14 @@ pub fn env_bulk_read_regex() -> &'static Regex {
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Mirrors `argus-pypi::push_name_findings`.
-pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(name, POPULAR_RUBY_GEMS, "RubyGems name", findings);
+#[cfg(test)]
+pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::RubyGems,
+        name,
+        "RubyGems name",
+        findings,
+    )
 }
 
 #[cfg(test)]
@@ -289,7 +231,7 @@ mod tests {
     #[test]
     fn typosquat_nokogir_fires() {
         let mut f = Vec::new();
-        push_name_findings("nokogir", &mut f);
+        push_name_findings("nokogir", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
         assert!(rules.contains(&"low-reputation"), "got: {rules:?}");
@@ -298,7 +240,7 @@ mod tests {
     #[test]
     fn legitimate_gem_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("rails", &mut f);
+        push_name_findings("rails", &mut f).unwrap();
         assert!(f.is_empty());
     }
 }

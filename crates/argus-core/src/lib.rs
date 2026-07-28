@@ -548,6 +548,14 @@ pub struct ExternalRuleMetadata {
     pub severity: Severity,
 }
 
+/// Versioned embedded data participating in an effective rule configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleDataMetadata {
+    pub id: String,
+    pub version: String,
+    pub sha256: String,
+}
+
 /// Effective rule configuration attached only when the caller explicitly
 /// supplies a rules directory or override.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,6 +565,10 @@ pub struct RuleExecutionMetadata {
     pub external_rule_count: usize,
     pub disabled_rule_ids: Vec<String>,
     pub applied_overrides: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_overrides: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<RuleDataMetadata>,
     pub external_rules: Vec<ExternalRuleMetadata>,
 }
 

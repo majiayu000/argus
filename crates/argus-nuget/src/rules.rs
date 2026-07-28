@@ -17,49 +17,10 @@
 //! DLLs under `lib/`, which argus treats as binary and does NOT decompile.
 //! See the crate docs for that blind-spot disclosure.
 
+#[cfg(test)]
 use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// NuGet packages that are common typosquat targets. Drawn from
-/// nuget.org download statistics + recent attack reports.
-pub const POPULAR_NUGET_PACKAGES: &[&str] = &[
-    "Newtonsoft.Json",
-    "Serilog",
-    "AutoMapper",
-    "Polly",
-    "Dapper",
-    "Moq",
-    "xunit",
-    "NUnit",
-    "FluentAssertions",
-    "Castle.Core",
-    "MediatR",
-    "FluentValidation",
-    "Microsoft.Extensions.Logging",
-    "Microsoft.Extensions.DependencyInjection",
-    "Microsoft.Extensions.Configuration",
-    "Microsoft.EntityFrameworkCore",
-    "Swashbuckle.AspNetCore",
-    "System.Text.Json",
-    "RestSharp",
-    "NLog",
-    "log4net",
-    "EntityFramework",
-    "Humanizer",
-    "Bogus",
-    "CsvHelper",
-    "MailKit",
-    "BouncyCastle",
-    "protobuf-net",
-    "StackExchange.Redis",
-    "AWSSDK.Core",
-    "Azure.Storage.Blobs",
-    "Google.Protobuf",
-    "Grpc.Net.Client",
-    "Microsoft.AspNetCore.Mvc",
-    "SkiaSharp",
-];
 
 /// PowerShell content that downloads + executes code at install time. This
 /// is the highest-concern signal: a `.ps1` install hook that pulls a remote
@@ -136,8 +97,14 @@ pub fn msbuild_inline_task_regex() -> &'static Regex {
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Matches the pypi/crates shape.
-pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(name, POPULAR_NUGET_PACKAGES, "NuGet id", findings);
+#[cfg(test)]
+pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::NuGet,
+        name,
+        "NuGet id",
+        findings,
+    )
 }
 
 #[cfg(test)]
@@ -199,7 +166,7 @@ mod tests {
         // `Newtonsift.Json` is exactly one substitution (o→i) from the
         // popular `Newtonsoft.Json` (Levenshtein distance 1).
         let mut f = Vec::new();
-        push_name_findings("Newtonsift.Json", &mut f);
+        push_name_findings("Newtonsift.Json", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
         assert!(rules.contains(&"low-reputation"), "got: {rules:?}");
@@ -208,7 +175,7 @@ mod tests {
     #[test]
     fn legitimate_name_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("Newtonsoft.Json", &mut f);
+        push_name_findings("Newtonsoft.Json", &mut f).unwrap();
         assert!(f.is_empty());
     }
 }

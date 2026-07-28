@@ -55,7 +55,10 @@ pub(crate) struct VulnsCommonArgs {
     #[arg(long, value_enum, default_value_t = crate::Format::Text)]
     pub(crate) format: crate::Format,
     /// Disable a registered vulnerability rule or replace emitted severity.
-    #[arg(long = "rule-override", value_name = "ID=off|severity:LEVEL")]
+    #[arg(
+        long = "rule-override",
+        value_name = "ID=off|severity:LEVEL|param:KEY=VALUE"
+    )]
     pub(crate) rule_override: Vec<RuleOverride>,
 }
 

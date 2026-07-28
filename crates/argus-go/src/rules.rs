@@ -23,40 +23,10 @@
 //! particular is a heuristic that can mis-fire. A real implementation
 //! would eventually want an AST pass; v1 does not have one.
 
+#[cfg(test)]
 use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// Popular Go modules that are common typosquat targets. Drawn from Go
-/// module download stats + the wider Go SDK ecosystem.
-pub const POPULAR_GO_MODULES: &[&str] = &[
-    "github.com/sirupsen/logrus",
-    "github.com/gin-gonic/gin",
-    "github.com/gorilla/mux",
-    "github.com/stretchr/testify",
-    "github.com/spf13/cobra",
-    "github.com/spf13/viper",
-    "github.com/pkg/errors",
-    "github.com/aws/aws-sdk-go-v2",
-    "github.com/aws/aws-sdk-go",
-    "k8s.io/client-go",
-    "github.com/stripe/stripe-go",
-    "github.com/prometheus/client_golang",
-    "google.golang.org/grpc",
-    "google.golang.org/protobuf",
-    "github.com/golang/protobuf",
-    "go.uber.org/zap",
-    "github.com/google/uuid",
-    "github.com/json-iterator/go",
-    "github.com/go-redis/redis",
-    "github.com/lib/pq",
-    "gorm.io/gorm",
-    "github.com/labstack/echo",
-    "github.com/gofiber/fiber",
-    "golang.org/x/crypto",
-    "golang.org/x/net",
-    "golang.org/x/sync",
-];
 
 /// `func init()` declaration at top level. Structural meta-finding.
 pub fn init_func_regex() -> &'static Regex {
@@ -216,8 +186,14 @@ pub fn detect_exec_call(content: &str) -> bool {
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list. Mirrors `argus_pypi::rules::push_name_findings`.
-pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(name, POPULAR_GO_MODULES, "Go module", findings);
+#[cfg(test)]
+pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::Go,
+        name,
+        "Go module",
+        findings,
+    )
 }
 
 #[cfg(test)]
@@ -321,7 +297,7 @@ mod tests {
     #[test]
     fn typosquat_logruss() {
         let mut f = Vec::new();
-        push_name_findings("github.com/sirupsen/logruss", &mut f);
+        push_name_findings("github.com/sirupsen/logruss", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
         assert!(rules.contains(&"low-reputation"), "got: {rules:?}");
@@ -330,7 +306,7 @@ mod tests {
     #[test]
     fn legitimate_module_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("github.com/sirupsen/logrus", &mut f);
+        push_name_findings("github.com/sirupsen/logrus", &mut f).unwrap();
         assert!(f.is_empty());
     }
 }

@@ -388,5 +388,85 @@ fn symlink_root_and_internal_file_are_allowed_but_escapes_fail() {
     assert!(RuleSession::load(Some(&real), &[]).is_err());
 }
 
+#[test]
+fn typed_typosquat_parameters_drive_matching_and_audit_metadata() {
+    let default = RuleSession::builtin().unwrap();
+    let mut findings = Vec::new();
+    default
+        .push_typosquat_findings(
+            argus_core::Ecosystem::Npm,
+            "react-dxx",
+            "npm name",
+            &mut findings,
+        )
+        .unwrap();
+    assert!(findings.is_empty());
+
+    let configured = RuleSession::load(
+        None,
+        &["typosquatting=param:max_edit_distance=2".to_string()],
+    )
+    .unwrap();
+    configured
+        .push_typosquat_findings(
+            argus_core::Ecosystem::Npm,
+            "react-dxx",
+            "npm name",
+            &mut findings,
+        )
+        .unwrap();
+    assert_eq!(findings[0].rule_id, "typosquatting");
+    let metadata = configured.metadata().expect("explicit override is audited");
+    assert_eq!(
+        metadata.parameter_overrides,
+        ["typosquatting=param:max_edit_distance=2"]
+    );
+    assert_eq!(metadata.data.len(), 10);
+    assert!(metadata.data.iter().all(|asset| asset.sha256.len() == 64));
+}
+
+#[test]
+fn typosquat_and_low_reputation_switches_are_independent() {
+    for (overrides, expected_rule_ids) in [
+        (
+            Vec::<String>::new(),
+            vec!["typosquatting", "low-reputation"],
+        ),
+        (
+            vec!["typosquatting=off".to_string()],
+            vec!["low-reputation"],
+        ),
+        (
+            vec!["low-reputation=off".to_string()],
+            vec!["typosquatting"],
+        ),
+        (
+            vec![
+                "typosquatting=off".to_string(),
+                "low-reputation=off".to_string(),
+            ],
+            Vec::<&str>::new(),
+        ),
+    ] {
+        let session = RuleSession::load(None, &overrides).unwrap();
+        let mut findings = Vec::new();
+        session
+            .push_typosquat_findings(
+                argus_core::Ecosystem::Npm,
+                "reactt",
+                "npm name",
+                &mut findings,
+            )
+            .unwrap();
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            expected_rule_ids
+        );
+    }
+}
+
 mod matcher_matrix;
 mod resource_limits;

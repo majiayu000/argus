@@ -33,7 +33,6 @@ mod scan;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, GemVersion, ResolvedVersion};
-pub use rules::POPULAR_RUBY_GEMS;
 pub use scan::{
     parse_gemspec_extensions, parse_gemspec_name_version, read_gem_member, scan_gem,
     scan_gem_with_rules,
@@ -183,7 +182,12 @@ pub fn fetch_and_scan_gems_with_rules(
     let mut all_findings: Vec<Finding> = scanned.findings;
 
     // 6. Name-based rules (typosquatting) on the gem name itself.
-    rules::push_name_findings(&pkg.name, &mut all_findings);
+    rules.push_typosquat_findings(
+        Ecosystem::RubyGems,
+        &pkg.name,
+        "RubyGems name",
+        &mut all_findings,
+    )?;
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 

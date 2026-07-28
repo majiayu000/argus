@@ -24,7 +24,6 @@ mod scan;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, CrateVersion, CratesPackument};
-pub use rules::POPULAR_CRATES;
 pub use scan::{
     scan_crate_archive, scan_crate_archive_with_rules, scan_extracted_crate,
     scan_extracted_crate_with_rules,
@@ -189,7 +188,12 @@ pub fn fetch_and_scan_crate_with_rules(
     .context("scan extracted .crate")?;
 
     // Name-based rules apply to the user-supplied package name.
-    rules::push_name_findings(&pkg.name, &mut report.findings);
+    rules.push_typosquat_findings(
+        Ecosystem::CratesIo,
+        &pkg.name,
+        "crate name",
+        &mut report.findings,
+    )?;
 
     report.decision = argus_rules::derive_decision_from_findings(&report.findings);
     // Registry coordinate, never the random extraction TempDir: the path

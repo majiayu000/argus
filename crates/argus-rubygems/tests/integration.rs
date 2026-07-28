@@ -554,3 +554,59 @@ fn rubygems_external_rule_matches_and_can_be_disabled() {
         vec![format!("{EXTERNAL_RULE_ID}=off")]
     );
 }
+
+#[test]
+fn rubygems_fetch_reports_typosquat_and_preserves_rule_independence() {
+    let fixture = || {
+        make_gem(
+            &gemspec("bundelr", "1.0.0", "extensions: []\n"),
+            &[("lib/bundelr.rb", b"module Bundelr; end\n")],
+        )
+    };
+
+    for (overrides, expected, expected_decision) in [
+        (
+            Vec::<String>::new(),
+            vec![
+                ("typosquatting", Severity::High),
+                ("low-reputation", Severity::Medium),
+            ],
+            Decision::Block,
+        ),
+        (
+            vec!["typosquatting=off".to_string()],
+            vec![("low-reputation", Severity::Medium)],
+            Decision::Block,
+        ),
+        (
+            vec!["low-reputation=off".to_string()],
+            vec![("typosquatting", Severity::High)],
+            Decision::Block,
+        ),
+        (
+            vec![
+                "typosquatting=off".to_string(),
+                "low-reputation=off".to_string(),
+            ],
+            Vec::new(),
+            Decision::Allow,
+        ),
+    ] {
+        let session = RuleSession::load(None, &overrides).unwrap();
+        let report = scan_gem_fixture_with_rules("bundelr", "1.0.0", fixture(), &session).unwrap();
+        let relevant = report
+            .findings
+            .iter()
+            .filter(|finding| {
+                matches!(finding.rule_id.as_str(), "typosquatting" | "low-reputation")
+            })
+            .map(|finding| (finding.rule_id.as_str(), finding.severity))
+            .collect::<Vec<_>>();
+        assert_eq!(relevant, expected, "overrides: {overrides:?}");
+        assert_eq!(
+            report.decision, expected_decision,
+            "overrides: {overrides:?}"
+        );
+        assert_eq!(report.rules.as_ref(), session.metadata());
+    }
+}

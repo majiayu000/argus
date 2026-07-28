@@ -5,74 +5,6 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
-// Popular Composer packages — typosquat target list
-// ---------------------------------------------------------------------------
-
-/// Well-known Composer packages. Drawn from Packagist download stats and
-/// known attack targets.
-pub const POPULAR_COMPOSER_PACKAGES: &[&str] = &[
-    // HTTP clients
-    "guzzlehttp/guzzle",
-    "guzzlehttp/promises",
-    "guzzlehttp/psr7",
-    // Symfony
-    "symfony/console",
-    "symfony/http-foundation",
-    "symfony/http-kernel",
-    "symfony/routing",
-    "symfony/event-dispatcher",
-    "symfony/dependency-injection",
-    "symfony/finder",
-    "symfony/process",
-    "symfony/yaml",
-    "symfony/dotenv",
-    "symfony/mailer",
-    "symfony/security-core",
-    "symfony/var-dumper",
-    // Laravel / Illuminate
-    "illuminate/support",
-    "illuminate/container",
-    "illuminate/database",
-    "illuminate/http",
-    "illuminate/routing",
-    "laravel/framework",
-    // PSR / PHP-FIG
-    "psr/log",
-    "psr/cache",
-    "psr/container",
-    "psr/http-message",
-    "psr/http-client",
-    // Testing
-    "phpunit/phpunit",
-    "mockery/mockery",
-    "fakerphp/faker",
-    // Doctrine
-    "doctrine/orm",
-    "doctrine/dbal",
-    "doctrine/inflector",
-    "doctrine/collections",
-    // Logging
-    "monolog/monolog",
-    // Misc
-    "vlucas/phpdotenv",
-    "nesbot/carbon",
-    "ramsey/uuid",
-    "league/flysystem",
-    "league/oauth2-server",
-    "predis/predis",
-    "aws/aws-sdk-php",
-    "stripe/stripe-php",
-    "twilio/sdk",
-    "google/apiclient",
-    "phpmailer/phpmailer",
-    "swiftmailer/swiftmailer",
-    "intervention/image",
-    "barryvdh/laravel-debugbar",
-    "spatie/laravel-permission",
-    "composer/composer",
-    "composer/semver",
-];
-
 // ---------------------------------------------------------------------------
 // PHP-specific regex patterns
 // ---------------------------------------------------------------------------
@@ -210,13 +142,14 @@ pub fn script_shell_exec_regex() -> &'static Regex {
 
 /// Push typosquatting + low-reputation findings when `full_name` is one
 /// Levenshtein edit away from a popular Composer package.
-pub fn push_name_findings(full_name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(
+#[cfg(test)]
+pub fn push_name_findings(full_name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::Packagist,
         full_name,
-        POPULAR_COMPOSER_PACKAGES,
         "Composer package",
         findings,
-    );
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +314,7 @@ mod tests {
     fn push_name_typosquat() {
         let mut findings = Vec::new();
         // "monlog/monolog" is 1 edit from "monolog/monolog"
-        push_name_findings("monlog/monolog", &mut findings);
+        push_name_findings("monlog/monolog", &mut findings).unwrap();
         let ids: Vec<_> = findings.iter().map(|f| f.rule_id.as_str()).collect();
         assert!(ids.contains(&"typosquatting"), "got: {ids:?}");
         assert!(ids.contains(&"low-reputation"), "got: {ids:?}");
@@ -390,7 +323,7 @@ mod tests {
     #[test]
     fn push_name_exact_match_no_findings() {
         let mut findings = Vec::new();
-        push_name_findings("monolog/monolog", &mut findings);
+        push_name_findings("monolog/monolog", &mut findings).unwrap();
         assert!(findings.is_empty());
     }
 

@@ -46,7 +46,6 @@ pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{
     normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };
-pub use rules::POPULAR_NUGET_PACKAGES;
 pub use scan::{
     scan_extracted_nupkg, scan_extracted_nupkg_with_rules, scan_nuget_archive,
     scan_nuget_archive_with_rules, NupkgScan,
@@ -230,7 +229,7 @@ pub fn fetch_and_scan_nuget_with_rules(
     findings.extend(scan.findings);
 
     // 7. Name-based rules on the user-supplied id.
-    rules::push_name_findings(&pkg.name, &mut findings);
+    rules.push_typosquat_findings(Ecosystem::NuGet, &pkg.name, "NuGet id", &mut findings)?;
 
     let decision = argus_rules::derive_decision_from_findings(&findings);
 

@@ -6,87 +6,10 @@
 //! apply by calling `argus_rules::scan_text_file` on every Python file
 //! we extract.
 
+#[cfg(test)]
 use argus_core::Finding;
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// Python packages that are common typosquat targets. Mirrors the
-/// hand-curated cluster in `argus-rules::name::POPULAR_PACKAGES` but
-/// drawn from PyPI download statistics + recent attack reports.
-pub const POPULAR_PYTHON_PACKAGES: &[&str] = &[
-    // top by downloads
-    "requests",
-    "urllib3",
-    "boto3",
-    "botocore",
-    "setuptools",
-    "pip",
-    "wheel",
-    "six",
-    "certifi",
-    "idna",
-    "charset-normalizer",
-    "typing-extensions",
-    "packaging",
-    "click",
-    "pyyaml",
-    "jinja2",
-    "markupsafe",
-    "cryptography",
-    "cffi",
-    "pycparser",
-    "rsa",
-    "pyasn1",
-    "attrs",
-    // data / ML
-    "numpy",
-    "pandas",
-    "scipy",
-    "matplotlib",
-    "scikit-learn",
-    "torch",
-    "tensorflow",
-    "keras",
-    "transformers",
-    "huggingface-hub",
-    "datasets",
-    "tokenizers",
-    "pillow",
-    "opencv-python",
-    "openai",
-    "anthropic",
-    "litellm",
-    "mistralai",
-    // web frameworks
-    "django",
-    "flask",
-    "fastapi",
-    "starlette",
-    "uvicorn",
-    "gunicorn",
-    "werkzeug",
-    "aiohttp",
-    "httpx",
-    // db / infra
-    "sqlalchemy",
-    "psycopg2",
-    "psycopg2-binary",
-    "pymongo",
-    "redis",
-    "celery",
-    "kombu",
-    // dev tools
-    "pytest",
-    "mock",
-    "tox",
-    "coverage",
-    "flake8",
-    "pylint",
-    "black",
-    "isort",
-    "mypy",
-    "ruff",
-];
 
 /// Top-level `sys.modules[...] = ...` or `__builtins__.X = ...` rewrite,
 /// which is how a wheel can hijack downstream imports.
@@ -108,8 +31,14 @@ pub fn import_time_hook_regex() -> &'static Regex {
 
 /// Push name-based findings (typosquatting + low-reputation) onto the
 /// running findings list.
-pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) {
-    argus_rules::push_typosquat_findings(name, POPULAR_PYTHON_PACKAGES, "PyPI name", findings);
+#[cfg(test)]
+pub fn push_name_findings(name: &str, findings: &mut Vec<Finding>) -> anyhow::Result<()> {
+    argus_rules::RuleSession::builtin()?.push_typosquat_findings(
+        argus_core::Ecosystem::PyPi,
+        name,
+        "PyPI name",
+        findings,
+    )
 }
 
 #[cfg(test)]
@@ -134,7 +63,7 @@ mod tests {
     #[test]
     fn typosquat_rrequests() {
         let mut f = Vec::new();
-        push_name_findings("rrequests", &mut f);
+        push_name_findings("rrequests", &mut f).unwrap();
         let rules: Vec<&str> = f.iter().map(|x| x.rule_id.as_str()).collect();
         assert!(rules.contains(&"typosquatting"), "got: {rules:?}");
         assert!(rules.contains(&"low-reputation"));
@@ -143,7 +72,7 @@ mod tests {
     #[test]
     fn legitimate_name_does_not_fire() {
         let mut f = Vec::new();
-        push_name_findings("requests", &mut f);
+        push_name_findings("requests", &mut f).unwrap();
         assert!(f.is_empty());
     }
 }

@@ -181,7 +181,12 @@ pub fn fetch_and_scan_composer_with_rules(
     .context("scan extracted Composer zip")?;
 
     // Name-based (typosquatting) findings.
-    rules::push_name_findings(&full_name, &mut report.findings);
+    rules.push_typosquat_findings(
+        Ecosystem::Packagist,
+        &full_name,
+        "Composer package",
+        &mut report.findings,
+    )?;
 
     // Integrity findings come after content findings.
     report.findings.extend(extra_findings);
