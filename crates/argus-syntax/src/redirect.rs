@@ -4,14 +4,14 @@ use super::StaticValue;
 /// consumers can tell `cmd > target` (a write) from `cmd < target` (file
 /// content entering the command on a descriptor).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::capability) struct Redirect {
+pub struct Redirect {
     pub fd: Option<u32>,
     pub direction: RedirectDirection,
     pub target: StaticValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::capability) enum RedirectDirection {
+pub enum RedirectDirection {
     Input,
     Output,
 }
@@ -34,7 +34,7 @@ impl Redirect {
 /// Unknown operators fall back to `Output` so a redirection this parser does
 /// not model keeps its existing write-detection behavior instead of silently
 /// dropping out of the write surface.
-pub(in crate::capability) fn redirect_direction(operator: &str) -> RedirectDirection {
+pub(crate) fn redirect_direction(operator: &str) -> RedirectDirection {
     let operator = operator.trim();
     let symbols = operator.trim_start_matches(|character: char| character.is_ascii_digit());
     match symbols {
@@ -46,7 +46,7 @@ pub(in crate::capability) fn redirect_direction(operator: &str) -> RedirectDirec
 /// Extract an explicit descriptor number from a redirection operator prefix
 /// (`2>`, `0<`). Returns `None` when the operator leaves the descriptor
 /// implicit, which the direction then determines.
-pub(in crate::capability) fn redirect_fd(operator: &str) -> Option<u32> {
+pub(crate) fn redirect_fd(operator: &str) -> Option<u32> {
     let digits: String = operator
         .trim()
         .chars()

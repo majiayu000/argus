@@ -1,4 +1,4 @@
-use super::super::syntax::{ShellArgument, StaticValue};
+use argus_syntax::{ShellArgument, StaticValue};
 use std::ops::Range;
 
 #[derive(Clone, Default)]
@@ -115,7 +115,7 @@ impl CurlInput {
 
 fn matching_source_allows_stdin(
     sources: &[CurlFileSource],
-    fragment: &super::super::syntax::ExecutableReferenceFragment,
+    fragment: &argus_syntax::ExecutableReferenceFragment,
 ) -> bool {
     sources.iter().any(|source| {
         source.stdin_allowed

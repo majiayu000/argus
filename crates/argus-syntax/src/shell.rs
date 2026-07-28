@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use std::iter::Peekable;
 use std::str::Chars;
 
-pub(in crate::capability) fn bounded_shell_pipeline(
-    value: &str,
-) -> Option<(Vec<String>, Vec<bool>)> {
+pub fn bounded_shell_pipeline(value: &str) -> Option<(Vec<String>, Vec<bool>)> {
     let mut segments = Vec::new();
     let mut redirects = Vec::new();
     let mut segment = String::new();

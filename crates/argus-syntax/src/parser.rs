@@ -1,115 +1,19 @@
-use crate::SurfaceFile;
+use crate::{
+    bash::{bash_argument_value, bash_command_fact, bash_pipeline_fact, bash_redirect_fact},
+    normalize::{
+        constructed_class, contains_missing, exec_wrapper_argument_nodes, is_identifier,
+        replace_identifier_token, resolve_static_value, unquote,
+    },
+    receiver::writer_receiver_value,
+    reference::executable_references,
+    ArgumentShape, Bindings, ExecutableReferenceFragment, Fact, FactKind, ScriptLanguage,
+    ShellArgument, StaticValue,
+};
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tree_sitter::{Language, Node, Parser};
 
-mod bash;
-mod normalize;
-mod receiver;
-mod redirect;
-mod reference;
-mod shell;
-
-pub(super) use normalize::{
-    bounded_command_invocation, effective_command_token, is_exec_wrapper, is_shell_wrapper,
-    shell_wrapper_invocation,
-};
-pub(super) use redirect::Redirect;
-pub(super) use shell::bounded_shell_pipeline;
-
-use bash::{bash_argument_value, bash_command_fact, bash_pipeline_fact, bash_redirect_fact};
-use normalize::{
-    command_argument_shape, constructed_class, contains_missing, exec_wrapper_argument_nodes,
-    is_identifier, language_for, replace_identifier_token, resolve_static_value, unquote,
-};
-use receiver::writer_receiver_value;
-use reference::executable_references;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FactKind {
-    Command,
-    Call,
-    Pipeline,
-    Access,
-    Assignment,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ArgumentShape {
-    Direct,
-    CommandString,
-    Argv,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StaticValue {
-    pub raw: String,
-    pub resolved: Option<String>,
-    pub executable_reference: Option<String>,
-    pub executable_reference_fragments: Vec<ExecutableReferenceFragment>,
-    pub shell_argument: ShellArgument,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ExecutableReferenceFragment {
-    pub raw: String,
-    pub resolved: String,
-    pub constant_resolved: Option<String>,
-    pub start_byte: usize,
-    pub end_byte: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ShellArgument {
-    NotShell,
-    Known(ShellArgumentValue),
-    Dynamic,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ShellArgumentValue {
-    pub text: String,
-    pub raw_boundaries: Vec<usize>,
-}
-
-pub(super) type PipelineStage = (String, Vec<StaticValue>);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Fact {
-    pub kind: FactKind,
-    pub language: ScriptLanguage,
-    pub line: usize,
-    pub callee: Option<String>,
-    pub receiver: Option<StaticValue>,
-    pub arguments: Vec<StaticValue>,
-    pub argument_shape: ArgumentShape,
-    pub pipeline_sources: Vec<PipelineStage>,
-    pub pipeline_sink_arguments: Vec<StaticValue>,
-    pub pipeline_scan_text: Option<String>,
-    pub redirect: Option<Redirect>,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScriptLanguage {
-    Bash,
-    Python,
-    JavaScript,
-    TypeScript,
-    Unsupported,
-}
-
-#[derive(Clone, Default)]
-struct Bindings {
-    aliases: BTreeMap<String, String>,
-    constants: BTreeMap<String, String>,
-    provenance: BTreeMap<String, String>,
-    suppressed_constants: BTreeSet<String>,
-}
-
-pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
-    let language = language_for(&file.rel);
+pub(crate) fn analyze(path: &str, content: &str, language: ScriptLanguage) -> Result<Vec<Fact>> {
     if language == ScriptLanguage::Unsupported {
         return Ok(vec![Fact {
             kind: FactKind::Unsupported,
@@ -123,23 +27,23 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
             pipeline_sink_arguments: Vec::new(),
             pipeline_scan_text: None,
             redirect: None,
-            text: format!("unsupported script language for {}", file.rel),
+            text: format!("unsupported script language for {path}"),
         }]);
     }
 
     let mut parser = Parser::new();
     parser
         .set_language(&grammar(language))
-        .with_context(|| format!("initialize syntax parser for {}", file.rel))?;
+        .with_context(|| format!("initialize syntax parser for {path}"))?;
     let tree = parser
-        .parse(&file.content, None)
-        .ok_or_else(|| anyhow!("syntax parser returned no tree for {}", file.rel))?;
+        .parse(content, None)
+        .ok_or_else(|| anyhow!("syntax parser returned no tree for {path}"))?;
     let root = tree.root_node();
     if root.has_error() || contains_missing(root) {
         bail!(
-            "incomplete {:?} syntax parse for {}; refusing capability allow",
+            "incomplete {:?} syntax parse for {}; refusing incomplete analysis",
             language,
-            file.rel
+            path
         );
     }
 
@@ -147,7 +51,7 @@ pub(super) fn analyze(file: &SurfaceFile) -> Result<Vec<Fact>> {
     let mut facts = Vec::new();
     collect_facts(
         root,
-        file.content.as_bytes(),
+        content.as_bytes(),
         language,
         &mut bindings,
         &mut facts,
@@ -395,11 +299,19 @@ fn parse_assignment(
             (language == ScriptLanguage::Bash && !raw_value.contains('$'))
                 .then(|| raw_value.trim().to_string())
         });
+    let callable_alias = resolved.is_none().then(|| {
+        callable_reference(value_node, raw_value, language)
+            .map(|reference| canonical_callee(reference, bindings))
+    });
     if let Some(value) = resolved {
         if language == ScriptLanguage::Bash && value.contains('$') {
             bindings.suppressed_constants.insert(name.to_string());
         }
         bindings.constants.insert(name.to_string(), value);
+    }
+    if let Some(alias) = callable_alias.flatten() {
+        bindings.aliases.insert(name.to_string(), alias);
+        return Ok(());
     }
     if matches!(
         language,
@@ -412,6 +324,21 @@ fn parse_assignment(
         }
     }
     Ok(())
+}
+
+fn callable_reference<'a>(
+    value_node: Node<'_>,
+    raw_value: &'a str,
+    language: ScriptLanguage,
+) -> Option<&'a str> {
+    let supported_shape = match language {
+        ScriptLanguage::Python => matches!(value_node.kind(), "identifier" | "attribute"),
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => {
+            matches!(value_node.kind(), "identifier" | "member_expression")
+        }
+        ScriptLanguage::Bash | ScriptLanguage::Unsupported => false,
+    };
+    supported_shape.then_some(raw_value.trim())
 }
 
 fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindings) {
@@ -538,7 +465,7 @@ fn parse_shell_alias(statement: &str, bindings: &mut Bindings) {
     }
 }
 
-fn static_value(
+pub(crate) fn static_value(
     node: Node<'_>,
     source: &[u8],
     bindings: &Bindings,
@@ -663,7 +590,7 @@ fn canonical_reference(raw: &str, bindings: &Bindings) -> String {
         })
 }
 
-fn canonical_callee(raw: &str, bindings: &Bindings) -> String {
+pub(crate) fn canonical_callee(raw: &str, bindings: &Bindings) -> String {
     let raw = raw.trim();
     if let Some(alias) = bindings.aliases.get(raw) {
         return alias.clone();
@@ -776,13 +703,10 @@ fn has_ancestor_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     false
 }
 
-fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Result<&'a str> {
+pub(crate) fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Result<&'a str> {
     node.utf8_text(source).context("read parsed syntax node")
 }
 
-fn line(node: Node<'_>) -> usize {
+pub(crate) fn line(node: Node<'_>) -> usize {
     node.start_position().row + 1
 }
-
-#[cfg(test)]
-mod tests;

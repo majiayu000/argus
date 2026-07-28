@@ -70,8 +70,8 @@ pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
     };
 
     let mut findings: Vec<Finding> = Vec::new();
-    lifecycle::run(&ctx, &mut findings);
-    content::run(&ctx, &mut findings);
+    lifecycle::run(&ctx, &mut findings)?;
+    content::run(&ctx, &mut findings)?;
     binary::run(&ctx, &mut findings);
     name::run(&ctx, &mut findings);
 
