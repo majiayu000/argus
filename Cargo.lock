@@ -190,9 +190,11 @@ name = "argus-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-syntax",
  "base64",
  "chrono",
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha1",
@@ -200,6 +202,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "url",
+ "yaml-rust2",
 ]
 
 [[package]]
