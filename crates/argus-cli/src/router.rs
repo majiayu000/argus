@@ -1,5 +1,6 @@
 //! Clap-only routing types for the explicit vulnerability query surface.
 
+use argus_core::rules::RuleOverride;
 use argus_core::Ecosystem;
 use argus_osv::severity::SeverityLevel;
 use clap::{Args, Subcommand, ValueEnum};
@@ -53,6 +54,9 @@ pub(crate) struct VulnsCommonArgs {
     /// Successful report format.
     #[arg(long, value_enum, default_value_t = crate::Format::Text)]
     pub(crate) format: crate::Format,
+    /// Disable a registered vulnerability rule or replace emitted severity.
+    #[arg(long = "rule-override", value_name = "ID=off|severity:LEVEL")]
+    pub(crate) rule_override: Vec<RuleOverride>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

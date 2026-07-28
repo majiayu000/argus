@@ -3,10 +3,11 @@
 use crate::{print_report_text, sarif, Format};
 use anyhow::{bail, Context, Result};
 use argus_agent::{
-    scan_agent_surface_with_snapshot, BaselineMode, LlmJudge, LlmJudgeRequest, LlmJudgeResponse,
-    SnapshotMode,
+    scan_agent_surface_with_snapshot_and_rules, BaselineMode, LlmJudge, LlmJudgeRequest,
+    LlmJudgeResponse, SnapshotMode,
 };
 use argus_core::{Decision, ScanReport};
+use argus_rules::RuleSession;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -39,6 +40,7 @@ pub fn cmd_agent_scan(
     update_snapshot: Option<&Path>,
     llm_judge: bool,
     llm_judge_command: Option<&Path>,
+    rules: RuleSession,
 ) -> Result<ExitCode> {
     validate_persistence_flags(
         paths,
@@ -71,11 +73,12 @@ pub fn cmd_agent_scan(
         if !path.exists() {
             bail!("path does not exist: {}", path.display());
         }
-        let outcome = scan_agent_surface_with_snapshot(
+        let outcome = scan_agent_surface_with_snapshot_and_rules(
             path,
             baseline_mode,
             snapshot_mode,
             judge.as_ref().map(|judge| judge as &dyn LlmJudge),
+            &rules,
         )
         .with_context(|| format!("agent scan {}", path.display()))?;
         if outcome.operational_error.is_some() {
@@ -509,6 +512,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("single"), "{err}");
@@ -525,6 +529,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("single"), "{err}");
@@ -544,6 +549,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
@@ -567,8 +573,18 @@ mod tests {
 
     #[test]
     fn llm_judge_requires_an_explicit_command() {
-        let err =
-            cmd_agent_scan(&[], Format::Text, None, None, None, None, true, None).unwrap_err();
+        let err = cmd_agent_scan(
+            &[],
+            Format::Text,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            RuleSession::builtin().unwrap(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("requires --llm-judge-command"));
     }
 
@@ -583,6 +599,7 @@ mod tests {
             None,
             false,
             Some(Path::new("/tmp/judge")),
+            RuleSession::builtin().unwrap(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("requires --llm-judge"));
@@ -605,6 +622,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .expect("text agent scan");
         cmd_agent_scan(
@@ -616,6 +634,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .expect("JSON agent scan");
 
@@ -635,6 +654,7 @@ mod tests {
             None,
             false,
             None,
+            RuleSession::builtin().unwrap(),
         )
         .expect("update baseline agent scan");
         assert!(baseline.exists());
@@ -674,6 +694,7 @@ mod tests {
                 findings: Vec::new(),
                 coordinate: None,
                 intelligence: None,
+                rules: None,
             },
         }
     }
@@ -715,6 +736,7 @@ mod tests {
             None,
             true,
             Some(&path),
+            RuleSession::builtin().unwrap(),
         )
         .expect("agent scan with enabled judge");
     }

@@ -15,3 +15,7 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

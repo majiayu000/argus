@@ -143,7 +143,7 @@ fn external_literal_and_regex_are_typed_compiled_and_sorted() {
     assert_eq!(catalog.rules()[1].id.as_str(), "z-regex");
     assert_eq!(
         catalog.get("a-literal").unwrap().languages,
-        vec![argus_syntax::ScriptLanguage::JavaScript]
+        vec![RuleLanguage::JavaScript]
     );
     assert_eq!(
         catalog
@@ -186,11 +186,7 @@ fn invalid_catalog_shapes_fail_closed() {
         "schema_version: 1\nrules:\n  - ",
         valid.strip_suffix(" }").unwrap()
     );
-    assert_catalog_error(
-        &unknown_record,
-        CatalogOrigin::External,
-        "unknown field `unknown`",
-    );
+    assert_catalog_error(&unknown_record, CatalogOrigin::External, "unknown field");
     assert_catalog_error(
         &external_catalog(&[
             valid.replace("description: \"external test rule\"", "description: \"  \"")
@@ -226,7 +222,7 @@ fn invalid_catalog_shapes_fail_closed() {
             "description: first, description: second",
         )]),
         CatalogOrigin::External,
-        "duplicated key",
+        "invalid YAML",
     );
     assert_catalog_error(
         "schema_version: 1\nrules:\n  - &rule { id: x, description: x, policy_class: blocking, default_severity: high, help_uri: \"https://example.test\", languages: [javascript], matcher: { kind: literal, pattern: x } }\n",
@@ -323,7 +319,7 @@ fn invalid_ids_duplicates_languages_and_matchers_fail_closed() {
     );
     let unsupported_language =
         external_rule("language-rule", r#"{ kind: literal, pattern: "needle" }"#)
-            .replace("[javascript]", "[javascript, rust]");
+            .replace("[javascript]", "[javascript, brainfuck]");
     assert_catalog_error(
         &external_catalog(&[unsupported_language]),
         CatalogOrigin::External,
@@ -335,7 +331,7 @@ fn invalid_ids_duplicates_languages_and_matchers_fail_closed() {
     assert_catalog_error(
         &external_catalog(&[duplicate_language]),
         CatalogOrigin::External,
-        "duplicate `javascript`",
+        "contains a duplicate",
     );
     let bad_regex = external_rule("bad-regex", r#"{ kind: regex, pattern: "[" }"#);
     assert_catalog_error(
@@ -372,7 +368,7 @@ fn unsupported_matcher_combinations_and_collisions_fail_closed() {
     assert_catalog_error(
         &external_catalog(&[extra_matcher_field]),
         CatalogOrigin::External,
-        "unknown field `name`",
+        "unknown field",
     );
     let collision = external_rule("remote-download", r#"{ kind: literal, pattern: "needle" }"#);
     assert_catalog_error(
@@ -564,4 +560,81 @@ fn override_normalization_preserves_package_and_agent_decision_contracts() {
         aggregate(&[agent_finding], AggregationProfile::SeverityDriven),
         crate::Decision::Allow
     );
+}
+
+#[test]
+fn invalid_external_values_are_not_reflected_in_diagnostics() {
+    let cases = [
+        (
+            external_catalog(&[external_rule(
+                "invalid id SECRET_ID",
+                r#"{ kind: literal, pattern: "needle" }"#,
+            )]),
+            "SECRET_ID",
+        ),
+        (
+            external_catalog(&[external_rule(
+                "secret-regex",
+                r#"{ kind: regex, pattern: "SECRET_REGEX[" }"#,
+            )]),
+            "SECRET_REGEX",
+        ),
+        (
+            external_catalog(&[external_rule(
+                "secret-language",
+                r#"{ kind: literal, pattern: "needle" }"#,
+            )])
+            .replace("languages: [javascript]", "languages: [SECRET_LANGUAGE]"),
+            "SECRET_LANGUAGE",
+        ),
+        (
+            external_catalog(&[external_rule(
+                "secret-field",
+                r#"{ kind: literal, pattern: "needle" }"#,
+            )])
+            .replace(
+                "policy_class: blocking",
+                "SECRET_FIELD: value\n    policy_class: blocking",
+            ),
+            "SECRET_FIELD",
+        ),
+        ("SECRET_YAML: [unterminated".to_string(), "SECRET_YAML"),
+        (
+            external_catalog(&[
+                external_rule(
+                    "SECRET_DUPLICATE_ID",
+                    r#"{ kind: literal, pattern: "one" }"#,
+                ),
+                external_rule(
+                    "SECRET_DUPLICATE_ID",
+                    r#"{ kind: literal, pattern: "two" }"#,
+                ),
+            ]),
+            "SECRET_DUPLICATE_ID",
+        ),
+        (
+            external_catalog(&[external_rule(
+                "secret-uri",
+                r#"{ kind: literal, pattern: "needle" }"#,
+            )])
+            .replace(GENERIC_HELP, "SECRET_INVALID_URI"),
+            "SECRET_INVALID_URI",
+        ),
+    ];
+    for (source, secret) in cases {
+        let error = RuleCatalog::parse_yaml(&source, CatalogOrigin::External)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(secret), "diagnostic reflected `{secret}`");
+    }
+
+    let malformed = RuleOverride::from_str("remote-download=SECRET_OVERRIDE")
+        .unwrap_err()
+        .to_string();
+    assert!(!malformed.contains("SECRET_OVERRIDE"));
+    let unknown = RuleOverride::from_str("SECRET_UNKNOWN=off").unwrap();
+    let error = EffectiveRuleSet::build(builtin_catalog().unwrap(), [unknown])
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("SECRET_UNKNOWN"));
 }

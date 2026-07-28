@@ -9,5 +9,6 @@ description = "EcosystemFetcher trait: the shared fetch-verify-extract-scan entr
 
 [dependencies]
 argus-core = { workspace = true }
+argus-rules = { workspace = true }
 argus-transport = { workspace = true }
 anyhow = { workspace = true }

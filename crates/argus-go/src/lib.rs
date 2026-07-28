@@ -37,7 +37,9 @@ pub use argus_core::ArtifactScan;
 pub use argus_transport::{is_not_found, HttpTransport, Transport};
 pub use metadata::{escape_module_path, parse_go_mod_module, resolve_version, GoModInfo};
 pub use rules::POPULAR_GO_MODULES;
-pub use scan::{extract_module_zip, scan_extracted_module, ExtractedModule};
+pub use scan::{
+    extract_module_zip, scan_extracted_module, scan_extracted_module_with_rules, ExtractedModule,
+};
 
 /// proxy.golang.org serves both metadata AND the module zip from the same
 /// host, so the CDN allowlist is empty: only the registry host itself is
@@ -110,6 +112,16 @@ pub fn fetch_and_scan_go(
     pkg: &GoModuleRef,
     opts: &GoFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_go_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_go_with_rules(
+    pkg: &GoModuleRef,
+    opts: &GoFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(registry)
@@ -204,7 +216,8 @@ pub fn fetch_and_scan_go(
     let recomputed_h1 = dirhash::compute_h1(module.files());
 
     // 6. Scan the extracted sources.
-    let mut scan_result = scan_extracted_module(&module);
+    let mut scan_result = scan_extracted_module_with_rules(&module, rules)
+        .context("scan extracted Go module with configured rules")?;
     let mut all_findings: Vec<Finding> = std::mem::take(&mut scan_result.findings);
 
     // 6b. Integrity verdict. A present checksum that mismatches is a hard
@@ -238,7 +251,7 @@ pub fn fetch_and_scan_go(
 
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: ArtifactKind::PackageDir,
         path: opts
             .cache_dir
@@ -250,7 +263,11 @@ pub fn fetch_and_scan_go(
         findings: all_findings,
         coordinate: Some(coordinate),
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 /// Build a Finding with the given rule_id/severity/detail and no location.
@@ -318,6 +335,7 @@ impl argus_pipeline::EcosystemFetcher for GoFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = GoModuleRef::parse(spec)?;
         let opts = GoFetchOptions {
@@ -325,7 +343,7 @@ impl argus_pipeline::EcosystemFetcher for GoFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..GoFetchOptions::default()
         };
-        fetch_and_scan_go(&pkg, &opts, transport)
+        fetch_and_scan_go_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

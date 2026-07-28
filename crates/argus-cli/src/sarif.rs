@@ -1,7 +1,9 @@
 //! Deterministic SARIF 2.1.0 rendering for complete and partial scan reports.
 
 use anyhow::{anyhow, Result};
-use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
+use argus_core::{
+    ArtifactKind, ExternalRuleMetadata, Finding, RuleExecutionMetadata, ScanReport, Severity,
+};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -30,7 +32,26 @@ enum Execution {
 }
 
 fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -> Result<Value> {
-    let rule_severities = collect_rule_severities(reports);
+    let rule_metadata = rule_execution_metadata(reports)?;
+    let external_rules = rule_metadata
+        .map(|metadata| {
+            metadata
+                .external_rules
+                .iter()
+                .map(|rule| (rule.id.as_str(), rule))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut rule_severities = collect_rule_severities(reports);
+    if let Some(metadata) = rule_metadata {
+        for rule in &metadata.external_rules {
+            if !metadata.disabled_rule_ids.contains(&rule.id) {
+                rule_severities
+                    .entry(rule.id.clone())
+                    .or_insert(rule.severity);
+            }
+        }
+    }
     let rule_indices: BTreeMap<&str, usize> = rule_severities
         .keys()
         .enumerate()
@@ -38,7 +59,13 @@ fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -
         .collect();
     let rules = rule_severities
         .iter()
-        .map(|(rule_id, severity)| rule_descriptor(rule_id, *severity))
+        .map(|(rule_id, severity)| {
+            rule_descriptor(
+                rule_id,
+                *severity,
+                external_rules.get(rule_id.as_str()).copied(),
+            )
+        })
         .collect::<Vec<_>>();
     let mut results = Vec::new();
     for report in reports {
@@ -51,10 +78,18 @@ fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -
         }
     }
 
-    let properties =
-        intelligence_status(reports)?.map(|status| json!({"argusIntelligence": status}));
+    let mut properties = Map::new();
+    if let Some(status) = intelligence_status(reports)? {
+        properties.insert("argusIntelligence".to_string(), json!(status));
+    }
+    if let Some(metadata) = rule_metadata {
+        properties.insert("argusRules".to_string(), json!(metadata));
+    }
     Ok(render_document_with_execution(
-        rules, results, properties, execution,
+        rules,
+        results,
+        (!properties.is_empty()).then_some(Value::Object(properties)),
+        execution,
     ))
 }
 
@@ -134,6 +169,29 @@ fn intelligence_status(reports: &[ScanReport]) -> Result<Option<&argus_core::Int
     Ok(Some(first))
 }
 
+fn rule_execution_metadata(reports: &[ScanReport]) -> Result<Option<&RuleExecutionMetadata>> {
+    let Some(first_report) = reports.first() else {
+        return Ok(None);
+    };
+    let Some(first) = first_report.rules.as_ref() else {
+        if reports.iter().any(|report| report.rules.is_some()) {
+            return Err(anyhow!(
+                "cannot mix reports with and without rule metadata in one SARIF run"
+            ));
+        }
+        return Ok(None);
+    };
+    if reports
+        .iter()
+        .any(|report| report.rules.as_ref() != Some(first))
+    {
+        return Err(anyhow!(
+            "cannot represent different effective rule sets in one SARIF run"
+        ));
+    }
+    Ok(Some(first))
+}
+
 fn collect_rule_severities(reports: &[ScanReport]) -> BTreeMap<String, Severity> {
     let mut rules = BTreeMap::new();
     for finding in reports.iter().flat_map(|report| &report.findings) {
@@ -149,7 +207,21 @@ fn collect_rule_severities(reports: &[ScanReport]) -> BTreeMap<String, Severity>
     rules
 }
 
-fn rule_descriptor(rule_id: &str, severity: Severity) -> Value {
+fn rule_descriptor(
+    rule_id: &str,
+    severity: Severity,
+    external: Option<&ExternalRuleMetadata>,
+) -> Value {
+    if let Some(external) = external {
+        return json!({
+            "id": external.id,
+            "name": rule_name(&external.id),
+            "shortDescription": {"text": external.description},
+            "help": {"text": external.description},
+            "helpUri": external.help_uri,
+            "defaultConfiguration": {"level": sarif_level(severity)}
+        });
+    }
     let help_uri = if rule_id.starts_with("AGT-")
         || matches!(
             rule_id,
@@ -398,7 +470,7 @@ fn artifact_kind(kind: ArtifactKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argus_core::{Decision, Finding};
+    use argus_core::{Decision, ExternalRuleMetadata, Finding, RuleExecutionMetadata};
     use std::path::PathBuf;
 
     fn report(artifact: ArtifactKind, path: &str, findings: Vec<Finding>) -> ScanReport {
@@ -411,6 +483,7 @@ mod tests {
             findings,
             coordinate: None,
             intelligence: None,
+            rules: None,
         }
     }
 
@@ -581,6 +654,55 @@ mod tests {
         );
         assert_eq!(document["runs"][0]["tool"]["driver"]["rules"], json!([]));
         assert_eq!(document["runs"][0]["results"], json!([]));
+    }
+
+    #[test]
+    fn external_rule_descriptor_and_zero_result_audit_are_preserved() {
+        let metadata = RuleExecutionMetadata {
+            digest: "b".repeat(64),
+            loaded_external_files: vec!["external.yaml".to_string()],
+            external_rule_count: 1,
+            disabled_rule_ids: Vec::new(),
+            applied_overrides: vec!["external-demo=severity:low".to_string()],
+            external_rules: vec![ExternalRuleMetadata {
+                id: "external-demo".to_string(),
+                description: "exact external description".to_string(),
+                help_uri: "https://example.test/external-demo".to_string(),
+                severity: Severity::Low,
+            }],
+        };
+        let mut finding =
+            Finding::new("external-demo", Severity::Low, "exact external description")
+                .at("src/demo.rs");
+        finding.evidence = Some(vec!["src/demo.rs:2".to_string()]);
+        let mut hit = report(ArtifactKind::PackageDir, "fixture", vec![finding]);
+        hit.rules = Some(metadata.clone());
+        let document = render(&[hit]);
+        let descriptor = &document["runs"][0]["tool"]["driver"]["rules"][0];
+        assert_eq!(
+            descriptor["shortDescription"]["text"],
+            "exact external description"
+        );
+        assert_eq!(descriptor["helpUri"], "https://example.test/external-demo");
+        assert_eq!(descriptor["defaultConfiguration"]["level"], "note");
+        assert_eq!(
+            document["runs"][0]["properties"]["argusRules"]["digest"],
+            "b".repeat(64)
+        );
+        assert_eq!(
+            first_result(&document)["locations"][0]["physicalLocation"]["region"]["startLine"],
+            2
+        );
+
+        let mut clean = report(ArtifactKind::PackageDir, "fixture", Vec::new());
+        clean.decision = Decision::Allow;
+        clean.rules = Some(metadata);
+        let clean_document = render(&[clean]);
+        assert_eq!(
+            clean_document["runs"][0]["properties"]["argusRules"]["applied_overrides"][0],
+            "external-demo=severity:low"
+        );
+        assert_eq!(clean_document["runs"][0]["results"], json!([]));
     }
 
     #[test]

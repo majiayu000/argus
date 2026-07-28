@@ -47,7 +47,10 @@ pub use metadata::{
     normalize_version, resolve_version, CatalogLeaf, FlatContainerIndex, RegistrationLeaf,
 };
 pub use rules::POPULAR_NUGET_PACKAGES;
-pub use scan::{scan_extracted_nupkg, scan_nuget_archive, NupkgScan};
+pub use scan::{
+    scan_extracted_nupkg, scan_extracted_nupkg_with_rules, scan_nuget_archive,
+    scan_nuget_archive_with_rules, NupkgScan,
+};
 
 /// The flat-container download host for nuget.org is the registry host
 /// itself (`api.nuget.org/v3-flatcontainer/...`), and argus constructs that
@@ -115,6 +118,16 @@ pub fn fetch_and_scan_nuget(
     pkg: &NugetRef,
     opts: &NugetFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_nuget_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_nuget_with_rules(
+    pkg: &NugetRef,
+    opts: &NugetFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/');
     let registry_host = host_of(&opts.registry)
@@ -207,8 +220,13 @@ pub fn fetch_and_scan_nuget(
         }
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
-    let scan = scan_nuget_archive(&nupkg_bytes, extract_root.path(), opts.max_extracted_bytes)
-        .context("scan extracted .nupkg")?;
+    let scan = scan_nuget_archive_with_rules(
+        &nupkg_bytes,
+        extract_root.path(),
+        opts.max_extracted_bytes,
+        rules,
+    )
+    .context("scan extracted .nupkg")?;
     findings.extend(scan.findings);
 
     // 7. Name-based rules on the user-supplied id.
@@ -216,7 +234,7 @@ pub fn fetch_and_scan_nuget(
 
     let decision = argus_rules::derive_decision_from_findings(&findings);
 
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: ArtifactKind::PackageDir,
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints.
@@ -227,7 +245,11 @@ pub fn fetch_and_scan_nuget(
         findings,
         coordinate: Some(coordinate),
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 /// Follow the registration leaf → `catalogEntry.@id` → catalog leaf and
@@ -295,6 +317,7 @@ impl argus_pipeline::EcosystemFetcher for NugetFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = NugetRef::parse(spec)?;
         let opts = NugetFetchOptions {
@@ -302,7 +325,7 @@ impl argus_pipeline::EcosystemFetcher for NugetFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..NugetFetchOptions::default()
         };
-        fetch_and_scan_nuget(&pkg, &opts, transport)
+        fetch_and_scan_nuget_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

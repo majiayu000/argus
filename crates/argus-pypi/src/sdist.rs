@@ -9,7 +9,7 @@ use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use argus_syntax::{FactKind, ScriptLanguage};
 use std::path::Path;
 
@@ -22,14 +22,38 @@ pub fn scan_sdist_dir(
     dest_root: &Path,
     max_extracted_bytes: u64,
 ) -> Result<ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_sdist_dir_with_rules(tarball_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_sdist_dir_with_rules(
+    tarball_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
+) -> Result<ArtifactScan> {
     let pkg_dir = extract_tarball(tarball_bytes, dest_root, max_extracted_bytes)
         .context("safe-extract PyPI sdist")?;
-    scan_extracted_sdist(&pkg_dir)
+    let mut scan = scan_extracted_sdist(&pkg_dir)?;
+    rules
+        .scan_directory(dest_root, &mut scan.findings)
+        .context("run configured rules on extracted PyPI sdist archive")?;
+    rules.validate_external_limits(&scan.findings)?;
+    rules.normalize_findings(&mut scan.findings);
+    Ok(scan)
 }
 
 /// Walk an already-extracted sdist directory and apply both PyPI-specific
 /// rules and the ecosystem-agnostic content rules from `argus-rules`.
 pub fn scan_extracted_sdist(pkg_dir: &Path) -> Result<ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_extracted_sdist_with_rules(pkg_dir, &rules)
+}
+
+pub fn scan_extracted_sdist_with_rules(
+    pkg_dir: &Path,
+    rules: &RuleSession,
+) -> Result<ArtifactScan> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
@@ -117,6 +141,12 @@ pub fn scan_extracted_sdist(pkg_dir: &Path) -> Result<ArtifactScan> {
             "sdist contains neither setup.py nor pyproject.toml",
         ));
     }
+
+    rules
+        .scan_directory(pkg_dir, &mut findings)
+        .context("run configured rules on extracted PyPI sdist")?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(ArtifactScan {
         findings,

@@ -16,7 +16,7 @@
 use crate::{finding, rules};
 use anyhow::{Context, Result};
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_rules::{looks_binary, scan_text_file, TextFile};
+use argus_rules::{looks_binary, scan_text_file, RuleSession, TextFile};
 use std::path::Path;
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
@@ -29,6 +29,16 @@ pub fn scan_maven_jar(
     jar_bytes: &[u8],
     dest_root: &Path,
     max_extracted_bytes: u64,
+) -> Result<ArtifactScan> {
+    let rules = RuleSession::builtin()?;
+    scan_maven_jar_with_rules(jar_bytes, dest_root, max_extracted_bytes, &rules)
+}
+
+pub fn scan_maven_jar_with_rules(
+    jar_bytes: &[u8],
+    dest_root: &Path,
+    max_extracted_bytes: u64,
+    rules: &RuleSession,
 ) -> Result<ArtifactScan> {
     argus_archive::extract_zip(jar_bytes, dest_root, max_extracted_bytes, "jar entry")
         .context("extract jar")?;
@@ -123,6 +133,12 @@ pub fn scan_maven_jar(
         ".class bytecode was not disassembled; a clean report covers only \
          textual/structured surfaces (MANIFEST.MF, pom.xml, embedded text)",
     ));
+
+    rules
+        .scan_directory(dest_root, &mut findings)
+        .context("run configured rules on extracted Maven jar")?;
+    rules.validate_external_limits(&findings)?;
+    rules.normalize_findings(&mut findings);
 
     Ok(ArtifactScan {
         findings,

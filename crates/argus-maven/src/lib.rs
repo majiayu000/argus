@@ -44,7 +44,7 @@ pub use metadata::{
     parse_maven_metadata, parse_pom_plugins, resolve_version, MavenMetadata, MavenRef, PomPlugins,
 };
 pub use rules::POPULAR_MAVEN_ARTIFACTS;
-pub use scan::{parse_jar_manifest, scan_maven_jar, JarManifest};
+pub use scan::{parse_jar_manifest, scan_maven_jar, scan_maven_jar_with_rules, JarManifest};
 
 /// Maven Central + its mirrors live under `*.maven.org`. The default
 /// registry host is `repo1.maven.org`; the suffix entry accepts the
@@ -84,6 +84,16 @@ pub fn fetch_and_scan_maven(
     pkg: &MavenRef,
     opts: &MavenFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_maven_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_maven_with_rules(
+    pkg: &MavenRef,
+    opts: &MavenFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     let registry = opts.registry.trim_end_matches('/').to_string();
     let registry_host = host_of(&registry)
@@ -157,7 +167,7 @@ pub fn fetch_and_scan_maven(
     let jar_dir = extract_root.path().join("jar");
     std::fs::create_dir_all(&jar_dir).with_context(|| format!("mkdir {}", jar_dir.display()))?;
 
-    let scan = scan_maven_jar(&jar_bytes, &jar_dir, opts.max_extracted_bytes)
+    let scan = scan_maven_jar_with_rules(&jar_bytes, &jar_dir, opts.max_extracted_bytes, rules)
         .with_context(|| format!("scan jar {jar_url}"))?;
 
     let mut all_findings: Vec<Finding> = scan.findings;
@@ -173,6 +183,9 @@ pub fn fetch_and_scan_maven(
         validate_artifact_url(u, &registry_host, MAVEN_CDN_ALLOWLIST)
     }) {
         Ok(pom_bytes) => {
+            rules
+                .scan_bytes("pom.xml", &pom_bytes, &mut all_findings)
+                .context("run external rules on standalone Maven pom")?;
             let pom_xml = String::from_utf8_lossy(&pom_bytes);
             let plugins =
                 parse_pom_plugins(&pom_xml).with_context(|| format!("parse pom {pom_url}"))?;
@@ -211,7 +224,7 @@ pub fn fetch_and_scan_maven(
     //    findings and are not the artifact's identity.
     let decision = argus_rules::derive_decision_from_findings(&all_findings);
 
-    Ok(ScanReport {
+    let mut report = ScanReport {
         artifact: argus_core::ArtifactKind::PackageDir,
         // Registry coordinate, never the random extraction TempDir: the
         // path feeds text/JSON/SARIF output and fingerprints.
@@ -222,7 +235,11 @@ pub fn fetch_and_scan_maven(
         findings: all_findings,
         coordinate: Some(coordinate),
         intelligence: None,
-    })
+        rules: None,
+    };
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
+    Ok(report)
 }
 
 /// Verify the downloaded jar bytes against the registry's checksum.
@@ -346,6 +363,7 @@ impl argus_pipeline::EcosystemFetcher for MavenFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = MavenRef::parse(spec)?;
         let opts = MavenFetchOptions {
@@ -353,7 +371,7 @@ impl argus_pipeline::EcosystemFetcher for MavenFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..MavenFetchOptions::default()
         };
-        fetch_and_scan_maven(&pkg, &opts, transport)
+        fetch_and_scan_maven_with_rules(&pkg, &opts, transport, rules)
     }
 }
 

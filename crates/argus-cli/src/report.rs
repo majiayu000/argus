@@ -2,7 +2,7 @@
 
 use crate::{intel, sarif, Format};
 use anyhow::Result;
-use argus_core::{Decision, ScanReport};
+use argus_core::{Decision, RuleExecutionMetadata, ScanReport};
 use std::process::ExitCode;
 
 /// Exit codes are part of the CLI contract.
@@ -47,6 +47,9 @@ pub(crate) fn render_report_text(report: &ScanReport) -> String {
     if let Some(status) = &report.intelligence {
         output.push_str(&intel::render_status_text(status));
     }
+    if let Some(rules) = &report.rules {
+        output.push_str(&render_rules_text(rules));
+    }
     if report.findings.is_empty() {
         writeln!(output, "findings: none").expect("writing a report to String cannot fail");
         return output;
@@ -71,6 +74,41 @@ pub(crate) fn render_report_text(report: &ScanReport) -> String {
     output
 }
 
+pub(crate) fn render_rules_text(rules: &RuleExecutionMetadata) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(output, "rules_digest: {}", rules.digest).expect("write String");
+    writeln!(
+        output,
+        "rules_external: count={} files={}",
+        rules.external_rule_count,
+        display_values(&rules.loaded_external_files)
+    )
+    .expect("write String");
+    writeln!(
+        output,
+        "rules_disabled: {}",
+        display_values(&rules.disabled_rule_ids)
+    )
+    .expect("write String");
+    writeln!(
+        output,
+        "rules_overrides: {}",
+        display_values(&rules.applied_overrides)
+    )
+    .expect("write String");
+    output
+}
+
+fn display_values(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
 fn severity_tag(finding: &argus_core::Finding) -> &'static str {
     match finding.severity {
         argus_core::Severity::Critical => "CRIT",
@@ -84,7 +122,7 @@ fn severity_tag(finding: &argus_core::Finding) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argus_core::{ArtifactKind, Finding, Severity};
+    use argus_core::{ArtifactKind, Finding, RuleExecutionMetadata, Severity};
     use std::path::PathBuf;
 
     fn anomaly_report() -> ScanReport {
@@ -106,6 +144,7 @@ mod tests {
             findings: vec![finding],
             coordinate: None,
             intelligence: None,
+            rules: None,
         }
     }
 
@@ -133,5 +172,26 @@ mod tests {
                 ["uri"],
             "%40scope/demo%403.0.0"
         );
+    }
+
+    #[test]
+    fn clean_text_report_keeps_rule_audit_metadata() {
+        let mut report = anomaly_report();
+        report.decision = Decision::Allow;
+        report.findings.clear();
+        report.rules = Some(RuleExecutionMetadata {
+            digest: "a".repeat(64),
+            loaded_external_files: vec!["rules.yaml".to_string()],
+            external_rule_count: 1,
+            disabled_rule_ids: vec!["external-demo".to_string()],
+            applied_overrides: vec!["external-demo=off".to_string()],
+            external_rules: Vec::new(),
+        });
+        let text = render_report_text(&report);
+        assert!(text.contains(&format!("rules_digest: {}", "a".repeat(64))));
+        assert!(text.contains("rules_external: count=1 files=rules.yaml"));
+        assert!(text.contains("rules_disabled: external-demo"));
+        assert!(text.contains("rules_overrides: external-demo=off"));
+        assert!(text.contains("findings: none"));
     }
 }

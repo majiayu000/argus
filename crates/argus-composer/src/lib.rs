@@ -25,7 +25,7 @@ mod scan;
 pub use argus_core::ArtifactScan;
 pub use argus_transport::{HttpTransport, Transport};
 pub use metadata::{resolve_version, ComposerManifest, ComposerPackument, ComposerRef};
-pub use scan::scan_composer_zip;
+pub use scan::{scan_composer_zip, scan_composer_zip_with_rules};
 
 /// Composer dist artifacts come from GitHub/GitLab/Bitbucket CDNs, not from
 /// repo.packagist.org itself. The allowlist covers those well-known code-
@@ -66,6 +66,16 @@ pub fn fetch_and_scan_composer(
     pkg: &ComposerRef,
     opts: &ComposerFetchOptions,
     transport: &dyn Transport,
+) -> Result<ScanReport> {
+    let rules = argus_rules::RuleSession::builtin()?;
+    fetch_and_scan_composer_with_rules(pkg, opts, transport, &rules)
+}
+
+pub fn fetch_and_scan_composer_with_rules(
+    pkg: &ComposerRef,
+    opts: &ComposerFetchOptions,
+    transport: &dyn Transport,
+    rules: &argus_rules::RuleSession,
 ) -> Result<ScanReport> {
     let registry_host = host_of(&opts.registry)
         .with_context(|| format!("registry URL has no parseable host: {}", opts.registry))?;
@@ -161,11 +171,12 @@ pub fn fetch_and_scan_composer(
         None => tempfile::tempdir().context("create private extract scratch dir")?,
     };
 
-    let mut report = scan::scan_composer_zip(
+    let mut report = scan::scan_composer_zip_with_rules(
         &zip_bytes,
         extract_root.path(),
         opts.max_extracted_bytes,
         version_obj,
+        rules,
     )
     .context("scan extracted Composer zip")?;
 
@@ -186,6 +197,8 @@ pub fn fetch_and_scan_composer(
         report.package_version = Some(resolved_version);
     }
     report.coordinate = Some(coordinate);
+    rules.validate_external_limits(&report.findings)?;
+    rules.finalize_package(&mut report);
     Ok(report)
 }
 
@@ -210,6 +223,7 @@ impl argus_pipeline::EcosystemFetcher for ComposerFetcher {
         spec: &str,
         opts: &argus_pipeline::CommonFetchOptions,
         transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
     ) -> anyhow::Result<argus_core::ScanReport> {
         let pkg = ComposerRef::parse(spec)?;
         let opts = ComposerFetchOptions {
@@ -217,7 +231,7 @@ impl argus_pipeline::EcosystemFetcher for ComposerFetcher {
             cache_dir: opts.cache_dir.clone(),
             ..ComposerFetchOptions::default()
         };
-        fetch_and_scan_composer(&pkg, &opts, transport)
+        fetch_and_scan_composer_with_rules(&pkg, &opts, transport, rules)
     }
 }
 
