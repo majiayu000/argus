@@ -29,6 +29,36 @@ fn make_crate(name: &str, version: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     gz.finish().unwrap()
 }
 
+fn make_crate_from_fixture(name: &str, version: &str, fixture: &str) -> Vec<u8> {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/fixtures")
+        .join(fixture);
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut builder = tar::Builder::new(&mut gz);
+        let top = format!("{name}-{version}");
+        for entry in walkdir::WalkDir::new(&fixture_dir) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(&fixture_dir).unwrap();
+            let body = std::fs::read(entry.path()).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header
+                .set_path(std::path::Path::new(&top).join(rel))
+                .unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, body.as_slice()).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+    gz.finish().unwrap()
+}
+
 fn sha256_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
 }
@@ -389,6 +419,137 @@ proc-macro = true
 }
 
 #[test]
+fn crates_proc_macro_network_from_macro_source_blocks() {
+    let registry = "https://mock.registry";
+    let cargo_toml = br#"
+[package]
+name = "network-derive"
+version = "1.0.0"
+
+[lib]
+proc-macro = true
+"#;
+    let lib_rs = br#"
+#[proc_macro_attribute]
+pub fn network(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let _ = reqwest::blocking::get("https://telemetry.example.invalid/macro");
+    item
+}
+"#;
+    let crate_bytes = make_crate(
+        "network-derive",
+        "1.0.0",
+        &[("Cargo.toml", cargo_toml), ("src/lib.rs", lib_rs)],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/network-derive/1.0.0/download");
+    let pack = packument("network-derive", "1.0.0", &sha256_hex(&crate_bytes));
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/network-derive"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("network-derive").unwrap();
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport).unwrap();
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .expect("proc-macro network finding");
+
+    assert_eq!(finding.severity, argus_core::Severity::Critical);
+    assert!(finding.detail.contains("src/lib.rs"), "got: {finding:?}");
+    assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn crates_network_in_ordinary_library_is_not_proc_macro_network() {
+    let registry = "https://mock.registry";
+    let cargo_toml = b"[package]\nname = \"ordinary-client\"\nversion = \"1.0.0\"\nbuild = false\n";
+    let lib_rs = br#"pub fn fetch() { let _ = ureq::get("https://api.example.invalid/data"); }"#;
+    let crate_bytes = make_crate(
+        "ordinary-client",
+        "1.0.0",
+        &[("Cargo.toml", cargo_toml), ("src/lib.rs", lib_rs)],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/ordinary-client/1.0.0/download");
+    let pack = packument("ordinary-client", "1.0.0", &sha256_hex(&crate_bytes));
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/ordinary-client"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("ordinary-client").unwrap();
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport).unwrap();
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+
+    assert!(
+        !rule_ids.contains(&"proc-macro-network"),
+        "got: {rule_ids:?}"
+    );
+}
+
+#[test]
+fn crates_proc_macro_build_script_network_is_not_macro_source_network() {
+    let registry = "https://mock.registry";
+    let cargo_toml = br#"
+[package]
+name = "generated-derive"
+version = "1.0.0"
+
+[lib]
+proc-macro = true
+"#;
+    let build_rs =
+        br#"fn main() { let _ = reqwest::get("https://build.example.invalid/schema"); }"#;
+    let crate_bytes = make_crate(
+        "generated-derive",
+        "1.0.0",
+        &[
+            ("Cargo.toml", cargo_toml),
+            ("build.rs", build_rs),
+            ("src/lib.rs", b""),
+        ],
+    );
+    let dl_url = format!("{registry}/api/v1/crates/generated-derive/1.0.0/download");
+    let pack = packument("generated-derive", "1.0.0", &sha256_hex(&crate_bytes));
+
+    let transport = MockTransport::new();
+    transport.insert(
+        &format!("{registry}/api/v1/crates/generated-derive"),
+        pack.into_bytes(),
+    );
+    transport.insert(&dl_url, crate_bytes);
+
+    let opts = CratesFetchOptions {
+        registry: registry.to_string(),
+        ..CratesFetchOptions::default()
+    };
+    let pkg = CrateRef::parse("generated-derive").unwrap();
+    let report = fetch_and_scan_crate(&pkg, &opts, &transport).unwrap();
+    let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+
+    assert!(rule_ids.contains(&"build-rs-network"), "got: {rule_ids:?}");
+    assert!(
+        !rule_ids.contains(&"proc-macro-network"),
+        "got: {rule_ids:?}"
+    );
+}
+
+#[test]
 fn crates_typosquat_toikio_blocks() {
     let registry = "https://mock.registry";
     let cargo_toml = b"[package]\nname = \"toikio\"\nversion = \"1.0.0\"\n";
@@ -480,6 +641,59 @@ fn main() {
         "got: {rule_ids:?}"
     );
     assert_eq!(report.decision, Decision::Block);
+}
+
+#[test]
+fn crates_corpus_fixture_families_produce_expected_rules() {
+    let cases = [
+        (
+            "crates-build-rs-network",
+            "build-rs-network",
+            "crates-build-rs-network",
+        ),
+        (
+            "crates-include-bytes-payload",
+            "build-rs-include-bytes",
+            "crates-include-bytes-payload",
+        ),
+        (
+            "crates-trapdoor",
+            "build-rs-include-bytes",
+            "crates-trapdoor",
+        ),
+        ("toikio", "typosquatting", "crates-typosquat-toikio"),
+    ];
+
+    for (name, expected_rule, fixture) in cases {
+        let registry = "https://mock.registry";
+        let version = "1.0.0";
+        let crate_bytes = make_crate_from_fixture(name, version, fixture);
+        let dl_url = format!("{registry}/api/v1/crates/{name}/{version}/download");
+        let pack = packument(name, version, &sha256_hex(&crate_bytes));
+        let transport = MockTransport::new();
+        transport.insert(
+            &format!("{registry}/api/v1/crates/{name}"),
+            pack.into_bytes(),
+        );
+        transport.insert(&dl_url, crate_bytes);
+        let opts = CratesFetchOptions {
+            registry: registry.to_string(),
+            ..CratesFetchOptions::default()
+        };
+        let report =
+            fetch_and_scan_crate(&CrateRef::parse(name).unwrap(), &opts, &transport).unwrap();
+        let rule_ids: Vec<&str> = report
+            .findings
+            .iter()
+            .map(|finding| finding.rule_id.as_str())
+            .collect();
+
+        assert!(
+            rule_ids.contains(&expected_rule),
+            "{fixture}: expected {expected_rule}, got {rule_ids:?}"
+        );
+        assert_eq!(report.decision, Decision::Block, "{fixture}");
+    }
 }
 
 #[test]
