@@ -66,9 +66,9 @@ pub enum SigstoreVerdict {
     /// One of the Sigstore cryptographic layers failed (signature, chain,
     /// transparency-log entry, subject-digest mismatch, …).
     SignatureInvalid { reason: String },
-    /// Cryptographic layers passed but the leaf cert's SAN URI is not in
-    /// the operator's allowlist. The attestation is *real* but it was not
-    /// issued by an allowlisted builder.
+    /// Legacy structured result retained for API compatibility. Full
+    /// verification now treats an identity-policy mismatch as
+    /// [`SignatureInvalid`] so callers fail closed.
     UntrustedIssuer {
         actual_identity: String,
         actual_issuer: String,
@@ -90,8 +90,8 @@ pub fn verify_bundle_full(
     artifact: &[u8],
     allowlist: &IdentityAllowlist<'_>,
 ) -> Result<SigstoreVerdict> {
-    // An empty SAN allowlist would silently block every bundle as
-    // UntrustedIssuer with no error — almost certainly a caller mistake
+    // An empty SAN allowlist would silently block every bundle with no
+    // useful policy — almost certainly a caller mistake
     // (forgot to populate the patterns vec). Fail fast so the
     // misconfiguration is visible.
     if allowlist.san_uri_patterns.is_empty() {
@@ -130,9 +130,11 @@ pub fn verify_bundle_full(
                 if san_matches(&identity, allowlist.san_uri_patterns) {
                     Ok(SigstoreVerdict::Verified { identity, issuer })
                 } else {
-                    Ok(SigstoreVerdict::UntrustedIssuer {
-                        actual_identity: identity,
-                        actual_issuer: issuer,
+                    Ok(SigstoreVerdict::SignatureInvalid {
+                        reason: format!(
+                            "OIDC identity is not in the operator allowlist \
+                             (issuer={issuer}, identity={identity})"
+                        ),
                     })
                 }
             }

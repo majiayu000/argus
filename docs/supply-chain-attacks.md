@@ -454,7 +454,7 @@ pipelines are outside Argus's package-registry command surface. **Full gap.**
 
 2. **Worms collapse the incident-response window.** Pre-Shai-Hulud, a stolen maintainer token led to a hand-crafted poisoned version. Post-Shai-Hulud, the same stolen token automatically poisons every package the victim can publish, within minutes. The 16-minute chalk window is now baseline.
 
-3. **Provenance attestation is not a panacea.** TanStack proved that an attacker who pivots through legitimate CI infrastructure gets a real Sigstore signature on malicious bytes. Argus ships opt-in verification plumbing, but the current upstream `intoto/0.0.2` gap blocks a green Verified verdict for real npm v0.2 bundles. Even after that gap closes, provenance will authenticate the builder and bytes, not benign intent.
+3. **Provenance attestation is not a panacea.** TanStack proved that an attacker who pivots through legitimate CI infrastructure gets a real Sigstore signature on malicious bytes. Argus can fully verify supported npm v0.2 Sigstore bundles, but provenance authenticates the builder and bytes, not benign intent.
 
 4. **The lifecycle-script monoculture is intact.** Nearly every 2025–2026 incident uses `preinstall` or `postinstall`. Bun's `trustedDependencies` and pnpm's `approve-builds` are the strongest registry-side mitigations; argus's default `--ignore-scripts` posture lands in the same spot. PR #6 confirms argus never runs lifecycle scripts during scan.
 
@@ -563,7 +563,7 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
   depth or event-specific validation.
 - Sigstore wrapper, trust-root, and caller-supplied identity-policy plumbing is
   available as an opt-in npm provenance layer; real npm v0.2 Verified verdicts
-  remain blocked by the documented upstream `intoto/0.0.2` gap.
+  are verified end to end when they use the supported Fulcio-backed `intoto/0.0.2` shape.
 - Opt-in `npm-anomaly-v1` implements bounded `version-shape-anomaly` and
   `rapid-publish-window` review signals, with explicit Info unassessed states
   when packument history or npm search candidates cannot support an assessment.
