@@ -26,10 +26,13 @@ jobs:
         run: python3 -m pip install pytest==8.4.1
       - name: Check workflow pack and spec packets
         run: python3 checks/check_workflow.py --repo . --all-specs
+        working-directory: tooling/specrail
       - name: Verify pinned SpecRail adoption manifest
         run: python3 checks/verify_specrail_adoption.py --repo .
+        working-directory: tooling/specrail
       - name: Run SpecRail and Argus adoption tests
         run: python3 -m pytest -q
+        working-directory: tooling/specrail
       - name: Check whitespace
         shell: bash
         run: |

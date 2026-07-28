@@ -130,6 +130,7 @@ def test_argus_adoption_source_is_pinned() -> None:
             "bound oversized PR review evidence to an exact local base/head diff fallback",
             "bound review evidence to stable base and head snapshots",
             "normalized copied template whitespace",
+            "nested the managed pack under tooling/specrail and released workflow-check.yml to consumer ownership",
         ],
     }
 

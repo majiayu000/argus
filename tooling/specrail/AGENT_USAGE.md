@@ -4,6 +4,20 @@ SpecRail is primarily for code agents, not for human project management. Humans
 own policy and final gates; agents use this repository to decide how to triage,
 write specs, prepare PRs, review, and report handoffs without inventing process.
 
+## Pack Location In This Repository
+
+In this repository the SpecRail pack lives under `tooling/specrail/`. Every
+relative path and every `python3 checks/...` command in this document, in the
+skills, and in check output is relative to that pack root. Run workflow
+commands from the pack root, for example:
+
+```bash
+cd tooling/specrail && python3 checks/check_workflow.py --repo . --all-specs
+```
+
+Product code (`crates/`), product documentation (`docs/`), and the CI entry
+point (`.github/workflows/workflow-check.yml`) remain at the repository root.
+
 ## What The Agent Should Load
 
 When a repository adopts SpecRail, the agent should read these files before

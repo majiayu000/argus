@@ -8,7 +8,12 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from github_evidence_common import EvidenceError, json_array, json_object
+from github_evidence_common import (
+    EvidenceError,
+    json_array,
+    json_object,
+    pack_path_prefix,
+)
 from sensitive_enforcement import normalize_changed_paths
 from specrail_lib import PackConfig, spec_packet_artifact_paths
 
@@ -59,8 +64,13 @@ def derive_spec_refs(
     paths = normalize_changed_paths(
         repo, changed_paths, label="PR changed-file snapshot paths"
     )
+    # GitHub reports changed files relative to the repository work tree root;
+    # a nested pack (e.g. tooling/specrail/) carries that prefix, which is
+    # stripped so refs stay pack-relative like the configured artifact paths.
+    prefix = pack_path_prefix(repo)
+    spec_pattern = re.compile(r"(?:" + re.escape(prefix) + r")?specs/GH[1-9][0-9]*/.+")
     refs = {
-        path for path in paths if re.fullmatch(r"specs/GH[1-9][0-9]*/.+", path)
+        path.removeprefix(prefix) for path in paths if spec_pattern.fullmatch(path)
     }
     if linked_issue is not None:
         configured = spec_packet_artifact_paths(config, linked_issue, repo=repo)

@@ -26,7 +26,9 @@ MANAGED_DIRECTORIES = (
     "tools",
 )
 MANAGED_FILES = (
-    ".github/workflows/workflow-check.yml",
+    # .github/workflows/workflow-check.yml is consumer-owned and stays at the
+    # repository root: GitHub only executes workflows from .github/workflows/,
+    # so the CI entry point cannot live inside the nested pack root.
     "AGENT_USAGE.md",
     "SPEC.md",
     "docs/ADOPTION_MATRIX.md",
