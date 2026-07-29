@@ -175,6 +175,23 @@ def _hash_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _git_object_path(repo: Path, raw_path: str, label: str) -> str:
+    """Map a pack-relative path to a Git worktree-relative object path."""
+
+    path = _trusted_path(repo, raw_path, label)
+    prefix = _git(
+        repo,
+        ["rev-parse", "--show-prefix"],
+        "git work tree prefix",
+    ).decode("utf-8", errors="strict").rstrip("\r\n").rstrip("/")
+    if not prefix:
+        return path
+    trusted_prefix = validated_repo_relative_path(
+        prefix, label="git work tree prefix"
+    ).as_posix()
+    return f"{trusted_prefix}/{path}"
+
+
 def trusted_default_base(repo: Path) -> tuple[str, str]:
     """Resolve the local, fetch-backed origin default branch and commit."""
 
@@ -210,9 +227,17 @@ def approved_spec_source_commits(
     configured = spec_packet_artifact_paths(config, issue, repo=repo)
     result: dict[str, str] = {}
     for path in [configured["product_spec"], configured["tech_spec"]]:
+        object_path = _git_object_path(repo, path, f"approved spec path {path}")
         source_commit = _git(
             repo,
-            ["log", "-1", "--format=%H", trusted_base_sha, "--", path],
+            [
+                "log",
+                "-1",
+                "--format=%H",
+                trusted_base_sha,
+                "--",
+                f":(top,literal){object_path}",
+            ],
             f"approved spec source commit {path}",
         ).decode("utf-8", errors="strict").strip()
         if not COMMIT_RE.fullmatch(source_commit):
@@ -242,8 +267,13 @@ def build_approved_spec_evidence(
         source_commit = revision.get("source_commit_sha") if isinstance(revision, dict) else None
         if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
             raise SpecRailError(f"spec_revisions[{path}].source_commit_sha must be a full SHA")
+        object_path = _git_object_path(repo, path, f"approved spec path {path}")
         hashes[path] = _hash_bytes(
-            _git(repo, ["show", f"{source_commit}:{path}"], f"approved spec source {path}")
+            _git(
+                repo,
+                ["show", f"{source_commit}:{object_path}"],
+                f"approved spec source {path}",
+            )
         )
     evidence = {
         "repository": repository,
@@ -341,6 +371,7 @@ def validate_approved_spec_evidence(
     if gated_head_sha is not None and not COMMIT_RE.fullmatch(gated_head_sha):
         raise SpecRailError("gated head SHA must be a full commit SHA")
     for path in expected_paths:
+        object_path = _git_object_path(repo, path, f"approved spec path {path}")
         digest = hashes.get(path)
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise SpecRailError(f"approved_spec.content_hashes[{path}] must be a sha256 hex digest")
@@ -371,22 +402,34 @@ def validate_approved_spec_evidence(
             f"approved spec merge commit must be on trusted default base: {path}",
         )
         source_digest = _hash_bytes(
-            _git(repo, ["show", f"{source_commit}:{path}"], f"approved spec source {path}")
+            _git(
+                repo,
+                ["show", f"{source_commit}:{object_path}"],
+                f"approved spec source {path}",
+            )
         )
         merge_digest = _hash_bytes(
-            _git(repo, ["show", f"{merge_commit}:{path}"], f"approved spec merge {path}")
+            _git(
+                repo,
+                ["show", f"{merge_commit}:{object_path}"],
+                f"approved spec merge {path}",
+            )
         )
         current_base_digest = _hash_bytes(
             _git(
                 repo,
-                ["show", f"{trusted_base_sha}:{path}"],
+                ["show", f"{trusted_base_sha}:{object_path}"],
                 f"approved spec at current trusted base {path}",
             )
         )
         gated_digest = digest
         if gated_head_sha is not None:
             gated_digest = _hash_bytes(
-                _git(repo, ["show", f"{gated_head_sha}:{path}"], f"approved spec at gated head {path}")
+                _git(
+                    repo,
+                    ["show", f"{gated_head_sha}:{object_path}"],
+                    f"approved spec at gated head {path}",
+                )
             )
         if not all(
             value == digest
@@ -407,8 +450,9 @@ def classification_from_approved_tech(
     if not COMMIT_RE.fullmatch(base_sha):
         raise SpecRailError("tech spec base_sha must be a full commit SHA")
     tech_path = spec_packet_artifact_paths(config, issue, repo=repo)["tech_spec"]
+    object_path = _git_object_path(repo, tech_path, "approved tech spec path")
     base_content = _git(
-        repo, ["show", f"{base_sha}:{tech_path}"], "trusted approved tech spec"
+        repo, ["show", f"{base_sha}:{object_path}"], "trusted approved tech spec"
     )
     matches = PLANNED_CHANGES_MANIFEST_RE.findall(base_content)
     if len(matches) != 1:

@@ -208,13 +208,26 @@ def verify_adoption(
 
         source_path_value = entry.get("source_path")
         source_hash = entry.get("source_sha256")
+        adaptation = entry.get("adaptation")
+        has_adaptation = isinstance(adaptation, str) and bool(adaptation.strip())
         if source_path_value is None:
-            if not isinstance(entry.get("adaptation"), str) or not entry["adaptation"].strip():
+            if not has_adaptation:
                 errors.append(f"target-only file lacks adaptation reason: {relative}")
             continue
         if not isinstance(source_hash, str) or len(source_hash) != 64:
             errors.append(f"invalid source sha256 for {relative}")
             continue
+        if (
+            isinstance(expected_hash, str)
+            and len(expected_hash) == 64
+            and expected_hash != source_hash
+            and not has_adaptation
+        ):
+            errors.append(
+                f"source-backed file diverges without adaptation reason: {relative}"
+            )
+        elif adaptation is not None and not has_adaptation:
+            errors.append(f"invalid adaptation reason for {relative}")
         if source_root is not None:
             try:
                 source_path = safe_repo_path(

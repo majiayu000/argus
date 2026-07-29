@@ -12,7 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "checks"))
 
 from route_gate import artifact_exists  # noqa: E402
-from sensitive_enforcement import build_approved_spec_evidence  # noqa: E402
+from sensitive_enforcement import (  # noqa: E402
+    approved_spec_source_commits,
+    build_approved_spec_evidence,
+    classification_from_approved_tech,
+)
 from specrail_lib import load_pack  # noqa: E402
 
 from test_route_gate import (  # noqa: E402
@@ -394,3 +398,106 @@ def test_route_gate_blocks_unknown_current_state() -> None:
     assert result.returncode == 1
     assert payload["decision"] == "blocked"
     assert payload["reasons"] == ["unknown current state: ready_to_merge"]
+
+
+def test_approved_spec_git_reads_support_nested_pack_root(tmp_path: Path) -> None:
+    worktree = tmp_path / "consumer"
+    (worktree / "tooling").mkdir(parents=True)
+    pack = worktree / "tooling" / "specrail"
+    write_custom_pack(pack, "specs[prod]")
+    workflow_path = pack / "workflow.yaml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8").replace(
+            "    paths: []", "    paths:\n      - checks/**"
+        ),
+        encoding="utf-8",
+    )
+    packet = pack / "specs[prod]" / "GH999"
+    packet.mkdir(parents=True)
+    (packet / "product.md").write_text(
+        "GitHub issue: `#999`\n", encoding="utf-8"
+    )
+    planned_changes = {
+        "version": 1,
+        "issue": 999,
+        "complete": True,
+        "paths": ["checks/route_gate.py"],
+        "spec_refs": [],
+    }
+    (packet / "tech.md").write_text(
+        "GitHub issue: `#999`\n"
+        "<!-- specrail-planned-changes\n"
+        f"{json.dumps(planned_changes, separators=(',', ':'))}\n"
+        "-->\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+    subprocess.run(["git", "-C", str(worktree), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=SpecRail Test",
+            "-c",
+            "user.email=specrail@example.invalid",
+            "commit",
+            "-qm",
+            "nested pack",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(worktree), "update-ref", "refs/remotes/origin/main", head],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+        check=True,
+    )
+
+    config = load_pack(pack)
+    paths = [f"specs[prod]/GH999/{name}.md" for name in ["product", "tech"]]
+    revisions = {
+        path: {
+            "source_commit_sha": head,
+            "pr_number": 10,
+            "merged_at": "2029-01-01T00:00:00Z",
+            "merge_commit_sha": head,
+        }
+        for path in paths
+    }
+
+    assert approved_spec_source_commits(config, pack, 999) == {
+        path: head for path in paths
+    }
+    evidence = build_approved_spec_evidence(
+        config,
+        pack,
+        repository="example/consumer",
+        issue=999,
+        spec_revisions=revisions,
+        approved_at="2030-01-01T00:00:00Z",
+        maintainer_actor="maintainer",
+        gated_head_sha=head,
+    )
+    assert evidence["spec_paths"] == paths
+    classification = classification_from_approved_tech(
+        config, pack, issue=999, base_sha=head
+    )
+    assert classification["source_path"] == "specs[prod]/GH999/tech.md"
+    assert classification["matched_paths"] == ["checks/route_gate.py"]

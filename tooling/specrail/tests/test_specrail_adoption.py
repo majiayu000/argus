@@ -84,6 +84,70 @@ def test_adoption_manifest_detects_target_drift(tmp_path: Path) -> None:
     assert any("target hash mismatch" in error for error in payload["errors"])
 
 
+def test_adoption_manifest_requires_reason_for_source_divergence(
+    tmp_path: Path,
+) -> None:
+    metadata = {
+        "repository": "https://github.com/majiayu000/specrail.git",
+        "commit": SOURCE_COMMIT,
+    }
+    metadata_path = tmp_path / "specrail-source.json"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    asset_path = tmp_path / "AGENT_USAGE.md"
+    asset_path.write_text("consumer adaptation\n", encoding="utf-8")
+    manifest = {
+        "manifest_version": 1,
+        "source": {"commit": SOURCE_COMMIT},
+        "files": [
+            {
+                "path": "AGENT_USAGE.md",
+                "sha256": hashlib.sha256(asset_path.read_bytes()).hexdigest(),
+                "source_path": "AGENT_USAGE.md",
+                "source_sha256": hashlib.sha256(b"upstream\n").hexdigest(),
+                "adaptation": None,
+            },
+            {
+                "path": "specrail-source.json",
+                "sha256": hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+                "source_path": None,
+                "source_sha256": None,
+                "adaptation": "test metadata",
+            },
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    blocked = run_check(
+        "checks/verify_specrail_adoption.py",
+        "--repo",
+        str(tmp_path),
+        "--manifest",
+        manifest_path.name,
+        "--json",
+    )
+
+    assert blocked.returncode == 1
+    assert any(
+        "source-backed file diverges without adaptation reason" in error
+        for error in json.loads(blocked.stdout)["errors"]
+    )
+
+    manifest["files"][0]["adaptation"] = "consumer-specific wording"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    allowed = run_check(
+        "checks/verify_specrail_adoption.py",
+        "--repo",
+        str(tmp_path),
+        "--manifest",
+        manifest_path.name,
+        "--json",
+    )
+
+    assert allowed.returncode == 0, allowed.stderr or allowed.stdout
+    assert json.loads(allowed.stdout)["decision"] == "allowed"
+
+
 def test_adoption_manifest_ignores_consumer_owned_tests(tmp_path: Path) -> None:
     test_root = tmp_path / "tests"
     test_root.mkdir()
@@ -94,6 +158,14 @@ def test_adoption_manifest_ignores_consumer_owned_tests(tmp_path: Path) -> None:
 
     assert "tests/integration.rs" not in paths
     assert "tests/test_pr_gate.py" in paths
+
+
+def test_argus_workflow_runs_repository_release_contract_tests() -> None:
+    workflow = (
+        ROOT.parents[1] / ".github" / "workflows" / "workflow-check.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "run: python3 -m pytest -q scripts/tests" in workflow
 
 
 def test_argus_adoption_source_is_pinned() -> None:
