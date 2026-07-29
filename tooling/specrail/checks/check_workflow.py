@@ -27,9 +27,6 @@ from sensitive_enforcement import validate_sensitive_registry
 
 
 REQUIRED_FILES = [
-    "README.md",
-    "LICENSE",
-    "CHANGELOG.md",
     "SPEC.md",
     "docs/ADOPTION_MATRIX.md",
     "workflow.yaml",

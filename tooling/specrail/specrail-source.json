@@ -28,6 +28,7 @@
     "limited adoption ownership to explicitly copied SpecRail test files",
     "bound oversized PR review evidence to an exact local base/head diff fallback",
     "bound review evidence to stable base and head snapshots",
-    "normalized copied template whitespace"
+    "normalized copied template whitespace",
+    "nested the managed pack under tooling/specrail and released workflow-check.yml to consumer ownership"
   ]
 }
