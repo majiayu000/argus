@@ -1,8 +1,0 @@
-# SpecRail pack pytest configuration (issue #147).
-#
-# The pack's process tests run from this directory (the pack root), matching
-# the CI step `python3 -m pytest -q` with working-directory tooling/specrail.
-# testpaths pins collection to the pack's tests so a bare invocation can
-# never silently widen the collection scope.
-[tool.pytest.ini_options]
-testpaths = ["tests"]
