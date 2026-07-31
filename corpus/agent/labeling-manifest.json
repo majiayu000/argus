@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "sourceSnapshot": {
+    "repository": "https://github.com/majiayu000/claude-skill-registry-data",
+    "commit": "0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3",
+    "tree": "d936718ef2277eb14eb5fb59f04ed914f290500c",
+    "committedAt": "2026-07-03T03:57:59Z",
+    "totalPathCount": 411009,
+    "skillRootCount": 202660
+  },
+  "detectorBaseline": {
+    "repository": "https://github.com/majiayu000/argus",
+    "commit": "7bcd1afbb1a64c90adaf5e1b60a8ca4f0a8b0fba",
+    "tree": "6000b84f8d7eb39002fc97e6a997626d6681ad9b",
+    "positiveDecision": "block"
+  },
+  "cohorts": [
+    {
+      "id": "detector-hit",
+      "description": "Preserved issue #88 census candidates, rescanned at the pinned detector baseline.",
+      "rowCount": 849,
+      "legacyInputCombinedSha256": "52c1fc69e93f17050be27701a71eb38452764b81d52faa3b716ac62bc7a6e4c0",
+      "combinedSha256": "04110ce4c6672b0f9e79d94d1fcbfde240359c9a14ed1ab4e629eac65bc5ba6e",
+      "predictionCounts": {
+        "allow": 402,
+        "allow-with-approval": 186,
+        "block": 261
+      },
+      "shards": [
+        {
+          "path": "corpus/agent/labeling-worklists/detector-hit-001.jsonl",
+          "rowCount": 300,
+          "sha256": "224cfbc2b81528f732d2246138af2397945b1fdc0c9d5db770289b4f04148fe3"
+        },
+        {
+          "path": "corpus/agent/labeling-worklists/detector-hit-002.jsonl",
+          "rowCount": 300,
+          "sha256": "fbb43b116b79f277d42ba5f58ffc051c38470ac22592f9a019358aa3cb80a7b2"
+        },
+        {
+          "path": "corpus/agent/labeling-worklists/detector-hit-003.jsonl",
+          "rowCount": 249,
+          "sha256": "d4974da9a96fb5e1011fca3c9e2c92059d8e2571a345c4bfba13dcff5eb48464"
+        }
+      ]
+    },
+    {
+      "id": "detector-non-block",
+      "description": "Deterministically ranked source roots whose pinned Argus scan did not return the positive block decision.",
+      "rowCount": 849,
+      "combinedSha256": "2fc300b6974c9bde2e70ad9322e421b3eb395d98671ee491de87617dac60bfdc",
+      "predictionCounts": {
+        "allow": 849,
+        "allow-with-approval": 0,
+        "block": 0
+      },
+      "sampling": {
+        "method": "sha256_rank_then_static_scan",
+        "seed": "argus-gh145-detector-nonblock-v1",
+        "excludedHitSkillRootCount": 719,
+        "eligibleSkillRootCount": 201941,
+        "candidateCount": 950,
+        "acceptedDecisions": [
+          "allow",
+          "allow-with-approval"
+        ],
+        "selectedCount": 849
+      },
+      "shards": [
+        {
+          "path": "corpus/agent/labeling-worklists/detector-non-block-001.jsonl",
+          "rowCount": 300,
+          "sha256": "be266c59e0ee2f4203cdae84c7e48146e6f8810ff9d42e61375eb11a87526a9e"
+        },
+        {
+          "path": "corpus/agent/labeling-worklists/detector-non-block-002.jsonl",
+          "rowCount": 300,
+          "sha256": "b2fdfe452401267a9e1cf0c028cc66750b9ee30dcdb208c00d9fdd41474f231c"
+        },
+        {
+          "path": "corpus/agent/labeling-worklists/detector-non-block-003.jsonl",
+          "rowCount": 249,
+          "sha256": "a0406a039f3cd97145a78479e1a2e4f2a423450e403c17e16421111b31c9afbe"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "All labels and reviewer notes are intentionally empty until independent human review.",
+    "This balanced case-control benchmark does not estimate source-population prevalence.",
+    "Recall is valid only for the frozen labeled benchmark after both cohorts receive final human labels."
+  ]
+}

@@ -3,12 +3,12 @@
 
 Uses a 6-row synthetic fixture (fixtures/reviewer_A.csv / reviewer_B.csv):
 
-  fix-01  A=TP  B=TP             -> agreed
-  fix-02  A=FP  B=FP             -> agreed
-  fix-03  A=TP  B=FP             -> dispute (disagreement), arbitrated TP
-  fix-04  A=needs-context B=TP   -> dispute (uncertain), arbitrated FP
-  fix-05  A=TP  B=(empty)        -> dispute (unlabeled), stays unresolved
-  fix-06  A=FP  B=FP             -> agreed
+  fix-01  A=block  B=block             -> agreed
+  fix-02  A=non-block  B=non-block     -> agreed
+  fix-03  A=block  B=non-block         -> dispute, arbitrated block
+  fix-04  A=needs-context B=block      -> dispute, arbitrated non-block
+  fix-05  A=block  B=(empty)           -> dispute, stays unresolved
+  fix-06  A=non-block  B=non-block     -> agreed
 
 Stage 1 (no arbitration): 3 agreed, 3 disputes, kappa over 5 dual-labeled rows.
 Stage 2 (with arbitration): 5 final labels, 1 unresolved dispute.
@@ -59,10 +59,10 @@ def main():
         check("disputes_total", report["disputes_total"], 3)
         check("disputes_unresolved", report["disputes_unresolved"], 3)
         check("final_labels", report["final_labels"], 3)
-        # 5 dual-labeled pairs: (TP,TP) (FP,FP) (TP,FP) (needs-context,TP) (FP,FP)
+        # Five dual-labeled pairs have three agreements.
         # observed agreement = 3/5 = 0.6
         check("percent_agreement", report["percent_agreement"], 0.6)
-        # marginals: A {TP:2, FP:2, nc:1}, B {TP:2, FP:3}
+        # Marginals preserve the original two-class fixture proportions.
         # expected agreement = (2/5*2/5) + (2/5*3/5) = 0.4
         # kappa = (0.6 - 0.4) / (1 - 0.4) = 0.3333
         check("cohens_kappa", report["cohens_kappa"], 0.3333)
@@ -74,7 +74,7 @@ def main():
         check("fix-04 reason", disputes["fix-04"]["dispute_reason"], "uncertain")
         check("fix-05 reason", disputes["fix-05"]["dispute_reason"], "unlabeled")
 
-        # Stage 2: with human arbitration (fix-03 -> TP, fix-04 -> FP).
+        # Stage 2: human arbitration resolves fix-03/fix-04.
         out2 = os.path.join(tmp, "stage2")
         report2 = run(out2, arbitration=os.path.join(FIXTURES, "disputes_resolved.csv"))
         check("stage2 disputes_arbitrated", report2["disputes_arbitrated"], 2)
@@ -83,7 +83,19 @@ def main():
         check(
             "stage2 label_distribution",
             report2["label_distribution_final"],
-            {"TP": 2, "FP": 3},
+            {"block": 2, "non-block": 3},
+        )
+        check(
+            "stage2 benchmark",
+            report2["benchmark"],
+            {
+                "tp": 2,
+                "fp": 1,
+                "fn": 0,
+                "tn": 2,
+                "precision": 0.666667,
+                "recall": 1.0,
+            },
         )
 
         with open(os.path.join(out2, "final_labels.jsonl")) as fh:
@@ -91,8 +103,8 @@ def main():
         check("stage2 final ids", sorted(finals),
               ["fix-01", "fix-02", "fix-03", "fix-04", "fix-06"])
         check("fix-03 source", finals["fix-03"]["source"], "arbitrated")
-        check("fix-03 label", finals["fix-03"]["label"], "TP")
-        check("fix-04 label", finals["fix-04"]["label"], "FP")
+        check("fix-03 label", finals["fix-03"]["label"], "block")
+        check("fix-04 label", finals["fix-04"]["label"], "non-block")
         check("fix-01 source", finals["fix-01"]["source"], "agreed")
         # Arbitrated rows keep why they were disputed, so a label resolved from a
         # genuine disagreement is distinguishable from one resolved for a row no

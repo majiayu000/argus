@@ -9,8 +9,8 @@ Pipeline:
      marked `needs-context`, or where a label is missing. A human arbitrator
      fills the `final_label` / `final_notes` columns of that file.
   4. Merge: final_labels.jsonl is built ONLY from agreed rows (A == B, label
-     TP or FP) plus arbitrated rows (from --arbitration). No machine ever
-     invents a label.
+     block or non-block) plus arbitrated rows (from --arbitration). No machine
+     ever invents a label.
 
 Usage:
     python3 eval/labeling/compute_agreement.py \
@@ -27,16 +27,20 @@ import os
 import sys
 from collections import Counter
 
-DEFINITIVE_LABELS = ("TP", "FP")
+DEFINITIVE_LABELS = ("block", "non-block")
 UNCERTAIN_LABEL = "needs-context"
 VALID_LABELS = DEFINITIVE_LABELS + (UNCERTAIN_LABEL,)
 
 DISPUTE_FIELDS = [
     "sample_id",
+    "cohort",
     "batch",
     "category",
     "priority",
     "path",
+    "source_commit",
+    "source_url",
+    "prediction_decision",
     "detector",
     "contexts",
     "label_a",
@@ -64,7 +68,18 @@ def read_reviewer_csv(path):
     rows = {}
     with open(path, "r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
-        required = {"sample_id", "batch", "path", "label", "notes"}
+        required = {
+            "sample_id",
+            "reviewer",
+            "cohort",
+            "batch",
+            "path",
+            "source_commit",
+            "source_url",
+            "prediction_decision",
+            "label",
+            "notes",
+        }
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"error: {path}: missing columns: {sorted(missing)}")
@@ -78,6 +93,10 @@ def read_reviewer_csv(path):
                 row["label"] = normalize_label(row["label"])
             except ValueError as exc:
                 raise SystemExit(f"error: {path}:{lineno}: {exc}")
+            if row["label"] and not row["notes"].strip():
+                raise SystemExit(
+                    f"error: {path}:{lineno}: labeled row requires reviewer notes"
+                )
             rows[sid] = row
     if not rows:
         raise SystemExit(f"error: {path}: no data rows")
@@ -112,6 +131,12 @@ def read_arbitration_csv(path):
             raise SystemExit(f"error: {path}: missing columns: {sorted(missing)}")
         for lineno, row in enumerate(reader, 2):
             sid = row["sample_id"].strip()
+            if not sid:
+                raise SystemExit(f"error: {path}:{lineno}: empty sample_id")
+            if sid in resolved:
+                raise SystemExit(
+                    f"error: {path}:{lineno}: duplicate sample_id {sid}"
+                )
             label = (row.get("final_label") or "").strip()
             if not label:
                 continue  # still unresolved; stays a dispute
@@ -121,14 +146,90 @@ def read_arbitration_csv(path):
                 raise SystemExit(f"error: {path}:{lineno}: {exc}")
             if label not in DEFINITIVE_LABELS:
                 raise SystemExit(
-                    f"error: {path}:{lineno}: arbitrated final_label must be TP or FP, "
+                    f"error: {path}:{lineno}: arbitrated final_label must be "
+                    "block or non-block, "
                     f"got {label!r}"
+                )
+            notes = (row.get("final_notes") or "").strip()
+            if not notes:
+                raise SystemExit(
+                    f"error: {path}:{lineno}: resolved row requires final_notes"
                 )
             resolved[sid] = {
                 "label": label,
-                "notes": (row.get("final_notes") or "").strip(),
+                "notes": notes,
             }
     return resolved
+
+
+def immutable_fields(row):
+    return {
+        key: row.get(key, "")
+        for key in (
+            "sample_id",
+            "cohort",
+            "batch",
+            "category",
+            "priority",
+            "path",
+            "source_commit",
+            "source_url",
+            "prediction_decision",
+            "detector",
+            "contexts",
+        )
+    }
+
+
+def final_record(row, label, source):
+    return {
+        "sample_id": row["sample_id"],
+        "cohort": row["cohort"],
+        "batch": row["batch"],
+        "path": row["path"],
+        "source_commit": row["source_commit"],
+        "source_url": row["source_url"],
+        "prediction_decision": row["prediction_decision"],
+        "label": label,
+        "source": source,
+    }
+
+
+def benchmark_metrics(final):
+    counts = Counter({"tp": 0, "fp": 0, "fn": 0, "tn": 0})
+    for row in final:
+        prediction = row["prediction_decision"]
+        label = row["label"]
+        if prediction not in {"block", "allow", "allow-with-approval"}:
+            raise SystemExit(
+                f"error: {row['sample_id']}: invalid prediction_decision "
+                f"{prediction!r}"
+            )
+        predicted_positive = prediction == "block"
+        actual_positive = label == "block"
+        if predicted_positive and actual_positive:
+            counts["tp"] += 1
+        elif predicted_positive:
+            counts["fp"] += 1
+        elif actual_positive:
+            counts["fn"] += 1
+        else:
+            counts["tn"] += 1
+    precision_denominator = counts["tp"] + counts["fp"]
+    recall_denominator = counts["tp"] + counts["fn"]
+    return {
+        **counts,
+        "precision": (
+            round(counts["tp"] / precision_denominator, 6)
+            if precision_denominator
+            else None
+        ),
+        "recall": (
+            round(counts["tp"] / recall_denominator, 6)
+            if recall_denominator
+            else None
+        ),
+    }
 
 
 def main():
@@ -145,6 +246,10 @@ def main():
 
     rows_a = read_reviewer_csv(args.a)
     rows_b = read_reviewer_csv(args.b)
+    if any(row["reviewer"] != "A" for row in rows_a.values()):
+        raise SystemExit("error: reviewer A file contains a non-A reviewer row")
+    if any(row["reviewer"] != "B" for row in rows_b.values()):
+        raise SystemExit("error: reviewer B file contains a non-B reviewer row")
     if set(rows_a) != set(rows_b):
         only_a = sorted(set(rows_a) - set(rows_b))[:5]
         only_b = sorted(set(rows_b) - set(rows_a))[:5]
@@ -162,6 +267,10 @@ def main():
 
     for sid in rows_a:
         a, b = rows_a[sid], rows_b[sid]
+        if immutable_fields(a) != immutable_fields(b):
+            raise SystemExit(
+                f"error: reviewer files disagree on immutable fields for {sid}"
+            )
         la, lb = a["label"], b["label"]
         if la and lb:
             dual_labeled_pairs.append((la, lb))
@@ -176,25 +285,22 @@ def main():
             reason = "disagreement"
 
         if reason is None:
-            agreed.append(
-                {
-                    "sample_id": sid,
-                    "batch": a["batch"],
-                    "path": a["path"],
-                    "label": la,
-                    "source": "agreed",
-                    "notes_a": a["notes"].strip(),
-                    "notes_b": b["notes"].strip(),
-                }
-            )
+            record = final_record(a, la, "agreed")
+            record["notes_a"] = a["notes"].strip()
+            record["notes_b"] = b["notes"].strip()
+            agreed.append(record)
         else:
             disputes.append(
                 {
                     "sample_id": sid,
+                    "cohort": a["cohort"],
                     "batch": a["batch"],
                     "category": a.get("category", ""),
                     "priority": a.get("priority", ""),
                     "path": a["path"],
+                    "source_commit": a["source_commit"],
+                    "source_url": a["source_url"],
+                    "prediction_decision": a["prediction_decision"],
                     "detector": a.get("detector", ""),
                     "contexts": a.get("contexts", ""),
                     "label_a": la,
@@ -206,6 +312,13 @@ def main():
                     "final_notes": "",
                 }
             )
+
+    stale_arbitration = sorted(set(arbitrated) - {d["sample_id"] for d in disputes})
+    if stale_arbitration:
+        raise SystemExit(
+            "error: arbitration file resolves samples that are not disputes: "
+            f"{stale_arbitration[:5]}"
+        )
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -220,28 +333,15 @@ def main():
 
     # Merge: agreed rows + arbitrated rows only.
     final = list(agreed)
-    stale_arbitration = sorted(set(arbitrated) - {d["sample_id"] for d in disputes})
-    if stale_arbitration:
-        raise SystemExit(
-            "error: arbitration file resolves samples that are not disputes: "
-            f"{stale_arbitration[:5]}"
-        )
     for d in disputes:
         res = arbitrated.get(d["sample_id"])
         if res:
-            final.append(
-                {
-                    "sample_id": d["sample_id"],
-                    "batch": d["batch"],
-                    "path": d["path"],
-                    "label": res["label"],
-                    "source": "arbitrated",
-                    "dispute_reason": d["dispute_reason"],
-                    "notes_a": d["notes_a"].strip(),
-                    "notes_b": d["notes_b"].strip(),
-                    "arbitration_notes": res["notes"],
-                }
-            )
+            record = final_record(d, res["label"], "arbitrated")
+            record["dispute_reason"] = d["dispute_reason"]
+            record["notes_a"] = d["notes_a"].strip()
+            record["notes_b"] = d["notes_b"].strip()
+            record["arbitration_notes"] = res["notes"]
+            final.append(record)
 
     final_path = os.path.join(args.out_dir, "final_labels.jsonl")
     with open(final_path, "w", encoding="utf-8") as fh:
@@ -271,6 +371,7 @@ def main():
         "disputes_unresolved": len(unresolved),
         "final_labels": len(final),
         "label_distribution_final": dict(Counter(r["label"] for r in final)),
+        "benchmark": benchmark_metrics(final),
     }
     report_path = os.path.join(args.out_dir, "agreement_report.json")
     with open(report_path, "w", encoding="utf-8") as fh:

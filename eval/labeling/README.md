@@ -1,75 +1,93 @@
-# Human labeling workflow for the agent-scan precision/recall baseline (#88)
+# Human labeling workflow for the agent benchmark (#145)
 
-Tooling to dual-label `corpus/agent/labeling-worklist.jsonl` (849 real census
-hits) with human TP/FP judgments.
+This directory exports, reconciles, and evaluates a pinned two-cohort
+benchmark. Scripts may select and move samples, verify integrity, and calculate
+statistics. They must never assign or suggest a human label.
 
-**Labels must be human-provided.** AI labeling is explicitly forbidden for
-issue #88 — these scripts only move data around, compute agreement statistics,
-and merge already-human decisions. No script in this directory assigns or
-suggests a label.
+The source snapshot and every worklist shard are frozen in
+`corpus/agent/labeling-manifest.json`. The snapshot is
+`majiayu000/claude-skill-registry-data` commit
+`0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3`, tree
+`d936718ef2277eb14eb5fb59f04ed914f290500c`.
+
+## Benchmark composition
+
+| cohort | rows | frozen prediction | purpose |
+|---|---:|---|---|
+| `detector-hit` | 849 | 261 `block`, 402 `allow`, 186 `allow-with-approval` | review preserved #88 census candidates under the pinned baseline |
+| `detector-non-block` | 849 | row-level `allow` / `allow-with-approval` | expose false negatives and supply a recall denominator |
+
+The 1,698-row balanced set is a case-control benchmark. Its precision and
+recall describe this frozen benchmark; they do not estimate malicious-sample
+prevalence in the 202,660-skill source population.
 
 ## Workflow
 
-```
-export → two humans label independently → agreement/dispute report
-       → human arbitration of disputes → merged final labels
+```text
+verify + export → two humans label independently → agreement/disputes
+                → human arbitration → frozen final labels
 ```
 
-### 1. Export reviewer assignments
+### 1. Export both reviewer assignments
 
-```
+From the repository root:
+
+```bash
 python3 eval/labeling/export_assignments.py
 ```
 
-Writes `eval/labeling/assignments/reviewer_A.csv` and `reviewer_B.csv`
-(849 rows each, identical content). Each row carries the sample id, batch,
-category, priority, source path, detector summary (matched pattern or
-extracted capabilities), and the matched context snippets, plus empty
-`label` and `notes` columns.
+This verifies the manifest SHA-256 and row count for all six shards before
+writing:
+
+- `eval/labeling/assignments/reviewer_A.csv`
+- `eval/labeling/assignments/reviewer_B.csv`
+
+Each file contains 1,698 samples in the same deterministic order. The files
+differ only in the `reviewer` column. Every row includes its cohort, frozen
+prediction, source commit, and a link pinned to that commit. `label` and
+`notes` are empty.
 
 ### 2. Two humans label independently
 
-Reviewer A fills `reviewer_A.csv`; reviewer B fills `reviewer_B.csv`.
-The reviewers must not see each other's file while labeling.
+Reviewers A and B must not see each other's assignment while labeling. Every
+labeled row requires a reviewer rationale in `notes`.
 
-Allowed values for `label`:
+| label | ground-truth meaning |
+|---|---|
+| `block` | the package should be blocked |
+| `non-block` | the package should not be blocked |
+| `needs-context` | the reviewer cannot decide; human arbitration is required |
 
-| label | meaning |
-|-------|---------|
-| `TP` | the detector hit is a real finding |
-| `FP` | the detector hit is noise |
-| `needs-context` | the reviewer cannot decide from the snippet (goes to arbitration) |
+These are ground-truth labels, not `TP` / `FP` labels. The evaluation script
+combines them with `prediction_decision` to derive TP, FP, FN, and TN. This
+keeps the same label contract valid for both hit and non-block cohorts.
 
-Use `notes` for the reviewer rationale (issue #88 requires reviewer notes).
+### 3. Calculate agreement and disputes
 
-### 3. Agreement / dispute report
-
-```
+```bash
 python3 eval/labeling/compute_agreement.py \
   --a eval/labeling/assignments/reviewer_A.csv \
   --b eval/labeling/assignments/reviewer_B.csv \
   --out-dir eval/labeling/out
 ```
 
-Outputs in `eval/labeling/out/`:
+Outputs:
 
-- `agreement_report.json` — percent agreement and Cohen's kappa over
-  dual-labeled rows, plus counts.
-- `disputes.csv` — every row where A and B disagree, where either marked
-  `needs-context`, or where a label is missing. Has empty `final_label` /
-  `final_notes` columns.
-- `final_labels.jsonl` — at this stage, only the rows where A and B agree
-  on TP or FP.
+- `agreement_report.json`: agreement, Cohen's kappa, label distribution, and
+  the confusion matrix over finalized rows.
+- `disputes.csv`: disagreements, `needs-context`, and missing labels, with
+  empty `final_label` / `final_notes`.
+- `final_labels.jsonl`: rows independently agreed as `block` or `non-block`.
 
-### 4. Human arbitration
+The command rejects reviewer files that differ in immutable source,
+prediction, or evidence fields.
 
-A third human (or both reviewers together) fills `final_label` (TP or FP)
-and `final_notes` in a copy of `disputes.csv`, e.g.
-`eval/labeling/out/disputes_resolved.csv`.
+### 4. Human arbitration and final merge
 
-### 5. Merge final labels
+A third human, or both reviewers together, fills `final_label` and
+`final_notes` in a copy of `disputes.csv`. Then run:
 
-```
+```bash
 python3 eval/labeling/compute_agreement.py \
   --a eval/labeling/assignments/reviewer_A.csv \
   --b eval/labeling/assignments/reviewer_B.csv \
@@ -77,20 +95,39 @@ python3 eval/labeling/compute_agreement.py \
   --arbitration eval/labeling/out/disputes_resolved.csv
 ```
 
-`final_labels.jsonl` now contains agreed rows (`"source": "agreed"`) plus
-arbitrated rows (`"source": "arbitrated"`), each with both reviewers' notes
-for provenance. Arbitrated rows also keep `dispute_reason`
-(`disagreement` / `uncertain` / `unlabeled`), so a label resolved from a real
-reviewer disagreement stays distinguishable from one resolved for a row that
-no reviewer labeled; `agreement_report.json` reports the same breakdown under
-`arbitrated_by_reason`. Rows still unresolved stay in `disputes.csv` and never
-enter the final labels.
+Unresolved rows never enter `final_labels.jsonl`. A frozen benchmark is ready
+to commit only when all 1,698 rows have human final labels.
+
+## Rebuild the non-block cohort
+
+Build Argus at the detector baseline recorded in the manifest, and check out
+the pinned source snapshot without executing any source content:
+
+```bash
+git clone https://github.com/majiayu000/claude-skill-registry-data \
+  /path/to/claude-skill-registry-data
+git -C /path/to/claude-skill-registry-data checkout \
+  0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3
+git checkout 7bcd1afbb1a64c90adaf5e1b60a8ca4f0a8b0fba
+cargo build -p argus-cli
+python3 eval/labeling/build_non_hit_worklist.py \
+  --source-repo /path/to/claude-skill-registry-data \
+  --argus-repo . \
+  --argus target/debug/argus
+```
+
+The builder verifies both commits and trees. It first rescans the 719 unique
+skill roots represented by the preserved #88 worklist and verifies that every
+recorded context still exists in the pinned source. It then excludes those
+roots, SHA-256-ranks the remaining roots with the manifest seed, and statically
+scans the first 950 candidates. It writes both 849-row cohorts into three
+shards each, with per-row source blob/content hashes and actual pinned-baseline
+predictions. It disables executable lookup and outbound proxies; it never runs
+source scripts.
 
 ## Tests
 
-A tiny synthetic fixture (not real labels) proves the agreement pipeline
-end-to-end:
-
-```
+```bash
+python3 -m unittest discover -s eval/labeling/tests -p 'test_*.py'
 python3 eval/labeling/tests/run_fixture_test.py
 ```
