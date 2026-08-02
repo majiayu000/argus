@@ -24,6 +24,14 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "compute_agreement.py")
 FIXTURES = os.path.join(HERE, "fixtures")
+FIX_IDS = {
+    "fix-01": "agt88-bbe74ad684",
+    "fix-02": "agt88-986704c6c8",
+    "fix-03": "agt88-0605a5a6b3",
+    "fix-04": "agt88-9596bf2e4c",
+    "fix-05": "agt88-c256763861",
+    "fix-06": "agt88-ef6cb42983",
+}
 
 
 def run(out_dir, arbitration=None):
@@ -69,10 +77,26 @@ def main():
 
         with open(os.path.join(out1, "disputes.csv")) as fh:
             disputes = {r["sample_id"]: r for r in csv.DictReader(fh)}
-        check("dispute ids", sorted(disputes), ["fix-03", "fix-04", "fix-05"])
-        check("fix-03 reason", disputes["fix-03"]["dispute_reason"], "disagreement")
-        check("fix-04 reason", disputes["fix-04"]["dispute_reason"], "uncertain")
-        check("fix-05 reason", disputes["fix-05"]["dispute_reason"], "unlabeled")
+        check(
+            "dispute ids",
+            sorted(disputes),
+            sorted(FIX_IDS[key] for key in ("fix-03", "fix-04", "fix-05")),
+        )
+        check(
+            "fix-03 reason",
+            disputes[FIX_IDS["fix-03"]]["dispute_reason"],
+            "disagreement",
+        )
+        check(
+            "fix-04 reason",
+            disputes[FIX_IDS["fix-04"]]["dispute_reason"],
+            "uncertain",
+        )
+        check(
+            "fix-05 reason",
+            disputes[FIX_IDS["fix-05"]]["dispute_reason"],
+            "unlabeled",
+        )
 
         # Stage 2: human arbitration resolves fix-03/fix-04.
         out2 = os.path.join(tmp, "stage2")
@@ -100,18 +124,41 @@ def main():
 
         with open(os.path.join(out2, "final_labels.jsonl")) as fh:
             finals = {r["sample_id"]: r for r in map(json.loads, fh)}
-        check("stage2 final ids", sorted(finals),
-              ["fix-01", "fix-02", "fix-03", "fix-04", "fix-06"])
-        check("fix-03 source", finals["fix-03"]["source"], "arbitrated")
-        check("fix-03 label", finals["fix-03"]["label"], "block")
-        check("fix-04 label", finals["fix-04"]["label"], "non-block")
-        check("fix-01 source", finals["fix-01"]["source"], "agreed")
+        check(
+            "stage2 final ids",
+            sorted(finals),
+            sorted(
+                FIX_IDS[key]
+                for key in ("fix-01", "fix-02", "fix-03", "fix-04", "fix-06")
+            ),
+        )
+        check("fix-03 source", finals[FIX_IDS["fix-03"]]["source"], "arbitrated")
+        check("fix-03 label", finals[FIX_IDS["fix-03"]]["label"], "block")
+        check(
+            "fix-03 skill root",
+            finals[FIX_IDS["fix-03"]]["skill_root"],
+            "skills/three",
+        )
+        check("fix-04 label", finals[FIX_IDS["fix-04"]]["label"], "non-block")
+        check("fix-01 source", finals[FIX_IDS["fix-01"]]["source"], "agreed")
         # Arbitrated rows keep why they were disputed, so a label resolved from a
         # genuine disagreement is distinguishable from one resolved for a row no
         # reviewer labeled.
-        check("fix-03 dispute_reason", finals["fix-03"]["dispute_reason"], "disagreement")
-        check("fix-04 dispute_reason", finals["fix-04"]["dispute_reason"], "uncertain")
-        check("fix-01 has no dispute_reason", "dispute_reason" in finals["fix-01"], False)
+        check(
+            "fix-03 dispute_reason",
+            finals[FIX_IDS["fix-03"]]["dispute_reason"],
+            "disagreement",
+        )
+        check(
+            "fix-04 dispute_reason",
+            finals[FIX_IDS["fix-04"]]["dispute_reason"],
+            "uncertain",
+        )
+        check(
+            "fix-01 has no dispute_reason",
+            "dispute_reason" in finals[FIX_IDS["fix-01"]],
+            False,
+        )
         check(
             "stage2 arbitrated_by_reason",
             report2["arbitrated_by_reason"],

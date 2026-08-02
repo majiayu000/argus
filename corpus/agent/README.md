@@ -10,8 +10,8 @@ full census of `claude-skill-registry-data` (202,660 skills). See
   corpus schema. All hosts point at `.example.invalid` (non-resolvable); no
   fixture downloads, executes, or sends anything real. Drop into `argus/corpus`.
 - `labeling-manifest.json` + `labeling-worklists/` — a pinned, sharded
-  two-cohort human benchmark: 849 preserved census candidates and 849
-  detector non-blocks.
+  two-cohort human benchmark: 719 unique census-hit packages preserving all
+  849 detector findings, plus 719 detector non-block packages.
 
 ## The 6 fixtures — and why the negatives matter most
 
@@ -34,20 +34,25 @@ The manifest binds every shard to the exact source commit/tree, row count, and
 SHA-256. Each JSONL row contains its path, detector evidence, context, and empty
 human label/note fields.
 
-| batch | count | purpose |
+| legacy finding batch | count | purpose |
 |-------|-------|---------|
 | script-capability | 245 | real scripts with extracted capabilities (15 flagged high — misfit/obfuscation combos) |
 | override_lang | 210 | SKILL.md injection-language hits (mixed TP/FP) |
 | concealment | 244 | SKILL.md concealment-language hits (mixed) |
 | *-fp-sample | 150 | 50 each of exfil/curl_pipe/autorun — near-100% FP, to quantify the noise floor |
-| detector-non-block-v1 | 849 | deterministic non-block cohort for finding false negatives and true negatives |
+| detector-non-block-v1 | 719 packages | deterministic non-block cohort for finding false negatives and true negatives |
+
+The 849 legacy hit rows are detector findings, not independent package labels.
+They are aggregated into 719 package samples so packages with several findings
+do not receive extra statistical weight; every finding and context remains in
+the package row.
 
 Reviewers label ground truth as `block` / `non-block` / `needs-context`; the
 evaluation pipeline derives TP/FP/FN/TN from that label and the frozen
 prediction. See `../../eval/labeling/README.md` for the independent dual-review
 and arbitration workflow.
 
-All 1,698 labels are intentionally empty pending two independent human
+All 1,438 labels are intentionally empty pending two independent human
 reviews. Until review and arbitration are complete, no benchmark precision or
 recall may be claimed. The balanced case-control design does not estimate
 source-population prevalence.
@@ -86,4 +91,4 @@ argus corpus eval --corpus corpus/agent --format json
 The result is explicitly a **synthetic fixture metric**, not a real-world
 quality claim. At the implementation head it reports 4 TP, 0 FP, 0 FN, 2 TN,
 precision 1.0, and recall 1.0. These six synthetic fixture metrics remain
-separate from the pinned 1,698-row human benchmark.
+separate from the pinned 1,438-row human benchmark.

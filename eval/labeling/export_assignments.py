@@ -27,6 +27,7 @@ FIELDNAMES = [
     "batch",
     "category",
     "priority",
+    "skill_root",
     "path",
     "source_commit",
     "source_url",
@@ -42,14 +43,13 @@ def fail(message):
     raise SystemExit(f"error: {message}")
 
 
-def sample_id(batch, path):
-    """Return a stable identifier for a unique batch/path pair."""
-    digest = hashlib.sha1(f"{batch}\x00{path}".encode()).hexdigest()[:10]
+def sample_id(cohort, skill_root):
+    """Return a stable identifier for one package-level benchmark sample."""
+    digest = hashlib.sha1(f"{cohort}\x00{skill_root}".encode()).hexdigest()[:10]
     return f"agt88-{digest}"
 
 
-def detector_summary(row):
-    """Return a human-readable detector summary without adding a judgment."""
+def finding_summary(row):
     if "capabilities" in row:
         capabilities = row["capabilities"]
         if not isinstance(capabilities, dict):
@@ -81,19 +81,52 @@ def detector_summary(row):
     return f"pattern={matched}"
 
 
+def detector_summary(row):
+    """Return a human-readable detector summary without adding a judgment."""
+    findings = row.get("detectorFindings")
+    if findings is not None:
+        if not isinstance(findings, list) or not findings:
+            fail(f"{row.get('path', '<unknown>')}: detector findings are empty")
+        parts = []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                fail(
+                    f"{row.get('path', '<unknown>')}: detector finding is invalid"
+                )
+            batch = finding.get("batch")
+            path = finding.get("path")
+            if not isinstance(batch, str) or not isinstance(path, str):
+                fail(
+                    f"{row.get('path', '<unknown>')}: "
+                    "detector finding lacks provenance"
+                )
+            parts.append(f"[{batch} {path}] {finding_summary(finding)}")
+        return "\n".join(parts)
+    return finding_summary(row)
+
+
 def contexts_text(row):
     contexts = row.get("contexts")
     if not isinstance(contexts, list):
         fail(f"{row.get('path', '<unknown>')}: contexts is not an array")
+    if not contexts:
+        fail(f"{row.get('path', '<unknown>')}: context evidence is empty")
     parts = []
     for context in contexts:
         if not isinstance(context, dict):
             fail(f"{row.get('path', '<unknown>')}: context is not an object")
         snippet = context.get("context")
         line = context.get("line")
-        if not isinstance(snippet, str) or not isinstance(line, int):
-            fail(f"{row.get('path', '<unknown>')}: invalid context")
-        parts.append(f"[line {line}]\n{snippet.strip()}")
+        if (
+            not isinstance(snippet, str)
+            or not snippet.strip()
+            or not isinstance(line, int)
+        ):
+            fail(f"{row.get('path', '<unknown>')}: context evidence is invalid")
+        context_path = context.get("path", row.get("path"))
+        if not isinstance(context_path, str):
+            fail(f"{row.get('path', '<unknown>')}: invalid context path")
+        parts.append(f"[{context_path}:line {line}]\n{snippet.strip()}")
     return "\n---\n".join(parts)
 
 
@@ -163,6 +196,7 @@ def load_manifest_worklists(manifest_path, selected_paths=None, repo_root=REPO_R
 
     all_rows = []
     declared_paths = set()
+    declared_roots = set()
     matched_paths = set()
     for cohort in cohorts:
         if not isinstance(cohort, dict):
@@ -190,6 +224,8 @@ def load_manifest_worklists(manifest_path, selected_paths=None, repo_root=REPO_R
 
         combined = hashlib.sha256()
         cohort_row_count = 0
+        cohort_roots = set()
+        detector_finding_count = 0
         prediction_counts = Counter()
         for shard in shards:
             if not isinstance(shard, dict):
@@ -215,6 +251,20 @@ def load_manifest_worklists(manifest_path, selected_paths=None, repo_root=REPO_R
             if include_rows:
                 matched_paths.add(path_key)
             for row in rows:
+                skill_root = row.get("skillRoot")
+                if not isinstance(skill_root, str) or not skill_root:
+                    fail(f"{path}: row skillRoot is missing")
+                if skill_root in declared_roots:
+                    fail(f"{path}: duplicate package root {skill_root}")
+                declared_roots.add(skill_root)
+                cohort_roots.add(skill_root)
+                if cohort_id == "detector-hit":
+                    findings = row.get("detectorFindings")
+                    if not isinstance(findings, list) or not findings:
+                        fail(f"{path}: detector findings are empty")
+                    if not all(isinstance(finding, dict) for finding in findings):
+                        fail(f"{path}: detector finding is invalid")
+                    detector_finding_count += len(findings)
                 row_prediction = row.get("prediction")
                 if cohort_prediction is not None:
                     prediction_decision = cohort_prediction
@@ -253,6 +303,27 @@ def load_manifest_worklists(manifest_path, selected_paths=None, repo_root=REPO_R
             fail(f"{manifest_path}: cohort {cohort_id} combined sha256 mismatch")
         if prediction_counts != Counter(expected_predictions):
             fail(f"{manifest_path}: cohort {cohort_id} prediction counts mismatch")
+        if cohort_id == "detector-hit":
+            expected_finding_count = cohort.get("detectorFindingCount")
+            legacy_row_count = cohort.get("legacyInputRowCount")
+            legacy_root_count = cohort.get("legacyUniqueSkillRootCount")
+            legacy_digest = cohort.get("legacyInputCombinedSha256")
+            if (
+                not isinstance(expected_finding_count, int)
+                or not isinstance(legacy_row_count, int)
+                or not isinstance(legacy_root_count, int)
+                or not isinstance(legacy_digest, str)
+            ):
+                fail(f"{manifest_path}: hit aggregation contract is invalid")
+            if detector_finding_count != expected_finding_count:
+                fail(
+                    f"{manifest_path}: detector finding count "
+                    f"{detector_finding_count} != {expected_finding_count}"
+                )
+            if legacy_row_count != detector_finding_count:
+                fail(f"{manifest_path}: legacy input row count mismatch")
+            if legacy_root_count != len(cohort_roots):
+                fail(f"{manifest_path}: legacy unique package count mismatch")
 
     if selected is not None and matched_paths != selected:
         unknown = sorted(selected - matched_paths)
@@ -272,11 +343,18 @@ def build_records(rows):
     for row in rows:
         batch = row.get("batch")
         path = row.get("path")
-        if not isinstance(batch, str) or not isinstance(path, str):
-            fail("worklist row requires string batch and path")
-        identifier = sample_id(batch, path)
+        skill_root = row.get("skillRoot")
+        cohort = row.get("_cohort")
+        if (
+            not isinstance(batch, str)
+            or not isinstance(path, str)
+            or not isinstance(skill_root, str)
+            or not isinstance(cohort, str)
+        ):
+            fail("worklist row requires string cohort, batch, skillRoot, and path")
+        identifier = sample_id(cohort, skill_root)
         if identifier in seen:
-            fail(f"duplicate sample id for batch={batch} path={path}")
+            fail(f"duplicate package root {skill_root}")
         seen.add(identifier)
         if row.get("label"):
             fail(f"{path}: worklist already has a label")
@@ -285,10 +363,11 @@ def build_records(rows):
         records.append(
             {
                 "sample_id": identifier,
-                "cohort": row["_cohort"],
+                "cohort": cohort,
                 "batch": batch,
                 "category": row.get("category", ""),
                 "priority": row.get("priority", ""),
+                "skill_root": skill_root,
                 "path": path,
                 "source_commit": source_commit,
                 "source_url": source_url(repository, source_commit, path),

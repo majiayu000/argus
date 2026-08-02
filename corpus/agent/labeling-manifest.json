@@ -17,40 +17,43 @@
   "cohorts": [
     {
       "id": "detector-hit",
-      "description": "Preserved issue #88 census candidates, rescanned at the pinned detector baseline.",
-      "rowCount": 849,
+      "description": "Unique package roots from the issue #88 census candidates, preserving every legacy detector finding and rescanned at the pinned detector baseline.",
+      "rowCount": 719,
+      "legacyInputRowCount": 849,
+      "legacyUniqueSkillRootCount": 719,
+      "detectorFindingCount": 849,
       "legacyInputCombinedSha256": "52c1fc69e93f17050be27701a71eb38452764b81d52faa3b716ac62bc7a6e4c0",
-      "combinedSha256": "04110ce4c6672b0f9e79d94d1fcbfde240359c9a14ed1ab4e629eac65bc5ba6e",
+      "combinedSha256": "3873dd232f1d4e191bb96b8c7719a9f0eedb12826d11cfbfee31f56bd67bef9a",
       "predictionCounts": {
-        "allow": 402,
-        "allow-with-approval": 186,
-        "block": 261
+        "allow": 401,
+        "allow-with-approval": 71,
+        "block": 247
       },
       "shards": [
         {
           "path": "corpus/agent/labeling-worklists/detector-hit-001.jsonl",
           "rowCount": 300,
-          "sha256": "224cfbc2b81528f732d2246138af2397945b1fdc0c9d5db770289b4f04148fe3"
+          "sha256": "b5d99a182f9eba69ec00e1b7ec30c479c679fc552e6aca9c1c7e73f0c5fbfe34"
         },
         {
           "path": "corpus/agent/labeling-worklists/detector-hit-002.jsonl",
           "rowCount": 300,
-          "sha256": "fbb43b116b79f277d42ba5f58ffc051c38470ac22592f9a019358aa3cb80a7b2"
+          "sha256": "110eb487bfe295e97c0c13c2a6ce13395e62ff528883ff38101b1c861405da7b"
         },
         {
           "path": "corpus/agent/labeling-worklists/detector-hit-003.jsonl",
-          "rowCount": 249,
-          "sha256": "d4974da9a96fb5e1011fca3c9e2c92059d8e2571a345c4bfba13dcff5eb48464"
+          "rowCount": 119,
+          "sha256": "4517c195f44ca915b93cfb6278e35fcfe01c4c4fc94fddff1bda1a0605dbb81b"
         }
       ]
     },
     {
       "id": "detector-non-block",
       "description": "Deterministically ranked source roots whose pinned Argus scan did not return the positive block decision.",
-      "rowCount": 849,
-      "combinedSha256": "2fc300b6974c9bde2e70ad9322e421b3eb395d98671ee491de87617dac60bfdc",
+      "rowCount": 719,
+      "combinedSha256": "50a31be571ade3944f1f499c5a9c7d7879f258e559f9c6328de06f4fb7d2d848",
       "predictionCounts": {
-        "allow": 849,
+        "allow": 719,
         "allow-with-approval": 0,
         "block": 0
       },
@@ -64,7 +67,7 @@
           "allow",
           "allow-with-approval"
         ],
-        "selectedCount": 849
+        "selectedCount": 719
       },
       "shards": [
         {
@@ -79,8 +82,8 @@
         },
         {
           "path": "corpus/agent/labeling-worklists/detector-non-block-003.jsonl",
-          "rowCount": 249,
-          "sha256": "a0406a039f3cd97145a78479e1a2e4f2a423450e403c17e16421111b31c9afbe"
+          "rowCount": 119,
+          "sha256": "4c4458c8828cb07a5b6c28843352eb12616450b01642b6c0049e2b83a4fee966"
         }
       ]
     }

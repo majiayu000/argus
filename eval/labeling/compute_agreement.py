@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -31,12 +32,28 @@ DEFINITIVE_LABELS = ("block", "non-block")
 UNCERTAIN_LABEL = "needs-context"
 VALID_LABELS = DEFINITIVE_LABELS + (UNCERTAIN_LABEL,)
 
+IMMUTABLE_FIELDS = (
+    "sample_id",
+    "cohort",
+    "batch",
+    "category",
+    "priority",
+    "skill_root",
+    "path",
+    "source_commit",
+    "source_url",
+    "prediction_decision",
+    "detector",
+    "contexts",
+)
+
 DISPUTE_FIELDS = [
     "sample_id",
     "cohort",
     "batch",
     "category",
     "priority",
+    "skill_root",
     "path",
     "source_commit",
     "source_url",
@@ -51,6 +68,11 @@ DISPUTE_FIELDS = [
     "final_label",
     "final_notes",
 ]
+
+
+def expected_sample_id(cohort, skill_root):
+    digest = hashlib.sha1(f"{cohort}\x00{skill_root}".encode()).hexdigest()[:10]
+    return f"agt88-{digest}"
 
 
 def normalize_label(raw):
@@ -68,18 +90,7 @@ def read_reviewer_csv(path):
     rows = {}
     with open(path, "r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
-        required = {
-            "sample_id",
-            "reviewer",
-            "cohort",
-            "batch",
-            "path",
-            "source_commit",
-            "source_url",
-            "prediction_decision",
-            "label",
-            "notes",
-        }
+        required = set(IMMUTABLE_FIELDS) | {"reviewer", "label", "notes"}
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"error: {path}: missing columns: {sorted(missing)}")
@@ -89,6 +100,24 @@ def read_reviewer_csv(path):
                 raise SystemExit(f"error: {path}:{lineno}: empty sample_id")
             if sid in rows:
                 raise SystemExit(f"error: {path}:{lineno}: duplicate sample_id {sid}")
+            cohort = row["cohort"].strip()
+            skill_root = row["skill_root"].strip()
+            if not cohort or not skill_root:
+                raise SystemExit(
+                    f"error: {path}:{lineno}: cohort and skill_root must be non-empty"
+                )
+            if sid != expected_sample_id(cohort, skill_root):
+                raise SystemExit(
+                    f"error: {path}:{lineno}: sample_id does not match "
+                    "cohort and skill_root"
+                )
+            row["cohort"] = cohort
+            row["skill_root"] = skill_root
+            if not row["detector"].strip() or not row["contexts"].strip():
+                raise SystemExit(
+                    f"error: {path}:{lineno}: detector and contexts "
+                    "must be non-empty"
+                )
             try:
                 row["label"] = normalize_label(row["label"])
             except ValueError as exc:
@@ -163,22 +192,7 @@ def read_arbitration_csv(path):
 
 
 def immutable_fields(row):
-    return {
-        key: row.get(key, "")
-        for key in (
-            "sample_id",
-            "cohort",
-            "batch",
-            "category",
-            "priority",
-            "path",
-            "source_commit",
-            "source_url",
-            "prediction_decision",
-            "detector",
-            "contexts",
-        )
-    }
+    return {key: row[key] for key in IMMUTABLE_FIELDS}
 
 
 def final_record(row, label, source):
@@ -186,6 +200,7 @@ def final_record(row, label, source):
         "sample_id": row["sample_id"],
         "cohort": row["cohort"],
         "batch": row["batch"],
+        "skill_root": row["skill_root"],
         "path": row["path"],
         "source_commit": row["source_commit"],
         "source_url": row["source_url"],
@@ -295,14 +310,15 @@ def main():
                     "sample_id": sid,
                     "cohort": a["cohort"],
                     "batch": a["batch"],
-                    "category": a.get("category", ""),
-                    "priority": a.get("priority", ""),
+                    "category": a["category"],
+                    "priority": a["priority"],
+                    "skill_root": a["skill_root"],
                     "path": a["path"],
                     "source_commit": a["source_commit"],
                     "source_url": a["source_url"],
                     "prediction_decision": a["prediction_decision"],
-                    "detector": a.get("detector", ""),
-                    "contexts": a.get("contexts", ""),
+                    "detector": a["detector"],
+                    "contexts": a["contexts"],
                     "label_a": la,
                     "notes_a": a["notes"],
                     "label_b": lb,

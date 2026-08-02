@@ -12,6 +12,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -21,7 +22,6 @@ DEFAULT_SOURCE_TREE = "d936718ef2277eb14eb5fb59f04ed914f290500c"
 DEFAULT_ARGUS_COMMIT = "7bcd1afbb1a64c90adaf5e1b60a8ca4f0a8b0fba"
 DEFAULT_ARGUS_TREE = "6000b84f8d7eb39002fc97e6a997626d6681ad9b"
 DEFAULT_SEED = "argus-gh145-detector-nonblock-v1"
-DEFAULT_TARGET_COUNT = 849
 DEFAULT_CANDIDATE_COUNT = 950
 DEFAULT_SHARD_SIZE = 300
 DEFAULT_HIT_WORKLISTS = tuple(
@@ -70,6 +70,28 @@ def load_jsonl_many(paths):
     for path in paths:
         rows.extend(load_jsonl(path))
     return rows
+
+
+def expand_hit_findings(rows):
+    findings = []
+    for row in rows:
+        nested = row.get("detectorFindings")
+        if nested is None:
+            findings.append(dict(row))
+            continue
+        if not isinstance(nested, list) or not nested:
+            raise SystemExit(
+                f"error: {row.get('path', '<unknown>')}: "
+                "detectorFindings is empty or invalid"
+            )
+        for finding in nested:
+            if not isinstance(finding, dict) or "detectorFindings" in finding:
+                raise SystemExit(
+                    f"error: {row.get('path', '<unknown>')}: "
+                    "nested detector finding is invalid"
+                )
+            findings.append(dict(finding))
+    return findings
 
 
 def source_inventory(source_repo):
@@ -235,32 +257,120 @@ def generated_non_block_row(
     }
 
 
-def generated_hit_row(row, root, result, inventory, source_repo):
-    path = row["path"]
+def restored_context(path, content, matched):
+    if not isinstance(matched, str) or not matched.strip():
+        raise RuntimeError(f"{path}: cannot restore context without matched text")
+    tokens = matched.split()
+    pattern = re.compile(r"\s+".join(re.escape(token) for token in tokens))
+    match = pattern.search(content)
+    if match is None:
+        raise RuntimeError(f"{path}: cannot restore context for {matched!r}")
+    lines = content.splitlines()
+    first_line = content.count("\n", 0, match.start())
+    last_line = content.count("\n", 0, match.end())
+    excerpt_start = max(0, first_line - 2)
+    excerpt_end = min(len(lines), last_line + 3)
+    return {
+        "context": "\n".join(lines[excerpt_start:excerpt_end]),
+        "line": excerpt_start + 1,
+        "path": path,
+    }
+
+
+def verified_contexts(row, source_repo):
+    path = row.get("path")
+    if not isinstance(path, str):
+        raise RuntimeError("hit row path is not a string")
     content = (source_repo / path).read_text(encoding="utf-8")
-    for context in row.get("contexts", []):
-        snippet = context.get("context", "").strip()
-        if snippet and snippet not in content:
+    contexts = row.get("contexts")
+    if not isinstance(contexts, list):
+        raise RuntimeError(f"{path}: contexts is not an array")
+    if not contexts:
+        return [restored_context(path, content, row.get("matched"))]
+
+    verified = []
+    for context in contexts:
+        if not isinstance(context, dict):
+            raise RuntimeError(f"{path}: context is not an object")
+        snippet = context.get("context")
+        line = context.get("line")
+        context_path = context.get("path", path)
+        if (
+            not isinstance(snippet, str)
+            or not snippet.strip()
+            or not isinstance(line, int)
+        ):
+            raise RuntimeError(f"{path}: context evidence is empty or invalid")
+        if context_path != path:
             raise RuntimeError(
-                f"{path}: recorded context at line {context.get('line')} "
+                f"{path}: context path {context_path!r} disagrees with finding"
+            )
+        if snippet.strip() not in content:
+            raise RuntimeError(
+                f"{path}: recorded context at line {line} "
                 "is absent from the pinned source"
             )
-    generated = dict(row)
-    generated.pop("reviewer_note", None)
-    generated.update(
-        {
-            "cohort": "detector-hit",
-            "prediction": {
-                "decision": result["decision"],
-                "positiveDecision": "block",
-                "rules": result["rules"],
-            },
-            "reviewerNote": "",
-            "skillRoot": root,
-            **source_provenance(path, inventory, source_repo),
+        verified.append({"context": snippet.strip(), "line": line, "path": path})
+    return verified
+
+
+def generated_hit_row(rows, root, result, inventory, source_repo):
+    if not rows:
+        raise RuntimeError(f"{root}: no detector findings to aggregate")
+    primary_path = f"{root}/SKILL.md"
+    findings = []
+    contexts = []
+    context_keys = set()
+    priorities = []
+    for row in rows:
+        if row.get("label"):
+            raise RuntimeError(f"{row.get('path', root)}: unexpected human label")
+        finding_contexts = verified_contexts(row, source_repo)
+        finding = {
+            key: value
+            for key, value in row.items()
+            if key
+            not in {
+                "cohort",
+                "label",
+                "prediction",
+                "reviewer_note",
+                "reviewerNote",
+                "skillRoot",
+                "sourceBlobSha1",
+                "sourceBytes",
+                "sourceContentSha256",
+            }
         }
-    )
-    return generated
+        finding["contexts"] = finding_contexts
+        findings.append(finding)
+        priorities.append(row.get("priority"))
+        for context in finding_contexts:
+            key = (context["path"], context["line"], context["context"])
+            if key not in context_keys:
+                context_keys.add(key)
+                contexts.append(context)
+
+    priority_rank = {"high": 2, "normal": 1}
+    priority = max(priorities, key=lambda value: priority_rank.get(value, 0))
+    return {
+        "batch": "detector-hit-v1",
+        "category": root.split("/", 1)[0],
+        "cohort": "detector-hit",
+        "contexts": contexts,
+        "detectorFindings": findings,
+        "label": "",
+        "path": primary_path,
+        "prediction": {
+            "decision": result["decision"],
+            "positiveDecision": "block",
+            "rules": result["rules"],
+        },
+        "priority": priority,
+        "reviewerNote": "",
+        "skillRoot": root,
+        **source_provenance(primary_path, inventory, source_repo),
+    }
 
 
 def atomic_write_jsonl(path, rows):
@@ -330,7 +440,11 @@ def main():
     parser.add_argument("--argus-commit", default=DEFAULT_ARGUS_COMMIT)
     parser.add_argument("--argus-tree", default=DEFAULT_ARGUS_TREE)
     parser.add_argument("--seed", default=DEFAULT_SEED)
-    parser.add_argument("--target-count", type=int, default=DEFAULT_TARGET_COUNT)
+    parser.add_argument(
+        "--target-count",
+        type=int,
+        help="Non-block package count (defaults to the unique hit package count)",
+    )
     parser.add_argument(
         "--candidate-count",
         type=int,
@@ -342,10 +456,8 @@ def main():
 
     if not 1 <= args.jobs <= MAX_JOBS:
         raise SystemExit(f"error: --jobs must be in 1..={MAX_JOBS}")
-    if args.target_count < 1:
+    if args.target_count is not None and args.target_count < 1:
         raise SystemExit("error: --target-count must be positive")
-    if args.candidate_count < args.target_count:
-        raise SystemExit("error: --candidate-count must be >= --target-count")
     if not 1 <= args.shard_size <= MAX_SHARD_SIZE:
         raise SystemExit(
             f"error: --shard-size must be in 1..={MAX_SHARD_SIZE}"
@@ -366,7 +478,9 @@ def main():
         "Argus",
     )
 
-    hit_rows = load_jsonl_many(args.hit_worklists or DEFAULT_HIT_WORKLISTS)
+    hit_rows = expand_hit_findings(
+        load_jsonl_many(args.hit_worklists or DEFAULT_HIT_WORKLISTS)
+    )
     inventory = source_inventory(args.source_repo)
     skill_roots = {
         path[: -len("/SKILL.md")]
@@ -377,6 +491,9 @@ def main():
         skill_root_for(row["path"], skill_roots) for row in hit_rows
     ]
     unique_hit_roots = sorted(set(hit_roots_by_row))
+    target_count = args.target_count or len(unique_hit_roots)
+    if args.candidate_count < target_count:
+        raise SystemExit("error: --candidate-count must be >= --target-count")
     candidates = ranked_candidates(inventory, hit_rows, args.seed)
     candidates = candidates[: args.candidate_count]
     for root in candidates:
@@ -413,15 +530,18 @@ def main():
             )
         )
 
+    hit_rows_by_root = {root: [] for root in unique_hit_roots}
+    for row, root in zip(hit_rows, hit_roots_by_row):
+        hit_rows_by_root[root].append(row)
     generated_hit_rows = [
         generated_hit_row(
-            row,
+            hit_rows_by_root[root],
             root,
             hit_results[root],
             inventory,
             args.source_repo,
         )
-        for row, root in zip(hit_rows, hit_roots_by_row)
+        for root in unique_hit_roots
     ]
     non_block_rows = []
     for rank, (root, result) in enumerate(
@@ -439,9 +559,9 @@ def main():
                 source_repo=args.source_repo,
             )
         )
-        if len(non_block_rows) == args.target_count:
+        if len(non_block_rows) == target_count:
             break
-    if len(non_block_rows) != args.target_count:
+    if len(non_block_rows) != target_count:
         raise SystemExit(
             f"error: only {len(non_block_rows)} non-block reports among "
             f"{len(candidates)} candidates; no output written"
