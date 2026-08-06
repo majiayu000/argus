@@ -43,11 +43,16 @@ pub fn analyze_with_language(
     parser::analyze(path, content, language)
 }
 
+/// Analyze only the bounded direct encoded-decoder-to-dynamic-execution
+/// pattern. Supported-language syntax errors are returned to the caller.
+pub fn analyze_encoded_dynamic_execution(path: &str, content: &str) -> Result<bool> {
+    parser::analyze_encoded_dynamic_execution(path, content, ScriptLanguage::from_path(path))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactKind {
     Command,
     Call,
-    EncodedDynamicExecution,
     Pipeline,
     Access,
     Assignment,

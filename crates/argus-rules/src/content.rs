@@ -20,9 +20,11 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
     ) {
         let facts = argus_syntax::analyze(&file.rel, &file.content)
             .with_context(|| format!("parse npm source `{}`", file.rel))?;
-        scan_file(file, &mut findings, NetworkScan::Syntax(&facts));
+        let encoded = argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
+            .with_context(|| format!("analyze npm source `{}`", file.rel))?;
+        scan_file(file, &mut findings, NetworkScan::Syntax(&facts), encoded);
     } else {
-        scan_file(file, &mut findings, NetworkScan::Disabled);
+        scan_file(file, &mut findings, NetworkScan::Disabled, false);
     }
     Ok(findings)
 }
@@ -37,7 +39,22 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
 /// or Rust file they extract — none of these rules are npm-specific in
 /// behaviour, only in the regex literals they look for (e.g. `.npmrc`).
 pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
-    scan_file(file, findings, NetworkScan::Legacy);
+    scan_file(file, findings, NetworkScan::Legacy, false);
+}
+
+/// Checked variant for package extractors whose source language is known.
+/// Python files are parsed before content rules run so malformed syntax cannot
+/// silently bypass encoded dynamic execution detection.
+pub fn scan_text_file_checked(file: &TextFile, findings: &mut Vec<Finding>) -> Result<()> {
+    let language = ScriptLanguage::from_path(&file.rel);
+    let encoded = if language == ScriptLanguage::Python {
+        argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
+            .with_context(|| format!("parse source `{}`", file.rel))?
+    } else {
+        false
+    };
+    scan_file(file, findings, NetworkScan::Legacy, encoded);
+    Ok(())
 }
 
 enum NetworkScan<'a> {
@@ -46,7 +63,12 @@ enum NetworkScan<'a> {
     Disabled,
 }
 
-fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: NetworkScan<'_>) {
+fn scan_file(
+    file: &TextFile,
+    findings: &mut Vec<Finding>,
+    network_scan: NetworkScan<'_>,
+    encoded_dynamic_execution: bool,
+) {
     let body = &file.content;
 
     // credential-access: targets host secret files by literal path.
@@ -184,15 +206,6 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
     // encoded-dynamic-execution: only the direct decode -> eval/exec chain.
     // This intentionally does not score standalone decoders, long/minified
     // lines, or entropy: the chain itself is the high-confidence signal.
-    let encoded_dynamic_execution = match &network_scan {
-        NetworkScan::Syntax(facts) => syntax_encoded_dynamic_execution(facts),
-        NetworkScan::Legacy => source_encoded_dynamic_execution(body, language_for_file(&file.rel)),
-        // npm's syntax-backed network rule is JavaScript-only, but Python
-        // source files shipped in a package still use the shared scanner.
-        NetworkScan::Disabled => {
-            source_encoded_dynamic_execution(body, language_for_file(&file.rel))
-        }
-    };
     if encoded_dynamic_execution {
         findings.push(
             Finding::new(
@@ -203,331 +216,6 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
             .at(&file.rel),
         );
     }
-}
-
-fn language_for_file(path: &str) -> ScriptLanguage {
-    ScriptLanguage::from_path(path)
-}
-
-fn syntax_encoded_dynamic_execution(facts: &[Fact]) -> bool {
-    facts
-        .iter()
-        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution)
-}
-
-/// Scan Python and non-JavaScript shared surfaces without treating comments or
-/// string literals as code. The grammar is deliberately limited to the exact
-/// `exec/eval(base64.b64decode(...))` shape; aliases and intermediate values
-/// are left for a future syntax-backed rule.
-fn source_encoded_dynamic_execution(body: &str, language: ScriptLanguage) -> bool {
-    if !matches!(language, ScriptLanguage::Python) {
-        return false;
-    }
-    let eval_shadowed = python_shadowed_binding(body, "eval");
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'#' {
-            skip_line_comment(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if !matches!(identifier, "exec" | "eval")
-            || (identifier == "eval" && eval_shadowed)
-            || previous_member(bytes, index)
-        {
-            index = end;
-            continue;
-        }
-        let mut cursor = skip_space(bytes, end);
-        if bytes.get(cursor) != Some(&b'(') {
-            index = end;
-            continue;
-        }
-        cursor = skip_python_trivia(bytes, cursor + 1);
-        if python_direct_decoder(bytes, cursor) || python_fstring_decoder(bytes, cursor) {
-            return true;
-        }
-        index = end;
-    }
-    false
-}
-
-fn previous_member(bytes: &[u8], index: usize) -> bool {
-    let mut cursor = index;
-    while cursor > 0
-        && bytes[cursor - 1].is_ascii_whitespace()
-        && bytes[cursor - 1] != b'\n'
-        && bytes[cursor - 1] != b'\r'
-    {
-        cursor -= 1;
-    }
-    cursor > 0 && (bytes[cursor - 1] == b'.' || bytes[cursor - 1] == b'?')
-}
-
-fn python_shadowed_binding(body: &str, name: &str) -> bool {
-    if python_function_parameter_shadowed(body, name) {
-        return true;
-    }
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'#' {
-            skip_line_comment(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if identifier == name {
-            let before = body[..index].trim_end();
-            let declaration = before.ends_with("def")
-                || before.ends_with("class")
-                || before.ends_with("as")
-                || bytes.get(skip_python_trivia(bytes, end)) == Some(&b'=');
-            if declaration {
-                return true;
-            }
-        }
-        index = end;
-    }
-    false
-}
-
-fn python_function_parameter_shadowed(body: &str, name: &str) -> bool {
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'#' {
-            skip_line_comment(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if identifier != "def" {
-            index = end;
-            continue;
-        }
-        let mut cursor = skip_python_trivia(bytes, end);
-        if let Some((_, function_end)) = identifier_at(bytes, cursor) {
-            cursor = skip_python_trivia(bytes, function_end);
-        }
-        if bytes.get(cursor) != Some(&b'(') {
-            index = end;
-            continue;
-        }
-        let mut depth = 1;
-        cursor += 1;
-        while cursor < bytes.len() && depth > 0 {
-            if let Some((parameter, parameter_end)) = identifier_at(bytes, cursor) {
-                if parameter == name {
-                    return true;
-                }
-                cursor = parameter_end;
-                continue;
-            }
-            match bytes[cursor] {
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
-            }
-            cursor += 1;
-        }
-        index = end;
-    }
-    false
-}
-
-fn skip_python_trivia(bytes: &[u8], mut index: usize) -> usize {
-    loop {
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) == Some(&b'#') {
-            skip_line_comment(bytes, &mut index);
-            continue;
-        }
-        break;
-    }
-    index
-}
-
-fn python_direct_decoder(bytes: &[u8], mut index: usize) -> bool {
-    loop {
-        index = skip_python_trivia(bytes, index);
-        if bytes.get(index) != Some(&b'(') {
-            break;
-        }
-        index += 1;
-    }
-    let Some((module, end)) = identifier_at(bytes, index) else {
-        return false;
-    };
-    if module != "base64" {
-        return false;
-    }
-    index = skip_python_trivia(bytes, end);
-    if bytes.get(index) != Some(&b'.') {
-        return false;
-    }
-    let Some((decoder, end)) = identifier_at(bytes, skip_python_trivia(bytes, index + 1)) else {
-        return false;
-    };
-    decoder == "b64decode" && bytes.get(skip_python_trivia(bytes, end)) == Some(&b'(')
-}
-
-fn python_fstring_decoder(bytes: &[u8], index: usize) -> bool {
-    let quote_index = if matches!(bytes.get(index), Some(b'f' | b'F'))
-        && bytes.get(index + 1).is_some_and(|byte| is_quote(*byte))
-    {
-        index + 1
-    } else if (matches!(bytes.get(index), Some(b'r' | b'R'))
-        && bytes
-            .get(index + 1)
-            .is_some_and(|byte| matches!(byte, b'f' | b'F'))
-        || matches!(bytes.get(index), Some(b'f' | b'F'))
-            && bytes
-                .get(index + 1)
-                .is_some_and(|byte| matches!(byte, b'r' | b'R')))
-        && bytes.get(index + 2).is_some_and(|byte| is_quote(*byte))
-    {
-        index + 2
-    } else {
-        return false;
-    };
-    let quote = bytes[quote_index];
-    let triple = bytes
-        .get(quote_index..quote_index + 3)
-        .is_some_and(|window| window == [quote, quote, quote]);
-    let mut cursor = quote_index + if triple { 3 } else { 1 };
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'\\' {
-            cursor = (cursor + 2).min(bytes.len());
-            continue;
-        }
-        if triple && bytes.get(cursor..cursor + 3) == Some(&[quote, quote, quote]) {
-            return false;
-        }
-        if !triple && bytes[cursor] == quote {
-            return false;
-        }
-        if bytes[cursor] == b'{' && bytes.get(cursor + 1) != Some(&b'{') {
-            let expression_start = cursor + 1;
-            let mut depth = 1;
-            cursor = expression_start;
-            while cursor < bytes.len() && depth > 0 {
-                if bytes[cursor] == b'{' {
-                    depth += 1;
-                } else if bytes[cursor] == b'}' {
-                    depth -= 1;
-                }
-                cursor += 1;
-            }
-            let expression_end = cursor.saturating_sub(1);
-            if depth == 0
-                && python_fstring_expression_dynamic_decoder(
-                    bytes,
-                    expression_start.min(expression_end),
-                )
-            {
-                return true;
-            }
-            continue;
-        }
-        cursor += 1;
-    }
-    false
-}
-
-fn python_fstring_expression_dynamic_decoder(bytes: &[u8], mut index: usize) -> bool {
-    index = skip_python_trivia(bytes, index);
-    let Some((callee, end)) = identifier_at(bytes, index) else {
-        return false;
-    };
-    if !matches!(callee, "eval" | "exec") {
-        return false;
-    }
-    index = skip_python_trivia(bytes, end);
-    bytes.get(index) == Some(&b'(')
-        && python_direct_decoder(bytes, skip_python_trivia(bytes, index + 1))
-}
-
-fn is_quote(byte: u8) -> bool {
-    matches!(byte, b'\'' | b'"')
-}
-
-fn skip_line_comment(bytes: &[u8], index: &mut usize) {
-    while *index < bytes.len() && bytes[*index] != b'\n' {
-        *index += 1;
-    }
-}
-
-fn skip_string(bytes: &[u8], index: &mut usize) {
-    let quote = bytes[*index];
-    let triple = bytes
-        .get(*index..*index + 3)
-        .is_some_and(|window| window == [quote, quote, quote]);
-    if triple {
-        *index += 3;
-        while *index + 2 < bytes.len() && bytes[*index..*index + 3] != [quote, quote, quote] {
-            *index += 1;
-        }
-        *index = (*index + 3).min(bytes.len());
-        return;
-    }
-    *index += 1;
-    while *index < bytes.len() {
-        if bytes[*index] == b'\\' {
-            *index = (*index + 2).min(bytes.len());
-        } else if bytes[*index] == quote {
-            *index += 1;
-            break;
-        } else {
-            *index += 1;
-        }
-    }
-}
-
-fn skip_space(bytes: &[u8], mut index: usize) -> usize {
-    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-        index += 1;
-    }
-    index
-}
-
-fn identifier_at(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
-    let first = *bytes.get(start)?;
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return None;
-    }
-    let mut end = start + 1;
-    while bytes
-        .get(end)
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-    {
-        end += 1;
-    }
-    std::str::from_utf8(&bytes[start..end])
-        .ok()
-        .map(|identifier| (identifier, end))
 }
 
 // ---------- regex helpers (compiled once via OnceLock; scans touch every file) ----------
@@ -826,13 +514,14 @@ mod tests {
 
     fn python_findings(source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
-        scan_text_file(
+        scan_text_file_checked(
             &TextFile {
                 rel: "module.py".into(),
                 content: source.into(),
             },
             &mut findings,
-        );
+        )
+        .expect("scan Python");
         findings
     }
 

@@ -24,7 +24,7 @@ mod session;
 mod session_execution;
 pub mod typosquat;
 
-pub use content::scan_text_file;
+pub use content::{scan_text_file, scan_text_file_checked};
 pub use decision::derive_from_findings as derive_decision_from_findings;
 pub use session::{
     RuleSession, MAX_EXTERNAL_EVIDENCE_BYTES, MAX_EXTERNAL_FINDINGS, MAX_EXTERNAL_INPUT_BYTES,

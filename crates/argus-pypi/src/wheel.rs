@@ -13,7 +13,7 @@
 use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_core::{Finding, Severity};
-use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
+use argus_rules::{scan_text_file_checked, scan_text_files_with_context, RuleSession};
 use std::path::Path;
 
 /// Wheel paths whose contents the PyPI rules read.
@@ -97,7 +97,7 @@ pub(crate) fn scan_wheel_zip_with_rules_budget_and_context(
             {
                 parse_metadata_name_version(&file.content)
             } else {
-                scan_text_file(file, &mut per_file);
+                scan_text_file_checked(file, &mut per_file)?;
                 if (file.rel.ends_with(".py") || file.rel.ends_with(".pyi"))
                     && rules::import_time_hook_regex().is_match(&file.content)
                 {

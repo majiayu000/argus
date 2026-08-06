@@ -58,9 +58,7 @@ fn dynamic_builtin_bindings_are_scope_and_order_aware() {
     assert!(javascript
         .iter()
         .any(|fact| fact.callee.as_deref() == Some("shadowed.eval") && fact.text.contains("'x'")));
-    assert!(javascript
-        .iter()
-        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution && fact.text.contains("'y'")));
+    assert!(analyze_source_encoded("scope.js", "eval((atob('y')));"));
 
     let python = analyze(&script(
         "scope.py",
@@ -76,9 +74,10 @@ fn dynamic_builtin_bindings_are_scope_and_order_aware() {
     assert!(python
         .iter()
         .any(|fact| fact.callee.as_deref() == Some("exec")));
-    assert!(python
-        .iter()
-        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution && fact.text.contains("'z'")));
+    assert!(analyze_source_encoded(
+        "scope.py",
+        "exec(base64.b64decode('z'))"
+    ));
 }
 
 #[test]
@@ -97,25 +96,57 @@ fn javascript_new_function_is_a_constructor_fact_with_all_arguments() {
         .arguments
         .last()
         .is_some_and(|argument| argument.raw.starts_with("atob")));
-    assert!(facts
-        .iter()
-        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution));
+    assert!(analyze_source_encoded(
+        "constructor.js",
+        "new Function('arg', atob('body'))"
+    ));
 }
 
 #[test]
 fn python_fstring_marker_requires_nested_dynamic_call() {
-    let bytes = analyze(&script(
+    analyze(&script(
         "fstring.py",
         "exec(f\"{base64.b64decode('bytes')}\")\nexec(f\"{eval(base64.b64decode('code'))}\")",
     ))
     .expect("parse Python");
-    let encoded: Vec<&Fact> = bytes
-        .iter()
-        .filter(|fact| fact.kind == FactKind::EncodedDynamicExecution)
-        .collect();
-    assert_eq!(encoded.len(), 2);
-    assert!(encoded.iter().any(|fact| fact.text.starts_with("exec(")));
-    assert!(encoded.iter().any(|fact| fact.text.starts_with("eval(")));
+    assert!(!analyze_source_encoded(
+        "fstring.py",
+        "exec(f\"{base64.b64decode('bytes')}\")"
+    ));
+    assert!(analyze_source_encoded(
+        "fstring.py",
+        "exec(f\"{eval(base64.b64decode('code'))}\")"
+    ));
+}
+
+#[test]
+fn encoded_decoder_identity_respects_shadowing_and_declarations() {
+    assert!(!analyze_source_encoded(
+        "shadow.js",
+        "const atob = local; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "shadow.py",
+        "base64 = local\nexec(base64.b64decode('x'))"
+    ));
+    assert!(!analyze_source_encoded(
+        "decl.js",
+        "function eval() {}\neval(atob('x'));"
+    ));
+    let catch_source = "try {} catch (eval) { eval(atob('x')); }";
+    assert!(!analyze_source_encoded("catch.js", catch_source));
+    assert!(!analyze_source_encoded(
+        "catch.py",
+        "try:\n    pass\nexcept Exception as eval:\n    eval(base64.b64decode('x'))"
+    ));
+    assert!(analyze_source_encoded(
+        "default.js",
+        "function run(eval = eval(atob('x'))) {}"
+    ));
+}
+
+fn analyze_source_encoded(path: &str, source: &str) -> bool {
+    super::analyze_encoded_dynamic_execution(path, source).expect("parse source")
 }
 
 #[test]
