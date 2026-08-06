@@ -24,6 +24,9 @@ The 849 hit-only worklist in `eval/labeling/` still requires two independent
 真人 reviewers and human arbitration. It cannot establish recall because it
 contains no non-hit population. Until a real frozen dataset is created and
 reviewed, this tool provides no precision/recall or other quality statement.
+Every source dataset and final-labels artifact is bound by an explicit path
+and SHA-256 and is verified under `--root`; per-sample decisions retain both
+reviewer evidence and, when needed, arbitration evidence.
 
 Manifest shape (schema version 1):
 
@@ -35,7 +38,8 @@ Manifest shape (schema version 1):
   "source": {
     "corpus_revision": "...",
     "scanner_revision": "...",
-    "corpus_sha256": "64 lowercase hex characters",
+    "dataset_artifact": {"path": "dataset.json", "sha256": "64 lowercase hex characters"},
+    "final_labels_artifact": {"path": "final-labels.jsonl", "sha256": "64 lowercase hex characters"},
     "provenance": "..."
   },
   "reviewer_provenance": {
@@ -46,10 +50,25 @@ Manifest shape (schema version 1):
   "samples": [{
     "id": "sample-1",
     "kind": "hit",
-    "group": "optional-group",
+    "group": "group-1",
+    "coordinate": "stable-observation-coordinate",
     "artifact": {"path": "fixture.txt", "sha256": "..."},
-    "ground_truth": {"status": "positive", "findings": [{"rule_id": "R-1", "finding_id": "f-1"}]},
+    "ground_truth": {
+      "status": "positive",
+      "findings": [{"rule_id": "R-1", "finding_id": "f-1"}],
+      "resolution": {
+        "source": "agreed",
+        "reviewer_a": {"status": "positive", "evidence": "..."},
+        "reviewer_b": {"status": "positive", "evidence": "..."},
+        "arbitration": null
+      }
+    },
     "prediction": {"status": "positive", "findings": [{"rule_id": "R-1", "finding_id": "f-1"}]}
   }]
 }
 ```
+
+Observation identity is `(artifact.sha256, group, coordinate)`, independent of
+the display `id`; duplicate identities are rejected to prevent contradictory
+rows from being counted twice. Positive statuses require at least one finding
+and negative statuses require an empty finding list.
