@@ -59,6 +59,9 @@ jobs:
       - name: Argus release contract tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_release_*.py'
 
+      - name: Synthetic benchmark contract self-test
+        run: python3 eval/benchmark/tests/run_fixture_test.py
+
       - name: Check whitespace
         shell: bash
         run: |
