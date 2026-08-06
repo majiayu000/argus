@@ -21,11 +21,6 @@ def _write(root: Path, name: str, content: str) -> str:
 
 
 def manifest(root: Path):
-    source = {
-        "dataset.json": _write(root, "dataset.json", '{"dataset":"synthetic-v1"}\n'),
-        "final-labels.jsonl": _write(root, "final-labels.jsonl", '{"source":"human-agreed"}\n'),
-    }
-
     def sample(sid, kind, truth, prediction):
         filename = sid + ".txt"
         digest = _write(root, filename, f"independent synthetic fixture {sid}\n")
@@ -47,6 +42,19 @@ def manifest(root: Path):
             "prediction": {"status": prediction, "findings": findings},
         }
 
+    samples = [
+        sample("hit-tp", "hit", "positive", "positive"),
+        sample("hit-fp", "hit", "negative", "positive"),
+        sample("non-hit-fn", "non-hit", "positive", "negative"),
+        sample("non-hit-tn", "non-hit", "negative", "negative"),
+    ]
+    dataset = {"schema_version": 1, "samples": [{
+        "id": s["id"], "kind": s["kind"], "path": s["artifact"]["path"], "sha256": s["artifact"]["sha256"],
+        "group": s["group"], "coordinate": s["coordinate"], "prediction": s["prediction"]
+    } for s in samples]}
+    labels = "\n".join(json.dumps({"sample_id": s["id"], **s["ground_truth"]}, sort_keys=True) for s in samples) + "\n"
+    dataset_digest = _write(root, "dataset.json", json.dumps(dataset, sort_keys=True) + "\n")
+    labels_digest = _write(root, "final-labels.jsonl", labels)
     return {
         "schema_version": 1,
         "dataset_type": "synthetic-fixtures",
@@ -54,17 +62,12 @@ def manifest(root: Path):
         "source": {
             "corpus_revision": "synthetic-corpus-r1",
             "scanner_revision": "synthetic-scanner-r1",
-            "dataset_artifact": {"path": "dataset.json", "sha256": source["dataset.json"]},
-            "final_labels_artifact": {"path": "final-labels.jsonl", "sha256": source["final-labels.jsonl"]},
+            "dataset_artifact": {"path": "dataset.json", "sha256": dataset_digest},
+            "final_labels_artifact": {"path": "final-labels.jsonl", "sha256": labels_digest},
             "provenance": "checked-in synthetic fixture bound to its dataset and final-label artifacts",
         },
         "reviewer_provenance": {"method": "human-dual-review", "reviewers": ["reviewer-A", "reviewer-B"], "arbitrator": "reviewer-arbitrator"},
-        "samples": [
-            sample("hit-tp", "hit", "positive", "positive"),
-            sample("hit-fp", "hit", "negative", "positive"),
-            sample("non-hit-fn", "non-hit", "positive", "negative"),
-            sample("non-hit-tn", "non-hit", "negative", "negative"),
-        ],
+        "samples": samples,
     }
 
 
@@ -97,6 +100,9 @@ def main():
         expect_reject(base, root, lambda x: x["source"].update(extra=True), "unknown nested key")
         expect_reject(base, root, lambda x: x.update(schema_version=True), "bool schema version")
         expect_reject(base, root, lambda x: x.update(schema_version="1"), "wrong schema version type")
+        expect_reject(base, root, lambda x: x["reviewer_provenance"].update(reviewers=[" reviewer-A ", "reviewer-A"]), "same reviewer after trim")
+        expect_reject(base, root, lambda x: x["samples"][0].update(group="other-group"), "group bypass")
+        expect_reject(base, root, lambda x: x["samples"][0].update(coordinate="free-coordinate"), "free coordinate bypass")
         expect_reject(base, root, lambda x: x["samples"].append({**copy.deepcopy(x["samples"][0]), "id": "different-id"}), "duplicate observation identity")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(3, {**x["samples"][3], "artifact": {**x["samples"][3]["artifact"], "sha256": "b" * 64}}), "hash drift")
         expect_reject(base, root, lambda x: x["reviewer_provenance"].update(reviewers=["one"]), "reviewer provenance")
@@ -105,6 +111,25 @@ def main():
         expect_reject(base, root, lambda x: x["samples"].__setitem__(1, {**x["samples"][1], "ground_truth": {**x["samples"][1]["ground_truth"], "status": "positive", "findings": [{"rule_id": "SYN-01", "finding_id": "fp-truth"}]}}), "negative/positive finding identity contract")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(0, {**x["samples"][0], "kind": "hit", "prediction": {"status": "negative", "findings": []}}), "hit prediction contract")
         expect_reject(base, root, lambda x: x.update(samples=[x["samples"][0], x["samples"][1]]), "missing non-hit")
+
+        # Correct hashes do not make empty frozen artifacts valid.
+        def empty_dataset(x):
+            digest = _write(root, "dataset.json", "")
+            x["source"]["dataset_artifact"]["sha256"] = digest
+        expect_reject(base, root, empty_dataset, "empty dataset artifact")
+
+        def empty_labels(x):
+            digest = _write(root, "final-labels.jsonl", "")
+            x["source"]["final_labels_artifact"]["sha256"] = digest
+        expect_reject(base, root, empty_labels, "empty final-labels artifact")
+        base = manifest(root)
+
+        # Arbitration cannot overturn two identical definitive reviewer labels.
+        def flip_agreed(x):
+            resolution = x["samples"][0]["ground_truth"]["resolution"]
+            resolution["source"] = "arbitrated"
+            resolution["arbitration"] = {"status": "negative", "evidence": "invalid flip"}
+        expect_reject(base, root, flip_agreed, "invalid same-label arbitration")
 
         # Root containment and regular-file checks reject symlink escape.
         outside = Path(tmp).parent / (Path(tmp).name + "-outside")

@@ -68,7 +68,11 @@ Manifest shape (schema version 1):
 }
 ```
 
-Observation identity is `(artifact.sha256, group, coordinate)`, independent of
-the display `id`; duplicate identities are rejected to prevent contradictory
-rows from being counted twice. Positive statuses require at least one finding
-and negative statuses require an empty finding list.
+Observation identity is the immutable `artifact.sha256`, independent of the
+display `id`, group, or coordinate; duplicate digests are rejected to prevent
+contradictory rows from being counted twice. Group, coordinate, path, and
+prediction are derived from (and strictly cross-validated against) the frozen
+dataset artifact, so a manifest cannot use a free coordinate to bypass
+identity. Positive statuses require at least one finding and negative statuses
+require an empty finding list. The final-labels artifact is non-empty, parsed,
+and the sole ground-truth source after exact per-sample cross-validation.

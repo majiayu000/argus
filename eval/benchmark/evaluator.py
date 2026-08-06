@@ -66,8 +66,8 @@ def _sha(value: Any, where: str) -> str:
     return value
 
 
-def _artifact(root: Path, value: Any, where: str) -> str:
-    """Validate a content-addressed, regular file under root and return SHA."""
+def _artifact_path(root: Path, value: Any, where: str) -> tuple[Path, str]:
+    """Validate a content-addressed, regular file under root."""
     _keys(value, {"path", "sha256"}, where)
     rel = _string(value.get("path"), f"{where}.path")
     rel_path = Path(rel)
@@ -98,7 +98,11 @@ def _artifact(root: Path, value: Any, where: str) -> str:
     digest = _sha(value.get("sha256"), f"{where}.sha256")
     if actual != digest:
         raise ValidationError(f"{where}.sha256: hash drift for {rel}")
-    return digest
+    return current, digest
+
+
+def _artifact(root: Path, value: Any, where: str) -> str:
+    return _artifact_path(root, value, where)[1]
 
 
 def _findings(value: Any, where: str) -> list[dict[str, str]]:
@@ -134,9 +138,11 @@ def _resolution(value: Any, status: str, where: str) -> None:
     second = reviewer("reviewer_b")
     arbitration = value.get("arbitration")
     if source == "agreed":
-        if first["status"] != second["status"] or first["status"] != status or arbitration is not None:
+        if first["status"] not in {"positive", "negative"} or first["status"] != second["status"] or first["status"] != status or arbitration is not None:
             raise ValidationError(f"{where}: agreed resolution must match both reviewers and have no arbitration")
     else:
+        if first["status"] == second["status"] and "needs-context" not in {first["status"], second["status"]}:
+            raise ValidationError(f"{where}: arbitration requires disagreement or needs-context")
         _keys(arbitration, {"status", "evidence"}, f"{where}.arbitration")
         final = _status(arbitration.get("status"), f"{where}.arbitration.status", {"positive", "negative"})
         _string(arbitration.get("evidence"), f"{where}.arbitration.evidence")
@@ -166,6 +172,77 @@ def _metric(tp: int, fp: int, fn: int, tn: int, where: str) -> dict[str, Any]:
     }
 
 
+def _prediction(value: Any, where: str) -> dict[str, Any]:
+    _keys(value, {"status", "findings"}, where)
+    status = _status(value.get("status"), f"{where}.status", {"positive", "negative"})
+    findings = _findings(value.get("findings"), f"{where}.findings")
+    if (status == "positive") != bool(findings):
+        raise ValidationError(f"{where}: positive requires findings; negative must have none")
+    return {"status": status, "findings": findings}
+
+
+def _load_dataset(root: Path, path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    try:
+        raw = load_json(path)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("dataset artifact: invalid JSON") from exc
+    _keys(raw, {"schema_version", "samples"}, "dataset artifact")
+    if type(raw.get("schema_version")) is not int or raw["schema_version"] != SCHEMA_VERSION:
+        raise ValidationError("dataset artifact.schema_version: unsupported")
+    entries = raw.get("samples")
+    if not isinstance(entries, list) or not entries:
+        raise ValidationError("dataset artifact.samples: expected non-empty array")
+    by_id: dict[str, dict[str, Any]] = {}
+    by_digest: dict[str, dict[str, Any]] = {}
+    for index, entry in enumerate(entries):
+        at = f"dataset artifact.samples[{index}]"
+        _keys(entry, {"id", "kind", "path", "sha256", "group", "coordinate", "prediction"}, at)
+        sid = _string(entry.get("id"), f"{at}.id")
+        if sid in by_id:
+            raise ValidationError(f"{at}.id: duplicate sample ID")
+        kind = _status(entry.get("kind"), f"{at}.kind", {"hit", "non-hit"})
+        group = _string(entry.get("group"), f"{at}.group")
+        coordinate = _string(entry.get("coordinate"), f"{at}.coordinate")
+        artifact = {"path": entry.get("path"), "sha256": entry.get("sha256")}
+        _, digest = _artifact_path(root, artifact, f"{at}.artifact")
+        if digest in by_digest:
+            raise ValidationError(f"{at}: duplicate observation digest")
+        prediction = _prediction(entry.get("prediction"), f"{at}.prediction")
+        expected_kind = "hit" if prediction["status"] == "positive" else "non-hit"
+        if kind != expected_kind:
+            raise ValidationError(f"{at}.kind: must match prediction status")
+        canonical = {"id": sid, "kind": kind, "path": entry["path"], "sha256": digest, "group": group, "coordinate": coordinate, "prediction": prediction}
+        by_id[sid] = canonical
+        by_digest[digest] = canonical
+    return by_id, by_digest
+
+
+def _load_labels(path: Path) -> dict[str, dict[str, Any]]:
+    labels: dict[str, dict[str, Any]] = {}
+    text = path.read_text(encoding="utf-8")
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line, object_pairs_hook=_reject_duplicate_keys)
+        except json.JSONDecodeError as exc:
+            raise ValidationError(f"final-labels artifact line {lineno}: invalid JSON") from exc
+        at = f"final-labels artifact line {lineno}"
+        _keys(value, {"sample_id", "status", "findings", "resolution"}, at)
+        sid = _string(value.get("sample_id"), f"{at}.sample_id")
+        if sid in labels:
+            raise ValidationError(f"{at}: duplicate sample_id")
+        status = _status(value.get("status"), f"{at}.status", {"positive", "negative", "needs-context"})
+        findings = _findings(value.get("findings"), f"{at}.findings")
+        if (status == "positive") != bool(findings):
+            raise ValidationError(f"{at}: positive requires findings; negative must have none")
+        _resolution(value.get("resolution"), status, f"{at}.resolution")
+        labels[sid] = {"status": status, "findings": findings, "resolution": value["resolution"]}
+    if not labels:
+        raise ValidationError("final-labels artifact: no labels")
+    return labels
+
+
 def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _keys(
         raw,
@@ -182,8 +259,12 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
     _keys(source, {"corpus_revision", "scanner_revision", "dataset_artifact", "final_labels_artifact", "provenance"}, "manifest.source")
     _string(source.get("corpus_revision"), "manifest.source.corpus_revision")
     _string(source.get("scanner_revision"), "manifest.source.scanner_revision")
-    _artifact(root, source.get("dataset_artifact"), "manifest.source.dataset_artifact")
-    _artifact(root, source.get("final_labels_artifact"), "manifest.source.final_labels_artifact")
+    dataset_path, _ = _artifact_path(root, source.get("dataset_artifact"), "manifest.source.dataset_artifact")
+    labels_path, _ = _artifact_path(root, source.get("final_labels_artifact"), "manifest.source.final_labels_artifact")
+    dataset_by_id, dataset_by_digest = _load_dataset(root, dataset_path)
+    labels_by_id = _load_labels(labels_path)
+    if set(labels_by_id) != set(dataset_by_id):
+        raise ValidationError("final-labels artifact must cover exactly the frozen dataset samples")
     _string(source.get("provenance"), "manifest.source.provenance")
 
     reviewers = raw.get("reviewer_provenance")
@@ -193,15 +274,21 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
     names = reviewers.get("reviewers")
     if not isinstance(names, list) or len(names) < 2 or any(not isinstance(n, str) or not n.strip() for n in names):
         raise ValidationError("manifest.reviewer_provenance.reviewers: require at least two human names")
-    if len(set(names)) != len(names):
+    normalized_names = [" ".join(n.split()) for n in names]
+    if len({n.casefold() for n in normalized_names}) != len(normalized_names):
         raise ValidationError("manifest.reviewer_provenance.reviewers: duplicate reviewer")
-    _string(reviewers.get("arbitrator"), "manifest.reviewer_provenance.arbitrator")
+    reviewers["reviewers"] = normalized_names
+    arbitrator = _string(reviewers.get("arbitrator"), "manifest.reviewer_provenance.arbitrator")
+    arbitrator = " ".join(arbitrator.split())
+    if arbitrator.casefold() in {n.casefold() for n in normalized_names}:
+        raise ValidationError("manifest.reviewer_provenance.arbitrator: must be distinct")
+    reviewers["arbitrator"] = arbitrator
 
     samples = raw.get("samples")
     if not isinstance(samples, list) or not samples:
         raise ValidationError("manifest.samples: expected non-empty array")
     seen_ids: set[str] = set()
-    seen_observations: set[tuple[str, str, str]] = set()
+    seen_observations: set[str] = set()
     parsed: list[dict[str, Any]] = []
     for index, sample in enumerate(samples):
         at = f"manifest.samples[{index}]"
@@ -217,10 +304,16 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
 
         artifact = sample.get("artifact")
         digest = _artifact(root, artifact, f"{at}.artifact")
-        identity = (digest, group, coordinate)
-        if identity in seen_observations:
-            raise ValidationError(f"{at}: duplicate observation identity (artifact digest, group, coordinate)")
-        seen_observations.add(identity)
+        if digest in seen_observations:
+            raise ValidationError(f"{at}: duplicate observation identity (artifact digest)")
+        seen_observations.add(digest)
+        frozen = dataset_by_id.get(sid)
+        if frozen is None:
+            raise ValidationError(f"{at}.id: not present in frozen dataset artifact")
+        if frozen["sha256"] != digest or frozen["path"] != artifact["path"] or frozen["group"] != group or frozen["coordinate"] != coordinate or frozen["kind"] != kind:
+            raise ValidationError(f"{at}: immutable observation fields disagree with frozen dataset artifact")
+        if dataset_by_digest.get(digest, {}).get("id") != sid:
+            raise ValidationError(f"{at}: artifact digest maps to a different frozen sample")
 
         truth = sample.get("ground_truth")
         _keys(truth, {"status", "findings", "resolution"}, f"{at}.ground_truth")
@@ -229,12 +322,17 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
         if (truth_status == "positive") != bool(truth_findings):
             raise ValidationError(f"{at}.ground_truth: positive requires findings; negative must have none")
         _resolution(truth.get("resolution"), truth_status, f"{at}.ground_truth.resolution")
+        frozen_label = labels_by_id[sid]
+        if {"status": truth_status, "findings": truth_findings, "resolution": truth["resolution"]} != frozen_label:
+            raise ValidationError(f"{at}.ground_truth: differs from frozen final-labels artifact")
         prediction = sample.get("prediction")
         _keys(prediction, {"status", "findings"}, f"{at}.prediction")
         prediction_status = _status(prediction.get("status"), f"{at}.prediction.status", {"positive", "negative"})
         prediction_findings = _findings(prediction.get("findings"), f"{at}.prediction.findings")
         if (prediction_status == "positive") != bool(prediction_findings):
             raise ValidationError(f"{at}.prediction: positive requires findings; negative must have none")
+        if prediction != frozen["prediction"]:
+            raise ValidationError(f"{at}.prediction: differs from frozen dataset artifact")
         if kind == "hit" and prediction_status != "positive":
             raise ValidationError(f"{at}.kind=hit requires prediction.status=positive")
         if kind == "non-hit" and prediction_status != "negative":
@@ -243,6 +341,8 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
 
     if not any(s["kind"] == "hit" for s in parsed) or not any(s["kind"] == "non-hit" for s in parsed):
         raise ValidationError("manifest.samples: both hit and non-hit samples are required")
+    if set(seen_ids) != set(dataset_by_id):
+        raise ValidationError("manifest.samples must cover exactly the frozen dataset samples")
     thresholds = raw.get("thresholds")
     if thresholds is not None:
         _keys(thresholds, {"min_precision", "min_recall"}, "manifest.thresholds")
