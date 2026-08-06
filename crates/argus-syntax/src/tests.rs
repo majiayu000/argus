@@ -148,6 +148,18 @@ fn encoded_decoder_identity_respects_shadowing_and_declarations() {
         "function run(eval = eval(atob('x'))) {}"
     ));
     assert!(!analyze_source_encoded(
+        "default-later-eval.js",
+        "function run(x = eval(atob('x')), eval) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "default-later-atob.js",
+        "function run(x = eval(atob('x')), atob) {}"
+    ));
+    assert!(analyze_source_encoded(
+        "default-later-benign.js",
+        "function run(x = eval(atob('x')), y) {}"
+    ));
+    assert!(!analyze_source_encoded(
         "import.js",
         "import {atob} from './safe.js'; eval(atob('x'));"
     ));

@@ -300,10 +300,16 @@ fn collect_js_parameter_defaults(
         mark_declaration_name(scope, source, &mut parameter_bindings)?;
     }
     let mut cursor = parameters.walk();
-    for parameter in parameters.named_children(&mut cursor) {
-        // JavaScript parameter initializers see the current parameter (TDZ)
-        // and all preceding parameters, but not later parameters.
-        mark_parameter_node(parameter, source, &mut parameter_bindings)?;
+    let parameter_nodes = parameters.named_children(&mut cursor).collect::<Vec<_>>();
+    // All JavaScript formal parameters are bindings in the function's
+    // parameter environment before any initializer runs. Later names are
+    // therefore visible as TDZ bindings to earlier defaults as well.
+    for parameter in &parameter_nodes {
+        mark_parameter_node(*parameter, source, &mut parameter_bindings)?;
+    }
+    for parameter in parameter_nodes {
+        // Analyze defaults in source order while retaining the complete
+        // parameter binding environment and any effects from earlier defaults.
         collect_facts(
             parameter,
             source,
