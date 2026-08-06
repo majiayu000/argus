@@ -166,7 +166,7 @@ fn collect_facts(
     }
 
     if is_import(node.kind(), language) {
-        parse_import(text(node, source)?, language, bindings);
+        parse_import(node, source, language, bindings)?;
     }
 
     if is_assignment(node.kind(), language) {
@@ -707,7 +707,13 @@ fn callable_reference<'a>(
     supported_shape.then_some(raw_value.trim())
 }
 
-fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindings) {
+fn parse_import(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    bindings: &mut Bindings,
+) -> Result<()> {
+    let statement = text(node, source)?;
     let compact = statement.trim().trim_end_matches(';');
     match language {
         ScriptLanguage::Python if compact.starts_with("import ") => {
@@ -738,61 +744,66 @@ fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindin
             }
         }
         ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => {
-            if let Some((clause, source)) = compact
-                .strip_prefix("import ")
-                .and_then(|rest| rest.split_once(" from "))
-            {
-                if let Some(module) = unquote(source.trim()) {
-                    parse_javascript_import_clause(clause.trim(), &module, bindings);
-                }
-            }
+            parse_javascript_import_node(node, source, bindings);
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn parse_javascript_import_clause(clause: &str, module: &str, bindings: &mut Bindings) {
-    let clause = clause.trim();
-    if let Some(alias) = clause.strip_prefix("* as ") {
-        let alias = alias.trim();
-        if is_identifier(alias) {
-            bindings
-                .aliases
-                .insert(alias.to_string(), module.to_string());
-        }
+fn parse_javascript_import_node(node: Node<'_>, source: &[u8], bindings: &mut Bindings) {
+    let Some(module) = node
+        .child_by_field_name("source")
+        .and_then(|source_node| text(source_node, source).ok())
+        .and_then(|value| unquote(value.trim()))
+    else {
         return;
-    }
-    if let Some(start) = clause.find('{') {
-        let default = clause[..start].trim().trim_end_matches(',').trim();
-        if is_identifier(default) {
-            bindings
-                .aliases
-                .insert(default.to_string(), module.to_string());
-        }
-        if let Some(end) = clause.rfind('}') {
-            for specifier in clause[start + 1..end].split(',') {
-                let parts: Vec<&str> = specifier.split_whitespace().collect();
-                let (imported, local) = if parts.len() == 3 && parts[1] == "as" {
-                    (parts[0], parts[2])
-                } else if parts.len() == 1 {
-                    (parts[0], parts[0])
-                } else {
-                    continue;
-                };
-                if is_identifier(imported) && is_identifier(local) {
+    };
+    let Some(clause) = node
+        .named_children(&mut node.walk())
+        .find(|child| child.kind() == "import_clause")
+    else {
+        return;
+    };
+    let mut cursor = clause.walk();
+    for child in clause.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                bindings.aliases.insert(
+                    text(child, source).unwrap_or_default().to_string(),
+                    module.clone(),
+                );
+            }
+            "namespace_import" => {
+                if let Some(local) = child.named_children(&mut child.walk()).next() {
+                    bindings.aliases.insert(
+                        text(local, source).unwrap_or_default().to_string(),
+                        module.clone(),
+                    );
+                }
+            }
+            "named_imports" => {
+                let mut imports = child.walk();
+                for specifier in child.named_children(&mut imports) {
+                    if specifier.kind() != "import_specifier" {
+                        continue;
+                    }
+                    let imported = specifier.child_by_field_name("name");
+                    let local = specifier.child_by_field_name("alias").or(imported);
+                    let (Some(imported), Some(local)) = (imported, local) else {
+                        continue;
+                    };
+                    let (Ok(imported), Ok(local)) = (text(imported, source), text(local, source))
+                    else {
+                        continue;
+                    };
                     bindings
                         .aliases
                         .insert(local.to_string(), format!("{module}.{imported}"));
                 }
             }
+            _ => {}
         }
-        return;
-    }
-    let default = clause.split(',').next().unwrap_or_default().trim();
-    if is_identifier(default) {
-        bindings
-            .aliases
-            .insert(default.to_string(), module.to_string());
     }
 }
 

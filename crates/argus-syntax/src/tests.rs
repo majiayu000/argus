@@ -163,6 +163,14 @@ fn encoded_decoder_identity_respects_shadowing_and_declarations() {
         "import.js",
         "import {atob} from './safe.js'; eval(atob('x'));"
     ));
+    for source in [
+        "import{atob}from './safe.js'; eval(atob('x'));",
+        "import atob from'./safe.js'; eval(atob('x'));",
+        "import * as atob from './safe.js'; eval(atob('x'));",
+        "import {safe as atob}from'./safe.js'; eval(atob('x'));",
+    ] {
+        assert!(!analyze_source_encoded("import-compact.js", source));
+    }
     assert!(!analyze_source_encoded(
         "import.py",
         "import local as base64\nexec(base64.b64decode('x'))"
