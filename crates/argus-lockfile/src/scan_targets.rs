@@ -92,17 +92,21 @@ struct SemanticSource {
     immutable_revision: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SemanticOccurrence {
+    sources: Vec<SemanticSource>,
+    integrity_state: IntegrityState,
+    integrity: Vec<(Option<String>, Option<String>)>,
+    constraint: LockfileScanConstraint,
+}
+
 impl LockfileScanTarget {
     fn identity(&self) -> TargetIdentity {
         TargetIdentity {
             ecosystem: self.ecosystem,
             name: self.name.clone().unwrap_or_default(),
             version: self.version.clone().unwrap_or_default(),
-            source_key: self
-                .coordinate
-                .is_none()
-                .then(|| semantic_sources(&self.sources))
-                .unwrap_or_default(),
+            source_key: target_source_key(self),
         }
     }
 
@@ -110,10 +114,7 @@ impl LockfileScanTarget {
         (
             self.ecosystem,
             self.name.clone().unwrap_or_default(),
-            self.coordinate
-                .is_none()
-                .then(|| semantic_sources(&self.sources))
-                .unwrap_or_default(),
+            target_source_key(self),
         )
     }
 
@@ -315,11 +316,7 @@ fn record_identity(record: &NormalizedDependency) -> TargetIdentity {
             .map(|coordinate| coordinate.version.clone())
             .or_else(|| record.raw_version.clone())
             .unwrap_or_default(),
-        source_key: record
-            .coordinate
-            .is_none()
-            .then(|| semantic_sources(&record.sources))
-            .unwrap_or_default(),
+        source_key: record_source_key(record),
     }
 }
 
@@ -412,6 +409,22 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
     })
 }
 
+fn target_source_key(target: &LockfileScanTarget) -> Vec<SemanticSource> {
+    if target.coordinate.is_none() {
+        semantic_sources(&target.sources)
+    } else {
+        Vec::new()
+    }
+}
+
+fn record_source_key(record: &NormalizedDependency) -> Vec<SemanticSource> {
+    if record.coordinate.is_none() {
+        semantic_sources(&record.sources)
+    } else {
+        Vec::new()
+    }
+}
+
 fn semantic_sources(sources: &[NormalizedSource]) -> Vec<SemanticSource> {
     let projected: BTreeSet<_> = sources
         .iter()
@@ -432,23 +445,14 @@ fn semantic_integrity(integrity: &[IntegrityEvidence]) -> Vec<(Option<String>, O
     projected.into_iter().collect()
 }
 
-fn semantic_occurrences(
-    occurrences: &[LockfileScanOccurrence],
-) -> BTreeSet<(
-    Vec<SemanticSource>,
-    IntegrityState,
-    Vec<(Option<String>, Option<String>)>,
-    LockfileScanConstraint,
-)> {
+fn semantic_occurrences(occurrences: &[LockfileScanOccurrence]) -> BTreeSet<SemanticOccurrence> {
     occurrences
         .iter()
-        .map(|occurrence| {
-            (
-                semantic_sources(&occurrence.sources),
-                occurrence.integrity_state,
-                semantic_integrity(&occurrence.expected_integrity),
-                occurrence.constraint.clone(),
-            )
+        .map(|occurrence| SemanticOccurrence {
+            sources: semantic_sources(&occurrence.sources),
+            integrity_state: occurrence.integrity_state,
+            integrity: semantic_integrity(&occurrence.expected_integrity),
+            constraint: occurrence.constraint.clone(),
         })
         .collect()
 }
