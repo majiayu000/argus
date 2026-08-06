@@ -99,6 +99,13 @@ impl RiskScore {
     pub const fn value(self) -> u64 {
         self.0
     }
+
+    pub const fn checked_add(self, other: Self) -> Option<Self> {
+        match self.0.checked_add(other.0) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
 }
 
 /// Thresholds for the three decisions. A score below `approval` allows;
@@ -106,8 +113,8 @@ impl RiskScore {
 /// or above `block` are blocked. `approval < block` is required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RiskThresholds {
-    pub approval: RiskScore,
-    pub block: RiskScore,
+    approval: RiskScore,
+    block: RiskScore,
 }
 
 impl RiskThresholds {
@@ -145,6 +152,9 @@ pub struct RiskContribution {
     pub rule_id: String,
     pub weight: RuleWeight,
     pub confidence: Confidence,
+    /// `floor(weight * confidence / 10_000)`, i.e. truncation toward zero.
+    /// Both operands are bounded at 10,000, so their `u64` product is at most
+    /// 100,000,000 and cannot overflow.
     pub score: RiskScore,
 }
 
@@ -255,7 +265,10 @@ pub type RiskAssessmentEngine<W, C> = RiskEngine<W, C>;
 /// Assess findings using explicit resolvers. Duplicate findings are
 /// conservatively de-duplicated by `rule_id` (there is no reliable observation
 /// key in v1) and retain the maximum confidence for that rule. Contributions
-/// are returned in lexicographic rule-id order.
+/// are returned in lexicographic rule-id order. Each contribution uses
+/// `floor(weight * confidence / 10_000)` (truncation toward zero; values are
+/// non-negative), and the bounded operands make the multiplication safe in
+/// `u64`.
 pub fn assess<W, C>(
     findings: &[Finding],
     thresholds: RiskThresholds,
@@ -267,21 +280,39 @@ where
     C: Fn(&Finding) -> Option<Confidence>,
 {
     let thresholds = thresholds.validate()?;
-    let mut confidence_by_rule: BTreeMap<String, Confidence> = BTreeMap::new();
+    let mut findings_by_rule: BTreeMap<String, Vec<&Finding>> = BTreeMap::new();
     for finding in findings {
-        let confidence =
-            confidence_for(finding).ok_or_else(|| RiskAssessmentError::MissingConfidence {
-                rule_id: finding.rule_id.clone(),
-            })?;
-        confidence_by_rule
+        findings_by_rule
             .entry(finding.rule_id.clone())
-            .and_modify(|existing| *existing = (*existing).max(confidence))
-            .or_insert(confidence);
+            .or_default()
+            .push(finding);
     }
 
-    let mut contributions = Vec::with_capacity(confidence_by_rule.len());
+    let mut contributions = Vec::with_capacity(findings_by_rule.len());
     let mut total = RiskScore::zero();
-    for (rule_id, confidence) in confidence_by_rule {
+    for (rule_id, mut observations) in findings_by_rule {
+        // The resolver is caller-owned and should be pure. Sorting the
+        // observations also gives it a stable invocation order if a resolver
+        // tracks calls internally.
+        observations.sort_by_key(|finding| {
+            (
+                finding.detail.as_str(),
+                finding.location.as_deref(),
+                finding.capability.as_deref(),
+                finding.evidence.as_deref(),
+                finding.resolved_host.as_deref(),
+            )
+        });
+        let mut confidence = None;
+        for finding in observations {
+            let resolved =
+                confidence_for(finding).ok_or_else(|| RiskAssessmentError::MissingConfidence {
+                    rule_id: rule_id.clone(),
+                })?;
+            confidence =
+                Some(confidence.map_or(resolved, |current: Confidence| current.max(resolved)));
+        }
+        let confidence = confidence.unwrap_or(Confidence::zero());
         let weight = weight_for(&rule_id).ok_or_else(|| RiskAssessmentError::MissingWeight {
             rule_id: rule_id.clone(),
         })?;
@@ -289,11 +320,12 @@ where
             (u64::from(weight.basis_points()) * u64::from(confidence.basis_points()))
                 / u64::from(BASIS_POINTS),
         );
-        total = RiskScore::new(total.value().checked_add(contribution.value()).ok_or_else(
-            || RiskAssessmentError::ScoreOverflow {
-                rule_id: rule_id.clone(),
-            },
-        )?);
+        total =
+            total
+                .checked_add(contribution)
+                .ok_or_else(|| RiskAssessmentError::ScoreOverflow {
+                    rule_id: rule_id.clone(),
+                })?;
         contributions.push(RiskContribution {
             rule_id,
             weight,
@@ -371,15 +403,25 @@ mod tests {
 
     #[test]
     fn deduplicates_max_confidence_and_is_input_order_independent() {
-        let first = vec![finding("z"), finding("a"), finding("a")];
-        let second = vec![finding("a"), finding("z"), finding("a")];
+        let first = vec![
+            finding("z"),
+            Finding::new("a", crate::Severity::High, "low").at("a-low"),
+            Finding::new("a", crate::Severity::High, "high").at("a-high"),
+        ];
+        let second = vec![
+            Finding::new("a", crate::Severity::High, "high").at("a-high"),
+            finding("z"),
+            Finding::new("a", crate::Severity::High, "low").at("a-low"),
+        ];
         let result = |items: &[Finding]| {
             assess(
                 items,
                 thresholds(),
                 |id| Some(RuleWeight::new(if id == "a" { 500 } else { 1000 }).unwrap()),
-                |finding| {
-                    Some(Confidence::new(if finding.rule_id == "a" { 1000 } else { 500 }).unwrap())
+                |finding| match finding.detail.as_str() {
+                    "low" => Some(Confidence::new(1000).unwrap()),
+                    "high" => Some(Confidence::new(9999).unwrap()),
+                    _ => Some(Confidence::new(500).unwrap()),
                 },
             )
             .unwrap()
@@ -389,6 +431,49 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.contributions.len(), 2);
         assert_eq!(a.contributions[0].rule_id, "a");
+        assert_eq!(
+            a.contributions[0].confidence,
+            Confidence::new(9999).unwrap()
+        );
+        assert_eq!(a.contributions[0].score, RiskScore::new(499));
+    }
+
+    #[test]
+    fn fractional_contributions_floor_and_freeze_decisions() {
+        let floor_thresholds = RiskThresholds::new(RiskScore::new(1), RiskScore::new(2)).unwrap();
+        let below_approval = assess(
+            &[finding("fractional")],
+            floor_thresholds,
+            |_| Some(RuleWeight::new(1).unwrap()),
+            |_| Some(Confidence::new(9999).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(below_approval.score, RiskScore::zero());
+        assert_eq!(below_approval.decision, Decision::Allow);
+
+        let threshold_edge =
+            RiskThresholds::new(RiskScore::new(9999), RiskScore::new(10000)).unwrap();
+        let at_approval = assess(
+            &[finding("fractional")],
+            threshold_edge,
+            |_| Some(RuleWeight::max()),
+            |_| Some(Confidence::new(9999).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(at_approval.score, RiskScore::new(9999));
+        assert_eq!(at_approval.decision, Decision::AllowWithApproval);
+    }
+
+    #[test]
+    fn score_addition_is_checked_at_u64_boundary() {
+        assert_eq!(
+            RiskScore::new(u64::MAX).checked_add(RiskScore::new(1)),
+            None
+        );
+        assert_eq!(
+            RiskScore::new(u64::MAX - 1).checked_add(RiskScore::new(1)),
+            Some(RiskScore::new(u64::MAX))
+        );
     }
 
     #[test]
@@ -414,6 +499,44 @@ mod tests {
         assert!(matches!(
             missing_confidence,
             RiskAssessmentError::MissingConfidence { .. }
+        ));
+
+        let a_missing_confidence = vec![finding("z"), finding("a")];
+        let z_missing_weight = |items: &[Finding]| {
+            assess(
+                items,
+                thresholds(),
+                |id| (id == "a").then(|| RuleWeight::new(1).unwrap()),
+                |finding| (finding.rule_id == "a").then(|| Confidence::new(1).unwrap()),
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(
+            z_missing_weight(&a_missing_confidence),
+            RiskAssessmentError::MissingConfidence { ref rule_id } if rule_id == "z"
+        ));
+        assert!(matches!(
+            z_missing_weight(&a_missing_confidence.into_iter().rev().collect::<Vec<_>>()),
+            RiskAssessmentError::MissingConfidence { ref rule_id } if rule_id == "z"
+        ));
+
+        let a_missing_weight = vec![finding("a"), finding("z")];
+        let missing_weight_first = |items: &[Finding]| {
+            assess(
+                items,
+                thresholds(),
+                |_| None,
+                |_| Some(Confidence::new(1).unwrap()),
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(
+            missing_weight_first(&a_missing_weight),
+            RiskAssessmentError::MissingWeight { ref rule_id } if rule_id == "a"
+        ));
+        assert!(matches!(
+            missing_weight_first(&a_missing_weight.into_iter().rev().collect::<Vec<_>>()),
+            RiskAssessmentError::MissingWeight { ref rule_id } if rule_id == "a"
         ));
 
         let empty = assess(&[], thresholds(), |_| None, |_| None).unwrap();
