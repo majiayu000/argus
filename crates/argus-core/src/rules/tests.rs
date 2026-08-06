@@ -110,6 +110,7 @@ fn legacy_policy_arrays_are_preserved() {
         "version-shape-anomaly",
         "rapid-publish-window",
         "lockfile-integrity-weak",
+        "encoded-dynamic-execution",
     ];
     const LEGACY_DOWNGRADE_SAFE: &[&str] = &[
         "lifecycle-script",

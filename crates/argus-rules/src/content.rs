@@ -143,7 +143,7 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
     }
 
     // network-exfiltration: fetch/POST to external host, excluding api.github.com.
-    let external_host = match network_scan {
+    let external_host = match &network_scan {
         NetworkScan::Syntax(facts) => syntax_external_fetch(facts),
         NetworkScan::Legacy => external_fetch(body),
         NetworkScan::Disabled => None,
@@ -180,6 +180,223 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
             .at(&file.rel),
         );
     }
+
+    // encoded-dynamic-execution: only the direct decode -> eval/exec chain.
+    // This intentionally does not score standalone decoders, long/minified
+    // lines, or entropy: the chain itself is the high-confidence signal.
+    let encoded_dynamic_execution = match &network_scan {
+        NetworkScan::Syntax(facts) => {
+            syntax_encoded_dynamic_execution(facts) || source_js_encoded_dynamic_execution(body)
+        }
+        NetworkScan::Legacy => source_encoded_dynamic_execution(body, language_for_file(&file.rel)),
+        // npm's syntax-backed network rule is JavaScript-only, but Python
+        // source files shipped in a package still use the shared scanner.
+        NetworkScan::Disabled => {
+            source_encoded_dynamic_execution(body, language_for_file(&file.rel))
+        }
+    };
+    if encoded_dynamic_execution {
+        findings.push(
+            Finding::new(
+                "encoded-dynamic-execution",
+                Severity::Medium,
+                "decodes an encoded payload directly into dynamic execution",
+            )
+            .at(&file.rel),
+        );
+    }
+}
+
+fn language_for_file(path: &str) -> ScriptLanguage {
+    ScriptLanguage::from_path(path)
+}
+
+fn syntax_encoded_dynamic_execution(facts: &[Fact]) -> bool {
+    facts.iter().any(|fact| {
+        if fact.kind != FactKind::Call {
+            return false;
+        }
+        let Some(callee) = fact.callee.as_deref() else {
+            return false;
+        };
+        let is_dynamic_exec = matches!(callee, "eval" | "Function");
+        if !is_dynamic_exec {
+            return false;
+        }
+        fact.arguments.first().is_some_and(|argument| {
+            let raw = argument.raw.trim_start();
+            raw.strip_prefix("atob")
+                .is_some_and(|rest| rest.trim_start().starts_with('('))
+        })
+    })
+}
+
+fn source_js_encoded_dynamic_execution(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            skip_line_comment(bytes, &mut index);
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if is_quote(bytes[index]) || bytes[index] == b'`' {
+            skip_string(bytes, &mut index);
+            continue;
+        }
+        let Some((identifier, end)) = identifier_at(bytes, index) else {
+            index += 1;
+            continue;
+        };
+        if !matches!(identifier, "eval" | "Function") {
+            index = end;
+            continue;
+        }
+        let cursor = skip_space(bytes, end);
+        if bytes.get(cursor) != Some(&b'(') {
+            index = end;
+            continue;
+        }
+        let cursor = skip_space(bytes, cursor + 1);
+        let Some((decoder, decoder_end)) = identifier_at(bytes, cursor) else {
+            index = end;
+            continue;
+        };
+        if decoder == "atob" && bytes.get(skip_space(bytes, decoder_end)) == Some(&b'(') {
+            return true;
+        }
+        index = end;
+    }
+    false
+}
+
+/// Scan Python and non-JavaScript shared surfaces without treating comments or
+/// string literals as code. The grammar is deliberately limited to the exact
+/// `exec/eval(base64.b64decode(...))` shape; aliases and intermediate values
+/// are left for a future syntax-backed rule.
+fn source_encoded_dynamic_execution(body: &str, language: ScriptLanguage) -> bool {
+    if !matches!(language, ScriptLanguage::Python) {
+        return matches!(
+            language,
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+        ) && source_js_encoded_dynamic_execution(body);
+    }
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'#' {
+            skip_line_comment(bytes, &mut index);
+            continue;
+        }
+        if is_quote(bytes[index]) {
+            skip_string(bytes, &mut index);
+            continue;
+        }
+        let Some((identifier, end)) = identifier_at(bytes, index) else {
+            index += 1;
+            continue;
+        };
+        if !matches!(identifier, "exec" | "eval") {
+            index = end;
+            continue;
+        }
+        let mut cursor = skip_space(bytes, end);
+        if bytes.get(cursor) != Some(&b'(') {
+            index = end;
+            continue;
+        }
+        cursor = skip_space(bytes, cursor + 1);
+        let Some((module, module_end)) = identifier_at(bytes, cursor) else {
+            index = end;
+            continue;
+        };
+        if module != "base64" {
+            index = end;
+            continue;
+        }
+        cursor = skip_space(bytes, module_end);
+        if bytes.get(cursor) != Some(&b'.') {
+            index = end;
+            continue;
+        }
+        cursor = skip_space(bytes, cursor + 1);
+        let Some((decoder, decoder_end)) = identifier_at(bytes, cursor) else {
+            index = end;
+            continue;
+        };
+        if decoder == "b64decode" && bytes.get(skip_space(bytes, decoder_end)) == Some(&b'(') {
+            return true;
+        }
+        index = end;
+    }
+    false
+}
+
+fn is_quote(byte: u8) -> bool {
+    matches!(byte, b'\'' | b'"')
+}
+
+fn skip_line_comment(bytes: &[u8], index: &mut usize) {
+    while *index < bytes.len() && bytes[*index] != b'\n' {
+        *index += 1;
+    }
+}
+
+fn skip_string(bytes: &[u8], index: &mut usize) {
+    let quote = bytes[*index];
+    let triple = bytes
+        .get(*index..*index + 3)
+        .is_some_and(|window| window == [quote, quote, quote]);
+    if triple {
+        *index += 3;
+        while *index + 2 < bytes.len() && bytes[*index..*index + 3] != [quote, quote, quote] {
+            *index += 1;
+        }
+        *index = (*index + 3).min(bytes.len());
+        return;
+    }
+    *index += 1;
+    while *index < bytes.len() {
+        if bytes[*index] == b'\\' {
+            *index = (*index + 2).min(bytes.len());
+        } else if bytes[*index] == quote {
+            *index += 1;
+            break;
+        } else {
+            *index += 1;
+        }
+    }
+}
+
+fn skip_space(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+fn identifier_at(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
+    let first = *bytes.get(start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        end += 1;
+    }
+    std::str::from_utf8(&bytes[start..end])
+        .ok()
+        .map(|identifier| (identifier, end))
 }
 
 // ---------- regex helpers (compiled once via OnceLock; scans touch every file) ----------
@@ -458,4 +675,88 @@ fn host_name(host: &str) -> &str {
             .map_or(bracketed, |(name, _)| name);
     }
     host.split_once(':').map_or(host, |(name, _)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_core::{Decision, Finding};
+
+    fn npm_ids(source: &str) -> Vec<String> {
+        scan_npm_text_file(&TextFile {
+            rel: "index.js".into(),
+            content: source.into(),
+        })
+        .expect("scan JavaScript")
+        .into_iter()
+        .map(|finding| finding.rule_id)
+        .collect()
+    }
+
+    fn python_findings(source: &str) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        scan_text_file(
+            &TextFile {
+                rel: "module.py".into(),
+                content: source.into(),
+            },
+            &mut findings,
+        );
+        findings
+    }
+
+    #[test]
+    fn javascript_direct_decode_execution_fires() {
+        let ids =
+            npm_ids("eval(atob('Y29uc29sZS5sb2coMSk=')); new Function( atob(\"cHJpbnQoMSk=\") );");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "encoded-dynamic-execution")
+                .count(),
+            1,
+            "one finding per file"
+        );
+    }
+
+    #[test]
+    fn javascript_function_constructor_decode_execution_fires() {
+        let ids = npm_ids("new Function(atob('Y29uc29sZS5sb2coMSk='));");
+        assert!(ids.iter().any(|id| id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn javascript_decode_only_and_inert_text_do_not_fire() {
+        let ids = npm_ids(concat!(
+            "const value = atob('Y29uc29sZS5sb2coMSk=');\n",
+            "// eval(atob('fake'))\nconst docs = \"eval(atob('fake'))\";",
+        ));
+        assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn python_direct_decode_execution_fires_and_is_approval_only() {
+        let findings = python_findings("exec(base64.b64decode('Y29uc29sZS5sb2coMSk='))");
+        let encoded = findings
+            .iter()
+            .find(|finding| finding.rule_id == "encoded-dynamic-execution")
+            .expect("encoded dynamic execution finding");
+        assert_eq!(encoded.severity, Severity::Medium);
+        assert_eq!(
+            crate::decision::derive_from_findings(&findings),
+            Decision::AllowWithApproval
+        );
+    }
+
+    #[test]
+    fn python_decode_only_comments_and_strings_do_not_fire() {
+        let findings = python_findings(concat!(
+            "value = base64.b64decode('Y29uc29sZS5sb2coMSk=')\n",
+            "# eval(base64.b64decode('fake'))\n",
+            "docs = \"exec(base64.b64decode('fake'))\"",
+            "\ndocstring = \"\"\"eval(base64.b64decode('fake'))\"\"\"",
+        ));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.rule_id == "encoded-dynamic-execution"));
+    }
 }

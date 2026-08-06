@@ -74,6 +74,33 @@
       "notes": "Models an internal-looking unscoped package that should not resolve from public npm."
     },
     {
+      "id": "encoded-dynamic-execution-js",
+      "kind": "fixture",
+      "path": "fixtures/encoded-dynamic-execution-js",
+      "packageName": "encoded-dynamic-execution-js",
+      "expectedDecision": "allow-with-approval",
+      "rules": ["encoded-dynamic-execution"],
+      "notes": "Direct eval(atob(...)) chain; payload is inert fixture text."
+    },
+    {
+      "id": "encoded-dynamic-execution-python",
+      "kind": "fixture",
+      "path": "fixtures/encoded-dynamic-execution-python",
+      "packageName": "encoded-dynamic-execution-python",
+      "expectedDecision": "allow-with-approval",
+      "rules": ["encoded-dynamic-execution"],
+      "notes": "Direct exec(base64.b64decode(...)) chain in a Python source file."
+    },
+    {
+      "id": "encoded-dynamic-execution-benign",
+      "kind": "fixture",
+      "path": "fixtures/encoded-dynamic-execution-benign",
+      "packageName": "encoded-dynamic-execution-benign",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Decode-only and string/comment lookalikes must remain clean."
+    },
+    {
       "id": "benign-esbuild-like",
       "kind": "fixture",
       "path": "fixtures/benign-esbuild-like",

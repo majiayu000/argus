@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add the approval-only `encoded-dynamic-execution` rule for direct JavaScript
+  `eval`/`Function(atob(...))` and Python
+  `exec`/`eval(base64.b64decode(...))` chains. Statistical obfuscation
+  heuristics remain out of scope.
+
 ## [0.1.0] - 2026-07-23
 
 First tagged release. Graduates the pre-launch history below into a versioned
