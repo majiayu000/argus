@@ -545,6 +545,16 @@ mod tests {
     }
 
     #[test]
+    fn imported_decoders_do_not_fire() {
+        let ids = npm_ids("import {atob} from './safe.js'; eval(atob('x'));");
+        assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+        let findings = python_findings("import local as base64\nexec(base64.b64decode('x'))");
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.rule_id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
     fn javascript_parentheses_comments_and_context_boundaries_are_safe() {
         for source in [
             "eval((atob('Y29uc29sZS5sb2coMSk=')));",

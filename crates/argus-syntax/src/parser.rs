@@ -117,12 +117,24 @@ fn collect_facts(
     encoded: &mut bool,
 ) -> Result<()> {
     if is_isolated_scope(node.kind(), language) {
-        mark_declaration_name(node, source, bindings)?;
+        if declaration_writes_parent(node.kind(), language) {
+            mark_declaration_name(node, source, bindings)?;
+        }
         let mut scoped = bindings.clone();
+        if node.kind() == "function_expression" {
+            mark_declaration_name(node, source, &mut scoped)?;
+        }
         mark_scope_parameters(node, source, &mut scoped)?;
         let parameters = node
             .child_by_field_name("parameters")
             .or_else(|| node.child_by_field_name("parameter"));
+        if is_js_function_scope(node.kind(), language) {
+            if let Some(parameters) = parameters {
+                collect_js_parameter_defaults(
+                    parameters, source, language, bindings, node, facts, encoded,
+                )?;
+            }
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             // Default parameter expressions run in the enclosing scope. Keep
@@ -132,6 +144,9 @@ fn collect_facts(
                 parameter.start_byte() == child.start_byte()
                     && parameter.end_byte() == child.end_byte()
             });
+            if is_parameters && is_js_function_scope(node.kind(), language) {
+                continue;
+            }
             if is_parameters {
                 collect_facts(child, source, language, bindings, facts, encoded)?;
             } else {
@@ -242,6 +257,61 @@ fn collect_facts(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         collect_facts(child, source, language, bindings, facts, encoded)?;
+    }
+    Ok(())
+}
+
+fn is_js_function_scope(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "function_declaration" | "function_expression" | "arrow_function" | "method_definition"
+        )
+    )
+}
+
+fn declaration_writes_parent(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (
+            ScriptLanguage::Python,
+            "function_definition" | "class_definition"
+        ) | (
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "function_declaration"
+        )
+    )
+}
+
+fn collect_js_parameter_defaults(
+    parameters: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    outer: &Bindings,
+    scope: Node<'_>,
+    facts: &mut Vec<Fact>,
+    encoded: &mut bool,
+) -> Result<()> {
+    let mut parameter_bindings = outer.clone();
+    if scope.kind() == "function_expression" {
+        // A named function expression is recursively bound only within the
+        // expression, including its parameter initializers.
+        mark_declaration_name(scope, source, &mut parameter_bindings)?;
+    }
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        // JavaScript parameter initializers see the current parameter (TDZ)
+        // and all preceding parameters, but not later parameters.
+        mark_parameter_node(parameter, source, &mut parameter_bindings)?;
+        collect_facts(
+            parameter,
+            source,
+            language,
+            &mut parameter_bindings,
+            facts,
+            encoded,
+        )?;
     }
     Ok(())
 }
@@ -360,8 +430,9 @@ fn direct_decoder_node(node: Node<'_>, source: &[u8], expected: &str, bindings: 
         return false;
     };
     let function_text = function_text.trim();
-    function_text == expected
-        && !function_text.split_once('.').map_or_else(
+    let canonical = canonical_callee(function_text, bindings);
+    canonical == expected
+        && !canonical.split_once('.').map_or_else(
             || bindings.shadowed.contains(function_text),
             |(head, _)| bindings.shadowed.contains(head),
         )
@@ -416,8 +487,10 @@ fn fstring_dynamic_decoder(node: Node<'_>, source: &[u8], bindings: &Bindings) -
                 let Ok(function_text) = text(function, source) else {
                     return false;
                 };
-                if !matches!(function_text.trim(), "eval" | "exec")
-                    || bindings.shadowed.contains(function_text.trim())
+                let function_text = function_text.trim();
+                let canonical = canonical_callee(function_text, bindings);
+                if !matches!(canonical.as_str(), "eval" | "exec")
+                    || bindings.shadowed.contains(function_text)
                 {
                     return false;
                 }

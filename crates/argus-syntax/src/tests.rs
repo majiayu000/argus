@@ -141,7 +141,47 @@ fn encoded_decoder_identity_respects_shadowing_and_declarations() {
     ));
     assert!(analyze_source_encoded(
         "default.js",
+        "function run(x = eval(atob('x'))) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "default-shadowed.js",
         "function run(eval = eval(atob('x'))) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "import.js",
+        "import {atob} from './safe.js'; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "import.py",
+        "import local as base64\nexec(base64.b64decode('x'))"
+    ));
+    assert!(analyze_source_encoded(
+        "method.js",
+        "const obj = { atob() { eval(atob('x')); } }; eval(atob('x'));"
+    ));
+    assert!(analyze_source_encoded(
+        "method-body.js",
+        "const obj = { atob() { eval(atob('x')); } };"
+    ));
+    assert!(analyze_source_encoded(
+        "method-eval.js",
+        "const obj = { eval() {} }; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "method-param.js",
+        "const obj = { run(eval) { eval(atob('x')); } };"
+    ));
+    assert!(analyze_source_encoded(
+        "named-expression.js",
+        "const f = function atob() {}; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "named-expression-body.js",
+        "const f = function atob() { eval(atob('x')); };"
+    ));
+    assert!(!analyze_source_encoded(
+        "named-expression-eval.js",
+        "const f = function eval() { eval(atob('x')); };"
     ));
 }
 
