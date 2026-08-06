@@ -82,7 +82,14 @@ struct TargetIdentity {
     ecosystem: Option<Ecosystem>,
     name: String,
     version: String,
-    source_key: String,
+    source_key: Vec<SemanticSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SemanticSource {
+    kind: SourceKind,
+    location: Option<String>,
+    immutable_revision: Option<String>,
 }
 
 impl LockfileScanTarget {
@@ -94,13 +101,20 @@ impl LockfileScanTarget {
             source_key: self
                 .coordinate
                 .is_none()
-                .then(|| semantic_source_key(&self.sources))
+                .then(|| semantic_sources(&self.sources))
                 .unwrap_or_default(),
         }
     }
 
-    fn name_identity(&self) -> (Option<Ecosystem>, String) {
-        (self.ecosystem, self.name.clone().unwrap_or_default())
+    fn name_identity(&self) -> (Option<Ecosystem>, String, Vec<SemanticSource>) {
+        (
+            self.ecosystem,
+            self.name.clone().unwrap_or_default(),
+            self.coordinate
+                .is_none()
+                .then(|| semantic_sources(&self.sources))
+                .unwrap_or_default(),
+        )
     }
 
     /// Security-relevant fields only. Occurrence locators are intentionally
@@ -199,8 +213,10 @@ pub fn diff_scan_targets(
     unmatched_current.sort_by(target_sort_key);
     let mut paired_base = vec![false; unmatched_base.len()];
     let mut paired_current = vec![false; unmatched_current.len()];
-    let mut base_groups: BTreeMap<(Option<Ecosystem>, String), Vec<usize>> = BTreeMap::new();
-    let mut current_groups: BTreeMap<(Option<Ecosystem>, String), Vec<usize>> = BTreeMap::new();
+    let mut base_groups: BTreeMap<(Option<Ecosystem>, String, Vec<SemanticSource>), Vec<usize>> =
+        BTreeMap::new();
+    let mut current_groups: BTreeMap<(Option<Ecosystem>, String, Vec<SemanticSource>), Vec<usize>> =
+        BTreeMap::new();
     for (index, target) in unmatched_base.iter().enumerate() {
         base_groups
             .entry(target.name_identity())
@@ -302,7 +318,7 @@ fn record_identity(record: &NormalizedDependency) -> TargetIdentity {
         source_key: record
             .coordinate
             .is_none()
-            .then(|| semantic_source_key(&record.sources))
+            .then(|| semantic_sources(&record.sources))
             .unwrap_or_default(),
     }
 }
@@ -396,31 +412,13 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
     })
 }
 
-fn semantic_source_key(sources: &[NormalizedSource]) -> String {
-    semantic_sources(sources)
-        .into_iter()
-        .map(|(kind, location, revision)| {
-            format!(
-                "{kind:?}|{}|{}",
-                location.unwrap_or_default(),
-                revision.unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
-fn semantic_sources(
-    sources: &[NormalizedSource],
-) -> Vec<(SourceKind, Option<String>, Option<String>)> {
+fn semantic_sources(sources: &[NormalizedSource]) -> Vec<SemanticSource> {
     let projected: BTreeSet<_> = sources
         .iter()
-        .map(|source| {
-            (
-                source.kind,
-                source.location.clone(),
-                source.immutable_revision.clone(),
-            )
+        .map(|source| SemanticSource {
+            kind: source.kind,
+            location: source.location.clone(),
+            immutable_revision: source.immutable_revision.clone(),
         })
         .collect();
     projected.into_iter().collect()
@@ -437,7 +435,7 @@ fn semantic_integrity(integrity: &[IntegrityEvidence]) -> Vec<(Option<String>, O
 fn semantic_occurrences(
     occurrences: &[LockfileScanOccurrence],
 ) -> BTreeSet<(
-    Vec<(SourceKind, Option<String>, Option<String>)>,
+    Vec<SemanticSource>,
     IntegrityState,
     Vec<(Option<String>, Option<String>)>,
     LockfileScanConstraint,

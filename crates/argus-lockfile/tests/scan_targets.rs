@@ -245,6 +245,41 @@ fn coordinate_less_identity_is_source_qualified() {
 }
 
 #[test]
+fn coordinate_less_typed_source_identity_cannot_delimiter_collide() {
+    let mut composite = record(
+        "local",
+        "1.0.0",
+        source(SourceKind::Path, "x|;Path|y"),
+        "composite",
+        None,
+    );
+    composite.coordinate = None;
+    composite.raw_name = None;
+    composite.raw_version = None;
+
+    let mut split = record(
+        "local",
+        "1.0.0",
+        source(SourceKind::Path, "x"),
+        "split",
+        None,
+    );
+    split.coordinate = None;
+    split.raw_name = None;
+    split.raw_version = None;
+    split.sources.push(source(SourceKind::Path, "y"));
+
+    let base = build_scan_targets(&output(vec![composite])).expect("base");
+    let current = build_scan_targets(&output(vec![split])).expect("current");
+    assert_eq!(base.len(), 1);
+    assert_eq!(current.len(), 1);
+    let delta = diff_scan_targets(&base, &current);
+    assert_eq!(delta.changed.len(), 0);
+    assert_eq!(delta.removed.len(), 1);
+    assert_eq!(delta.added.len(), 1);
+}
+
+#[test]
 fn ambiguous_multi_version_churn_stays_added_and_removed() {
     let base = build_scan_targets(&output(vec![
         record(
