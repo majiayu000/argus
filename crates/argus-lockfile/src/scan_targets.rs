@@ -31,6 +31,17 @@ pub struct LockfileScanConstraint {
     pub platform: Option<String>,
 }
 
+/// One lockfile occurrence, retaining the association between provenance,
+/// integrity evidence, constraints, and the parser locator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LockfileScanOccurrence {
+    pub sources: Vec<NormalizedSource>,
+    pub integrity_state: IntegrityState,
+    pub expected_integrity: Vec<IntegrityEvidence>,
+    pub locator: String,
+    pub constraint: LockfileScanConstraint,
+}
+
 /// One deduplicated artifact inventory entry.
 ///
 /// The target is an offline description only. A caller must inspect `kind` and
@@ -48,6 +59,7 @@ pub struct LockfileScanTarget {
     pub expected_integrity: Vec<IntegrityEvidence>,
     pub locators: Vec<String>,
     pub constraints: Vec<LockfileScanConstraint>,
+    pub occurrences: Vec<LockfileScanOccurrence>,
 }
 
 /// A changed target retains both sides so consumers cannot accidentally scan
@@ -70,6 +82,7 @@ struct TargetIdentity {
     ecosystem: Option<Ecosystem>,
     name: String,
     version: String,
+    source_key: String,
 }
 
 impl LockfileScanTarget {
@@ -78,6 +91,11 @@ impl LockfileScanTarget {
             ecosystem: self.ecosystem,
             name: self.name.clone().unwrap_or_default(),
             version: self.version.clone().unwrap_or_default(),
+            source_key: self
+                .coordinate
+                .is_none()
+                .then(|| semantic_source_key(&self.sources))
+                .unwrap_or_default(),
         }
     }
 
@@ -94,29 +112,22 @@ impl LockfileScanTarget {
             && self.name == other.name
             && self.version == other.version
             && self.formats == other.formats
-            && self.sources == other.sources
+            && semantic_sources(&self.sources) == semantic_sources(&other.sources)
             && self.integrity_state == other.integrity_state
-            && self.expected_integrity == other.expected_integrity
+            && semantic_integrity(&self.expected_integrity)
+                == semantic_integrity(&other.expected_integrity)
             && self.constraints == other.constraints
+            && semantic_occurrences(&self.occurrences) == semantic_occurrences(&other.occurrences)
     }
 }
 
 /// Build a stable, deduplicated inventory from parser output.
 pub fn build_scan_targets(output: &ParseOutput) -> Result<Vec<LockfileScanTarget>, LockfileError> {
-    output.coverage.validate()?;
-    if output.records.len() != output.coverage.record_units {
-        return Err(LockfileError::CoverageMismatch {
-            detail: format!(
-                "records length {} does not equal record_units {}",
-                output.records.len(),
-                output.coverage.record_units
-            ),
-        });
-    }
+    let mut validated = output.clone();
+    validated.validate_and_sort()?;
 
     let mut groups: BTreeMap<TargetIdentity, Vec<&NormalizedDependency>> = BTreeMap::new();
-    for record in &output.records {
-        validate_record(record)?;
+    for record in &validated.records {
         groups
             .entry(record_identity(record))
             .or_default()
@@ -188,21 +199,32 @@ pub fn diff_scan_targets(
     unmatched_current.sort_by(target_sort_key);
     let mut paired_base = vec![false; unmatched_base.len()];
     let mut paired_current = vec![false; unmatched_current.len()];
-    for (current_index, current_target) in unmatched_current.iter().enumerate() {
-        if let Some(base_index) = unmatched_base
-            .iter()
-            .enumerate()
-            .find(|(index, base_target)| {
-                !paired_base[*index]
-                    && base_target.name_identity() == current_target.name_identity()
-            })
-            .map(|(index, _)| index)
-        {
+    let mut base_groups: BTreeMap<(Option<Ecosystem>, String), Vec<usize>> = BTreeMap::new();
+    let mut current_groups: BTreeMap<(Option<Ecosystem>, String), Vec<usize>> = BTreeMap::new();
+    for (index, target) in unmatched_base.iter().enumerate() {
+        base_groups
+            .entry(target.name_identity())
+            .or_default()
+            .push(index);
+    }
+    for (index, target) in unmatched_current.iter().enumerate() {
+        current_groups
+            .entry(target.name_identity())
+            .or_default()
+            .push(index);
+    }
+    for (name, base_indices) in base_groups {
+        let Some(current_indices) = current_groups.get(&name) else {
+            continue;
+        };
+        if base_indices.len() == 1 && current_indices.len() == 1 {
+            let base_index = base_indices[0];
+            let current_index = current_indices[0];
             paired_base[base_index] = true;
             paired_current[current_index] = true;
             changed.push(LockfileScanTargetChange {
                 base: unmatched_base[base_index].clone(),
-                current: current_target.clone(),
+                current: unmatched_current[current_index].clone(),
             });
         }
     }
@@ -270,72 +292,19 @@ fn record_identity(record: &NormalizedDependency) -> TargetIdentity {
             .as_ref()
             .map(|coordinate| coordinate.canonical_name.clone())
             .or_else(|| record.raw_name.clone())
-            .unwrap_or_else(|| format!("<locator:{}>", record.locator)),
+            .unwrap_or_else(|| "<anonymous>".to_string()),
         version: record
             .coordinate
             .as_ref()
             .map(|coordinate| coordinate.version.clone())
             .or_else(|| record.raw_version.clone())
             .unwrap_or_default(),
+        source_key: record
+            .coordinate
+            .is_none()
+            .then(|| semantic_source_key(&record.sources))
+            .unwrap_or_default(),
     }
-}
-
-fn validate_record(record: &NormalizedDependency) -> Result<(), LockfileError> {
-    if record.locator.is_empty() {
-        return Err(LockfileError::InvalidModel {
-            detail: "record locator must not be empty".to_string(),
-        });
-    }
-    if record.sources.is_empty() {
-        return Err(LockfileError::InvalidModel {
-            detail: format!("record at `{}` has no source evidence", record.locator),
-        });
-    }
-    for source in &record.sources {
-        source.validate()?;
-    }
-    if let Some(coordinate) = &record.coordinate {
-        coordinate
-            .validate()
-            .map_err(|error| LockfileError::InvalidModel {
-                detail: error.to_string(),
-            })?;
-        if record.raw_name.as_deref() != Some(coordinate.original_name.as_str())
-            || record.raw_version.as_deref() != Some(coordinate.original_version.as_str())
-        {
-            return Err(LockfileError::InvalidModel {
-                detail: format!(
-                    "raw identity does not match coordinate at `{}`",
-                    record.locator
-                ),
-            });
-        }
-    }
-    if record
-        .integrity
-        .iter()
-        .any(|evidence| evidence.locator.is_empty())
-    {
-        return Err(LockfileError::InvalidModel {
-            detail: format!(
-                "integrity evidence locator is empty at `{}`",
-                record.locator
-            ),
-        });
-    }
-    if matches!(
-        record.integrity_state,
-        IntegrityState::RequiredPresent | IntegrityState::OptionalPresent | IntegrityState::Invalid
-    ) && record.integrity.is_empty()
-    {
-        return Err(LockfileError::InvalidModel {
-            detail: format!(
-                "{:?} integrity requires evidence at `{}`",
-                record.integrity_state, record.locator
-            ),
-        });
-    }
-    Ok(())
 }
 
 fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget, LockfileError> {
@@ -347,6 +316,8 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
     let mut locators = BTreeSet::new();
     let mut constraints = BTreeSet::new();
     let mut formats = BTreeSet::new();
+    let mut occurrences = BTreeSet::new();
+    let mut semantic_tuples = BTreeSet::new();
     let mut has_local = false;
     let mut has_nonlocal = false;
     let mut has_unavailable = false;
@@ -358,6 +329,21 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
             condition: record.condition.clone(),
             platform: record.platform.clone(),
         });
+        occurrences.insert(LockfileScanOccurrence {
+            sources: record.sources.clone(),
+            integrity_state: record.integrity_state,
+            expected_integrity: record.integrity.clone(),
+            locator: record.locator.clone(),
+            constraint: LockfileScanConstraint {
+                condition: record.condition.clone(),
+                platform: record.platform.clone(),
+            },
+        });
+        semantic_tuples.insert((
+            semantic_sources(&record.sources),
+            record.integrity_state,
+            semantic_integrity(&record.integrity),
+        ));
         formats.insert(record.format);
         for source in &record.sources {
             match source.kind {
@@ -367,7 +353,7 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
             }
         }
     }
-    let kind = if coordinate_mismatch || (has_local && has_nonlocal) {
+    let kind = if coordinate_mismatch || (has_local && has_nonlocal) || semantic_tuples.len() > 1 {
         LockfileScanTargetKind::Conflicting
     } else if has_local {
         LockfileScanTargetKind::LocalExcluded
@@ -406,7 +392,67 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
         expected_integrity: integrity.into_iter().collect(),
         locators: locators.into_iter().collect(),
         constraints: constraints.into_iter().collect(),
+        occurrences: occurrences.into_iter().collect(),
     })
+}
+
+fn semantic_source_key(sources: &[NormalizedSource]) -> String {
+    semantic_sources(sources)
+        .into_iter()
+        .map(|(kind, location, revision)| {
+            format!(
+                "{kind:?}|{}|{}",
+                location.unwrap_or_default(),
+                revision.unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn semantic_sources(
+    sources: &[NormalizedSource],
+) -> Vec<(SourceKind, Option<String>, Option<String>)> {
+    let projected: BTreeSet<_> = sources
+        .iter()
+        .map(|source| {
+            (
+                source.kind,
+                source.location.clone(),
+                source.immutable_revision.clone(),
+            )
+        })
+        .collect();
+    projected.into_iter().collect()
+}
+
+fn semantic_integrity(integrity: &[IntegrityEvidence]) -> Vec<(Option<String>, Option<String>)> {
+    let projected: BTreeSet<_> = integrity
+        .iter()
+        .map(|evidence| (evidence.algorithm.clone(), evidence.value.clone()))
+        .collect();
+    projected.into_iter().collect()
+}
+
+fn semantic_occurrences(
+    occurrences: &[LockfileScanOccurrence],
+) -> BTreeSet<(
+    Vec<(SourceKind, Option<String>, Option<String>)>,
+    IntegrityState,
+    Vec<(Option<String>, Option<String>)>,
+    LockfileScanConstraint,
+)> {
+    occurrences
+        .iter()
+        .map(|occurrence| {
+            (
+                semantic_sources(&occurrence.sources),
+                occurrence.integrity_state,
+                semantic_integrity(&occurrence.expected_integrity),
+                occurrence.constraint.clone(),
+            )
+        })
+        .collect()
 }
 
 fn integrity_rank(state: IntegrityState) -> u8 {

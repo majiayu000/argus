@@ -26,8 +26,8 @@ pub use parsers::{parser_for, LockfileParser};
 pub use policy::{evaluate, evaluate_with_rules, PolicyError, PolicyOptions};
 pub use scan_targets::{
     build_scan_targets, diff_lockfile_scan_targets, diff_scan_targets, scan_targets,
-    LockfileScanConstraint, LockfileScanDelta, LockfileScanTarget, LockfileScanTargetChange,
-    LockfileScanTargetClass, LockfileScanTargetKind,
+    LockfileScanConstraint, LockfileScanDelta, LockfileScanOccurrence, LockfileScanTarget,
+    LockfileScanTargetChange, LockfileScanTargetClass, LockfileScanTargetKind,
 };
 
 /// Detect and fully parse one lockfile through the frozen parser contract.
