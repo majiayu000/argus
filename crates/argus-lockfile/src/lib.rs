@@ -9,6 +9,7 @@ mod detect;
 mod model;
 pub mod parsers;
 pub mod policy;
+mod scan_targets;
 
 pub use bounds::{
     ensure_canonical_output_size, ensure_record_count, parse_json, parse_toml, parse_yaml,
@@ -23,6 +24,11 @@ pub use model::{
 };
 pub use parsers::{parser_for, LockfileParser};
 pub use policy::{evaluate, evaluate_with_rules, PolicyError, PolicyOptions};
+pub use scan_targets::{
+    build_scan_targets, diff_lockfile_scan_targets, diff_scan_targets, scan_targets,
+    LockfileScanConstraint, LockfileScanDelta, LockfileScanTarget, LockfileScanTargetChange,
+    LockfileScanTargetClass, LockfileScanTargetKind,
+};
 
 /// Detect and fully parse one lockfile through the frozen parser contract.
 pub fn parse_lockfile(
