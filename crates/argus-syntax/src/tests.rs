@@ -43,6 +43,82 @@ fn comments_and_inert_strings_do_not_become_calls() {
 }
 
 #[test]
+fn dynamic_builtin_bindings_are_scope_and_order_aware() {
+    let javascript = analyze(&script(
+        "scope.js",
+        "function local(eval = eval) { eval(atob('x')); }\nif (eval === safe) {}\neval((atob('y')));\nconst eval = safe; eval(atob('z'));",
+    ))
+    .expect("parse JavaScript");
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval") && fact.text.contains("'y'")));
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval")));
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval") && fact.text.contains("'x'")));
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution && fact.text.contains("'y'")));
+
+    let python = analyze(&script(
+        "scope.py",
+        "def local(eval=eval):\n    eval(base64.b64decode('x'))\nif eval == safe:\n    pass\neval(base64.b64decode('y'))\nexec(base64.b64decode('z'))",
+    ))
+    .expect("parse Python");
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval")));
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval") && fact.text.contains("'y'")));
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("exec")));
+    assert!(python
+        .iter()
+        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution && fact.text.contains("'z'")));
+}
+
+#[test]
+fn javascript_new_function_is_a_constructor_fact_with_all_arguments() {
+    let facts = analyze(&script(
+        "constructor.js",
+        "new Function( /* comment */ 'arg', atob('body'));\nconst x = 1 / 2;",
+    ))
+    .expect("parse JavaScript");
+    let constructor = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("Function"))
+        .expect("constructor fact");
+    assert!(constructor.arguments.len() >= 2);
+    assert!(constructor
+        .arguments
+        .last()
+        .is_some_and(|argument| argument.raw.starts_with("atob")));
+    assert!(facts
+        .iter()
+        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution));
+}
+
+#[test]
+fn python_fstring_marker_requires_nested_dynamic_call() {
+    let bytes = analyze(&script(
+        "fstring.py",
+        "exec(f\"{base64.b64decode('bytes')}\")\nexec(f\"{eval(base64.b64decode('code'))}\")",
+    ))
+    .expect("parse Python");
+    let encoded: Vec<&Fact> = bytes
+        .iter()
+        .filter(|fact| fact.kind == FactKind::EncodedDynamicExecution)
+        .collect();
+    assert_eq!(encoded.len(), 2);
+    assert!(encoded.iter().any(|fact| fact.text.starts_with("exec(")));
+    assert!(encoded.iter().any(|fact| fact.text.starts_with("eval(")));
+}
+
+#[test]
 fn resolves_python_alias_and_constant_concatenation() {
     let facts = analyze(&script(
         "collect.py",

@@ -16,7 +16,7 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
     let language = ScriptLanguage::from_path(&file.rel);
     if matches!(
         language,
-        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript | ScriptLanguage::Python
     ) {
         let facts = argus_syntax::analyze(&file.rel, &file.content)
             .with_context(|| format!("parse npm source `{}`", file.rel))?;
@@ -185,7 +185,7 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
     // This intentionally does not score standalone decoders, long/minified
     // lines, or entropy: the chain itself is the high-confidence signal.
     let encoded_dynamic_execution = match &network_scan {
-        NetworkScan::Syntax(facts) => syntax_encoded_dynamic_execution(facts, body),
+        NetworkScan::Syntax(facts) => syntax_encoded_dynamic_execution(facts),
         NetworkScan::Legacy => source_encoded_dynamic_execution(body, language_for_file(&file.rel)),
         // npm's syntax-backed network rule is JavaScript-only, but Python
         // source files shipped in a package still use the shared scanner.
@@ -209,25 +209,10 @@ fn language_for_file(path: &str) -> ScriptLanguage {
     ScriptLanguage::from_path(path)
 }
 
-fn syntax_encoded_dynamic_execution(facts: &[Fact], body: &str) -> bool {
-    let eval_shadowed = js_shadowed_binding(body, "eval");
-    facts.iter().any(|fact| {
-        if fact.kind != FactKind::Call {
-            return false;
-        }
-        let Some(callee) = fact.callee.as_deref() else {
-            return false;
-        };
-        if callee == "eval" && eval_shadowed {
-            return false;
-        }
-        if !matches!(callee, "eval" | "Function") {
-            return false;
-        }
-        fact.arguments.iter().find_map(|argument| {
-            (!js_comment_only(&argument.raw)).then(|| js_direct_decoder(&argument.raw, "atob"))
-        }) == Some(true)
-    }) || source_js_function_constructor(body)
+fn syntax_encoded_dynamic_execution(facts: &[Fact]) -> bool {
+    facts
+        .iter()
+        .any(|fact| fact.kind == FactKind::EncodedDynamicExecution)
 }
 
 /// Scan Python and non-JavaScript shared surfaces without treating comments or
@@ -275,132 +260,6 @@ fn source_encoded_dynamic_execution(body: &str, language: ScriptLanguage) -> boo
     false
 }
 
-fn js_direct_decoder(raw: &str, decoder: &str) -> bool {
-    let bytes = raw.as_bytes();
-    let mut index = 0;
-    loop {
-        index = skip_js_trivia(bytes, index);
-        if bytes.get(index) != Some(&b'(') {
-            break;
-        }
-        index += 1;
-    }
-    let Some((name, end)) = identifier_at(bytes, index) else {
-        return false;
-    };
-    name == decoder && bytes.get(skip_js_trivia(bytes, end)) == Some(&b'(')
-}
-
-fn js_comment_only(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    (trimmed.starts_with("/*") && trimmed.ends_with("*/")) || trimmed.starts_with("//")
-}
-
-fn source_js_function_constructor(body: &str) -> bool {
-    if js_shadowed_binding(body, "Function") {
-        return false;
-    }
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'/' {
-            if bytes.get(index + 1) == Some(&b'/') {
-                skip_line_comment(bytes, &mut index);
-                continue;
-            }
-            if bytes.get(index + 1) == Some(&b'*') {
-                skip_block_comment(bytes, &mut index);
-                continue;
-            }
-            skip_regex_literal(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) || bytes[index] == b'`' {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if identifier != "Function" || previous_member(bytes, index) {
-            index = end;
-            continue;
-        }
-        let cursor = skip_js_trivia(bytes, end);
-        if bytes.get(cursor) == Some(&b'(') && js_direct_decoder_bytes(bytes, cursor + 1) {
-            return true;
-        }
-        index = end;
-    }
-    false
-}
-
-fn js_direct_decoder_bytes(bytes: &[u8], mut index: usize) -> bool {
-    loop {
-        index = skip_js_trivia(bytes, index);
-        if bytes.get(index) != Some(&b'(') {
-            break;
-        }
-        index += 1;
-    }
-    let Some((name, end)) = identifier_at(bytes, index) else {
-        return false;
-    };
-    name == "atob" && bytes.get(skip_js_trivia(bytes, end)) == Some(&b'(')
-}
-
-fn skip_js_trivia(bytes: &[u8], mut index: usize) -> usize {
-    loop {
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
-            skip_block_comment(bytes, &mut index);
-            continue;
-        }
-        break;
-    }
-    index
-}
-
-fn skip_block_comment(bytes: &[u8], index: &mut usize) {
-    *index = (*index + 2).min(bytes.len());
-    while *index + 1 < bytes.len() && !(bytes[*index] == b'*' && bytes[*index + 1] == b'/') {
-        *index += 1;
-    }
-    *index = (*index + 2).min(bytes.len());
-}
-
-fn skip_regex_literal(bytes: &[u8], index: &mut usize) {
-    *index += 1;
-    let mut class = false;
-    while *index < bytes.len() {
-        match bytes[*index] {
-            b'\\' => *index = (*index + 2).min(bytes.len()),
-            b'[' => {
-                class = true;
-                *index += 1;
-            }
-            b']' => {
-                class = false;
-                *index += 1;
-            }
-            b'/' if !class => {
-                *index += 1;
-                while bytes
-                    .get(*index)
-                    .is_some_and(|byte| byte.is_ascii_alphabetic())
-                {
-                    *index += 1;
-                }
-                break;
-            }
-            _ => *index += 1,
-        }
-    }
-}
-
 fn previous_member(bytes: &[u8], index: usize) -> bool {
     let mut cursor = index;
     while cursor > 0
@@ -411,104 +270,6 @@ fn previous_member(bytes: &[u8], index: usize) -> bool {
         cursor -= 1;
     }
     cursor > 0 && (bytes[cursor - 1] == b'.' || bytes[cursor - 1] == b'?')
-}
-
-fn js_shadowed_binding(body: &str, name: &str) -> bool {
-    if js_function_parameter_shadowed(body, name) {
-        return true;
-    }
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    let mut previous = "";
-    while index < bytes.len() {
-        if bytes[index] == b'/' {
-            if bytes.get(index + 1) == Some(&b'/') {
-                skip_line_comment(bytes, &mut index);
-                continue;
-            }
-            if bytes.get(index + 1) == Some(&b'*') {
-                skip_block_comment(bytes, &mut index);
-                continue;
-            }
-            skip_regex_literal(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) || bytes[index] == b'`' {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if identifier == name
-            && (matches!(previous, "const" | "let" | "var" | "function" | "class")
-                || bytes.get(skip_space(bytes, end)) == Some(&b'='))
-        {
-            return true;
-        }
-        previous = identifier;
-        index = end;
-    }
-    false
-}
-
-fn js_function_parameter_shadowed(body: &str, name: &str) -> bool {
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'/' {
-            if bytes.get(index + 1) == Some(&b'/') {
-                skip_line_comment(bytes, &mut index);
-                continue;
-            }
-            if bytes.get(index + 1) == Some(&b'*') {
-                skip_block_comment(bytes, &mut index);
-                continue;
-            }
-            skip_regex_literal(bytes, &mut index);
-            continue;
-        }
-        if is_quote(bytes[index]) || bytes[index] == b'`' {
-            skip_string(bytes, &mut index);
-            continue;
-        }
-        let Some((identifier, end)) = identifier_at(bytes, index) else {
-            index += 1;
-            continue;
-        };
-        if identifier != "function" {
-            index = end;
-            continue;
-        }
-        let mut cursor = skip_js_trivia(bytes, end);
-        if let Some((_, function_end)) = identifier_at(bytes, cursor) {
-            cursor = skip_js_trivia(bytes, function_end);
-        }
-        if bytes.get(cursor) != Some(&b'(') {
-            index = end;
-            continue;
-        }
-        let mut depth = 1;
-        cursor += 1;
-        while cursor < bytes.len() && depth > 0 {
-            if let Some((parameter, parameter_end)) = identifier_at(bytes, cursor) {
-                if parameter == name {
-                    return true;
-                }
-                cursor = parameter_end;
-                continue;
-            }
-            match bytes[cursor] {
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
-            }
-            cursor += 1;
-        }
-        index = end;
-    }
-    false
 }
 
 fn python_shadowed_binding(body: &str, name: &str) -> bool {
@@ -634,12 +395,22 @@ fn python_direct_decoder(bytes: &[u8], mut index: usize) -> bool {
 }
 
 fn python_fstring_decoder(bytes: &[u8], index: usize) -> bool {
-    let Some(quote_index) = (0..=2).find_map(|offset| {
-        let at = index + offset;
-        (matches!(bytes.get(at), Some(b'f' | b'F' | b'r' | b'R'))
-            && bytes.get(at + 1).is_some_and(|byte| is_quote(*byte)))
-        .then_some(at + 1)
-    }) else {
+    let quote_index = if matches!(bytes.get(index), Some(b'f' | b'F'))
+        && bytes.get(index + 1).is_some_and(|byte| is_quote(*byte))
+    {
+        index + 1
+    } else if (matches!(bytes.get(index), Some(b'r' | b'R'))
+        && bytes
+            .get(index + 1)
+            .is_some_and(|byte| matches!(byte, b'f' | b'F'))
+        || matches!(bytes.get(index), Some(b'f' | b'F'))
+            && bytes
+                .get(index + 1)
+                .is_some_and(|byte| matches!(byte, b'r' | b'R')))
+        && bytes.get(index + 2).is_some_and(|byte| is_quote(*byte))
+    {
+        index + 2
+    } else {
         return false;
     };
     let quote = bytes[quote_index];
@@ -671,7 +442,12 @@ fn python_fstring_decoder(bytes: &[u8], index: usize) -> bool {
                 cursor += 1;
             }
             let expression_end = cursor.saturating_sub(1);
-            if depth == 0 && python_direct_decoder(bytes, expression_start.min(expression_end)) {
+            if depth == 0
+                && python_fstring_expression_dynamic_decoder(
+                    bytes,
+                    expression_start.min(expression_end),
+                )
+            {
                 return true;
             }
             continue;
@@ -679,6 +455,19 @@ fn python_fstring_decoder(bytes: &[u8], index: usize) -> bool {
         cursor += 1;
     }
     false
+}
+
+fn python_fstring_expression_dynamic_decoder(bytes: &[u8], mut index: usize) -> bool {
+    index = skip_python_trivia(bytes, index);
+    let Some((callee, end)) = identifier_at(bytes, index) else {
+        return false;
+    };
+    if !matches!(callee, "eval" | "exec") {
+        return false;
+    }
+    index = skip_python_trivia(bytes, end);
+    bytes.get(index) == Some(&b'(')
+        && python_direct_decoder(bytes, skip_python_trivia(bytes, index + 1))
 }
 
 fn is_quote(byte: u8) -> bool {
@@ -1072,6 +861,7 @@ mod tests {
             "eval((atob('Y29uc29sZS5sb2coMSk=')));",
             "eval(/* gap */ atob('Y29uc29sZS5sb2coMSk='));",
             "new Function(/* gap */ (atob('Y29uc29sZS5sb2coMSk=')));",
+            "new Function(`return ${atob('Y29uc29sZS5sb2coMSk=')}`);",
         ] {
             assert!(
                 npm_ids(source)
@@ -1085,6 +875,7 @@ mod tests {
             "safe.eval(atob('fake'));",
             "const eval = safe; eval(atob('fake'));",
             "function run(eval) { eval(atob('fake')); }",
+            "new Function(atob('fake'), 'body');",
         ] {
             assert!(
                 !npm_ids(source)
@@ -1136,7 +927,7 @@ mod tests {
         for source in [
             "exec((base64.b64decode('Y29uc29sZS5sb2coMSk=')))",
             "exec(\n # gap\n base64.b64decode('Y29uc29sZS5sb2coMSk='))",
-            "exec(f\"{base64.b64decode('Y29uc29sZS5sb2coMSk=')}\")",
+            "exec(f\"{eval(base64.b64decode('Y29uc29sZS5sb2coMSk='))}\")",
         ] {
             assert!(
                 python_findings(source)
@@ -1149,6 +940,8 @@ mod tests {
             "runner.exec(base64.b64decode('fake'))",
             "eval = safe\neval(base64.b64decode('fake'))",
             "def run(eval):\n    eval(base64.b64decode('fake'))",
+            "exec(f\"{base64.b64decode('fake')}\")",
+            "exec(r\"{eval(base64.b64decode('fake'))}\")",
         ] {
             assert!(
                 !python_findings(source)

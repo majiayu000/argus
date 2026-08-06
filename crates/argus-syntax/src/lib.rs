@@ -47,6 +47,7 @@ pub fn analyze_with_language(
 pub enum FactKind {
     Command,
     Call,
+    EncodedDynamicExecution,
     Pipeline,
     Access,
     Assignment,
@@ -138,6 +139,7 @@ pub(crate) struct Bindings {
     constants: BTreeMap<String, String>,
     provenance: BTreeMap<String, String>,
     suppressed_constants: BTreeSet<String>,
+    pub(crate) shadowed: BTreeSet<String>,
 }
 
 #[cfg(test)]
