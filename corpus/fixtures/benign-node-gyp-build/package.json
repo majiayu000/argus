@@ -1,0 +1,10 @@
+{
+  "name": "benign-node-gyp-build",
+  "version": "1.0.0",
+  "description": "Native addon compiled from bundled C++ sources at install time.",
+  "scripts": {
+    "install": "node-gyp rebuild"
+  },
+  "main": "index.js",
+  "gypfile": true
+}

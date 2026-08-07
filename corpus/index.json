@@ -243,6 +243,18 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "Lint rule that matches `eval(atob(`/`exec(base64.b64decode(` as text. Discussing dynamic execution is not performing it."
+    },
+    {
+      "id": "benign-node-gyp-build",
+      "kind": "fixture",
+      "path": "fixtures/benign-node-gyp-build",
+      "packageName": "benign-node-gyp-build",
+      "expectedDecision": "allow-with-approval",
+      "rules": [
+        "known-native-build-pattern",
+        "lifecycle-script"
+      ],
+      "notes": "Native addon compiled locally from bundled sources. GH-185: recognizing only prebuilt platform optionalDependencies blocked every ordinary node-gyp package."
     }
   ]
 }
