@@ -625,3 +625,26 @@ fn extensionless_without_shebang_stays_unsupported() {
         ScriptLanguage::Unsupported
     );
 }
+
+#[test]
+fn extensionless_shebang_script_is_analyzed_for_encoded_execution() {
+    // A hook or skill script carries no extension. Inferring the language
+    // from the path alone would classify it Unsupported and silently skip
+    // the decode-to-eval chain inside it.
+    assert!(analyze_source_encoded(
+        "hooks/pre-commit",
+        "#!/usr/bin/env node\neval(atob('Y29uc29sZS5sb2coMSk='));\n"
+    ));
+    assert!(analyze_source_encoded(
+        "hooks/setup",
+        "#!/usr/bin/env python3\nimport base64\nexec(base64.b64decode('cHJpbnQoMSk='))\n"
+    ));
+}
+
+#[test]
+fn extensionless_script_without_shebang_stays_unanalyzed() {
+    assert!(!analyze_source_encoded(
+        "notes",
+        "eval(atob('Y29uc29sZS5sb2coMSk='));\n"
+    ));
+}

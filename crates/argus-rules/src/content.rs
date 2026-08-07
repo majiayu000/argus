@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    let language = ScriptLanguage::from_path(&file.rel);
+    let language = ScriptLanguage::from_source(&file.rel, &file.content);
     if matches!(
         language,
         ScriptLanguage::JavaScript | ScriptLanguage::TypeScript | ScriptLanguage::Python
@@ -46,7 +46,7 @@ pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
 /// Python files are parsed before content rules run so malformed syntax cannot
 /// silently bypass encoded dynamic execution detection.
 pub fn scan_text_file_checked(file: &TextFile, findings: &mut Vec<Finding>) -> Result<()> {
-    let language = ScriptLanguage::from_path(&file.rel);
+    let language = ScriptLanguage::from_source(&file.rel, &file.content);
     let encoded = if language == ScriptLanguage::Python {
         argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
             .with_context(|| format!("parse source `{}`", file.rel))?
