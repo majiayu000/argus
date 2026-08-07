@@ -249,6 +249,7 @@ pub fn fetch_and_scan_nuget_with_rules_and_context(
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);

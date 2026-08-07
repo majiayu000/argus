@@ -316,6 +316,41 @@ before findings. Two categories are reported rather than dropped:
 
 SARIF emits one run per package.
 
+### Weighted risk scoring (opt-in)
+
+The default decision is policy-driven: a rule either participates in the
+decision or it does not, so a `Low` finding and a `Critical` one are
+interchangeable. `--risk-scoring` adds a weighted score in which severity
+actually participates.
+
+```sh
+argus scan path/to/pkg --risk-scoring                     # report the score
+argus scan path/to/pkg --risk-scoring --risk-decides      # let it decide
+argus scan path/to/pkg --risk-scoring --risk-decides \
+  --risk-approval-threshold 2000 --risk-block-threshold 5000
+```
+
+Weights are derived from the severity each detector already assigns
+(Critical 10000, High 6000, Medium 3000, Low 1000, Info 0 basis points).
+At the default thresholds a *single* finding produces exactly the decision the
+severity profile already produced, so enabling scoring is not a surprise. The
+difference appears with several findings: two independent Medium-risk
+behaviours accumulate past the block threshold, where set algebra saw one
+"medium bucket" and stopped. Repeated observations of the *same* rule count
+once, so a noisy detector cannot block on volume.
+
+Reports carry the score and every rule's contribution — text, JSON `risk`, and
+SARIF `properties.argusRisk` — so a scored decision can be checked rather than
+taken on faith.
+
+Scoring is off by default and `--risk-scoring` alone does not change any exit
+code; `--risk-decides` is required for that. Two things are deliberately
+missing until the labeled benchmark in
+[#145](https://github.com/majiayu000/argus/issues/145) lands: calibrated
+per-rule weights, and real per-rule confidence (every finding is currently
+assessed at full confidence). Both are claims about real-world outcomes that
+no measurement yet supports.
+
 ### Explicit OSV vulnerability queries
 
 The secure OSV cache and verified malicious-package snapshot implementations

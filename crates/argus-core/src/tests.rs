@@ -25,6 +25,7 @@ fn rule_ids_dedups_in_order() {
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     assert_eq!(
         report.rule_ids(),
@@ -178,6 +179,7 @@ fn intelligence_status() {
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     let report_json = serde_json::to_value(report).unwrap();
     assert!(report_json.get("coordinate").is_none());

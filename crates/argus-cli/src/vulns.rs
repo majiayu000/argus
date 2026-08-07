@@ -541,6 +541,7 @@ mod scan_vulns_tests {
             intelligence: None,
             rules: None,
             vulnerability: None,
+            risk: None,
         }
     }
 

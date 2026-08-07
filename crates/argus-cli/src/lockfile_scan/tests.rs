@@ -36,6 +36,7 @@ fn report(path: &str, decision: Decision, findings: Vec<Finding>) -> ScanReport 
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     }
 }
 

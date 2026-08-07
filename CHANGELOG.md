@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add opt-in weighted risk scoring (`--risk-scoring`, `--risk-decides`,
+  `--risk-approval-threshold`, `--risk-block-threshold`). Weights derive from
+  the severity detectors already assign, so `Low` and `Critical` stop being
+  interchangeable and independent risks accumulate. Reports carry the score and
+  per-rule contributions in text, JSON, and SARIF. Off by default; calibrated
+  per-rule weights and confidence wait on the GH-145 benchmark.
 - Add `argus lockfile-scan`, which fetches and statically scans every
   dependency a lockfile resolves and aggregates them into one decision and
   exit code. Dependencies that were skipped or could not be assessed are

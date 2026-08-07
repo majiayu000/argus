@@ -221,6 +221,7 @@ fn scan_agent_surface_inner(
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     rules.finalize_agent(&mut report);
 

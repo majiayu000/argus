@@ -12,6 +12,9 @@ mod intel;
 #[allow(dead_code)]
 #[path = "../src/report.rs"]
 mod report;
+#[allow(dead_code)]
+#[path = "../src/risk_args.rs"]
+mod risk_args;
 #[path = "../src/sarif.rs"]
 mod sarif;
 
@@ -74,6 +77,7 @@ fn synthetic_report(ecosystem: Ecosystem, name: &str, version: &str) -> ScanRepo
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     }
 }
 

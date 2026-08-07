@@ -24,7 +24,7 @@ pub(crate) enum VulnsOp {
         path: PathBuf,
         /// Explicit lockfile format, validated together with the basename.
         #[arg(long, value_enum)]
-        lockfile_format: Option<crate::LockfileFormatArg>,
+        lockfile_format: Option<LockfileFormatArg>,
         #[command(flatten)]
         common: VulnsCommonArgs,
     },
@@ -137,21 +137,18 @@ mod tests {
         ] {
             assert_eq!(Ecosystem::from(input), expected);
         }
-        // The scan and vulns commands now share crate::LockfileFormatArg, so
+        // The scan and vulns commands now share LockfileFormatArg, so
         // this exhaustiveness check covers the single remaining mapping.
         for (input, expected) in [
-            (
-                crate::LockfileFormatArg::PackageLock,
-                FormatHint::PackageLock,
-            ),
-            (crate::LockfileFormatArg::Yarn, FormatHint::Yarn),
-            (crate::LockfileFormatArg::Pnpm, FormatHint::Pnpm),
-            (crate::LockfileFormatArg::Poetry, FormatHint::Poetry),
-            (crate::LockfileFormatArg::Uv, FormatHint::Uv),
-            (crate::LockfileFormatArg::Cargo, FormatHint::Cargo),
-            (crate::LockfileFormatArg::GoSum, FormatHint::GoSum),
-            (crate::LockfileFormatArg::Bundler, FormatHint::Bundler),
-            (crate::LockfileFormatArg::Composer, FormatHint::Composer),
+            (LockfileFormatArg::PackageLock, FormatHint::PackageLock),
+            (LockfileFormatArg::Yarn, FormatHint::Yarn),
+            (LockfileFormatArg::Pnpm, FormatHint::Pnpm),
+            (LockfileFormatArg::Poetry, FormatHint::Poetry),
+            (LockfileFormatArg::Uv, FormatHint::Uv),
+            (LockfileFormatArg::Cargo, FormatHint::Cargo),
+            (LockfileFormatArg::GoSum, FormatHint::GoSum),
+            (LockfileFormatArg::Bundler, FormatHint::Bundler),
+            (LockfileFormatArg::Composer, FormatHint::Composer),
         ] {
             assert_eq!(FormatHint::from(input), expected);
         }
@@ -162,6 +159,35 @@ mod tests {
             (VulnsSeverity::Critical, SeverityLevel::Critical),
         ] {
             assert_eq!(SeverityLevel::from(input), expected);
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub(crate) enum LockfileFormatArg {
+    PackageLock,
+    Yarn,
+    Pnpm,
+    Poetry,
+    Uv,
+    Cargo,
+    GoSum,
+    Bundler,
+    Composer,
+}
+
+impl From<LockfileFormatArg> for argus_lockfile::FormatHint {
+    fn from(value: LockfileFormatArg) -> Self {
+        match value {
+            LockfileFormatArg::PackageLock => Self::PackageLock,
+            LockfileFormatArg::Yarn => Self::Yarn,
+            LockfileFormatArg::Pnpm => Self::Pnpm,
+            LockfileFormatArg::Poetry => Self::Poetry,
+            LockfileFormatArg::Uv => Self::Uv,
+            LockfileFormatArg::Cargo => Self::Cargo,
+            LockfileFormatArg::GoSum => Self::GoSum,
+            LockfileFormatArg::Bundler => Self::Bundler,
+            LockfileFormatArg::Composer => Self::Composer,
         }
     }
 }

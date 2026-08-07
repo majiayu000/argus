@@ -301,13 +301,13 @@ pub(crate) struct LockfileScanArgs {
     pub(crate) path: PathBuf,
     /// Explicit lockfile format, validated together with the basename.
     #[arg(long, value_enum)]
-    pub(crate) lockfile_format: Option<crate::LockfileFormatArg>,
+    pub(crate) lockfile_format: Option<crate::router::LockfileFormatArg>,
     /// Scan only dependencies added or changed against this base lockfile.
     #[arg(long, value_name = "FILE")]
     pub(crate) base: Option<PathBuf>,
     /// Explicit format for `--base`, when its basename is ambiguous.
     #[arg(long, value_enum, requires = "base")]
-    pub(crate) base_lockfile_format: Option<crate::LockfileFormatArg>,
+    pub(crate) base_lockfile_format: Option<crate::router::LockfileFormatArg>,
     /// Persistent scratch parent reused across every dependency fetch.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
