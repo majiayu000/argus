@@ -9,10 +9,15 @@
 mod catalog;
 mod effective;
 pub mod risk;
+pub mod risk_profile;
 
 pub use risk::{
     assess, Confidence, RiskAssessment, RiskAssessmentEngine, RiskAssessmentError,
     RiskContribution, RiskEngine, RiskScore, RiskThresholds, RuleWeight, BASIS_POINTS,
+};
+pub use risk_profile::{
+    assess_by_severity, default_thresholds, severity_weight_basis_points,
+    DEFAULT_APPROVAL_THRESHOLD, DEFAULT_BLOCK_THRESHOLD,
 };
 
 pub use catalog::{

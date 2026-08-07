@@ -50,6 +50,9 @@ pub(crate) fn render_report_text(report: &ScanReport) -> String {
     if let Some(rules) = &report.rules {
         output.push_str(&render_rules_text(rules));
     }
+    if let Some(risk) = &report.risk {
+        output.push_str(&crate::risk_args::render_text(risk));
+    }
     if report.findings.is_empty() {
         writeln!(output, "findings: none").expect("writing a report to String cannot fail");
         return output;
@@ -158,6 +161,7 @@ mod tests {
             intelligence: None,
             rules: None,
             vulnerability: None,
+            risk: None,
         }
     }
 

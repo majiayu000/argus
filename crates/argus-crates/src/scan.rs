@@ -77,6 +77,7 @@ pub fn scan_crate_archive_with_rules_and_context(
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     rules.finalize_package(&mut report);
     Ok(report)

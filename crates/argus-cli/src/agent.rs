@@ -711,6 +711,7 @@ mod tests {
                 intelligence: None,
                 rules: None,
                 vulnerability: None,
+                risk: None,
             },
         }
     }

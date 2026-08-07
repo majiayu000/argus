@@ -576,6 +576,57 @@ pub struct RuleExecutionMetadata {
     pub external_rules: Vec<ExternalRuleMetadata>,
 }
 
+/// Serializable view of a weighted risk assessment (GH-146).
+///
+/// Present only when the caller explicitly enabled risk scoring. The
+/// contributions are carried alongside the score so a report shows its work:
+/// a reviewer can see which rule produced which share of the total rather
+/// than being handed a bare number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskReport {
+    /// Total score in basis points.
+    pub score: u64,
+    /// Decision the thresholds imply for `score`.
+    pub decision: Decision,
+    pub approval_threshold: u64,
+    pub block_threshold: u64,
+    /// Per-rule contributions in lexicographic rule-id order.
+    pub contributions: Vec<RiskContributionReport>,
+}
+
+/// One rule's share of a [`RiskReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskContributionReport {
+    pub rule_id: String,
+    /// Weight in basis points.
+    pub weight: u32,
+    /// Confidence in basis points.
+    pub confidence: u32,
+    /// `floor(weight * confidence / 10_000)`.
+    pub score: u64,
+}
+
+impl From<rules::RiskAssessment> for RiskReport {
+    fn from(assessment: rules::RiskAssessment) -> Self {
+        Self {
+            score: assessment.score.value(),
+            decision: assessment.decision,
+            approval_threshold: assessment.thresholds.approval().value(),
+            block_threshold: assessment.thresholds.block().value(),
+            contributions: assessment
+                .contributions
+                .into_iter()
+                .map(|contribution| RiskContributionReport {
+                    rule_id: contribution.rule_id,
+                    weight: contribution.weight.basis_points(),
+                    confidence: contribution.confidence.basis_points(),
+                    score: contribution.score.value(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Final report after running all rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
@@ -594,6 +645,9 @@ pub struct ScanReport {
     /// Complete OSV query provenance when vulnerability enrichment was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vulnerability: Option<VulnerabilityQueryEvidence>,
+    /// Weighted risk assessment, present only when scoring was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskReport>,
 }
 
 impl ScanReport {

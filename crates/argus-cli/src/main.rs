@@ -7,7 +7,9 @@ mod execution;
 mod intel;
 mod lockfile_scan;
 mod report;
+mod risk_args;
 mod router;
+
 mod rule_args;
 mod sarif;
 mod sarif_vulns;
@@ -58,7 +60,7 @@ enum Cmd {
         format: Format,
         /// Explicit lockfile format, validated together with the basename.
         #[arg(long, value_enum)]
-        lockfile_format: Option<LockfileFormatArg>,
+        lockfile_format: Option<router::LockfileFormatArg>,
         /// Additional exact DNS host accepted for HTTPS/SSH lockfile sources.
         #[arg(long = "allow-registry-host", value_name = "HOST")]
         allow_registry_host: Vec<String>,
@@ -68,6 +70,8 @@ enum Cmd {
         vulns: vulns::ScanVulnsArgs,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        risk: risk_args::RiskArgs,
         #[command(flatten)]
         execution: execution::ExecutionArgs,
     },
@@ -149,6 +153,8 @@ enum Cmd {
         #[command(flatten)]
         rules: RuleArgs,
         #[command(flatten)]
+        risk: risk_args::RiskArgs,
+        #[command(flatten)]
         execution: execution::ExecutionArgs,
     },
     /// Fetch a package from PyPI, verify SHA-256, safe-extract sdist/wheel, scan.
@@ -172,6 +178,8 @@ enum Cmd {
         vulns: vulns::ScanVulnsArgs,
         #[command(flatten)]
         rules: RuleArgs,
+        #[command(flatten)]
+        risk: risk_args::RiskArgs,
         #[command(flatten)]
         execution: execution::ExecutionArgs,
     },
@@ -215,6 +223,8 @@ struct EcosystemFetchArgs {
     vulns: vulns::ScanVulnsArgs,
     #[command(flatten)]
     rules: RuleArgs,
+    #[command(flatten)]
+    risk: risk_args::RiskArgs,
     #[command(flatten)]
     execution: execution::ExecutionArgs,
 }
@@ -321,35 +331,6 @@ enum Format {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
-enum LockfileFormatArg {
-    PackageLock,
-    Yarn,
-    Pnpm,
-    Poetry,
-    Uv,
-    Cargo,
-    GoSum,
-    Bundler,
-    Composer,
-}
-
-impl From<LockfileFormatArg> for FormatHint {
-    fn from(value: LockfileFormatArg) -> Self {
-        match value {
-            LockfileFormatArg::PackageLock => Self::PackageLock,
-            LockfileFormatArg::Yarn => Self::Yarn,
-            LockfileFormatArg::Pnpm => Self::Pnpm,
-            LockfileFormatArg::Poetry => Self::Poetry,
-            LockfileFormatArg::Uv => Self::Uv,
-            LockfileFormatArg::Cargo => Self::Cargo,
-            LockfileFormatArg::GoSum => Self::GoSum,
-            LockfileFormatArg::Bundler => Self::Bundler,
-            LockfileFormatArg::Composer => Self::Composer,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum EvaluationFormat {
     Text,
     Json,
@@ -377,6 +358,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
+            risk,
             execution,
         } => {
             let execution = execution.resolve()?;
@@ -387,6 +369,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 &allow_registry_host,
                 intel,
                 vulns,
+                risk,
                 scan_started_at,
                 rules.load()?,
                 &execution,
@@ -409,6 +392,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
+            risk,
             execution,
         } => {
             let execution = execution.resolve()?;
@@ -425,6 +409,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 format,
                 intel,
                 vulns,
+                risk,
                 scan_started_at,
                 rules.load()?,
                 &execution,
@@ -439,6 +424,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             intel,
             vulns,
             rules,
+            risk,
             execution,
         } => {
             let execution = execution.resolve()?;
@@ -450,6 +436,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 format,
                 intel,
                 vulns,
+                risk,
                 scan_started_at,
                 rules.load()?,
                 &execution,
@@ -524,10 +511,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
 fn cmd_scan(
     path: &Path,
     format: Format,
-    lockfile_format: Option<LockfileFormatArg>,
+    lockfile_format: Option<router::LockfileFormatArg>,
     allow_registry_hosts: &[String],
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
+    risk: risk_args::RiskArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
     execution: &ExecutionContext,
@@ -544,6 +532,7 @@ fn cmd_scan(
         format,
         intel,
         vulns,
+        risk,
         scan_started_at,
         &rules,
         execution,
@@ -574,6 +563,7 @@ fn cmd_ecosystem_fetch(
         args.format,
         args.intel,
         args.vulns,
+        args.risk,
         scan_started_at,
         &rules,
         &execution,
@@ -589,6 +579,7 @@ fn cmd_pypi_fetch(
     format: Format,
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
+    risk: risk_args::RiskArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
     execution: &ExecutionContext,
@@ -611,6 +602,7 @@ fn cmd_pypi_fetch(
         format,
         intel,
         vulns,
+        risk,
         scan_started_at,
         &rules,
         execution,
@@ -631,6 +623,7 @@ fn cmd_fetch(
     format: Format,
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
+    risk: risk_args::RiskArgs,
     scan_started_at: DateTime<Utc>,
     rules: RuleSession,
     execution: &ExecutionContext,
@@ -665,17 +658,20 @@ fn cmd_fetch(
         format,
         intel,
         vulns,
+        risk,
         scan_started_at,
         &rules,
         execution,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_scan(
     mut report: ScanReport,
     format: Format,
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
+    risk: risk_args::RiskArgs,
     scan_started_at: DateTime<Utc>,
     rules: &RuleSession,
     execution: &ExecutionContext,
@@ -683,12 +679,15 @@ fn finish_scan(
     intel::apply_malicious_snapshot(&mut report, intel.malicious_db.as_deref(), scan_started_at)?;
     rules.finalize_package(&mut report);
     vulns::apply_osv_query(&mut report, &vulns, rules, execution)?;
+    // Scored last: the assessment must see the complete finding set, including
+    // intelligence and vulnerability findings added above.
+    risk.apply(&mut report)?;
     emit_report(&report, format)
 }
 
 fn scan_path(
     path: &Path,
-    lockfile_format: Option<LockfileFormatArg>,
+    lockfile_format: Option<router::LockfileFormatArg>,
     allow_registry_hosts: &[String],
     rules: &RuleSession,
     execution: &ExecutionContext,

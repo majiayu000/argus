@@ -189,6 +189,7 @@ pub fn scan_composer_zip_with_rules_and_context(
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     rules.finalize_package(&mut report);
     Ok(report)

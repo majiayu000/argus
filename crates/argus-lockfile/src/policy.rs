@@ -161,6 +161,7 @@ pub fn evaluate(
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     })
 }
 

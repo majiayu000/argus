@@ -185,6 +185,7 @@ fn scan_package_dir_inner_with_limit(
             intelligence: None,
             rules: None,
             vulnerability: None,
+            risk: None,
         },
         package,
     ))

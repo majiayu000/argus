@@ -49,6 +49,7 @@ pub(super) fn report(path: &Path, findings: Vec<Finding>, rules: &RuleSession) -
         intelligence: None,
         rules: None,
         vulnerability: None,
+        risk: None,
     };
     rules.finalize_agent(&mut report);
     report

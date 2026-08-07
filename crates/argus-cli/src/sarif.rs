@@ -85,6 +85,16 @@ fn render_reports_with_execution(reports: &[ScanReport], execution: Execution) -
     if let Some(metadata) = rule_metadata {
         properties.insert("argusRules".to_string(), json!(metadata));
     }
+    // GH-146: carry the score and every rule's contribution, so a SARIF
+    // consumer can see how a scored decision was reached instead of being
+    // handed an unexplained verdict.
+    let risk: Vec<&argus_core::RiskReport> = reports
+        .iter()
+        .filter_map(|report| report.risk.as_ref())
+        .collect();
+    if !risk.is_empty() {
+        properties.insert("argusRisk".to_string(), json!(risk));
+    }
     Ok(render_document_with_execution(
         rules,
         results,
@@ -485,6 +495,7 @@ mod tests {
             intelligence: None,
             rules: None,
             vulnerability: None,
+            risk: None,
         }
     }
 
