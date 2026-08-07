@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `eval`/`Function(atob(...))` and Python
   `exec`/`eval(base64.b64decode(...))` chains. Statistical obfuscation
   heuristics remain out of scope.
+- Add the approval-only `obfuscated-source` rule for structural obfuscation
+  signatures build tooling does not produce: systematic `_0x`-hex identifier
+  mangling and nested decoder chains. Shannon entropy, minified shape, and
+  maximum line length are attached as evidence on a finding that already
+  fired; they never raise one on their own, because legitimate bundles share
+  that shape. Threshold-based scoring of those metrics waits on the labeled
+  benchmark in GH-145.
 
 ## [0.1.0] - 2026-07-23
 
