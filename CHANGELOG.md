@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `known-native-build-pattern` now also recognizes addons compiled locally
+  from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
+  only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages
+  previously blocked on their lone `lifecycle-script` finding with no
+  downgrade path. Scripts that also fetch a remote payload — including
+  `prebuild-install`/`node-pre-gyp`, which reach the network on the common
+  path — are excluded (GH-185).
 - Add benign corpus fixtures covering the false-positive shapes the skill
   census measured: documented `curl | sh` installers, runtime HTTPS clients,
   base64-decoded embedded data, and lint rules that match dynamic-execution
