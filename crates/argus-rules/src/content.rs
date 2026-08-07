@@ -13,16 +13,18 @@ use std::sync::OnceLock;
 
 pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    let language = ScriptLanguage::from_path(&file.rel);
+    let language = ScriptLanguage::from_source(&file.rel, &file.content);
     if matches!(
         language,
-        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript | ScriptLanguage::Python
     ) {
         let facts = argus_syntax::analyze(&file.rel, &file.content)
             .with_context(|| format!("parse npm source `{}`", file.rel))?;
-        scan_file(file, &mut findings, NetworkScan::Syntax(&facts));
+        let encoded = argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
+            .with_context(|| format!("analyze npm source `{}`", file.rel))?;
+        scan_file(file, &mut findings, NetworkScan::Syntax(&facts), encoded);
     } else {
-        scan_file(file, &mut findings, NetworkScan::Disabled);
+        scan_file(file, &mut findings, NetworkScan::Disabled, false);
     }
     Ok(findings)
 }
@@ -37,7 +39,22 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
 /// or Rust file they extract — none of these rules are npm-specific in
 /// behaviour, only in the regex literals they look for (e.g. `.npmrc`).
 pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
-    scan_file(file, findings, NetworkScan::Legacy);
+    scan_file(file, findings, NetworkScan::Legacy, false);
+}
+
+/// Checked variant for package extractors whose source language is known.
+/// Python files are parsed before content rules run so malformed syntax cannot
+/// silently bypass encoded dynamic execution detection.
+pub fn scan_text_file_checked(file: &TextFile, findings: &mut Vec<Finding>) -> Result<()> {
+    let language = ScriptLanguage::from_source(&file.rel, &file.content);
+    let encoded = if language == ScriptLanguage::Python {
+        argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
+            .with_context(|| format!("parse source `{}`", file.rel))?
+    } else {
+        false
+    };
+    scan_file(file, findings, NetworkScan::Legacy, encoded);
+    Ok(())
 }
 
 enum NetworkScan<'a> {
@@ -46,7 +63,12 @@ enum NetworkScan<'a> {
     Disabled,
 }
 
-fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: NetworkScan<'_>) {
+fn scan_file(
+    file: &TextFile,
+    findings: &mut Vec<Finding>,
+    network_scan: NetworkScan<'_>,
+    encoded_dynamic_execution: bool,
+) {
     let body = &file.content;
 
     // credential-access: targets host secret files by literal path.
@@ -143,7 +165,7 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
     }
 
     // network-exfiltration: fetch/POST to external host, excluding api.github.com.
-    let external_host = match network_scan {
+    let external_host = match &network_scan {
         NetworkScan::Syntax(facts) => syntax_external_fetch(facts),
         NetworkScan::Legacy => external_fetch(body),
         NetworkScan::Disabled => None,
@@ -176,6 +198,20 @@ fn scan_file(file: &TextFile, findings: &mut Vec<Finding>, network_scan: Network
                 format!(
                     "writes to AI-agent context file `{target}` — pretends to be a maintainer-authored instruction, persists across sessions"
                 ),
+            )
+            .at(&file.rel),
+        );
+    }
+
+    // encoded-dynamic-execution: only the direct decode -> eval/exec chain.
+    // This intentionally does not score standalone decoders, long/minified
+    // lines, or entropy: the chain itself is the high-confidence signal.
+    if encoded_dynamic_execution {
+        findings.push(
+            Finding::new(
+                "encoded-dynamic-execution",
+                Severity::Medium,
+                "decodes an encoded payload directly into dynamic execution",
             )
             .at(&file.rel),
         );
@@ -458,4 +494,173 @@ fn host_name(host: &str) -> &str {
             .map_or(bracketed, |(name, _)| name);
     }
     host.split_once(':').map_or(host, |(name, _)| name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_core::{Decision, Finding};
+
+    fn npm_ids(source: &str) -> Vec<String> {
+        scan_npm_text_file(&TextFile {
+            rel: "index.js".into(),
+            content: source.into(),
+        })
+        .expect("scan JavaScript")
+        .into_iter()
+        .map(|finding| finding.rule_id)
+        .collect()
+    }
+
+    fn python_findings(source: &str) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        scan_text_file_checked(
+            &TextFile {
+                rel: "module.py".into(),
+                content: source.into(),
+            },
+            &mut findings,
+        )
+        .expect("scan Python");
+        findings
+    }
+
+    #[test]
+    fn javascript_direct_decode_execution_fires() {
+        let ids =
+            npm_ids("eval(atob('Y29uc29sZS5sb2coMSk=')); new Function( atob(\"cHJpbnQoMSk=\") );");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| *id == "encoded-dynamic-execution")
+                .count(),
+            1,
+            "one finding per file"
+        );
+    }
+
+    #[test]
+    fn javascript_function_constructor_decode_execution_fires() {
+        let ids = npm_ids("new Function(atob('Y29uc29sZS5sb2coMSk='));");
+        assert!(ids.iter().any(|id| id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn imported_decoders_do_not_fire() {
+        let ids = npm_ids("import {atob} from './safe.js'; eval(atob('x'));");
+        assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+        for source in [
+            "import{atob}from './safe.js'; eval(atob('x'));",
+            "import atob from'./safe.js'; eval(atob('x'));",
+            "import * as atob from './safe.js'; eval(atob('x'));",
+        ] {
+            let ids = npm_ids(source);
+            assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+        }
+        let findings = python_findings("import local as base64\nexec(base64.b64decode('x'))");
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.rule_id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn javascript_parentheses_comments_and_context_boundaries_are_safe() {
+        for source in [
+            "eval((atob('Y29uc29sZS5sb2coMSk=')));",
+            "eval(/* gap */ atob('Y29uc29sZS5sb2coMSk='));",
+            "new Function(/* gap */ (atob('Y29uc29sZS5sb2coMSk=')));",
+            "new Function(`return ${atob('Y29uc29sZS5sb2coMSk=')}`);",
+        ] {
+            assert!(
+                npm_ids(source)
+                    .iter()
+                    .any(|id| id == "encoded-dynamic-execution"),
+                "expected direct chain: {source}"
+            );
+        }
+        for source in [
+            "/eval(atob('fake'))/;",
+            "safe.eval(atob('fake'));",
+            "const eval = safe; eval(atob('fake'));",
+            "function run(eval) { eval(atob('fake')); }",
+            "new Function(atob('fake'), 'body');",
+        ] {
+            assert!(
+                !npm_ids(source)
+                    .iter()
+                    .any(|id| id == "encoded-dynamic-execution"),
+                "unexpected finding: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_decode_only_and_inert_text_do_not_fire() {
+        let ids = npm_ids(concat!(
+            "const value = atob('Y29uc29sZS5sb2coMSk=');\n",
+            "// eval(atob('fake'))\nconst docs = \"eval(atob('fake'))\";",
+        ));
+        assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn python_direct_decode_execution_fires_and_is_approval_only() {
+        let findings = python_findings("exec(base64.b64decode('Y29uc29sZS5sb2coMSk='))");
+        let encoded = findings
+            .iter()
+            .find(|finding| finding.rule_id == "encoded-dynamic-execution")
+            .expect("encoded dynamic execution finding");
+        assert_eq!(encoded.severity, Severity::Medium);
+        assert_eq!(
+            crate::decision::derive_from_findings(&findings),
+            Decision::AllowWithApproval
+        );
+    }
+
+    #[test]
+    fn python_decode_only_comments_and_strings_do_not_fire() {
+        let findings = python_findings(concat!(
+            "value = base64.b64decode('Y29uc29sZS5sb2coMSk=')\n",
+            "# eval(base64.b64decode('fake'))\n",
+            "docs = \"exec(base64.b64decode('fake'))\"",
+            "\ndocstring = \"\"\"eval(base64.b64decode('fake'))\"\"\"",
+        ));
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.rule_id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn python_parentheses_comments_fstrings_and_context_boundaries_are_safe() {
+        for source in [
+            "exec((base64.b64decode('Y29uc29sZS5sb2coMSk=')))",
+            "exec(\n # gap\n base64.b64decode('Y29uc29sZS5sb2coMSk='))",
+            "exec(f\"{eval(base64.b64decode('Y29uc29sZS5sb2coMSk='))}\")",
+        ] {
+            assert!(
+                python_findings(source)
+                    .iter()
+                    .any(|finding| finding.rule_id == "encoded-dynamic-execution"),
+                "expected direct chain: {source}"
+            );
+        }
+        for source in [
+            "runner.exec(base64.b64decode('fake'))",
+            "eval = safe\neval(base64.b64decode('fake'))",
+            "def run(eval):\n    eval(base64.b64decode('fake'))",
+            "exec(f\"{base64.b64decode('fake')}\")",
+            "exec(r\"{eval(base64.b64decode('fake'))}\")",
+        ] {
+            assert!(
+                !python_findings(source)
+                    .iter()
+                    .any(|finding| finding.rule_id == "encoded-dynamic-execution"),
+                "unexpected finding: {source}"
+            );
+        }
+        assert!(
+            python_findings("eval = safe\nexec(base64.b64decode('YQ=='))")
+                .iter()
+                .any(|finding| finding.rule_id == "encoded-dynamic-execution")
+        );
+    }
 }

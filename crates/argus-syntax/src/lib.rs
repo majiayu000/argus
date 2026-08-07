@@ -43,6 +43,20 @@ pub fn analyze_with_language(
     parser::analyze(path, content, language)
 }
 
+/// Analyze only the bounded direct encoded-decoder-to-dynamic-execution
+/// pattern. Supported-language syntax errors are returned to the caller.
+///
+/// The language is inferred from the path and, for extensionless files, from
+/// the interpreter shebang: a hook script that carries no extension is still
+/// an executable surface, and skipping it would be a silent detection gap.
+pub fn analyze_encoded_dynamic_execution(path: &str, content: &str) -> Result<bool> {
+    parser::analyze_encoded_dynamic_execution(
+        path,
+        content,
+        ScriptLanguage::from_source(path, content),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactKind {
     Command,
@@ -138,6 +152,7 @@ pub(crate) struct Bindings {
     constants: BTreeMap<String, String>,
     provenance: BTreeMap<String, String>,
     suppressed_constants: BTreeSet<String>,
+    pub(crate) shadowed: BTreeSet<String>,
 }
 
 #[cfg(test)]

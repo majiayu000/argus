@@ -9,7 +9,7 @@ use crate::{finding, rules, ArtifactScan};
 use anyhow::{Context, Result};
 use argus_archive::extract_tarball;
 use argus_core::{Finding, Severity};
-use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
+use argus_rules::{scan_text_file_checked, scan_text_files_with_context, RuleSession};
 use argus_syntax::{FactKind, ScriptLanguage};
 use std::path::Path;
 
@@ -126,7 +126,7 @@ pub fn scan_extracted_sdist_with_rules_and_context(
     let (file_results, skipped) =
         scan_text_files_with_context(pkg_dir, TEXT_MAX_BYTES, execution, |file| {
             let mut per_file = Vec::new();
-            scan_text_file(file, &mut per_file);
+            scan_text_file_checked(file, &mut per_file)?;
             let mut metadata = None;
             let mut saw_setup = false;
             let mut saw_pyproject = false;

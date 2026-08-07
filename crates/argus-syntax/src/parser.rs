@@ -49,14 +49,53 @@ pub(crate) fn analyze(path: &str, content: &str, language: ScriptLanguage) -> Re
 
     let mut bindings = Bindings::default();
     let mut facts = Vec::new();
+    let mut _encoded = false;
     collect_facts(
         root,
         content.as_bytes(),
         language,
         &mut bindings,
         &mut facts,
+        &mut _encoded,
     )?;
     Ok(facts)
+}
+
+pub(crate) fn analyze_encoded_dynamic_execution(
+    path: &str,
+    content: &str,
+    language: ScriptLanguage,
+) -> Result<bool> {
+    if language == ScriptLanguage::Unsupported {
+        return Ok(false);
+    }
+    let mut parser = Parser::new();
+    parser
+        .set_language(&grammar(language))
+        .with_context(|| format!("initialize syntax parser for {path}"))?;
+    let tree = parser
+        .parse(content, None)
+        .ok_or_else(|| anyhow!("syntax parser returned no tree for {path}"))?;
+    let root = tree.root_node();
+    if root.has_error() || contains_missing(root) {
+        bail!(
+            "incomplete {:?} syntax parse for {}; refusing incomplete analysis",
+            language,
+            path
+        );
+    }
+    let mut bindings = Bindings::default();
+    let mut facts = Vec::new();
+    let mut encoded = false;
+    collect_facts(
+        root,
+        content.as_bytes(),
+        language,
+        &mut bindings,
+        &mut facts,
+        &mut encoded,
+    )?;
+    Ok(encoded)
 }
 
 fn grammar(language: ScriptLanguage) -> Language {
@@ -75,12 +114,44 @@ fn collect_facts(
     language: ScriptLanguage,
     bindings: &mut Bindings,
     facts: &mut Vec<Fact>,
+    encoded: &mut bool,
 ) -> Result<()> {
     if is_isolated_scope(node.kind(), language) {
+        if declaration_writes_parent(node.kind(), language) {
+            mark_declaration_name(node, source, bindings)?;
+        }
         let mut scoped = bindings.clone();
+        if node.kind() == "function_expression" {
+            mark_declaration_name(node, source, &mut scoped)?;
+        }
+        mark_scope_parameters(node, source, &mut scoped)?;
+        let parameters = node
+            .child_by_field_name("parameters")
+            .or_else(|| node.child_by_field_name("parameter"));
+        if is_js_function_scope(node.kind(), language) {
+            if let Some(parameters) = parameters {
+                collect_js_parameter_defaults(
+                    parameters, source, language, bindings, node, facts, encoded,
+                )?;
+            }
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect_facts(child, source, language, &mut scoped, facts)?;
+            // Default parameter expressions run in the enclosing scope. Keep
+            // their decoder/builtin identity rooted in `bindings`; only the
+            // function body and other children use parameter shadowing.
+            let is_parameters = parameters.is_some_and(|parameter| {
+                parameter.start_byte() == child.start_byte()
+                    && parameter.end_byte() == child.end_byte()
+            });
+            if is_parameters && is_js_function_scope(node.kind(), language) {
+                continue;
+            }
+            if is_parameters {
+                collect_facts(child, source, language, bindings, facts, encoded)?;
+            } else {
+                collect_facts(child, source, language, &mut scoped, facts, encoded)?;
+            }
         }
         return Ok(());
     }
@@ -88,14 +159,14 @@ fn collect_facts(
         let mut scoped = bindings.clone();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect_facts(child, source, language, &mut scoped, facts)?;
+            collect_facts(child, source, language, &mut scoped, facts, encoded)?;
         }
         invalidate_assignments(node, source, language, bindings)?;
         return Ok(());
     }
 
     if is_import(node.kind(), language) {
-        parse_import(text(node, source)?, language, bindings);
+        parse_import(node, source, language, bindings)?;
     }
 
     if is_assignment(node.kind(), language) {
@@ -116,7 +187,14 @@ fn collect_facts(
         let mut expression_bindings = bindings.clone();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect_facts(child, source, language, &mut expression_bindings, facts)?;
+            collect_facts(
+                child,
+                source,
+                language,
+                &mut expression_bindings,
+                facts,
+                encoded,
+            )?;
         }
         parse_assignment(node, source, language, bindings)?;
         return Ok(());
@@ -133,24 +211,19 @@ fn collect_facts(
             facts.push(bash_pipeline_fact(node, source, bindings)?);
         }
         (ScriptLanguage::Python, "call") => {
-            facts.push(call_fact(
-                node,
-                source,
-                bindings,
-                language,
-                "function",
-                "arguments",
-            )?);
+            let fact = call_fact(node, source, bindings, language, "function", "arguments")?;
+            *encoded |= is_encoded_dynamic_call(node, source, language, bindings, &fact);
+            facts.push(fact);
         }
         (ScriptLanguage::JavaScript | ScriptLanguage::TypeScript, "call_expression") => {
-            facts.push(call_fact(
-                node,
-                source,
-                bindings,
-                language,
-                "function",
-                "arguments",
-            )?);
+            let fact = call_fact(node, source, bindings, language, "function", "arguments")?;
+            *encoded |= is_encoded_dynamic_call(node, source, language, bindings, &fact);
+            facts.push(fact);
+        }
+        (ScriptLanguage::JavaScript | ScriptLanguage::TypeScript, "new_expression") => {
+            let fact = call_fact(node, source, bindings, language, "constructor", "arguments")?;
+            *encoded |= is_encoded_dynamic_call(node, source, language, bindings, &fact);
+            facts.push(fact);
         }
         (ScriptLanguage::Python, "attribute" | "subscript")
         | (ScriptLanguage::JavaScript | ScriptLanguage::TypeScript, "member_expression")
@@ -183,7 +256,68 @@ fn collect_facts(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_facts(child, source, language, bindings, facts)?;
+        collect_facts(child, source, language, bindings, facts, encoded)?;
+    }
+    Ok(())
+}
+
+fn is_js_function_scope(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "function_declaration" | "function_expression" | "arrow_function" | "method_definition"
+        )
+    )
+}
+
+fn declaration_writes_parent(kind: &str, language: ScriptLanguage) -> bool {
+    matches!(
+        (language, kind),
+        (
+            ScriptLanguage::Python,
+            "function_definition" | "class_definition"
+        ) | (
+            ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
+            "function_declaration"
+        )
+    )
+}
+
+fn collect_js_parameter_defaults(
+    parameters: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    outer: &Bindings,
+    scope: Node<'_>,
+    facts: &mut Vec<Fact>,
+    encoded: &mut bool,
+) -> Result<()> {
+    let mut parameter_bindings = outer.clone();
+    if scope.kind() == "function_expression" {
+        // A named function expression is recursively bound only within the
+        // expression, including its parameter initializers.
+        mark_declaration_name(scope, source, &mut parameter_bindings)?;
+    }
+    let mut cursor = parameters.walk();
+    let parameter_nodes = parameters.named_children(&mut cursor).collect::<Vec<_>>();
+    // All JavaScript formal parameters are bindings in the function's
+    // parameter environment before any initializer runs. Later names are
+    // therefore visible as TDZ bindings to earlier defaults as well.
+    for parameter in &parameter_nodes {
+        mark_parameter_node(*parameter, source, &mut parameter_bindings)?;
+    }
+    for parameter in parameter_nodes {
+        // Analyze defaults in source order while retaining the complete
+        // parameter binding environment and any effects from earlier defaults.
+        collect_facts(
+            parameter,
+            source,
+            language,
+            &mut parameter_bindings,
+            facts,
+            encoded,
+        )?;
     }
     Ok(())
 }
@@ -205,7 +339,17 @@ fn call_fact(
         .and_then(|child| child.child_by_field_name("object"))
         .map(|child| writer_receiver_value(child, source, bindings, language))
         .transpose()?;
-    let callee = canonical_callee(function, bindings);
+    let canonical = canonical_callee(function, bindings);
+    let shadowed = bindings.shadowed.contains(function.trim())
+        || function
+            .trim()
+            .split_once('.')
+            .is_some_and(|(head, _)| bindings.shadowed.contains(head));
+    let callee = if shadowed {
+        format!("shadowed.{canonical}")
+    } else {
+        canonical
+    };
     let mut argument_nodes = Vec::new();
     if let Some(list) = node.child_by_field_name(arguments_field) {
         let mut cursor = list.walk();
@@ -233,6 +377,225 @@ fn call_fact(
         redirect: None,
         text: text(node, source)?.to_string(),
     })
+}
+
+fn is_encoded_dynamic_call(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    bindings: &Bindings,
+    fact: &Fact,
+) -> bool {
+    let callee = fact.callee.as_deref().unwrap_or_default();
+    let argument_nodes = node
+        .child_by_field_name("arguments")
+        .map(|list| {
+            let mut cursor = list.walk();
+            list.named_children(&mut cursor).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let argument = if callee == "Function" {
+        argument_nodes
+            .iter()
+            .rev()
+            .find(|argument| argument.kind() != "comment")
+            .copied()
+    } else if matches!(callee, "eval" | "exec") {
+        argument_nodes
+            .iter()
+            .find(|argument| argument.kind() != "comment")
+            .copied()
+    } else {
+        None
+    };
+    let Some(argument) = argument else {
+        return false;
+    };
+    match language {
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => {
+            direct_decoder_node(argument, source, "atob", bindings)
+                || template_interpolation_decoder(argument, source, "atob", bindings)
+        }
+        ScriptLanguage::Python => {
+            direct_decoder_node(argument, source, "base64.b64decode", bindings)
+                || fstring_dynamic_decoder(argument, source, bindings)
+        }
+        _ => false,
+    }
+}
+
+fn direct_decoder_node(node: Node<'_>, source: &[u8], expected: &str, bindings: &Bindings) -> bool {
+    let node = unwrap_parentheses(node);
+    if !matches!(node.kind(), "call" | "call_expression") {
+        return false;
+    }
+    let Some(function) = node.child_by_field_name("function") else {
+        return false;
+    };
+    let Ok(function_text) = text(function, source) else {
+        return false;
+    };
+    let function_text = function_text.trim();
+    let canonical = canonical_callee(function_text, bindings);
+    canonical == expected
+        && !canonical.split_once('.').map_or_else(
+            || bindings.shadowed.contains(function_text),
+            |(head, _)| bindings.shadowed.contains(head),
+        )
+}
+
+fn unwrap_parentheses(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let Some(child) = node.named_children(&mut cursor).next() else {
+            break;
+        };
+        node = child;
+    }
+    node
+}
+
+fn template_interpolation_decoder(
+    node: Node<'_>,
+    source: &[u8],
+    expected: &str,
+    bindings: &Bindings,
+) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "template_substitution"
+            && child
+                .named_children(&mut child.walk())
+                .any(|expression| direct_decoder_node(expression, source, expected, bindings))
+        {
+            return true;
+        }
+        if template_interpolation_decoder(child, source, expected, bindings) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fstring_dynamic_decoder(node: Node<'_>, source: &[u8], bindings: &Bindings) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "interpolation" {
+            let mut inner = child.walk();
+            if child.named_children(&mut inner).any(|expression| {
+                let expression = unwrap_parentheses(expression);
+                if !matches!(expression.kind(), "call") {
+                    return false;
+                }
+                let Some(function) = expression.child_by_field_name("function") else {
+                    return false;
+                };
+                let Ok(function_text) = text(function, source) else {
+                    return false;
+                };
+                let function_text = function_text.trim();
+                let canonical = canonical_callee(function_text, bindings);
+                if !matches!(canonical.as_str(), "eval" | "exec")
+                    || bindings.shadowed.contains(function_text)
+                {
+                    return false;
+                }
+                expression
+                    .child_by_field_name("arguments")
+                    .and_then(|arguments| {
+                        let mut args = arguments.walk();
+                        let first = arguments.named_children(&mut args).next();
+                        first
+                    })
+                    .is_some_and(|argument| {
+                        direct_decoder_node(argument, source, "base64.b64decode", bindings)
+                    })
+            }) {
+                return true;
+            }
+        }
+        if fstring_dynamic_decoder(child, source, bindings) {
+            return true;
+        }
+    }
+    false
+}
+
+fn mark_scope_parameters(node: Node<'_>, source: &[u8], bindings: &mut Bindings) -> Result<()> {
+    let parameters = node
+        .child_by_field_name("parameters")
+        .or_else(|| node.child_by_field_name("parameter"));
+    let Some(parameters) = parameters else {
+        if matches!(node.kind(), "catch_clause" | "except_clause") {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if matches!(child.kind(), "statement_block" | "block") {
+                    break;
+                }
+                mark_parameter_node(child, source, bindings)?;
+            }
+        }
+        return Ok(());
+    };
+    if parameters.kind() == "identifier" {
+        return mark_parameter_node(parameters, source, bindings);
+    }
+    let mut cursor = parameters.walk();
+    for child in parameters.named_children(&mut cursor) {
+        mark_parameter_node(child, source, bindings)?;
+    }
+    Ok(())
+}
+
+fn mark_parameter_node(node: Node<'_>, source: &[u8], bindings: &mut Bindings) -> Result<()> {
+    if node.kind() == "as_pattern_target" {
+        let name = text(node, source)?.trim();
+        if matches!(name, "eval" | "exec" | "Function" | "atob" | "base64") {
+            bindings.shadowed.insert(name.to_string());
+        }
+        return Ok(());
+    }
+    if node.kind() == "identifier" || node.named_child_count() == 0 {
+        let name = text(node, source)?.trim();
+        if matches!(name, "eval" | "exec" | "Function" | "atob" | "base64") {
+            bindings.shadowed.insert(name.to_string());
+        }
+        return Ok(());
+    }
+    if node.kind() == "as_pattern" {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            mark_parameter_node(child, source, bindings)?;
+        }
+        return Ok(());
+    }
+    for field in ["pattern", "name", "left", "alias"] {
+        if let Some(child) = node.child_by_field_name(field) {
+            mark_parameter_node(child, source, bindings)?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_declaration_name(node: Node<'_>, source: &[u8], bindings: &mut Bindings) -> Result<()> {
+    if !matches!(
+        node.kind(),
+        "function_definition"
+            | "function_declaration"
+            | "function_expression"
+            | "method_definition"
+            | "class_definition"
+    ) {
+        return Ok(());
+    }
+    let Some(name) = node.child_by_field_name("name") else {
+        return Ok(());
+    };
+    let name = text(name, source)?.trim();
+    if matches!(name, "eval" | "exec" | "Function" | "atob" | "base64") {
+        bindings.shadowed.insert(name.to_string());
+    }
+    Ok(())
 }
 
 fn assignment_values(
@@ -280,6 +643,9 @@ fn parse_assignment(
     }
     if !is_identifier(name) {
         return Ok(());
+    }
+    if matches!(name, "eval" | "exec" | "Function" | "atob" | "base64") {
+        bindings.shadowed.insert(name.to_string());
     }
     bindings.constants.remove(name);
     bindings.aliases.remove(name);
@@ -341,7 +707,13 @@ fn callable_reference<'a>(
     supported_shape.then_some(raw_value.trim())
 }
 
-fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindings) {
+fn parse_import(
+    node: Node<'_>,
+    source: &[u8],
+    language: ScriptLanguage,
+    bindings: &mut Bindings,
+) -> Result<()> {
+    let statement = text(node, source)?;
     let compact = statement.trim().trim_end_matches(';');
     match language {
         ScriptLanguage::Python if compact.starts_with("import ") => {
@@ -372,61 +744,66 @@ fn parse_import(statement: &str, language: ScriptLanguage, bindings: &mut Bindin
             }
         }
         ScriptLanguage::JavaScript | ScriptLanguage::TypeScript => {
-            if let Some((clause, source)) = compact
-                .strip_prefix("import ")
-                .and_then(|rest| rest.split_once(" from "))
-            {
-                if let Some(module) = unquote(source.trim()) {
-                    parse_javascript_import_clause(clause.trim(), &module, bindings);
-                }
-            }
+            parse_javascript_import_node(node, source, bindings);
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn parse_javascript_import_clause(clause: &str, module: &str, bindings: &mut Bindings) {
-    let clause = clause.trim();
-    if let Some(alias) = clause.strip_prefix("* as ") {
-        let alias = alias.trim();
-        if is_identifier(alias) {
-            bindings
-                .aliases
-                .insert(alias.to_string(), module.to_string());
-        }
+fn parse_javascript_import_node(node: Node<'_>, source: &[u8], bindings: &mut Bindings) {
+    let Some(module) = node
+        .child_by_field_name("source")
+        .and_then(|source_node| text(source_node, source).ok())
+        .and_then(|value| unquote(value.trim()))
+    else {
         return;
-    }
-    if let Some(start) = clause.find('{') {
-        let default = clause[..start].trim().trim_end_matches(',').trim();
-        if is_identifier(default) {
-            bindings
-                .aliases
-                .insert(default.to_string(), module.to_string());
-        }
-        if let Some(end) = clause.rfind('}') {
-            for specifier in clause[start + 1..end].split(',') {
-                let parts: Vec<&str> = specifier.split_whitespace().collect();
-                let (imported, local) = if parts.len() == 3 && parts[1] == "as" {
-                    (parts[0], parts[2])
-                } else if parts.len() == 1 {
-                    (parts[0], parts[0])
-                } else {
-                    continue;
-                };
-                if is_identifier(imported) && is_identifier(local) {
+    };
+    let Some(clause) = node
+        .named_children(&mut node.walk())
+        .find(|child| child.kind() == "import_clause")
+    else {
+        return;
+    };
+    let mut cursor = clause.walk();
+    for child in clause.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                bindings.aliases.insert(
+                    text(child, source).unwrap_or_default().to_string(),
+                    module.clone(),
+                );
+            }
+            "namespace_import" => {
+                if let Some(local) = child.named_children(&mut child.walk()).next() {
+                    bindings.aliases.insert(
+                        text(local, source).unwrap_or_default().to_string(),
+                        module.clone(),
+                    );
+                }
+            }
+            "named_imports" => {
+                let mut imports = child.walk();
+                for specifier in child.named_children(&mut imports) {
+                    if specifier.kind() != "import_specifier" {
+                        continue;
+                    }
+                    let imported = specifier.child_by_field_name("name");
+                    let local = specifier.child_by_field_name("alias").or(imported);
+                    let (Some(imported), Some(local)) = (imported, local) else {
+                        continue;
+                    };
+                    let (Ok(imported), Ok(local)) = (text(imported, source), text(local, source))
+                    else {
+                        continue;
+                    };
                     bindings
                         .aliases
                         .insert(local.to_string(), format!("{module}.{imported}"));
                 }
             }
+            _ => {}
         }
-        return;
-    }
-    let default = clause.split(',').next().unwrap_or_default().trim();
-    if is_identifier(default) {
-        bindings
-            .aliases
-            .insert(default.to_string(), module.to_string());
     }
 }
 
@@ -643,10 +1020,14 @@ fn is_isolated_scope(kind: &str, language: ScriptLanguage) -> bool {
         (language, kind),
         (
             ScriptLanguage::Python,
-            "function_definition" | "class_definition"
+            "function_definition" | "class_definition" | "lambda" | "except_clause"
         ) | (
             ScriptLanguage::JavaScript | ScriptLanguage::TypeScript,
-            "function_declaration" | "function_expression" | "arrow_function"
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "catch_clause"
         ) | (ScriptLanguage::Bash, "function_definition")
     )
 }

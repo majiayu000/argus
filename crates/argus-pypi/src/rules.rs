@@ -3,7 +3,7 @@
 //! These complement the ecosystem-agnostic rules in `argus-rules`
 //! (`credential-access`, `network-exfiltration`, `runtime-hook`,
 //! `wallet-interception`, `ai-context-poisoning`, etc.) which we still
-//! apply by calling `argus_rules::scan_text_file` on every Python file
+//! apply by calling `argus_rules::scan_text_file_checked` on every Python file
 //! we extract.
 
 #[cfg(test)]

@@ -43,6 +43,173 @@ fn comments_and_inert_strings_do_not_become_calls() {
 }
 
 #[test]
+fn dynamic_builtin_bindings_are_scope_and_order_aware() {
+    let javascript = analyze(&script(
+        "scope.js",
+        "function local(eval = eval) { eval(atob('x')); }\nif (eval === safe) {}\neval((atob('y')));\nconst eval = safe; eval(atob('z'));",
+    ))
+    .expect("parse JavaScript");
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval") && fact.text.contains("'y'")));
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval")));
+    assert!(javascript
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval") && fact.text.contains("'x'")));
+    assert!(analyze_source_encoded("scope.js", "eval((atob('y')));"));
+
+    let python = analyze(&script(
+        "scope.py",
+        "def local(eval=eval):\n    eval(base64.b64decode('x'))\nif eval == safe:\n    pass\neval(base64.b64decode('y'))\nexec(base64.b64decode('z'))",
+    ))
+    .expect("parse Python");
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("shadowed.eval")));
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("eval") && fact.text.contains("'y'")));
+    assert!(python
+        .iter()
+        .any(|fact| fact.callee.as_deref() == Some("exec")));
+    assert!(analyze_source_encoded(
+        "scope.py",
+        "exec(base64.b64decode('z'))"
+    ));
+}
+
+#[test]
+fn javascript_new_function_is_a_constructor_fact_with_all_arguments() {
+    let facts = analyze(&script(
+        "constructor.js",
+        "new Function( /* comment */ 'arg', atob('body'));\nconst x = 1 / 2;",
+    ))
+    .expect("parse JavaScript");
+    let constructor = facts
+        .iter()
+        .find(|fact| fact.callee.as_deref() == Some("Function"))
+        .expect("constructor fact");
+    assert!(constructor.arguments.len() >= 2);
+    assert!(constructor
+        .arguments
+        .last()
+        .is_some_and(|argument| argument.raw.starts_with("atob")));
+    assert!(analyze_source_encoded(
+        "constructor.js",
+        "new Function('arg', atob('body'))"
+    ));
+}
+
+#[test]
+fn python_fstring_marker_requires_nested_dynamic_call() {
+    analyze(&script(
+        "fstring.py",
+        "exec(f\"{base64.b64decode('bytes')}\")\nexec(f\"{eval(base64.b64decode('code'))}\")",
+    ))
+    .expect("parse Python");
+    assert!(!analyze_source_encoded(
+        "fstring.py",
+        "exec(f\"{base64.b64decode('bytes')}\")"
+    ));
+    assert!(analyze_source_encoded(
+        "fstring.py",
+        "exec(f\"{eval(base64.b64decode('code'))}\")"
+    ));
+}
+
+#[test]
+fn encoded_decoder_identity_respects_shadowing_and_declarations() {
+    assert!(!analyze_source_encoded(
+        "shadow.js",
+        "const atob = local; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "shadow.py",
+        "base64 = local\nexec(base64.b64decode('x'))"
+    ));
+    assert!(!analyze_source_encoded(
+        "decl.js",
+        "function eval() {}\neval(atob('x'));"
+    ));
+    let catch_source = "try {} catch (eval) { eval(atob('x')); }";
+    assert!(!analyze_source_encoded("catch.js", catch_source));
+    assert!(!analyze_source_encoded(
+        "catch.py",
+        "try:\n    pass\nexcept Exception as eval:\n    eval(base64.b64decode('x'))"
+    ));
+    assert!(analyze_source_encoded(
+        "default.js",
+        "function run(x = eval(atob('x'))) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "default-shadowed.js",
+        "function run(eval = eval(atob('x'))) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "default-later-eval.js",
+        "function run(x = eval(atob('x')), eval) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "default-later-atob.js",
+        "function run(x = eval(atob('x')), atob) {}"
+    ));
+    assert!(analyze_source_encoded(
+        "default-later-benign.js",
+        "function run(x = eval(atob('x')), y) {}"
+    ));
+    assert!(!analyze_source_encoded(
+        "import.js",
+        "import {atob} from './safe.js'; eval(atob('x'));"
+    ));
+    for source in [
+        "import{atob}from './safe.js'; eval(atob('x'));",
+        "import atob from'./safe.js'; eval(atob('x'));",
+        "import * as atob from './safe.js'; eval(atob('x'));",
+        "import {safe as atob}from'./safe.js'; eval(atob('x'));",
+    ] {
+        assert!(!analyze_source_encoded("import-compact.js", source));
+    }
+    assert!(!analyze_source_encoded(
+        "import.py",
+        "import local as base64\nexec(base64.b64decode('x'))"
+    ));
+    assert!(analyze_source_encoded(
+        "method.js",
+        "const obj = { atob() { eval(atob('x')); } }; eval(atob('x'));"
+    ));
+    assert!(analyze_source_encoded(
+        "method-body.js",
+        "const obj = { atob() { eval(atob('x')); } };"
+    ));
+    assert!(analyze_source_encoded(
+        "method-eval.js",
+        "const obj = { eval() {} }; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "method-param.js",
+        "const obj = { run(eval) { eval(atob('x')); } };"
+    ));
+    assert!(analyze_source_encoded(
+        "named-expression.js",
+        "const f = function atob() {}; eval(atob('x'));"
+    ));
+    assert!(!analyze_source_encoded(
+        "named-expression-body.js",
+        "const f = function atob() { eval(atob('x')); };"
+    ));
+    assert!(!analyze_source_encoded(
+        "named-expression-eval.js",
+        "const f = function eval() { eval(atob('x')); };"
+    ));
+}
+
+fn analyze_source_encoded(path: &str, source: &str) -> bool {
+    super::analyze_encoded_dynamic_execution(path, source).expect("parse source")
+}
+
+#[test]
 fn resolves_python_alias_and_constant_concatenation() {
     let facts = analyze(&script(
         "collect.py",
@@ -457,4 +624,27 @@ fn extensionless_without_shebang_stays_unsupported() {
         ScriptLanguage::from_source("hook", "plain text\n"),
         ScriptLanguage::Unsupported
     );
+}
+
+#[test]
+fn extensionless_shebang_script_is_analyzed_for_encoded_execution() {
+    // A hook or skill script carries no extension. Inferring the language
+    // from the path alone would classify it Unsupported and silently skip
+    // the decode-to-eval chain inside it.
+    assert!(analyze_source_encoded(
+        "hooks/pre-commit",
+        "#!/usr/bin/env node\neval(atob('Y29uc29sZS5sb2coMSk='));\n"
+    ));
+    assert!(analyze_source_encoded(
+        "hooks/setup",
+        "#!/usr/bin/env python3\nimport base64\nexec(base64.b64decode('cHJpbnQoMSk='))\n"
+    ));
+}
+
+#[test]
+fn extensionless_script_without_shebang_stays_unanalyzed() {
+    assert!(!analyze_source_encoded(
+        "notes",
+        "eval(atob('Y29uc29sZS5sb2coMSk='));\n"
+    ));
 }
