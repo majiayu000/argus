@@ -255,6 +255,15 @@
         "lifecycle-script"
       ],
       "notes": "Native addon compiled locally from bundled sources. GH-185: recognizing only prebuilt platform optionalDependencies blocked every ordinary node-gyp package."
+    },
+    {
+      "id": "benign-docs-mention-credentials",
+      "kind": "fixture",
+      "path": "fixtures/benign-docs-mention-credentials",
+      "packageName": "benign-docs-mention-credentials",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "README quoting ~/.npmrc, ~/.aws/credentials and ~/.ssh paths. GH-184: documenting a credential path is not reading one."
     }
   ]
 }
