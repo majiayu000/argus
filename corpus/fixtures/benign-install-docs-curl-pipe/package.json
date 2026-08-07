@@ -1,0 +1,6 @@
+{
+  "name": "benign-install-docs-curl-pipe",
+  "version": "1.0.0",
+  "description": "Wrapper whose README documents the upstream installer.",
+  "main": "index.js"
+}

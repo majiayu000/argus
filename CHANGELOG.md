@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add benign corpus fixtures covering the false-positive shapes the skill
+  census measured: documented `curl | sh` installers, runtime HTTPS clients,
+  base64-decoded embedded data, and lint rules that match dynamic-execution
+  text. Benign coverage goes from 2 cases to 6 (GH-145).
 - Add opt-in weighted risk scoring (`--risk-scoring`, `--risk-decides`,
   `--risk-approval-threshold`, `--risk-block-threshold`). Weights derive from
   the severity detectors already assign, so `Low` and `Critical` stop being

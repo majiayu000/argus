@@ -207,6 +207,42 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "Legitimate terser-shaped bundle: one long line, short identifiers, one decode step. The false-positive floor for GH-141."
+    },
+    {
+      "id": "benign-install-docs-curl-pipe",
+      "kind": "fixture",
+      "path": "fixtures/benign-install-docs-curl-pipe",
+      "packageName": "benign-install-docs-curl-pipe",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Wrapper whose README documents upstream `curl | sh` installers. The census measured 1,571 curl_pipe_sh hits as mostly this shape."
+    },
+    {
+      "id": "benign-runtime-http-client",
+      "kind": "fixture",
+      "path": "fixtures/benign-runtime-http-client",
+      "packageName": "benign-runtime-http-client",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Typed API client. Runtime egress the caller invokes explicitly is not install-time exfiltration."
+    },
+    {
+      "id": "benign-python-embedded-data",
+      "kind": "fixture",
+      "path": "fixtures/benign-python-embedded-data",
+      "packageName": "benign-python-embedded-data",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Python module that base64-decodes an embedded lookup table. Decoding without execution is not obfuscation."
+    },
+    {
+      "id": "benign-eval-mentioned-in-text",
+      "kind": "fixture",
+      "path": "fixtures/benign-eval-mentioned-in-text",
+      "packageName": "benign-eval-mentioned-in-text",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Lint rule that matches `eval(atob(`/`exec(base64.b64decode(` as text. Discussing dynamic execution is not performing it."
     }
   ]
 }
