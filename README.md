@@ -285,6 +285,37 @@ RFC 8785 canonical finding/evidence JSON. Equality is accepted; plus one is
 rejected. This scan evaluates source and integrity metadata only: it does not
 claim vulnerability status, malicious-package status, or artifact safety.
 
+### Whole-lockfile dependency scanning
+
+`argus scan <lockfile>` evaluates the lockfile's own source and integrity
+metadata. `argus lockfile-scan <lockfile>` answers the other CI question — is
+anything *inside* the resolved dependency tree unsafe — by fetching and
+statically scanning every dependency the lockfile resolves.
+
+```sh
+argus lockfile-scan package-lock.json --cache-dir .argus-cache
+argus lockfile-scan package-lock.json --base origin-main-lock.json   # delta only
+argus lockfile-scan package-lock.json --format sarif > argus.sarif
+```
+
+Each registry-fetchable coordinate is dispatched to its ecosystem's fetch
+pipeline, so every package gets the same integrity verification and static
+rules as the single-package commands. `--jobs` bounds concurrency, `--cache-dir`
+is reused across every fetch, and `--base` restricts the sweep to dependencies
+this change added or altered.
+
+The aggregate decision is the worst package decision, and coverage is stated
+before findings. Two categories are reported rather than dropped:
+
+- **not scanned** — local/path dependencies, unsupported source shapes,
+  conflicting resolutions, or incomplete coordinates.
+- **unassessed** — dependencies whose fetch or scan failed. These escalate the
+  aggregate decision to `block`. A dependency argus could not read is missing
+  evidence, not evidence of safety, so an unreachable registry never yields a
+  clean tree.
+
+SARIF emits one run per package.
+
 ### Explicit OSV vulnerability queries
 
 The secure OSV cache and verified malicious-package snapshot implementations

@@ -5,6 +5,7 @@ mod corpus;
 mod corpus_path;
 mod execution;
 mod intel;
+mod lockfile_scan;
 mod report;
 mod router;
 mod rule_args;
@@ -70,6 +71,12 @@ enum Cmd {
         #[command(flatten)]
         execution: execution::ExecutionArgs,
     },
+    /// Fetch and statically scan every dependency one lockfile resolves.
+    ///
+    /// Answers the CI question the single-package commands cannot: is
+    /// anything in this dependency tree unsafe. Dependencies that could not
+    /// be scanned are reported explicitly rather than dropped.
+    LockfileScan(lockfile_scan::LockfileScanArgs),
     /// Agent supply-chain surface commands (MCP configs, skills, hooks, AGENTS.md).
     Agent {
         #[command(subcommand)]
@@ -385,6 +392,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 &execution,
             )
         }
+        Cmd::LockfileScan(args) => lockfile_scan::run(args),
         Cmd::Intel { op } => intel::cmd_intel(op),
         Cmd::Vulns { op } => vulns::cmd_vulns(op),
         Cmd::Fetch {
