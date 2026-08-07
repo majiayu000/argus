@@ -13,6 +13,17 @@ use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use argus_syntax::{FactKind, ScriptLanguage};
 use std::path::Path;
 
+/// sdist paths whose contents the PyPI rules read.
+fn is_sdist_security_relevant(rel: &str) -> bool {
+    let base = std::path::Path::new(rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    rel.ends_with(".py")
+        || rel.ends_with(".pyi")
+        || matches!(base, "pyproject.toml" | "setup.cfg" | "PKG-INFO")
+}
+
 /// Maximum size we attempt to read as text. Matches `argus-rules`.
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -112,7 +123,7 @@ pub fn scan_extracted_sdist_with_rules_and_context(
     let mut setup_py_seen = false;
     let mut pyproject_seen = false;
 
-    let (file_results, _) =
+    let (file_results, skipped) =
         scan_text_files_with_context(pkg_dir, TEXT_MAX_BYTES, execution, |file| {
             let mut per_file = Vec::new();
             scan_text_file(file, &mut per_file);
@@ -147,6 +158,7 @@ pub fn scan_extracted_sdist_with_rules_and_context(
             }
             Ok((per_file, metadata, saw_setup, saw_pyproject))
         })?;
+    skipped.require_scanned("PyPI sdist", is_sdist_security_relevant)?;
     for (mut per_file, metadata, saw_setup, saw_pyproject) in file_results {
         setup_py_seen |= saw_setup;
         pyproject_seen |= saw_pyproject;
@@ -421,5 +433,20 @@ description = "x"
                 "{source}: {findings:?}"
             );
         }
+    }
+
+    #[test]
+    fn oversized_python_source_fails_closed() {
+        let directory = tempfile::tempdir().expect("test directory");
+        std::fs::write(
+            directory.path().join("setup.py"),
+            vec![b'#'; (TEXT_MAX_BYTES + 1) as usize],
+        )
+        .expect("oversized setup.py");
+        let error = match scan_extracted_sdist(directory.path()) {
+            Ok(_) => panic!("oversized setup.py was accepted"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("exceeds text scan limit"));
     }
 }

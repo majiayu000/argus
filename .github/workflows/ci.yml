@@ -50,6 +50,9 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+      - name: Sigstore feature integration tests
+        run: cargo test -p argus-fetch --features sigstore --test sigstore_integration
+
       - name: argus corpus test
         run: cargo run -q -p argus-cli -- corpus test --corpus corpus
 
@@ -111,7 +114,7 @@ jobs:
         run: cargo check --workspace --all-targets --all-features
 
   deps-audit:
-    name: cargo-deny (advisories, bans, sources)
+    name: cargo-deny (advisories, bans, licenses, sources)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -122,4 +125,4 @@ jobs:
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
-          command: check advisories bans sources
+          command: check advisories bans licenses sources

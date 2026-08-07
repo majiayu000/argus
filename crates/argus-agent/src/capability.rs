@@ -161,6 +161,17 @@ fn hook_persistence_re() -> &'static Regex {
     })
 }
 
+fn powershell_remote_exec_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:\biwr\b|\birm\b|\bInvoke-WebRequest\b|\bInvoke-RestMethod\b)[^\r\n|]{0,2048}\|\s*(?:&\s*)?\biex\b",
+        )
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern, same as the four regexes above
+        .expect("PowerShell remote-exec pattern compiles")
+    })
+}
+
 pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     let intent = Intent::from_files(files);
     for file in files {
@@ -176,6 +187,35 @@ pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
 fn extract_capabilities(file: &SurfaceFile) -> Result<Vec<CapabilityHit>> {
     let mut hits = Vec::new();
     let mut seen = BTreeSet::new();
+    if powershell_remote_exec_re().is_match(&file.content) {
+        push_hit(
+            &mut hits,
+            &mut seen,
+            "remote_shell_pipeline",
+            file,
+            1,
+            "PowerShell remote download is piped directly to Invoke-Expression",
+            resolve_host(&file.content),
+        );
+        push_hit(
+            &mut hits,
+            &mut seen,
+            "net_egress",
+            file,
+            1,
+            "PowerShell performs network egress before execution",
+            resolve_host(&file.content),
+        );
+        push_hit(
+            &mut hits,
+            &mut seen,
+            "exec_eval",
+            file,
+            1,
+            "PowerShell invokes downloaded content via Invoke-Expression",
+            None,
+        );
+    }
     for fact in argus_syntax::analyze(&file.rel, &file.content)? {
         if fact.kind == FactKind::Unsupported {
             push_hit(

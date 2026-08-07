@@ -276,7 +276,8 @@ fn validate_decision(decision: &str, case_id: &str) -> Result<()> {
 }
 
 fn load_index(path: &Path) -> Result<CorpusIndex> {
-    let raw = std::fs::read_to_string(path)
+    const MAX_CORPUS_INDEX_BYTES: usize = 16 * 1024 * 1024;
+    let raw = argus_core::fs::read_bounded_utf8_regular_file(path, MAX_CORPUS_INDEX_BYTES)
         .with_context(|| format!("read corpus index {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parse corpus index {}", path.display()))
 }

@@ -220,6 +220,7 @@ fn scan_agent_surface_inner(
         coordinate: None,
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.finalize_agent(&mut report);
 

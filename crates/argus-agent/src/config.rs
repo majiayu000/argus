@@ -12,15 +12,19 @@
 //! (product edge case 3).
 
 use crate::{SurfaceFile, SurfaceKind};
+use argus_core::fs::read_bounded_utf8_regular_file;
 use argus_core::{Finding, Severity};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const RULE_ALWAYS_LOAD: &str = "AGT-05-mcp-always-load";
 const RULE_ENABLE_ALL: &str = "AGT-05-enable-all-project-mcp";
 const RULE_ENABLED_LIST: &str = "AGT-05-enabled-mcpjson-servers";
 const RULE_OUTPUT_REWRITE: &str = "AGT-05-posttooluse-output-rewrite";
+const RULE_HOOK_UNASSESSED: &str = "AGT-05-hook-unassessed";
 const RULE_UNPARSEABLE: &str = "AGT-05-config-unparseable";
+const HOOK_SCRIPT_MAX_BYTES: usize = 1024 * 1024;
+const COMMAND_MAX_BYTES: usize = 8192;
 
 pub fn run(root: &Path, files: &[SurfaceFile], findings: &mut Vec<Finding>) {
     for file in files {
@@ -125,41 +129,204 @@ fn check_posttooluse_rewrite(root: &Path, value: &Value, rel: &str, findings: &m
             })
             .unwrap_or_default();
         for command in commands {
-            if command_rewrites_output(root, command) {
-                findings.push(
+            match inspect_output_rewrite(root, command) {
+                HookInspection::Rewrites => findings.push(
                     Finding::new(
                         RULE_OUTPUT_REWRITE,
                         Severity::Medium,
                         format!(
-                            "PostToolUse hook (matcher `{matcher}`) rewrites tool output via updatedToolOutput: `{command}`"
+                            "PostToolUse hook (matcher `{matcher}`) rewrites tool output via updatedToolOutput"
                         ),
                     )
                     .at(rel),
-                );
+                ),
+                HookInspection::Unassessed(reason) => findings.push(
+                    Finding::new(
+                        RULE_HOOK_UNASSESSED,
+                        Severity::Medium,
+                        format!(
+                            "PostToolUse hook (matcher `{matcher}`) could not be safely assessed: {reason}"
+                        ),
+                    )
+                    .at(rel),
+                ),
+                HookInspection::Clean => {}
             }
         }
     }
 }
 
-/// True when the inline command text, or the script file it points at,
-/// contains `updatedToolOutput`. The referenced script is read as text only.
-fn command_rewrites_output(root: &Path, command: &str) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum HookInspection {
+    Clean,
+    Rewrites,
+    Unassessed(String),
+}
+
+/// Inspect inline command text and conservatively resolved script operands.
+/// Referenced files must stay below the canonical scan root and are read via
+/// the shared no-follow, non-blocking, bounded regular-file primitive.
+fn inspect_output_rewrite(root: &Path, command: &str) -> HookInspection {
     if command.contains("updatedToolOutput") {
-        return true;
+        return HookInspection::Rewrites;
     }
-    let Some(first) = command.split_whitespace().next() else {
-        return false;
+    let candidates = match script_candidates(command) {
+        Ok(candidates) => candidates,
+        Err(reason) => return HookInspection::Unassessed(reason),
     };
-    let candidate = Path::new(first);
-    let path = if candidate.is_absolute() {
-        candidate.to_path_buf()
+    for candidate in candidates {
+        let Some(path) = (match contained_existing_path(root, &candidate) {
+            Ok(path) => path,
+            Err(reason) => return HookInspection::Unassessed(reason),
+        }) else {
+            continue;
+        };
+        match read_bounded_utf8_regular_file(&path, HOOK_SCRIPT_MAX_BYTES) {
+            Ok(body) if body.contains("updatedToolOutput") => return HookInspection::Rewrites,
+            Ok(_) => {}
+            Err(error) => {
+                return HookInspection::Unassessed(format!(
+                    "referenced script is not a bounded UTF-8 regular file ({error})"
+                ))
+            }
+        }
+    }
+    HookInspection::Clean
+}
+
+fn script_candidates(command: &str) -> std::result::Result<Vec<PathBuf>, String> {
+    if [";", "&&", "||", "|", "`", "$("]
+        .iter()
+        .any(|operator| command.contains(operator))
+    {
+        return Err(
+            "command contains shell composition that cannot be safely resolved".to_string(),
+        );
+    }
+    let tokens = tokenize_command(command)?;
+    let Some(first) = tokens.first() else {
+        return Ok(Vec::new());
+    };
+    let executable = Path::new(first)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first)
+        .to_ascii_lowercase();
+    let interpreter = matches!(
+        executable.as_str(),
+        "bash"
+            | "sh"
+            | "zsh"
+            | "python"
+            | "python3"
+            | "node"
+            | "ruby"
+            | "pwsh"
+            | "powershell"
+            | "powershell.exe"
+    );
+    let operands = if interpreter {
+        if tokens[1..].iter().any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "-c" | "--command" | "-command" | "-encodedcommand"
+            )
+        }) {
+            return Err("interpreter uses an opaque inline command mode".to_string());
+        }
+        &tokens[1..]
     } else {
-        root.join(candidate)
+        &tokens[..1]
     };
-    match std::fs::read_to_string(&path) {
-        Ok(body) => body.contains("updatedToolOutput"),
-        Err(_) => false,
+    Ok(operands
+        .iter()
+        .filter(|token| !token.starts_with('-') && looks_like_script_path(token))
+        .map(PathBuf::from)
+        .collect())
+}
+
+fn looks_like_script_path(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    token.contains('/')
+        || token.contains('\\')
+        || [
+            ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1",
+        ]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+}
+
+fn contained_existing_path(
+    root: &Path,
+    candidate: &Path,
+) -> std::result::Result<Option<PathBuf>, String> {
+    if candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("referenced script escapes the scan root".to_string());
     }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("scan root cannot be canonicalized ({error})"))?;
+    let joined = canonical_root.join(candidate);
+    let canonical = match std::fs::canonicalize(&joined) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("referenced script cannot be resolved ({error})")),
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return Err("referenced script resolves outside the scan root".to_string());
+    }
+    Ok(Some(canonical))
+}
+
+fn tokenize_command(command: &str) -> std::result::Result<Vec<String>, String> {
+    if command.len() > COMMAND_MAX_BYTES {
+        return Err(format!("command exceeds {COMMAND_MAX_BYTES} byte limit"));
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+        if character.is_whitespace() && quote.is_none() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped || quote.is_some() {
+        return Err("command has incomplete quoting or escaping".to_string());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -226,5 +393,65 @@ mod tests {
     fn benign_config_is_clean() {
         let f = run_on(r#"{"mcpServers":{"x":{"command":"node","args":["server.js"]}}}"#);
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn interpreter_wrapped_script_is_inspected() {
+        let root = tempfile::tempdir().expect("test root");
+        std::fs::create_dir(root.path().join("hooks")).expect("hooks directory");
+        std::fs::write(
+            root.path().join("hooks/rewrite.py"),
+            "print('updatedToolOutput')\n",
+        )
+        .expect("hook script");
+        assert_eq!(
+            inspect_output_rewrite(root.path(), "python3 'hooks/rewrite.py'"),
+            HookInspection::Rewrites
+        );
+    }
+
+    #[test]
+    fn traversal_and_absolute_script_references_are_not_read() {
+        let root = tempfile::tempdir().expect("test root");
+        assert!(matches!(
+            inspect_output_rewrite(root.path(), "python ../outside.py"),
+            HookInspection::Unassessed(_)
+        ));
+        assert!(matches!(
+            inspect_output_rewrite(root.path(), "python /dev/zero"),
+            HookInspection::Unassessed(_)
+        ));
+    }
+
+    #[test]
+    fn oversized_and_non_utf8_hook_scripts_are_unassessed() {
+        let root = tempfile::tempdir().expect("test root");
+        let large = root.path().join("large.py");
+        std::fs::write(&large, vec![b'x'; HOOK_SCRIPT_MAX_BYTES + 1]).expect("large hook");
+        assert!(matches!(
+            inspect_output_rewrite(root.path(), "python large.py"),
+            HookInspection::Unassessed(_)
+        ));
+        let binary = root.path().join("binary.py");
+        std::fs::write(&binary, [0xff, 0xfe]).expect("binary hook");
+        assert!(matches!(
+            inspect_output_rewrite(root.path(), "python binary.py"),
+            HookInspection::Unassessed(_)
+        ));
+    }
+
+    #[test]
+    fn shell_composition_and_inline_interpreter_commands_are_unassessed() {
+        let root = tempfile::tempdir().expect("test root");
+        for command in [
+            "bash hooks/check.sh | tee result",
+            "bash -c 'source hooks/check.sh'",
+            "powershell -Command hooks/check.ps1",
+        ] {
+            assert!(matches!(
+                inspect_output_rewrite(root.path(), command),
+                HookInspection::Unassessed(_)
+            ));
+        }
     }
 }

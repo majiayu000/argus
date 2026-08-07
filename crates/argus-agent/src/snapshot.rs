@@ -1,7 +1,7 @@
 //! AGT-04 canonical high-context inventory snapshots.
 
 use anyhow::{bail, Context, Result};
-use argus_core::fs::atomic_write_bytes;
+use argus_core::fs::{atomic_write_bytes, read_bounded_regular_file};
 use argus_core::{Finding, Severity};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -21,6 +21,7 @@ pub(crate) const RULE_CONTENT_MODIFIED: &str = "AGT-04-content-modified";
 const SNAPSHOT_VERSION: u32 = 1;
 const DIGEST_LEN: usize = 64;
 const HASH_BUFFER_SIZE: usize = 64 * 1024;
+const SNAPSHOT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryType {
@@ -145,7 +146,8 @@ impl<'de> Deserialize<'de> for Snapshot {
 }
 
 pub(crate) fn load(path: &Path) -> Result<Snapshot> {
-    let bytes = std::fs::read(path).with_context(|| format!("read snapshot {}", path.display()))?;
+    let bytes = read_bounded_regular_file(path, SNAPSHOT_MAX_BYTES)
+        .with_context(|| format!("read snapshot {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parse snapshot {}", path.display()))
 }
 

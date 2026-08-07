@@ -160,6 +160,7 @@ pub fn evaluate(
         coordinate: None,
         intelligence: None,
         rules: None,
+        vulnerability: None,
     })
 }
 

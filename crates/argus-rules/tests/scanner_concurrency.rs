@@ -22,7 +22,7 @@ fn actual_file_workers_use_multiple_bounded_invocation_threads() {
         let worker_names = Mutex::new(BTreeSet::new());
         let barrier = Arc::new(Barrier::new(jobs));
 
-        let (outputs, binaries) =
+        let (outputs, skipped) =
             scan_text_files_with_context(fixture.path(), 1024, &execution, |file| {
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(current, Ordering::SeqCst);
@@ -38,7 +38,9 @@ fn actual_file_workers_use_multiple_bounded_invocation_threads() {
             })
             .unwrap();
 
-        assert!(binaries.is_empty());
+        assert!(skipped.binary.is_empty());
+        assert!(skipped.oversized.is_empty());
+        assert!(skipped.unreadable.is_empty());
         assert_eq!(outputs.len(), jobs);
         assert_eq!(peak.load(Ordering::SeqCst), jobs);
         assert_eq!(worker_names.lock().unwrap().len(), jobs);

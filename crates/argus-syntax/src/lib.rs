@@ -25,9 +25,10 @@ pub use shell::bounded_shell_pipeline;
 pub(crate) use normalize::command_argument_shape;
 pub(crate) use parser::{canonical_callee, line, static_value, text};
 
-/// Analyze source using a language inferred from its path.
+/// Analyze source using a language inferred from its path, falling back to an
+/// interpreter shebang when the path carries no recognizable extension.
 pub fn analyze(path: &str, content: &str) -> Result<Vec<Fact>> {
-    analyze_with_language(path, content, ScriptLanguage::from_path(path))
+    analyze_with_language(path, content, ScriptLanguage::from_source(path, content))
 }
 
 /// Analyze source using an explicit language.
@@ -121,6 +122,13 @@ impl ScriptLanguage {
     /// Infer one of the four supported grammars from a source path.
     pub fn from_path(path: &str) -> Self {
         normalize::language_for(path)
+    }
+
+    /// Infer a grammar from the path, falling back to the interpreter named in
+    /// a `#!` shebang. Extensionless hook and skill scripts are executable
+    /// surfaces, so leaving them `Unsupported` would silently skip analysis.
+    pub fn from_source(path: &str, content: &str) -> Self {
+        normalize::language_for_source(path, content)
     }
 }
 

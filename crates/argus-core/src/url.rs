@@ -34,6 +34,9 @@ fn parse_http_url(raw: &str) -> Result<Url> {
     if raw_authority(raw, parsed.scheme().len())?.is_empty() || parsed.host_str().is_none() {
         bail!("URL has empty host: {raw}");
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("URL must not contain userinfo credentials");
+    }
     Ok(parsed)
 }
 
@@ -279,6 +282,12 @@ mod tests {
     #[test]
     fn host_of_rejects_empty_host() {
         assert!(host_of("https:///path").is_err());
+    }
+
+    #[test]
+    fn host_of_rejects_userinfo_credentials() {
+        assert!(host_of("https://user:secret@registry.example/pkg").is_err());
+        assert!(host_of("https://user@registry.example/pkg").is_err());
     }
 
     #[test]

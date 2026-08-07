@@ -140,7 +140,15 @@ pub fn scan_extracted_module_with_rules_and_context(
         |_index, (zip_name, bytes)| -> Result<Vec<Finding>> {
             let mut per_file = Vec::new();
             let rel = strip_module_prefix(zip_name);
-            if bytes.len() as u64 > TEXT_MAX_BYTES || looks_binary(bytes) {
+            if bytes.len() as u64 > TEXT_MAX_BYTES {
+                // An unscanned `.go` or `go.mod` is missing evidence. Reporting
+                // no findings for it would present an unread module as clean.
+                if rel.ends_with(".go") || rel == "go.mod" || rel.ends_with("/go.mod") {
+                    anyhow::bail!("security-relevant Go source `{rel}` exceeds text scan limit");
+                }
+                return Ok(per_file);
+            }
+            if looks_binary(bytes) {
                 return Ok(per_file);
             }
             let content = String::from_utf8_lossy(bytes).into_owned();
@@ -363,5 +371,22 @@ mod tests {
             serde_json::to_vec(&first.findings).unwrap(),
             serde_json::to_vec(&second.findings).unwrap()
         );
+    }
+
+    #[test]
+    fn oversized_go_source_fails_closed() {
+        let module = ExtractedModule {
+            files: vec![(
+                "example.com/demo@v1.0.0/init.go".to_string(),
+                vec![b'/'; (TEXT_MAX_BYTES + 1) as usize],
+            )],
+            module_path: Some("example.com/demo".to_string()),
+        };
+        let rules = RuleSession::builtin().expect("builtin rules");
+        let error = match scan_extracted_module_with_rules(&module, &rules) {
+            Ok(_) => panic!("oversized Go source was accepted"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("exceeds text scan limit"));
     }
 }

@@ -11,8 +11,9 @@
 2. 创建 active SemVer tag ruleset，精确覆盖 `refs/tags/v*.*.*` 并限制
    create/update/delete。
 3. 创建 exact `refs/heads/v1` ruleset，限制 create/update/delete/non-fast-forward。
-4. 创建 `release` environment，配置 required reviewer、prevent self-review 和只允许
-   SemVer tag 的 deployment policy。
+4. 创建 `release` environment。多维护者仓库配置 required reviewer、
+   prevent self-review 和只允许 SemVer tag 的 deployment policy；当前单管理员仓库按
+   `SECURITY.md` 记录的临时例外不要求独立 reviewer，但其余门禁保持 fail closed。
 5. 确认 `.github/workflows/release.yml` 之外没有发布凭据或 promotion token。
 
 任一项缺失时，publish job 必须 fail closed。不要临时删除检查、改用 checksum-only，
@@ -36,8 +37,8 @@
 1. 在 release-prep commit 中把 README、CHANGELOG、SECURITY 与 `action/release.json`
    更新为准确版本；不要提前声明不存在的下载或 `@v1`。
 2. 确认该 commit 在 `main`，创建对应的 immutable `vX.Y.Z` tag。
-3. tag workflow 重跑全部质量与 native smoke；publish job 进入 `release` environment
-   等待独立 reviewer。
+3. tag workflow 重跑全部质量与 native smoke；publish job 进入 `release` environment。
+   多维护者仓库等待独立 reviewer；当前单管理员例外以 `SECURITY.md` 为准。
 4. workflow 生成 canonical manifest/checksums；每个 native target 的 raw binary 与
    archive 共用一个 `{target}.sigstore.json`，manifest 与 checksum 各有独立 bundle。
    `LICENSE`/`README.md` 的摘要由已 attested manifest 绑定。完整复验后才

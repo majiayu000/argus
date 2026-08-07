@@ -52,6 +52,8 @@ test("reports bind decision to exit code and format", () => {
   assert.equal(validateReport("text", "decision: allow  package: x\npath: .\nfindings: none\n", 0, "0.1.0"), "allow");
   const blocked = JSON.stringify({ artifact: "package-dir", path: ".", package_name: "x", package_version: "1.0.0", decision: "block", findings: [{}] });
   assert.equal(validateReport("json", blocked, 1, "0.1.0"), "block");
+  assert.equal(validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: { version: 1 }, future_additive_field: true }), 1, "0.1.0"), "block");
+  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: [] }), 1, "0.1.0"), /contract/);
   const sarif = JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "argus", version: "0.1.0" } }, invocations: [{ executionSuccessful: true }], results: [] }] });
   assert.equal(validateReport("sarif", sarif, 0, "0.1.0"), "allow");
   assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), decision: "allow" }), 1, "0.1.0"), /contract/);

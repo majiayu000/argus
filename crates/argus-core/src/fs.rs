@@ -13,7 +13,8 @@
 //! flattening it onto this helper would weaken real durability guarantees.
 
 use anyhow::{bail, Context, Result};
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 use tempfile::{Builder, NamedTempFile};
 
@@ -22,6 +23,94 @@ const WRITE: &str = "write";
 const FLUSH: &str = "flush";
 const FILE_SYNC: &str = "file_sync";
 const PERSIST: &str = "persist";
+
+/// Open a local regular file without following its final symlink and read at
+/// most `maximum_bytes` bytes.
+///
+/// Security scanners must not use an untrusted path with `read` or
+/// `read_to_string`: a FIFO/device can block forever and a regular file can
+/// allocate without bound. Unix opens are non-blocking and no-follow so the
+/// type check is performed on the descriptor that is actually read.
+pub fn read_bounded_regular_file(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>> {
+    let file = open_regular_file(path)?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect regular file {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("path is not a regular file: {}", path.display());
+    }
+    if metadata.len() > maximum_bytes as u64 {
+        bail!(
+            "regular file exceeds {maximum_bytes} byte limit (maximum): {}",
+            path.display()
+        );
+    }
+
+    let mut bytes = Vec::with_capacity((metadata.len() as usize).min(maximum_bytes));
+    file.take((maximum_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read bounded regular file {}", path.display()))?;
+    if bytes.len() > maximum_bytes {
+        bail!(
+            "regular file grew beyond {maximum_bytes} byte limit while reading: {}",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
+pub fn read_bounded_utf8_regular_file(path: &Path, maximum_bytes: usize) -> Result<String> {
+    String::from_utf8(read_bounded_regular_file(path, maximum_bytes)?)
+        .with_context(|| format!("decode UTF-8 regular file {}", path.display()))
+}
+
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> Result<File> {
+    use rustix::fs::{open, Mode, OFlags};
+
+    let descriptor = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .with_context(|| {
+        format!(
+            "open regular file {} without following links",
+            path.display()
+        )
+    })?;
+    Ok(File::from(descriptor))
+}
+
+#[cfg(windows)]
+fn open_regular_file(path: &Path) -> Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    // Open the reparse point itself so the descriptor-level metadata check in
+    // `read_bounded_regular_file` rejects symlinks/junctions without a
+    // check-then-open race.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "open regular file {} without following links",
+                path.display()
+            )
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file(path: &Path) -> Result<File> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect regular file {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!("path is a symlink: {}", path.display());
+    }
+    File::open(path).with_context(|| format!("open regular file {}", path.display()))
+}
 
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8], temporary_prefix: &str) -> Result<()> {
     write_bytes_inner(path, bytes, temporary_prefix, |_| Ok(()))
@@ -202,5 +291,32 @@ mod tests {
                 "{fault:?} leaked a temporary file for a missing destination"
             );
         }
+    }
+
+    #[test]
+    fn bounded_regular_read_rejects_oversized_input() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let path = directory.path().join("large.txt");
+        fs::write(&path, b"12345").expect("write fixture");
+        let error = read_bounded_regular_file(&path, 4).expect_err("oversized file");
+        assert!(format!("{error:#}").contains("exceeds 4 byte limit"));
+        assert_eq!(
+            read_bounded_regular_file(&path, 5).expect("exact bound"),
+            b"12345"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_regular_read_rejects_symlinks_and_devices() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("test directory");
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        fs::write(&target, b"secret").expect("write target");
+        symlink(&target, &link).expect("create symlink");
+        assert!(read_bounded_regular_file(&link, 1024).is_err());
+        assert!(read_bounded_regular_file(Path::new("/dev/null"), 1024).is_err());
     }
 }

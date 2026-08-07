@@ -215,6 +215,7 @@ pub(crate) fn apply_osv_query(
     normalize_vulnerability_report(&mut vulnerability, rules);
     report.findings.extend(vulnerability.findings);
     report.decision = stricter(report.decision, vulnerability.decision);
+    report.vulnerability = Some(vulnerability.evidence);
     Ok(())
 }
 
@@ -539,6 +540,7 @@ mod scan_vulns_tests {
             coordinate: None,
             intelligence: None,
             rules: None,
+            vulnerability: None,
         }
     }
 

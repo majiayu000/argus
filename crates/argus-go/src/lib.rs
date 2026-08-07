@@ -269,10 +269,9 @@ pub fn fetch_and_scan_go_with_rules_and_context(
 
     let mut report = ScanReport {
         artifact: ArtifactKind::PackageDir,
-        path: opts
-            .cache_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("{}@{version}", pkg.module_path))),
+        // The report describes the scanned coordinate. `cache_dir` is an
+        // implementation option and must never masquerade as artifact identity.
+        path: PathBuf::from(format!("{}@{version}", coordinate.canonical_name)),
         package_name: scan_result.name.or_else(|| Some(pkg.module_path.clone())),
         package_version: Some(version),
         decision,
@@ -280,6 +279,7 @@ pub fn fetch_and_scan_go_with_rules_and_context(
         coordinate: Some(coordinate),
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);

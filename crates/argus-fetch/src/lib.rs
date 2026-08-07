@@ -510,7 +510,8 @@ mod sigstore_impl {
             }
         };
 
-        let mut findings = Vec::with_capacity(bundles.len());
+        let mut findings = Vec::with_capacity(bundles.len().saturating_add(1));
+        let mut verified = 0usize;
         for (i, bundle_json) in bundles.iter().enumerate() {
             let verdict = match verify_bundle_full(bundle_json, tarball_bytes, &allowlist) {
                 Ok(v) => v,
@@ -525,7 +526,17 @@ mod sigstore_impl {
                     continue;
                 }
             };
+            if matches!(&verdict, SigstoreVerdict::Verified { .. }) {
+                verified += 1;
+            }
             findings.push(verdict_to_finding(i, verdict));
+        }
+        if verified == 0 {
+            findings.push(Finding::new(
+                "provenance-signature-unverified",
+                Severity::High,
+                "--verify-sigstore was requested, but no attestation completed full signature, transparency-log, and identity verification",
+            ));
         }
         findings
     }

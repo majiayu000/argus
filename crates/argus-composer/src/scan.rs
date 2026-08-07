@@ -16,6 +16,11 @@ use argus_core::{ArtifactKind, Finding, ScanReport, Severity};
 use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use std::path::Path;
 
+/// Composer paths whose contents the PHP rules read.
+fn is_composer_security_relevant(rel: &str) -> bool {
+    is_php_source(rel) || rel == "composer.json" || rel.ends_with("/composer.json")
+}
+
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Composer event hook names we scan for lifecycle triggers.
@@ -117,7 +122,7 @@ pub fn scan_composer_zip_with_rules_and_context(
     // Track the shallowest composer.json depth seen so we only capture the root manifest.
     let mut composer_json_depth: Option<usize> = None;
 
-    let (file_results, _) =
+    let (file_results, skipped) =
         scan_text_files_with_context(dest_root, TEXT_MAX_BYTES, execution, |file| {
             let manifest = (file.rel == "composer.json" || file.rel.ends_with("/composer.json"))
                 .then(|| {
@@ -138,6 +143,7 @@ pub fn scan_composer_zip_with_rules_and_context(
             }
             Ok::<_, anyhow::Error>((per_file, manifest))
         })?;
+    skipped.require_scanned("Composer", is_composer_security_relevant)?;
     for (mut per_file, manifest) in file_results {
         if let Some((depth, content)) = manifest {
             if composer_json_depth.is_none_or(|current| depth < current) {
@@ -182,6 +188,7 @@ pub fn scan_composer_zip_with_rules_and_context(
         coordinate: None,
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.finalize_package(&mut report);
     Ok(report)

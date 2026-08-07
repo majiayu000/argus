@@ -110,7 +110,9 @@ pub enum CoordinatePolicy<'a> {
     SnapshotRootAware(&'a ScanRootContext),
 }
 
-const SCRIPT_EXTS: &[&str] = &[".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb"];
+const SCRIPT_EXTS: &[&str] = &[
+    ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1",
+];
 const INVENTORY_BASENAMES: &[&str] = &[
     ".cursorrules",
     ".aider.conf.yml",
@@ -156,9 +158,10 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
         || (in_claude_dir(path) && lower.starts_with("settings") && lower.ends_with(".json"))
     {
         Some(SurfaceKind::McpConfig)
-    } else if SCRIPT_EXTS
+    } else if (SCRIPT_EXTS
         .iter()
         .any(|extension| lower.ends_with(extension))
+        || !file_name.contains('.'))
         && (in_agent_hooks_dir(path)
             || skill_dirs
                 .iter()
@@ -222,9 +225,15 @@ mod tests {
             Some(SurfaceKind::Script)
         );
         assert_eq!(legacy("hooks/pre.sh", &[]), Some(SurfaceKind::Script));
+        assert_eq!(legacy("hooks/guard", &[]), Some(SurfaceKind::Script));
+        assert_eq!(legacy("hooks/guard.ps1", &[]), Some(SurfaceKind::Script));
         let skill_dirs = vec!["myskill/".to_string()];
         assert_eq!(
             legacy("myskill/run.py", &skill_dirs),
+            Some(SurfaceKind::Script)
+        );
+        assert_eq!(
+            legacy("myskill/scripts/install", &skill_dirs),
             Some(SurfaceKind::Script)
         );
         assert_eq!(legacy("src/main.rs", &[]), None);
