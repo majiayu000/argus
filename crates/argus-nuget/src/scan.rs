@@ -13,9 +13,11 @@
 //! - the single root-level `*.nuspec` manifest for name + version.
 
 use crate::{finding, rules};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use argus_core::{Finding, Severity};
-use argus_rules::{read_text_file_bounded, scan_text_file, RuleSession};
+use argus_rules::{
+    read_text_file_bounded, scan_text_file, RuleSession, SkipReason, TextFileOutcome,
+};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use quick_xml::XmlVersion;
@@ -124,8 +126,23 @@ pub fn scan_extracted_nupkg_with_rules_and_context(
             if *is_ps1 {
                 scan_powershell_name(rel, &mut per_file);
             }
-            let Some(file) = read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? else {
-                return Ok((per_file, *is_nuspec, None));
+            let file = match read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? {
+                TextFileOutcome::Text(file) => file,
+                // A .nuspec, install hook, or auto-imported MSBuild file we
+                // never read is missing evidence, not an absent finding.
+                TextFileOutcome::Skipped(reason) => {
+                    if reason != SkipReason::Binary && (*is_nuspec || *is_ps1 || *is_msbuild) {
+                        bail!(
+                            "security-relevant NuGet file `{rel}` was not scanned ({})",
+                            match reason {
+                                SkipReason::Oversized => "exceeds text scan limit",
+                                SkipReason::Unreadable => "could not be read",
+                                SkipReason::Binary => "is not text",
+                            }
+                        );
+                    }
+                    return Ok((per_file, *is_nuspec, None));
+                }
             };
             if *is_nuspec {
                 let metadata = parse_nuspec_name_version(&file.content);

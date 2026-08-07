@@ -479,7 +479,8 @@ fn join_process_threads(threads: Vec<thread::JoinHandle<()>>) -> Result<()> {
 /// Count the entries of a freshly written baseline file (shape:
 /// `{ "version": 1, "entries": { ... } }`).
 fn baseline_entry_count(path: &Path) -> Result<usize> {
-    let raw = std::fs::read_to_string(path)
+    const MAX_BASELINE_BYTES: usize = 16 * 1024 * 1024;
+    let raw = argus_core::fs::read_bounded_utf8_regular_file(path, MAX_BASELINE_BYTES)
         .with_context(|| format!("read baseline {}", path.display()))?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).with_context(|| format!("parse baseline {}", path.display()))?;
@@ -709,6 +710,7 @@ mod tests {
                 coordinate: None,
                 intelligence: None,
                 rules: None,
+                vulnerability: None,
             },
         }
     }

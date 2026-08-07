@@ -362,8 +362,8 @@ fn integrity_mismatch_errors() {
 }
 
 #[test]
-fn integrity_unverifiable_when_catalog_absent() {
-    // No registration/catalog routes registered → catalog hop fails.
+fn catalog_transport_failure_fails_closed() {
+    // No registration/catalog routes registered → required catalog hop fails.
     let nupkg = make_nupkg(&[("Unv.Pkg.nuspec", &nuspec("Unv.Pkg", "1.0.0"))]);
     let transport = MockTransport::new();
     base_routes(&transport, "unv.pkg", "1.0.0", &nupkg);
@@ -373,31 +373,16 @@ fn integrity_unverifiable_when_catalog_absent() {
         ..NugetFetchOptions::default()
     };
     let pkg = NugetRef::parse("Unv.Pkg").unwrap();
-    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
-
-    let ids = rule_ids(&report);
-    assert!(
-        ids.contains(&"nuget-integrity-unverifiable".to_string()),
-        "got: {ids:?}"
-    );
-    // Info-only finding must not force a Block on its own.
-    assert_eq!(report.decision, Decision::Allow);
-    // The detail must surface the reason (U-29 visibility).
-    let detail = report
-        .findings
-        .iter()
-        .find(|f| f.rule_id == "nuget-integrity-unverifiable")
-        .map(|f| f.detail.clone())
-        .unwrap();
-    assert!(detail.contains("digest not verified"), "got: {detail}");
+    let error = fetch_and_scan_nuget(&pkg, &opts, &transport)
+        .expect_err("catalog transport failure must fail closed");
+    assert!(format!("{error:#}").contains("catalog integrity evidence"));
 }
 
 #[test]
-fn catalog_url_on_foreign_host_is_unverifiable_not_fetched() {
+fn catalog_url_on_foreign_host_fails_closed_without_fetch() {
     // The registration leaf points catalogEntry.@id at a foreign host.
     // The host pin must reject that URL before fetching it, and the failure
-    // surfaces as an Info `nuget-integrity-unverifiable` finding (U-29),
-    // never a silent fetch of attacker-controlled content.
+    // fails the operation closed, never fetching attacker-controlled content.
     let nupkg = make_nupkg(&[("Foreign.Pkg.nuspec", &nuspec("Foreign.Pkg", "1.0.0"))]);
     let transport = MockTransport::new();
     base_routes(&transport, "foreign.pkg", "1.0.0", &nupkg);
@@ -417,13 +402,9 @@ fn catalog_url_on_foreign_host_is_unverifiable_not_fetched() {
         ..NugetFetchOptions::default()
     };
     let pkg = NugetRef::parse("Foreign.Pkg").unwrap();
-    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
-    let ids = rule_ids(&report);
-    assert!(
-        ids.contains(&"nuget-integrity-unverifiable".to_string()),
-        "got: {ids:?}"
-    );
-    assert_eq!(report.decision, Decision::Allow);
+    let error = fetch_and_scan_nuget(&pkg, &opts, &transport)
+        .expect_err("foreign catalog host must fail closed");
+    assert!(format!("{error:#}").contains("catalog integrity evidence"));
 }
 
 #[test]
@@ -603,7 +584,7 @@ fn buildmultitargeting_exec_blocks() {
 }
 
 #[test]
-fn oversized_install_script_still_flagged() {
+fn oversized_install_script_fails_closed_without_loading_body() {
     // An attacker pads tools/install.ps1 past the 1 MiB text cap to evade a
     // size-gated scan. The path-based install-hook finding must still fire.
     let mut padded = Vec::with_capacity(2 * 1024 * 1024);
@@ -628,14 +609,12 @@ fn oversized_install_script_still_flagged() {
         ..NugetFetchOptions::default()
     };
     let pkg = NugetRef::parse("Pad.Pkg").unwrap();
-    let report = fetch_and_scan_nuget(&pkg, &opts, &transport).unwrap();
-
-    let ids = rule_ids(&report);
+    let error = fetch_and_scan_nuget(&pkg, &opts, &transport)
+        .expect_err("oversized install hook must fail closed");
     assert!(
-        ids.contains(&"nuget-install-script".to_string()),
-        "oversized install hook must still be flagged by path; got: {ids:?}"
+        format!("{error:#}").contains("exceeds text scan limit"),
+        "unexpected error: {error:#}"
     );
-    assert_eq!(report.decision, Decision::Block);
 }
 
 #[test]

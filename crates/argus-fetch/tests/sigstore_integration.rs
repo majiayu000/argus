@@ -122,6 +122,35 @@ fn verify_sigstore_real_npm_bundle_is_verified() {
 }
 
 #[test]
+fn all_unsupported_bundles_fail_closed() {
+    let mut attestations: serde_json::Value = serde_json::from_slice(REAL_ATTESTATIONS).unwrap();
+    let unsupported = attestations["attestations"][0].clone();
+    attestations["attestations"] = serde_json::Value::Array(vec![unsupported]);
+
+    let transport = MockTransport::new();
+    let registry = "https://mock.registry";
+    install_routes_with_attestations(
+        &transport,
+        registry,
+        serde_json::to_vec(&attestations).unwrap(),
+    );
+    let opts = make_opts(
+        registry,
+        true,
+        &[r"^https://github\.com/sigstore/sigstore-js/.+$"],
+    );
+    let pkg = PackageRef::parse("sigstore@2.3.1").unwrap();
+    let report = fetch_and_scan(&pkg, &opts, &transport).expect("fetch_and_scan");
+
+    assert!(report.findings.iter().any(|finding| {
+        finding.rule_id == "provenance-signature-unverified"
+            && finding.severity == argus_core::Severity::High
+            && finding.detail.contains("no attestation completed")
+    }));
+    assert_eq!(report.decision, argus_core::Decision::Block);
+}
+
+#[test]
 fn corrupted_dsse_signature_is_critical_and_blocks() {
     let mut attestations: serde_json::Value = serde_json::from_slice(REAL_ATTESTATIONS).unwrap();
     attestations["attestations"][1]["bundle"]["dsseEnvelope"]["signatures"][0]["sig"] =

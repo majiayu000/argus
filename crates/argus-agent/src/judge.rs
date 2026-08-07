@@ -184,6 +184,7 @@ mod tests {
             coordinate: None,
             intelligence: None,
             rules: None,
+            vulnerability: None,
         };
         let error = LlmJudgeRequest::from_scan(&files, &report).unwrap_err();
         assert!(error.to_string().contains("exceeding"), "{error:#}");

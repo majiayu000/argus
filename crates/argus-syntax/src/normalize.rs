@@ -514,6 +514,34 @@ pub(crate) fn language_for(rel: &str) -> ScriptLanguage {
     }
 }
 
+/// Infer a language from the path, falling back to an interpreter shebang so
+/// extensionless hook and skill scripts are still parsed instead of skipped.
+pub(crate) fn language_for_source(rel: &str, content: &str) -> ScriptLanguage {
+    match language_for(rel) {
+        ScriptLanguage::Unsupported => {
+            language_from_shebang(content).unwrap_or(ScriptLanguage::Unsupported)
+        }
+        language => language,
+    }
+}
+
+fn language_from_shebang(content: &str) -> Option<ScriptLanguage> {
+    let first_line = content.lines().next()?.trim().to_ascii_lowercase();
+    let command = first_line.strip_prefix("#!")?.trim();
+    if command.contains("python") {
+        Some(ScriptLanguage::Python)
+    } else if command.contains("node") || command.contains("deno") {
+        Some(ScriptLanguage::JavaScript)
+    } else if ["bash", "zsh", "dash", "ksh", "/sh", " sh"]
+        .iter()
+        .any(|name| command.contains(name))
+    {
+        Some(ScriptLanguage::Bash)
+    } else {
+        None
+    }
+}
+
 pub(super) fn contains_missing(node: Node<'_>) -> bool {
     if node.is_missing() {
         return true;

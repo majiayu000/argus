@@ -16,6 +16,15 @@ use argus_core::{Finding, Severity};
 use argus_rules::{scan_text_file, scan_text_files_with_context, RuleSession};
 use std::path::Path;
 
+/// Wheel paths whose contents the PyPI rules read.
+fn is_wheel_security_relevant(rel: &str) -> bool {
+    rel.ends_with(".py")
+        || rel.ends_with(".pyi")
+        || rel.ends_with(".pth")
+        || rel.ends_with(".dist-info/METADATA")
+        || rel.ends_with(".dist-info/METADATA.txt")
+}
+
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Extract a `.whl` (ZIP) into `dest_root` and scan everything.
@@ -77,7 +86,7 @@ pub(crate) fn scan_wheel_zip_with_rules_budget_and_context(
     let mut version: Option<String> = None;
     let mut findings: Vec<Finding> = Vec::new();
 
-    let (file_results, _) = scan_text_files_with_context(
+    let (file_results, skipped) = scan_text_files_with_context(
         dest_root,
         TEXT_MAX_BYTES,
         execution,
@@ -106,6 +115,7 @@ pub(crate) fn scan_wheel_zip_with_rules_budget_and_context(
             Ok::<_, anyhow::Error>((per_file, metadata))
         },
     )?;
+    skipped.require_scanned("wheel", is_wheel_security_relevant)?;
     for (mut per_file, metadata) in file_results {
         if let Some((found_name, found_version)) = metadata {
             name = name.take().or(Some(found_name));

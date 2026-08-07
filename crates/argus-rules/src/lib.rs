@@ -7,7 +7,8 @@
 //! from the scanned artifact — files are read as text or treated as opaque
 //! bytes.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use argus_core::fs::read_bounded_utf8_regular_file;
 use argus_core::{ArtifactKind, Decision, ExecutionContext, Finding, ScanReport};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -58,7 +59,56 @@ pub struct PackageContext {
 }
 
 /// Maximum size we attempt to read as text. Larger files are treated as binary.
-const TEXT_MAX_BYTES: u64 = 1024 * 1024;
+const TEXT_MAX_BYTES: usize = 1024 * 1024;
+const MAX_PACKAGE_FILES: usize = 100_000;
+const MAX_PACKAGE_DEPTH: usize = 128;
+const MAX_TOTAL_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct ScanBudget {
+    files: usize,
+    text_bytes: usize,
+}
+
+impl ScanBudget {
+    fn observe_file(&mut self, depth: usize) -> Result<()> {
+        if depth > MAX_PACKAGE_DEPTH {
+            bail!("package path depth {depth} exceeds maximum {MAX_PACKAGE_DEPTH}");
+        }
+        self.files = self
+            .files
+            .checked_add(1)
+            .context("package file count overflow")?;
+        if self.files > MAX_PACKAGE_FILES {
+            bail!("package file count exceeds maximum {MAX_PACKAGE_FILES}");
+        }
+        Ok(())
+    }
+
+    fn observe_text(&mut self, bytes: usize) -> Result<()> {
+        self.text_bytes = self
+            .text_bytes
+            .checked_add(bytes)
+            .context("package text byte count overflow")?;
+        if self.text_bytes > MAX_TOTAL_TEXT_BYTES {
+            bail!("package text bytes exceed maximum {MAX_TOTAL_TEXT_BYTES}");
+        }
+        Ok(())
+    }
+}
+
+/// Paths whose contents npm content rules depend on. Anything here that was
+/// not read is missing evidence, so the scan must fail rather than report a
+/// clean package.
+fn is_npm_security_relevant(rel: &str) -> bool {
+    const EXECUTABLE_EXTS: &[&str] = &[
+        ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".sh", ".bash", ".py",
+    ];
+    let lower = rel.to_ascii_lowercase();
+    lower == "package.json"
+        || lower.ends_with("/package.json")
+        || EXECUTABLE_EXTS.iter().any(|ext| lower.ends_with(ext))
+}
 
 /// Top-level entry: scan a package directory, return a full report.
 pub fn scan_package_dir(path: &Path) -> Result<ScanReport> {
@@ -73,26 +123,13 @@ fn scan_package_dir_inner_with_limit(
     execution: &ExecutionContext,
 ) -> Result<(ScanReport, PackageJson)> {
     let pkg_json_path = path.join("package.json");
-    let file = std::fs::File::open(&pkg_json_path)
-        .with_context(|| format!("open package.json at {}", pkg_json_path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(package_json_limit as u64 + 1)
-        .read_to_end(&mut bytes)
+    let pkg_json_raw = read_bounded_utf8_regular_file(&pkg_json_path, package_json_limit)
         .with_context(|| format!("read package.json at {}", pkg_json_path.display()))?;
-    if bytes.len() > package_json_limit {
-        anyhow::bail!("package manifest exceeds {package_json_limit} bytes");
-    }
-    let pkg_json_raw = String::from_utf8(bytes).with_context(|| {
-        format!(
-            "package.json is not valid UTF-8 at {}",
-            pkg_json_path.display()
-        )
-    })?;
     let package: PackageJson = serde_json::from_str(&pkg_json_raw)
         .with_context(|| format!("parse package.json at {}", pkg_json_path.display()))?;
 
-    let (per_file, mut binary_files) =
-        scan_text_files_with_context(path, TEXT_MAX_BYTES, execution, |file| {
+    let (per_file, skipped) =
+        scan_text_files_with_context(path, TEXT_MAX_BYTES as u64, execution, |file| {
             let mut lifecycle_findings = Vec::new();
             lifecycle::scan_text_file(file, &mut lifecycle_findings);
             let content_findings = content::scan_npm_text_file(file)?;
@@ -102,6 +139,9 @@ fn scan_package_dir_inner_with_limit(
                 has_native_bin_ext(&file.rel).then(|| file.rel.clone()),
             ))
         })?;
+
+    skipped.require_scanned("npm package", is_npm_security_relevant)?;
+    let mut binary_files = skipped.binary;
 
     let ctx = PackageContext {
         root: path.to_path_buf(),
@@ -143,6 +183,7 @@ fn scan_package_dir_inner_with_limit(
             coordinate: None,
             intelligence: None,
             rules: None,
+            vulnerability: None,
         },
         package,
     ))
@@ -218,17 +259,19 @@ pub fn scan_text_files_with_context<O, Work>(
     text_max_bytes: u64,
     execution: &ExecutionContext,
     work: Work,
-) -> Result<(Vec<O>, Vec<String>)>
+) -> Result<(Vec<O>, SkippedFiles)>
 where
     O: Send,
     Work: Fn(&TextFile) -> Result<O> + Sync,
 {
+    let mut budget = ScanBudget::default();
     let mut inputs = Vec::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
+        budget.observe_file(entry.depth())?;
         let abs = entry.path();
         let rel = abs
             .strip_prefix(root)
@@ -240,54 +283,138 @@ where
     inputs.sort_by(|left, right| left.0.cmp(&right.0));
 
     enum Processed<O> {
-        Text(O),
-        Binary(String),
+        Text(O, usize),
+        Skipped(String, SkipReason),
     }
     let mut outputs = Vec::new();
-    let mut bins = Vec::new();
+    let mut skipped = SkippedFiles::default();
     execution.execute_ordered(
         &inputs,
         None,
         |_index, (rel, abs)| -> Result<Processed<O>> {
             match read_text_file_bounded(rel, abs, text_max_bytes)? {
-                Some(file) => Ok(Processed::Text(work(&file)?)),
-                None => Ok(Processed::Binary(rel.clone())),
+                TextFileOutcome::Text(file) => {
+                    let bytes = file.content.len();
+                    Ok(Processed::Text(work(&file)?, bytes))
+                }
+                TextFileOutcome::Skipped(reason) => Ok(Processed::Skipped(rel.clone(), reason)),
             }
         },
         |_index, processed| {
             match processed {
-                Processed::Text(output) => outputs.push(output),
-                Processed::Binary(rel) => bins.push(rel),
+                Processed::Text(output, bytes) => {
+                    budget.observe_text(bytes)?;
+                    outputs.push(output);
+                }
+                Processed::Skipped(rel, reason) => skipped.record(rel, reason),
             }
             Ok(())
         },
     )?;
-    Ok((outputs, bins))
+    Ok((outputs, skipped))
+}
+
+/// Why a discovered path never reached the content rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Content exceeded the caller's text limit.
+    Oversized,
+    /// The path could not be opened or read.
+    Unreadable,
+    /// Content is a native artifact, not text.
+    Binary,
+}
+
+/// Paths dropped before rule evaluation, grouped by reason.
+///
+/// Oversized and unreadable paths are *not* scan results — a scanner that
+/// treats them as "nothing found" reports a clean package it never read. Each
+/// ecosystem must run [`SkippedFiles::require_scanned`] over the paths whose
+/// contents its rules depend on.
+#[derive(Debug, Default, Clone)]
+pub struct SkippedFiles {
+    /// Native artifacts, which binary rules consume as evidence.
+    pub binary: Vec<String>,
+    /// Paths over the text limit, whose contents were never examined.
+    pub oversized: Vec<String>,
+    /// Paths that could not be opened or read.
+    pub unreadable: Vec<String>,
+}
+
+impl SkippedFiles {
+    fn record(&mut self, rel: String, reason: SkipReason) {
+        match reason {
+            SkipReason::Binary => self.binary.push(rel),
+            SkipReason::Oversized => self.oversized.push(rel),
+            SkipReason::Unreadable => self.unreadable.push(rel),
+        }
+    }
+
+    /// Fail closed when a path the caller's rules depend on was never read.
+    ///
+    /// `ecosystem` names the scanner in the error; `is_security_relevant`
+    /// decides which relative paths carry detection signal.
+    pub fn require_scanned<Relevant>(
+        &self,
+        ecosystem: &str,
+        is_security_relevant: Relevant,
+    ) -> Result<()>
+    where
+        Relevant: Fn(&str) -> bool,
+    {
+        for rel in &self.oversized {
+            if is_security_relevant(rel) {
+                bail!("security-relevant {ecosystem} file `{rel}` exceeds text scan limit");
+            }
+        }
+        for rel in &self.unreadable {
+            if is_security_relevant(rel) {
+                bail!("security-relevant {ecosystem} file `{rel}` could not be read");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Outcome of classifying one discovered path.
+#[derive(Debug, Clone)]
+pub enum TextFileOutcome {
+    /// Content was read within the limit and is text.
+    Text(TextFile),
+    /// Content never reached the rules, with the reason preserved so callers
+    /// can distinguish "not text" from "not read".
+    Skipped(SkipReason),
 }
 
 /// Read at most `text_max_bytes + 1` bytes and classify a single discovered
-/// path. Returning `None` preserves the existing unreadable, oversized, and
-/// binary-file treatment while closing metadata/read TOCTOU gaps.
+/// path, closing metadata/read TOCTOU gaps by reading through one descriptor.
+///
+/// The reason a path was skipped is carried out rather than collapsed into a
+/// single "not text" answer: an unreadable or oversized security-relevant file
+/// is missing evidence, not an absence of findings.
 pub fn read_text_file_bounded(
     rel: &str,
     path: &Path,
     text_max_bytes: u64,
-) -> Result<Option<TextFile>> {
+) -> Result<TextFileOutcome> {
     let read_limit = text_max_bytes
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("text input byte limit overflow"))?;
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(TextFileOutcome::Skipped(SkipReason::Unreadable)),
     };
     let mut bytes = Vec::new();
     if file.take(read_limit).read_to_end(&mut bytes).is_err() {
-        return Ok(None);
+        return Ok(TextFileOutcome::Skipped(SkipReason::Unreadable));
     }
-    if bytes.len() as u64 > text_max_bytes || looks_binary(&bytes) {
-        return Ok(None);
+    if bytes.len() as u64 > text_max_bytes {
+        return Ok(TextFileOutcome::Skipped(SkipReason::Oversized));
     }
-    Ok(Some(TextFile {
+    if looks_binary(&bytes) {
+        return Ok(TextFileOutcome::Skipped(SkipReason::Binary));
+    }
+    Ok(TextFileOutcome::Text(TextFile {
         rel: rel.to_string(),
         content: String::from_utf8_lossy(&bytes).into_owned(),
     }))
@@ -325,4 +452,52 @@ pub fn all_script_bodies(pkg: &PackageJson) -> String {
 /// Derive a decision externally (used by tests + corpus runner).
 pub fn derive_decision(ctx: &PackageContext, findings: &[Finding]) -> Decision {
     decision::derive(ctx, findings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_package_manifest_fails_closed() {
+        let directory = tempfile::tempdir().expect("test directory");
+        std::fs::write(
+            directory.path().join("package.json"),
+            vec![b' '; TEXT_MAX_BYTES + 1],
+        )
+        .expect("write oversized manifest");
+        let error = scan_package_dir(directory.path()).expect_err("oversized package.json");
+        assert!(format!("{error:#}").contains("exceeds 1048576 byte limit"));
+    }
+
+    #[test]
+    fn package_scan_budget_rejects_each_first_excess_unit() {
+        let mut files = ScanBudget {
+            files: MAX_PACKAGE_FILES,
+            text_bytes: 0,
+        };
+        assert!(files.observe_file(1).is_err());
+
+        let mut text = ScanBudget {
+            files: 0,
+            text_bytes: MAX_TOTAL_TEXT_BYTES,
+        };
+        assert!(text.observe_text(1).is_err());
+
+        assert!(ScanBudget::default()
+            .observe_file(MAX_PACKAGE_DEPTH + 1)
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_manifest_symlink_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("test directory");
+        let target = directory.path().join("manifest.json");
+        std::fs::write(&target, r#"{"name":"demo","version":"1.0.0"}"#).expect("write target");
+        symlink(&target, directory.path().join("package.json")).expect("create symlink");
+        assert!(scan_package_dir(directory.path()).is_err());
+    }
 }

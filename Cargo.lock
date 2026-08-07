@@ -123,6 +123,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "walkdir",
+ "yaml-rust2",
 ]
 
 [[package]]
@@ -196,6 +197,7 @@ dependencies = [
  "hex",
  "rayon",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "sha1",
@@ -421,6 +423,7 @@ dependencies = [
  "argus-transport",
  "flate2",
  "hex",
+ "pep440_rs",
  "regex",
  "serde",
  "serde_json",

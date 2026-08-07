@@ -23,3 +23,6 @@ tempfile = { workspace = true }
 regex = { workspace = true }
 rayon = { workspace = true }
 yaml-rust2 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }

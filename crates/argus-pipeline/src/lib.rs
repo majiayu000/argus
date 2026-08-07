@@ -117,6 +117,7 @@ mod tests {
                 coordinate: None,
                 intelligence: None,
                 rules: None,
+                vulnerability: None,
             })
         }
     }

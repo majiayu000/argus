@@ -13,13 +13,14 @@
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{Context, Result};
-use argus_core::fs::atomic_write_bytes;
+use argus_core::fs::{atomic_write_bytes, read_bounded_utf8_regular_file};
 use argus_core::{Finding, Severity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
+use yaml_rust2::{Yaml, YamlLoader};
 
 /// Drift of an approved description → medium (allow-with-approval).
 pub const RULE_DRIFT: &str = "AGT-02";
@@ -29,6 +30,7 @@ pub const RULE_ENTRY_MISSING: &str = "AGT-02-baseline-entry-missing";
 pub const RULE_BASELINE_UNREADABLE: &str = "AGT-02-baseline-unreadable";
 
 const HASH_PREFIX_LEN: usize = 12;
+const BASELINE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// One description-class entry keyed by a stable locator `"<rel>#<locator>"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +59,7 @@ impl Baseline {
 /// Read + parse a baseline file. Missing file or malformed JSON → `Err`
 /// (the caller turns this into an info finding, never a panic).
 pub fn load(path: &Path) -> Result<Baseline> {
-    let raw = std::fs::read_to_string(path)
+    let raw = read_bounded_utf8_regular_file(path, BASELINE_MAX_BYTES)
         .with_context(|| format!("read baseline {}", path.display()))?;
     let baseline: Baseline =
         serde_json::from_str(&raw).with_context(|| format!("parse baseline {}", path.display()))?;
@@ -207,30 +209,23 @@ fn frontmatter_block(content: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Extract a top-level scalar `key: value` from a frontmatter block.
-/// Only simple single-line scalars are read (matches the metadata AGT-02
-/// baselines); block/multiline YAML is intentionally out of scope.
+/// Extract a top-level string scalar from a frontmatter block.
+///
+/// Parsing the complete YAML document is important here: line-oriented
+/// extraction hashes only the `|` / `>` marker for block scalars, allowing the
+/// effective description to drift without changing the AGT-02 baseline.
 fn frontmatter_scalar(block: &str, key: &str) -> Option<String> {
-    for line in block.lines() {
-        let trimmed = line.trim_end();
-        let Some(rest) = trimmed.strip_prefix(key) else {
-            continue;
-        };
-        let Some(rest) = rest.strip_prefix(':') else {
-            continue;
-        };
-        let value = rest.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-            .unwrap_or(value);
-        if value.is_empty() {
-            return None;
-        }
-        return Some(value.to_string());
+    let documents = YamlLoader::load_from_str(block).ok()?;
+    let [document] = documents.as_slice() else {
+        return None;
+    };
+    let Yaml::Hash(mapping) = document else {
+        return None;
+    };
+    match mapping.get(&Yaml::String(key.to_string())) {
+        Some(Yaml::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => None,
     }
-    None
 }
 
 fn push_entry(out: &mut Vec<DescEntry>, rel: &str, locator: &str, desc: &str) {
@@ -311,6 +306,65 @@ mod tests {
             keys.contains(&"SKILL.md#frontmatter.description"),
             "{keys:?}"
         );
+    }
+
+    #[test]
+    fn extracts_literal_and_folded_yaml_descriptions() {
+        let literal = skill(
+            "literal/SKILL.md",
+            "---\nname: literal\ndescription: |-\n  first line\n  second line\n---\n",
+        );
+        let folded = skill(
+            "folded/SKILL.md",
+            "---\r\nname: folded\r\ndescription: >-\r\n  first line\r\n  second line\r\n---\r\n",
+        );
+        let entries = extract_entries(&[literal, folded]);
+        let hashes: BTreeMap<_, _> = entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.hash))
+            .collect();
+        assert_eq!(
+            hashes["literal/SKILL.md#frontmatter.description"],
+            hash_desc("first line\nsecond line")
+        );
+        assert_eq!(
+            hashes["folded/SKILL.md#frontmatter.description"],
+            hash_desc("first line second line")
+        );
+    }
+
+    #[test]
+    fn multiline_description_body_changes_the_baseline_hash() {
+        let before = skill(
+            "SKILL.md",
+            "---\nname: demo\ndescription: |\n  approved first line\n  approved second line\n---\n",
+        );
+        let after = skill(
+            "SKILL.md",
+            "---\nname: demo\ndescription: |\n  approved first line\n  changed second line\n---\n",
+        );
+        let before = extract_entries(&[before]);
+        let after = extract_entries(&[after]);
+        let before_hash = &before
+            .iter()
+            .find(|entry| entry.key.ends_with("frontmatter.description"))
+            .expect("description entry")
+            .hash;
+        let after_hash = &after
+            .iter()
+            .find(|entry| entry.key.ends_with("frontmatter.description"))
+            .expect("description entry")
+            .hash;
+        assert_ne!(before_hash, after_hash);
+    }
+
+    #[test]
+    fn ignores_non_string_frontmatter_fields() {
+        let f = skill(
+            "SKILL.md",
+            "---\nname: 42\ndescription:\n  nested: value\n---\n",
+        );
+        assert!(extract_entries(&[f]).is_empty());
     }
 
     #[test]

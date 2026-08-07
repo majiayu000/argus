@@ -114,9 +114,9 @@ function validateReport(format, text, code, version) {
     let report;
     try { report = JSON.parse(text); } catch (error) { throw new Error("JSON report is malformed", { cause: error }); }
     const required = ["artifact", "decision", "findings", "package_name", "package_version", "path"];
-    const allowed = new Set([...required, "coordinate", "intelligence"]);
     const keys = report && typeof report === "object" && !Array.isArray(report) ? Object.keys(report) : [];
-    if (required.some((key) => !keys.includes(key)) || keys.some((key) => !allowed.has(key)) || report.decision !== decision || !Array.isArray(report.findings) || typeof report.artifact !== "string" || typeof report.path !== "string") throw new Error("JSON report contract does not match exit code");
+    const optionalObject = (key) => report[key] === undefined || report[key] === null || (typeof report[key] === "object" && !Array.isArray(report[key]));
+    if (required.some((key) => !keys.includes(key)) || report.decision !== decision || !Array.isArray(report.findings) || report.findings.some((finding) => !finding || typeof finding !== "object" || Array.isArray(finding)) || typeof report.artifact !== "string" || typeof report.path !== "string" || ![report.package_name, report.package_version].every((value) => value === null || typeof value === "string") || !optionalObject("coordinate") || !optionalObject("intelligence") || !optionalObject("vulnerability")) throw new Error("JSON report contract does not match exit code");
     if ((decision === "allow") !== (report.findings.length === 0)) throw new Error("JSON report findings do not match decision");
   } else {
     let report;

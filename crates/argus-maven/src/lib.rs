@@ -269,6 +269,7 @@ pub fn fetch_and_scan_maven_with_rules_and_context(
         coordinate: Some(coordinate),
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);

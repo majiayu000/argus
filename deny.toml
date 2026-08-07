@@ -1,8 +1,4 @@
-# cargo-deny configuration (CI: `cargo deny check advisories bans sources`).
-#
-# License review is intentionally out of scope for the first iteration —
-# advisories/bans/sources are the supply-chain-relevant checks for a scanner
-# that should audit its own dependency tree (#131).
+# cargo-deny configuration (CI: `cargo deny check advisories bans licenses sources`).
 
 [advisories]
 version = 2
@@ -16,6 +12,25 @@ wildcards = "deny"
 # Workspace-internal `path` dependencies carry no version and would
 # otherwise trip the wildcard check.
 allow-wildcard-paths = true
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
 
 [sources]
 unknown-registry = "deny"

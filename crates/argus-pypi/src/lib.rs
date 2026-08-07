@@ -21,6 +21,7 @@ use argus_core::{
     canonicalize_package_name, Ecosystem, Finding, PackageCoordinate, ScanReport, Severity,
 };
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 mod metadata;
 mod rules;
@@ -226,8 +227,6 @@ pub fn fetch_and_scan_pypi_with_rules_and_context(
 
     // 5. For each artifact: validate URL, download, verify SHA-256, extract, scan.
     let mut all_findings: Vec<Finding> = Vec::new();
-    let mut last_name: Option<String> = None;
-    let mut last_version: Option<String> = None;
     let mut external_budget = argus_rules::ExternalScanBudget::default();
     for (index, art) in artifacts.iter().enumerate() {
         validate_artifact_filename(&art.filename)
@@ -279,13 +278,13 @@ pub fn fetch_and_scan_pypi_with_rules_and_context(
             }
             _ => unreachable!("artifact_kind is normalized above"),
         };
+        validate_embedded_identity(
+            &coordinate,
+            name.as_deref(),
+            version_str.as_deref(),
+            &art.filename,
+        )?;
         all_findings.extend(findings);
-        if name.is_some() {
-            last_name = name;
-        }
-        if version_str.is_some() {
-            last_version = version_str;
-        }
     }
 
     // 6. Run name-based rules (typosquatting) on the package name itself.
@@ -299,17 +298,53 @@ pub fn fetch_and_scan_pypi_with_rules_and_context(
         // path feeds text/JSON/SARIF output and fingerprints (see the
         // matching invariant in argus-fetch).
         path: PathBuf::from(format!("{}@{version}", coordinate.canonical_name)),
-        package_name: last_name.or_else(|| Some(pkg.name.clone())),
-        package_version: last_version.or(Some(version)),
+        package_name: Some(coordinate.original_name.clone()),
+        package_version: Some(coordinate.version.clone()),
         decision,
         findings: all_findings,
         coordinate: Some(coordinate),
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);
     Ok(report)
+}
+
+fn validate_embedded_identity(
+    coordinate: &PackageCoordinate,
+    embedded_name: Option<&str>,
+    embedded_version: Option<&str>,
+    artifact: &str,
+) -> Result<()> {
+    if let Some(name) = embedded_name {
+        let canonical = canonicalize_package_name(Ecosystem::PyPi, name)
+            .with_context(|| format!("normalize embedded PyPI name from {artifact}"))?;
+        if canonical != coordinate.canonical_name {
+            bail!(
+                "PyPI artifact identity mismatch in `{artifact}`: registry selected `{}` but embedded metadata names `{name}`",
+                coordinate.original_name
+            );
+        }
+    }
+    if let Some(version) = embedded_version {
+        let embedded = pep440_rs::Version::from_str(version)
+            .with_context(|| format!("parse embedded PyPI version `{version}` from {artifact}"))?;
+        let selected = pep440_rs::Version::from_str(&coordinate.version).with_context(|| {
+            format!(
+                "parse selected PyPI registry version `{}`",
+                coordinate.version
+            )
+        })?;
+        if embedded != selected {
+            bail!(
+                "PyPI artifact version mismatch in `{artifact}`: registry selected `{}` but embedded metadata names `{version}`",
+                coordinate.version
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_artifact_filename(filename: &str) -> Result<()> {

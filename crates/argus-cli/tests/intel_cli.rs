@@ -73,6 +73,7 @@ fn synthetic_report(ecosystem: Ecosystem, name: &str, version: &str) -> ScanRepo
         ),
         intelligence: None,
         rules: None,
+        vulnerability: None,
     }
 }
 

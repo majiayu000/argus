@@ -10,10 +10,12 @@
 //! - Enforce `max_extracted_bytes` across the whole archive with overflow-
 //!   checked accounting; an entry that overruns the remaining budget fails
 //!   the extraction.
+//! - Bound entry count and path complexity before any filesystem mutation.
 //!
 //! `label` names the artifact kind in error messages (for example
 //! `"wheel entry"`), preserving each ecosystem's diagnostics.
 
+use crate::{ArchiveBudget, DEFAULT_ARCHIVE_LIMITS};
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -95,6 +97,13 @@ fn for_each_entry(
         zip::ZipArchive::new(reader).with_context(|| format!("open {label} archive as ZIP"))?;
 
     let mut total: u64 = 0;
+    if archive.len() > DEFAULT_ARCHIVE_LIMITS.entries {
+        bail!(
+            "{label} entry count exceeds cap {}",
+            DEFAULT_ARCHIVE_LIMITS.entries
+        );
+    }
+    let mut budget = ArchiveBudget::new(DEFAULT_ARCHIVE_LIMITS);
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
@@ -110,6 +119,7 @@ fn for_each_entry(
                 file.name()
             ),
         };
+        budget.observe(&path, label)?;
         for comp in path.components() {
             match comp {
                 Component::Normal(_) | Component::CurDir => {}

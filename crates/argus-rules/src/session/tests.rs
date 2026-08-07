@@ -35,6 +35,7 @@ fn report(findings: Vec<Finding>) -> ScanReport {
         coordinate: None,
         intelligence: None,
         rules: None,
+        vulnerability: None,
     }
 }
 

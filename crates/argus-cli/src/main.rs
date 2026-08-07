@@ -30,7 +30,6 @@ use argus_rules::RuleSession;
 use argus_transport::HttpTransport;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -768,19 +767,12 @@ fn read_and_parse_lockfile_bytes(
     Ok((bytes, parsed))
 }
 
+/// Read the lockfile through a single no-follow descriptor.
+///
+/// A `File::open` after an `is_file()` probe both follows symlinks and leaves
+/// a TOCTOU window between the check and the read, so the bounded regular-file
+/// primitive does the type check on the descriptor it actually reads.
 fn read_lockfile_bytes(path: &Path) -> Result<Vec<u8>> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("open lockfile {}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take((MAX_INPUT_BYTES as u64) + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read lockfile {}", path.display()))?;
-    if bytes.len() > MAX_INPUT_BYTES {
-        bail!(
-            "lockfile {} exceeds maximum {} bytes",
-            path.display(),
-            MAX_INPUT_BYTES
-        );
-    }
-    Ok(bytes)
+    argus_core::fs::read_bounded_regular_file(path, MAX_INPUT_BYTES)
+        .with_context(|| format!("read bounded regular lockfile {}", path.display()))
 }

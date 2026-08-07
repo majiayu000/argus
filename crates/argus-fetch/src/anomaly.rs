@@ -612,16 +612,17 @@ fn read_cache(
     if !metadata.is_file() {
         bail!("metadata cache entry is not a file: {}", path.display());
     }
-    if metadata.len() > MAXIMUM_SEARCH_BYTES + 4096 {
-        bail!(
-            "metadata cache entry exceeds bounded size: {}",
-            path.display()
-        );
-    }
-    let entry: CacheEntry = serde_json::from_slice(
-        &fs::read(path).with_context(|| format!("read metadata cache {}", path.display()))?,
-    )
-    .with_context(|| format!("parse metadata cache {}", path.display()))?;
+    let bytes = match argus_core::fs::read_bounded_regular_file(
+        path,
+        (MAXIMUM_SEARCH_BYTES + 4096) as usize,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Err(error).with_context(|| format!("read metadata cache {}", path.display()))
+        }
+    };
+    let entry: CacheEntry = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse metadata cache {}", path.display()))?;
     if !cache_entry_is_reusable(entry.fetched_at, now, target_published_at)
         .with_context(|| format!("validate metadata cache time {}", path.display()))?
     {

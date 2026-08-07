@@ -23,6 +23,11 @@ use flate2::read::GzDecoder;
 use std::io::Read;
 use std::path::{Component, Path};
 
+/// Gem paths whose contents the RubyGems rules read.
+fn is_gem_security_relevant(rel: &str) -> bool {
+    rel.ends_with(".rb") || rel.ends_with(".gemspec")
+}
+
 /// Maximum size we read for any single outer `.gem` member into memory.
 /// The gemspec (`metadata.gz`) is tiny; `data.tar.gz` for large gems can be
 /// tens of MB but is bounded well under this.
@@ -103,11 +108,11 @@ fn gunzip_to_string(gz_bytes: &[u8], what: &str) -> Result<String> {
     let decoder = GzDecoder::new(gz_bytes);
     let mut out = Vec::new();
     decoder
-        .take(MAX_MEMBER_BYTES + 1)
+        .take(TEXT_MAX_BYTES + 1)
         .read_to_end(&mut out)
         .with_context(|| format!("gunzip {what}"))?;
-    if out.len() as u64 > MAX_MEMBER_BYTES {
-        bail!("decompressed {what} exceeds cap {MAX_MEMBER_BYTES} bytes");
+    if out.len() as u64 > TEXT_MAX_BYTES {
+        bail!("decompressed {what} exceeds text scan cap {TEXT_MAX_BYTES} bytes");
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
@@ -188,7 +193,7 @@ pub fn scan_gem_with_rules_and_context(
     let env_cred_re = rules::env_credential_read_regex();
     let env_bulk_re = rules::env_bulk_read_regex();
     let net_egress_re = rules::extconf_remote_download_regex();
-    let (file_results, _) = scan_text_files_with_context(
+    let (file_results, skipped) = scan_text_files_with_context(
         &pkg_dir,
         TEXT_MAX_BYTES,
         execution,
@@ -220,6 +225,7 @@ pub fn scan_gem_with_rules_and_context(
             Ok::<_, anyhow::Error>((per_file, is_extconf))
         },
     )?;
+    skipped.require_scanned("gem", is_gem_security_relevant)?;
     for (mut per_file, is_extconf) in file_results {
         extconf_on_disk |= is_extconf;
         findings.append(&mut per_file);

@@ -194,13 +194,9 @@ pub fn fetch_and_scan_nuget_with_rules_and_context(
                     )
                 })?;
             } else {
-                findings.push(Finding::new(
-                    "nuget-integrity-unverifiable",
-                    Severity::Info,
-                    format!(
-                        "catalog packageHashAlgorithm `{algo}` is not SHA512; content digest not verified"
-                    ),
-                ));
+                anyhow::bail!(
+                    "catalog packageHashAlgorithm `{algo}` is unsupported; refusing unverified artifact"
+                );
             }
         }
         Ok(None) => {
@@ -211,14 +207,8 @@ pub fn fetch_and_scan_nuget_with_rules_and_context(
                     .to_string(),
             ));
         }
-        Err(e) => {
-            findings.push(Finding::new(
-                "nuget-integrity-unverifiable",
-                Severity::Info,
-                format!(
-                    "NuGet catalog hop unavailable ({e:#}); content digest not verified (transport TLS + host pin only)"
-                ),
-            ));
+        Err(error) => {
+            return Err(error).context("resolve required NuGet catalog integrity evidence")
         }
     }
 
@@ -258,6 +248,7 @@ pub fn fetch_and_scan_nuget_with_rules_and_context(
         coordinate: Some(coordinate),
         intelligence: None,
         rules: None,
+        vulnerability: None,
     };
     rules.validate_external_limits(&report.findings)?;
     rules.finalize_package(&mut report);
@@ -267,8 +258,9 @@ pub fn fetch_and_scan_nuget_with_rules_and_context(
 /// Follow the registration leaf → `catalogEntry.@id` → catalog leaf and
 /// return `(packageHash_b64, algorithm)` if present. Returns `Ok(None)`
 /// when the catalog entry exists but omits `packageHash`. Any transport or
-/// parse failure is an `Err` and is surfaced to the caller as an Info
-/// finding — never silently swallowed (U-17 / U-29).
+/// parse or transport failure is an `Err` and fails the fetch closed. A
+/// successfully resolved catalog entry that explicitly omits `packageHash`
+/// remains `Ok(None)` and is surfaced as bounded uncertainty.
 fn resolve_catalog_hash(
     registry: &str,
     registry_host: &str,

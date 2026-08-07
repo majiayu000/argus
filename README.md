@@ -287,6 +287,11 @@ claim vulnerability status, malicious-package status, or artifact safety.
 
 ### Explicit OSV vulnerability queries
 
+The secure OSV cache and verified malicious-package snapshot implementations
+currently require Unix filesystem primitives. On Windows, those explicit
+intelligence commands fail closed as unsupported; package, lockfile, and agent
+static scans remain available.
+
 `argus vulns` is an opt-in known-vulnerability query. It accepts either one
 exact package coordinate or the normalized external coordinates from any of
 the nine lockfile families above:

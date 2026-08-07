@@ -193,7 +193,7 @@ fn bounded_worker_read_rechecks_size_after_discovery() {
     fs::write(&grown, b"small").unwrap();
     let execution = ExecutionContext::serial().unwrap();
 
-    let (outputs, binaries) = scan_text_files_with_context(package.path(), 5, &execution, |file| {
+    let (outputs, skipped) = scan_text_files_with_context(package.path(), 5, &execution, |file| {
         if file.rel == "a-trigger.txt" {
             fs::write(&grown, b"123456").unwrap();
         }
@@ -202,5 +202,8 @@ fn bounded_worker_read_rechecks_size_after_discovery() {
     .unwrap();
 
     assert_eq!(outputs, ["a-trigger.txt"]);
-    assert_eq!(binaries, ["b-grown.txt"]);
+    // A file that grew past the limit between discovery and read is oversized,
+    // not binary: the distinction is what lets callers fail closed on it.
+    assert_eq!(skipped.oversized, ["b-grown.txt"]);
+    assert!(skipped.binary.is_empty());
 }

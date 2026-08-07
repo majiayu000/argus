@@ -14,10 +14,31 @@
 //! traversal, reject symlinks, and cap total extracted size.
 
 use crate::{finding, rules};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use argus_core::{ArtifactScan, Finding, Severity};
-use argus_rules::{read_text_file_bounded, scan_text_file, RuleSession, TextFile};
+use argus_rules::{
+    read_text_file_bounded, scan_text_file, RuleSession, SkipReason, TextFile, TextFileOutcome,
+};
 use std::path::Path;
+
+type MavenFileResult = (Vec<Finding>, Option<JarManifest>, bool);
+
+/// Jar entries whose contents Maven rules read. Anything here that was not
+/// scanned must fail the scan instead of silently reporting nothing.
+fn is_maven_security_relevant(rel: &str) -> bool {
+    rules::is_embedded_build_script(rel)
+        || rel == "META-INF/MANIFEST.MF"
+        || rel.ends_with("/META-INF/MANIFEST.MF")
+        || rel.ends_with("pom.xml")
+}
+
+fn skip_label(reason: SkipReason) -> &'static str {
+    match reason {
+        SkipReason::Oversized => "exceeds text scan limit",
+        SkipReason::Unreadable => "could not be read",
+        SkipReason::Binary => "is not text",
+    }
+}
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -106,7 +127,7 @@ pub(crate) fn scan_maven_jar_with_rules_budget_and_context(
     execution.execute_ordered(
         &inputs,
         None,
-        |_index, (rel, abs)| -> Result<(Vec<Finding>, Option<JarManifest>, bool)> {
+        |_index, (rel, abs)| -> Result<MavenFileResult> {
             let mut per_file = Vec::new();
             let has_launcher = rules::is_embedded_build_script(rel);
             if has_launcher {
@@ -119,8 +140,19 @@ pub(crate) fn scan_maven_jar_with_rules_budget_and_context(
                     .at(rel.clone()),
                 );
             }
-            let Some(file) = read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? else {
-                return Ok((per_file, None, has_launcher));
+            let file = match read_text_file_bounded(rel, abs, TEXT_MAX_BYTES)? {
+                TextFileOutcome::Text(file) => file,
+                // A build/launcher script or MANIFEST we could not read is
+                // missing evidence, not an absent finding.
+                TextFileOutcome::Skipped(reason) => {
+                    if reason != SkipReason::Binary && is_maven_security_relevant(rel) {
+                        bail!(
+                            "security-relevant Maven file `{rel}` was not scanned ({})",
+                            skip_label(reason)
+                        );
+                    }
+                    return Ok((per_file, None, has_launcher));
+                }
             };
             let content = file.content;
             let manifest =
