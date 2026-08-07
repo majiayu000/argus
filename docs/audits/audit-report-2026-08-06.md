@@ -1,10 +1,10 @@
 # Argus 全量优化与安全审计报告
 
-> 日期：2026-08-06  
-> 分支：`chore/specrail-tooling-move`，起点 `f132051`  
-> 范围：21 个 Rust crates、GitHub Action、CI/发布、SpecRail、依赖与文档  
-> 方法：3 条并行只读审计线 + 主线复核、修复与回归  
-> 前次审计：`docs/audits/audit-report-2026-07-13.md`
+> - 日期：2026-08-06
+> - 分支：`chore/specrail-tooling-move`，起点 `f132051`
+> - 范围：21 个 Rust crates、GitHub Action、CI/发布、SpecRail、依赖与文档
+> - 方法：3 条并行只读审计线 + 主线复核、修复与回归
+> - 前次审计：`docs/audits/audit-report-2026-07-13.md`
 
 ## 结论
 
