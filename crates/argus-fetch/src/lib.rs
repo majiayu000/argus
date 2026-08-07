@@ -601,6 +601,54 @@ fn url_encode_pkg(name: &str) -> String {
     name.replace('/', "%2F")
 }
 
+/// [`argus_pipeline::EcosystemFetcher`] entry point for npm.
+///
+/// This is the plain fetch-verify-extract-scan path. npm's richer knobs —
+/// Sigstore verification, metadata-anomaly evaluation, tarball host
+/// allowlists — stay on [`FetchOptions`] and are reached through
+/// [`fetch_and_scan_with_rules_and_context`], exactly as the trait intends.
+/// A caller that needs them must ask for them explicitly rather than get a
+/// silently weaker or stronger scan through the generic entry point.
+pub struct NpmFetcher;
+
+impl argus_pipeline::EcosystemFetcher for NpmFetcher {
+    fn ecosystem(&self) -> argus_core::Ecosystem {
+        argus_core::Ecosystem::Npm
+    }
+
+    fn default_registry(&self) -> &'static str {
+        "https://registry.npmjs.org"
+    }
+
+    fn fetch_and_scan(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+    ) -> Result<ScanReport> {
+        let execution = argus_core::ExecutionContext::serial()?;
+        self.fetch_and_scan_with_context(spec, opts, transport, rules, &execution)
+    }
+
+    fn fetch_and_scan_with_context(
+        &self,
+        spec: &str,
+        opts: &argus_pipeline::CommonFetchOptions,
+        transport: &dyn Transport,
+        rules: &argus_rules::RuleSession,
+        execution: &argus_core::ExecutionContext,
+    ) -> Result<ScanReport> {
+        let pkg = PackageRef::parse(spec)?;
+        let opts = FetchOptions {
+            registry: opts.registry.clone(),
+            cache_dir: opts.cache_dir.clone(),
+            ..FetchOptions::default()
+        };
+        fetch_and_scan_with_rules_and_context(&pkg, &opts, transport, rules, execution)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

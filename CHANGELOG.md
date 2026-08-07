@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `argus lockfile-scan`, which fetches and statically scans every
+  dependency a lockfile resolves and aggregates them into one decision and
+  exit code. Dependencies that were skipped or could not be assessed are
+  reported explicitly, and an unassessed dependency escalates the aggregate
+  decision to `block` rather than contributing nothing. `--base` restricts the
+  sweep to added/changed dependencies; SARIF emits one run per package.
 - Add the approval-only `encoded-dynamic-execution` rule for direct JavaScript
   `eval`/`Function(atob(...))` and Python
   `exec`/`eval(base64.b64decode(...))` chains. Statistical obfuscation

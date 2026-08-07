@@ -121,7 +121,7 @@ fn display_values(values: &[String]) -> String {
     }
 }
 
-fn severity_tag(finding: &argus_core::Finding) -> &'static str {
+pub(crate) fn severity_tag(finding: &argus_core::Finding) -> &'static str {
     match finding.severity {
         argus_core::Severity::Critical => "CRIT",
         argus_core::Severity::High => "HIGH",
