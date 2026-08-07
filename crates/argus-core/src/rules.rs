@@ -8,6 +8,12 @@
 
 mod catalog;
 mod effective;
+pub mod risk;
+
+pub use risk::{
+    assess, Confidence, RiskAssessment, RiskAssessmentEngine, RiskAssessmentError,
+    RiskContribution, RiskEngine, RiskScore, RiskThresholds, RuleWeight, BASIS_POINTS,
+};
 
 pub use catalog::{
     CatalogError, CatalogOrigin, DefaultSeverity, HelpUri, MatcherKind, RuleCatalog, RuleDef,
