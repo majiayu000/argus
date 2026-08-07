@@ -203,6 +203,13 @@ fn scan_file(
         );
     }
 
+    // obfuscated-source: structural signatures a bundler cannot produce.
+    // Statistical shape (entropy, minification, line length) rides along as
+    // evidence only — see `crate::obfuscation` for why.
+    if let Some(finding) = crate::obfuscation::scan_source(file) {
+        findings.push(finding);
+    }
+
     // encoded-dynamic-execution: only the direct decode -> eval/exec chain.
     // This intentionally does not score standalone decoders, long/minified
     // lines, or entropy: the chain itself is the high-confidence signal.

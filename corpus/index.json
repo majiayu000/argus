@@ -7,7 +7,10 @@
       "path": "fixtures/blocked-marker",
       "packageName": "blocked-marker",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "pre-scan-execution-marker"],
+      "rules": [
+        "lifecycle-script",
+        "pre-scan-execution-marker"
+      ],
       "notes": "E2E marker fixture: raw install writes /tmp/safepm_should_not_exist; safepm must prevent it."
     },
     {
@@ -16,7 +19,11 @@
       "path": "fixtures/lifecycle-curl-sh",
       "packageName": "lifecycle-curl-sh",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "remote-download", "shell-pipe-execution"],
+      "rules": [
+        "lifecycle-script",
+        "remote-download",
+        "shell-pipe-execution"
+      ],
       "notes": "Models curl | sh postinstall execution."
     },
     {
@@ -25,7 +32,11 @@
       "path": "fixtures/credential-exfil",
       "packageName": "credential-exfil",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "credential-access", "network-exfiltration"],
+      "rules": [
+        "lifecycle-script",
+        "credential-access",
+        "network-exfiltration"
+      ],
       "notes": "Models .npmrc/.env collection followed by network exfiltration."
     },
     {
@@ -34,7 +45,11 @@
       "path": "fixtures/binary-dropper",
       "packageName": "binary-dropper",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "binary-file", "binary-execution"],
+      "rules": [
+        "lifecycle-script",
+        "binary-file",
+        "binary-execution"
+      ],
       "notes": "Models OS-specific binary execution during install."
     },
     {
@@ -43,7 +58,12 @@
       "path": "fixtures/worm-behavior",
       "packageName": "worm-behavior",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "token-harvest", "github-write-api", "npm-publish"],
+      "rules": [
+        "lifecycle-script",
+        "token-harvest",
+        "github-write-api",
+        "npm-publish"
+      ],
       "notes": "Models Shai-Hulud style token harvesting and self-propagation."
     },
     {
@@ -52,7 +72,11 @@
       "path": "fixtures/runtime-wallet-hook",
       "packageName": "runtime-wallet-hook",
       "expectedDecision": "block",
-      "rules": ["runtime-hook", "wallet-interception", "network-exfiltration"],
+      "rules": [
+        "runtime-hook",
+        "wallet-interception",
+        "network-exfiltration"
+      ],
       "notes": "Models runtime-only browser wallet/network interception."
     },
     {
@@ -61,7 +85,11 @@
       "path": "fixtures/typosquat-react-domm",
       "packageName": "react-domm",
       "expectedDecision": "block",
-      "rules": ["typosquatting", "low-reputation", "lifecycle-script"],
+      "rules": [
+        "typosquatting",
+        "low-reputation",
+        "lifecycle-script"
+      ],
       "notes": "Models a package name close to react-dom with install script risk."
     },
     {
@@ -70,7 +98,10 @@
       "path": "fixtures/dependency-confusion-internal",
       "packageName": "internal-auth-client",
       "expectedDecision": "block",
-      "rules": ["dependency-confusion", "public-registry-internal-name"],
+      "rules": [
+        "dependency-confusion",
+        "public-registry-internal-name"
+      ],
       "notes": "Models an internal-looking unscoped package that should not resolve from public npm."
     },
     {
@@ -79,7 +110,9 @@
       "path": "fixtures/encoded-dynamic-execution-js",
       "packageName": "encoded-dynamic-execution-js",
       "expectedDecision": "allow-with-approval",
-      "rules": ["encoded-dynamic-execution"],
+      "rules": [
+        "encoded-dynamic-execution"
+      ],
       "notes": "Direct eval(atob(...)) chain; payload is inert fixture text."
     },
     {
@@ -88,7 +121,9 @@
       "path": "fixtures/encoded-dynamic-execution-python",
       "packageName": "encoded-dynamic-execution-python",
       "expectedDecision": "allow-with-approval",
-      "rules": ["encoded-dynamic-execution"],
+      "rules": [
+        "encoded-dynamic-execution"
+      ],
       "notes": "Direct exec(base64.b64decode(...)) chain in a Python source file."
     },
     {
@@ -106,7 +141,10 @@
       "path": "fixtures/benign-esbuild-like",
       "packageName": "benign-esbuild-like",
       "expectedDecision": "allow-with-approval",
-      "rules": ["lifecycle-script", "known-native-build-pattern"],
+      "rules": [
+        "lifecycle-script",
+        "known-native-build-pattern"
+      ],
       "notes": "Models a legitimate platform binary validation script that still requires approval."
     },
     {
@@ -115,7 +153,12 @@
       "path": "fixtures/crypto-key-stealer",
       "packageName": "etherss",
       "expectedDecision": "block",
-      "rules": ["typosquatting", "low-reputation", "runtime-hook", "network-exfiltration"],
+      "rules": [
+        "typosquatting",
+        "low-reputation",
+        "runtime-hook",
+        "network-exfiltration"
+      ],
       "notes": "Models galedonovan 2026-03: crypto-library typosquat + runtime hook on key decode + Telegram exfil. Combined name-rules and runtime-rules in one fixture."
     },
     {
@@ -124,7 +167,12 @@
       "path": "fixtures/trapdoor-ai-context",
       "packageName": "defi-threat-scanner",
       "expectedDecision": "block",
-      "rules": ["lifecycle-script", "ai-context-poisoning", "credential-access", "network-exfiltration"],
+      "rules": [
+        "lifecycle-script",
+        "ai-context-poisoning",
+        "credential-access",
+        "network-exfiltration"
+      ],
       "notes": "Models the TrapDoor campaign (Socket.dev 2026-05-24): postinstall dropper poisons .cursorrules / CLAUDE.md, harvests SSH + AWS creds, exfils to attacker GitHub Pages. The ai-context-poisoning rule is novel here."
     },
     {
@@ -139,6 +187,26 @@
         "untrusted-registry-host"
       ],
       "notes": "Models lockfile poisoning through a plain HTTP tarball URL."
+    },
+    {
+      "id": "obfuscated-source-mangled",
+      "kind": "fixture",
+      "path": "fixtures/obfuscated-source-mangled",
+      "packageName": "obfuscated-source-mangled",
+      "expectedDecision": "allow-with-approval",
+      "rules": [
+        "obfuscated-source"
+      ],
+      "notes": "Systematic _0x hex identifier mangling; a signature build tooling never emits."
+    },
+    {
+      "id": "minified-bundle-benign",
+      "kind": "fixture",
+      "path": "fixtures/minified-bundle-benign",
+      "packageName": "minified-bundle-benign",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Legitimate terser-shaped bundle: one long line, short identifiers, one decode step. The false-positive floor for GH-141."
     }
   ]
 }

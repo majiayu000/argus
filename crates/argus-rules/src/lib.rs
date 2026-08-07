@@ -20,6 +20,7 @@ mod content;
 mod decision;
 mod lifecycle;
 mod name;
+pub mod obfuscation;
 mod session;
 mod session_execution;
 pub mod typosquat;
