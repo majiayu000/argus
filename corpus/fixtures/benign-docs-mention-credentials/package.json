@@ -1,0 +1,6 @@
+{
+  "name": "benign-docs-mention-credentials",
+  "version": "1.0.0",
+  "description": "Publishing checklist formatter; see README for registry auth setup.",
+  "main": "index.js"
+}

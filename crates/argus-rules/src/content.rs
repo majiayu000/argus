@@ -63,6 +63,47 @@ enum NetworkScan<'a> {
     Disabled,
 }
 
+/// Documentation extensions whose prose is not an executable surface.
+const PROSE_EXTENSIONS: &[&str] = &[
+    ".md",
+    ".markdown",
+    ".mdx",
+    ".rst",
+    ".txt",
+    ".adoc",
+    ".asciidoc",
+];
+
+/// Filenames an AI agent loads as instructions. These are `.md` by
+/// convention but are executed by the agent that reads them, so they are
+/// payload surfaces, not prose.
+const AGENT_INSTRUCTION_FILES: &[&str] = &[
+    "claude.md",
+    "agents.md",
+    ".cursorrules",
+    ".continuerules",
+    ".codexrules",
+    ".windsurfrules",
+    ".aider.conf.yml",
+];
+
+/// Whether a path's contents can meaningfully *read* host credentials.
+///
+/// Returns false only for prose documentation. Everything else — source,
+/// config, unknown extensions, extensionless scripts — stays in scope, so a
+/// payload cannot escape by choosing an unusual filename.
+fn is_credential_scan_surface(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if AGENT_INSTRUCTION_FILES.contains(&basename)
+        || lower.contains("/.claude/")
+        || lower.starts_with(".claude/")
+    {
+        return true;
+    }
+    !PROSE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
 fn scan_file(
     file: &TextFile,
     findings: &mut Vec<Finding>,
@@ -72,7 +113,13 @@ fn scan_file(
     let body = &file.content;
 
     // credential-access: targets host secret files by literal path.
-    if cred_paths_regex().is_match(body) {
+    //
+    // Prose is excluded: a README that documents `~/.npmrc` setup is not a
+    // package reading it, and that shape dominated the false positives the
+    // skill census measured (GH-184). Agent instruction files stay in scope —
+    // a shipped `CLAUDE.md` naming a credential path is read by the user's
+    // agent, so there it is a payload rather than documentation.
+    if is_credential_scan_surface(&file.rel) && cred_paths_regex().is_match(body) {
         findings.push(
             Finding::new(
                 "credential-access",
@@ -668,6 +715,103 @@ mod tests {
             python_findings("eval = safe\nexec(base64.b64decode('YQ=='))")
                 .iter()
                 .any(|finding| finding.rule_id == "encoded-dynamic-execution")
+        );
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    #[test]
+    fn prose_documentation_is_not_a_credential_surface() {
+        for rel in [
+            "README.md",
+            "docs/publishing.md",
+            "CHANGELOG.markdown",
+            "guide.rst",
+            "NOTES.txt",
+            "manual.adoc",
+        ] {
+            assert!(!is_credential_scan_surface(rel), "{rel}");
+        }
+    }
+
+    #[test]
+    fn agent_instruction_files_stay_in_scope() {
+        // A shipped CLAUDE.md naming a credential path is read by the user's
+        // agent. There the path is a payload, not documentation.
+        for rel in [
+            "CLAUDE.md",
+            "sub/CLAUDE.md",
+            "AGENTS.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".claude/commands/deploy.md",
+            "pkg/.claude/skills/x.md",
+        ] {
+            assert!(is_credential_scan_surface(rel), "{rel}");
+        }
+    }
+
+    #[test]
+    fn executable_and_unknown_surfaces_stay_in_scope() {
+        // Nothing escapes by choosing an unusual name: only prose is excluded.
+        for rel in [
+            "index.js",
+            "setup.py",
+            "build.rs",
+            "install.sh",
+            "hooks/pre-commit",
+            "config.json",
+            "data.yaml",
+            "weird.qqq",
+        ] {
+            assert!(is_credential_scan_surface(rel), "{rel}");
+        }
+    }
+
+    #[test]
+    fn documented_credential_path_no_longer_fires_but_source_still_does() {
+        let quoted = r#"It mounts "~/.ssh/id_ed25519" too."#;
+
+        let mut docs = Vec::new();
+        scan_text_file(
+            &TextFile {
+                rel: "README.md".to_string(),
+                content: quoted.to_string(),
+            },
+            &mut docs,
+        );
+        assert!(
+            !docs.iter().any(|f| f.rule_id == "credential-access"),
+            "documentation must not fire: {docs:?}"
+        );
+
+        let mut source = Vec::new();
+        scan_text_file(
+            &TextFile {
+                rel: "index.js".to_string(),
+                content: quoted.to_string(),
+            },
+            &mut source,
+        );
+        assert!(
+            source.iter().any(|f| f.rule_id == "credential-access"),
+            "source must still fire: {source:?}"
+        );
+
+        let mut agent = Vec::new();
+        scan_text_file(
+            &TextFile {
+                rel: "CLAUDE.md".to_string(),
+                content: quoted.to_string(),
+            },
+            &mut agent,
+        );
+        assert!(
+            agent.iter().any(|f| f.rule_id == "credential-access"),
+            "agent instruction file must still fire: {agent:?}"
         );
     }
 }

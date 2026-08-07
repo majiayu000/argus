@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downgrade path. Scripts that also fetch a remote payload — including
   `prebuild-install`/`node-pre-gyp`, which reach the network on the common
   path — are excluded (GH-185).
+- `credential-access` no longer fires on prose documentation. A README that
+  quotes `~/.npmrc` or `~/.aws/credentials` is not a package reading them, and
+  that shape dominated the false positives the skill census measured. Agent
+  instruction files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.claude/**`)
+  stay in scope, because there a credential path is a payload the user's agent
+  reads (GH-184).
 - Add benign corpus fixtures covering the false-positive shapes the skill
   census measured: documented `curl | sh` installers, runtime HTTPS clients,
   base64-decoded embedded data, and lint rules that match dynamic-execution
