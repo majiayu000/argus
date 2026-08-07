@@ -1,0 +1,6 @@
+{
+  "name": "benign-eval-mentioned-in-text",
+  "version": "1.0.0",
+  "description": "Linter rule that reports dynamic execution in user code.",
+  "main": "index.js"
+}
