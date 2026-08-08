@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end fixture test for compute_agreement.py.
 
-Uses a 6-row synthetic fixture (fixtures/reviewer_A.csv / reviewer_B.csv):
+Builds a 6-row frozen manifest, exports both reviewer assignments through the
+production exporter, fills synthetic human decisions, and verifies:
 
   fix-01  A=block  B=block             -> agreed
   fix-02  A=non-block  B=non-block     -> agreed
@@ -15,15 +16,17 @@ Stage 2 (with arbitration): 5 final labels, 1 unresolved dispute.
 """
 
 import csv
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "compute_agreement.py")
-FIXTURES = os.path.join(HERE, "fixtures")
+EXPORTER = os.path.join(HERE, "..", "export_assignments.py")
 FIX_IDS = {
     "fix-01": "agt88-bbe74ad684",
     "fix-02": "agt88-986704c6c8",
@@ -33,20 +36,194 @@ FIX_IDS = {
     "fix-06": "agt88-ef6cb42983",
 }
 
+REVIEW_LABELS = {
+    "A": {
+        "fix-01": ("block", "clear injection language"),
+        "fix-02": ("non-block", "official installer"),
+        "fix-03": ("block", "looks like concealment"),
+        "fix-04": ("needs-context", "cannot tell from snippet"),
+        "fix-05": ("block", "likely injection"),
+        "fix-06": ("non-block", "api documentation"),
+    },
+    "B": {
+        "fix-01": ("block", "agree injection"),
+        "fix-02": ("non-block", "benign installer"),
+        "fix-03": ("non-block", "reads like changelog advice"),
+        "fix-04": ("block", "exfil shape"),
+        "fix-05": ("", ""),
+        "fix-06": ("non-block", "doc snippet"),
+    },
+}
 
-def run(out_dir, arbitration=None):
+
+def fixture_rows():
+    specs = [
+        ("fix-01", "detector-hit", "override_lang", "high", "skills/one", "SKILL.md", "absolute authority", 3),
+        ("fix-02", "detector-hit", "curl_pipe_sh-fp-sample", "fp-check", "skills/two", "SKILL.md", "curl | sh", 9),
+        ("fix-03", "detector-hit", "concealment", "normal", "skills/three", "SKILL.md", "do not mention", 5),
+        ("fix-04", "detector-non-block", "script-capability", "high", "skills/four", "scripts/run.sh", "curl api endpoint", 12),
+        ("fix-05", "detector-non-block", "override_lang", "normal", "skills/five", "SKILL.md", "override system", 7),
+        ("fix-06", "detector-non-block", "exfil_instruction-fp-sample", "fp-check", "skills/six", "SKILL.md", "POST /token", 2),
+    ]
+    rows = []
+    for fixture_id, cohort, batch, priority, root, suffix, matched, line in specs:
+        path = f"{root}/{suffix}"
+        context = {"context": f"fixture evidence for {fixture_id}", "line": line, "path": path}
+        prediction = {
+            "decision": "block" if cohort == "detector-hit" else "allow",
+            "positiveDecision": "block",
+            "rules": [batch] if cohort == "detector-hit" else [],
+        }
+        row = {
+            "batch": f"{cohort}-v1",
+            "category": "dev",
+            "cohort": cohort,
+            "contexts": [context],
+            "label": "",
+            "path": path,
+            "prediction": prediction,
+            "priority": priority,
+            "reviewerNote": "",
+            "skillRoot": root,
+        }
+        if cohort == "detector-hit":
+            row["detectorFindings"] = [
+                {
+                    "batch": batch,
+                    "contexts": [context],
+                    "matched": matched,
+                    "path": path,
+                }
+            ]
+        rows.append(row)
+    return rows
+
+
+def write_jsonl(path, rows):
+    raw = b"".join(
+        (
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode()
+        for row in rows
+    )
+    path.write_bytes(raw)
+    return raw
+
+
+def fill_reviewer(path, reviewer):
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    labels_by_id = {
+        FIX_IDS[key]: value for key, value in REVIEW_LABELS[reviewer].items()
+    }
+    for row in rows:
+        row["label"], row["notes"] = labels_by_id[row["sample_id"]]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def build_fixture(root):
+    rows = fixture_rows()
+    cohorts = []
+    for cohort_id in ("detector-hit", "detector-non-block"):
+        cohort_rows = [row for row in rows if row["cohort"] == cohort_id]
+        shard = root / f"{cohort_id}.jsonl"
+        raw = write_jsonl(shard, cohort_rows)
+        cohort = {
+            "id": cohort_id,
+            "rowCount": len(cohort_rows),
+            "combinedSha256": hashlib.sha256(raw).hexdigest(),
+            "predictionCounts": {
+                "block" if cohort_id == "detector-hit" else "allow": len(cohort_rows)
+            },
+            "shards": [
+                {
+                    "path": shard.name,
+                    "rowCount": len(cohort_rows),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            ],
+        }
+        if cohort_id == "detector-hit":
+            cohort.update(
+                {
+                    "detectorFindingCount": len(cohort_rows),
+                    "legacyInputCombinedSha256": "0" * 64,
+                    "legacyInputRowCount": len(cohort_rows),
+                    "legacyUniqueSkillRootCount": len(cohort_rows),
+                }
+            )
+        cohorts.append(cohort)
+    manifest = {
+        "schemaVersion": 1,
+        "sourceSnapshot": {
+            "repository": "https://example.invalid/source",
+            "commit": "a" * 40,
+        },
+        "detectorBaseline": {"positiveDecision": "block"},
+        "cohorts": cohorts,
+    }
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assignments = root / "assignments"
+    subprocess.run(
+        [
+            sys.executable,
+            EXPORTER,
+            "--manifest",
+            str(manifest_path),
+            "--repo-root",
+            str(root),
+            "--out-dir",
+            str(assignments),
+        ],
+        check=True,
+    )
+    reviewer_a = assignments / "reviewer_A.csv"
+    reviewer_b = assignments / "reviewer_B.csv"
+    fill_reviewer(reviewer_a, "A")
+    fill_reviewer(reviewer_b, "B")
+    return manifest_path, reviewer_a, reviewer_b
+
+
+def run(out_dir, manifest, reviewer_a, reviewer_b, arbitration=None):
     cmd = [
         sys.executable,
         SCRIPT,
-        "--a", os.path.join(FIXTURES, "reviewer_A.csv"),
-        "--b", os.path.join(FIXTURES, "reviewer_B.csv"),
+        "--a", str(reviewer_a),
+        "--b", str(reviewer_b),
         "--out-dir", out_dir,
+        "--manifest", str(manifest),
+        "--repo-root", str(Path(manifest).parent),
     ]
     if arbitration:
         cmd += ["--arbitration", arbitration]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     with open(os.path.join(out_dir, "agreement_report.json")) as fh:
         return json.load(fh)
+
+
+def resolve_disputes(source, destination):
+    with source.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    resolutions = {
+        FIX_IDS["fix-03"]: ("block", "human arbitration: malicious"),
+        FIX_IDS["fix-04"]: ("non-block", "human arbitration: benign"),
+    }
+    for row in rows:
+        resolution = resolutions.get(row["sample_id"])
+        if resolution:
+            row["final_label"], row["final_notes"] = resolution
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main():
@@ -57,9 +234,11 @@ def main():
             failures.append(f"{name}: expected {expected!r}, got {actual!r}")
 
     with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest, reviewer_a, reviewer_b = build_fixture(root)
         # Stage 1: no arbitration.
         out1 = os.path.join(tmp, "stage1")
-        report = run(out1)
+        report = run(out1, manifest, reviewer_a, reviewer_b)
         check("total_samples", report["total_samples"], 6)
         check("dual_labeled", report["dual_labeled"], 5)
         check("unlabeled_by_either", report["unlabeled_by_either"], 1)
@@ -100,7 +279,15 @@ def main():
 
         # Stage 2: human arbitration resolves fix-03/fix-04.
         out2 = os.path.join(tmp, "stage2")
-        report2 = run(out2, arbitration=os.path.join(FIXTURES, "disputes_resolved.csv"))
+        arbitration = root / "disputes_resolved.csv"
+        resolve_disputes(root / "stage1/disputes.csv", arbitration)
+        report2 = run(
+            out2,
+            manifest,
+            reviewer_a,
+            reviewer_b,
+            arbitration=str(arbitration),
+        )
         check("stage2 disputes_arbitrated", report2["disputes_arbitrated"], 2)
         check("stage2 disputes_unresolved", report2["disputes_unresolved"], 1)
         check("stage2 final_labels", report2["final_labels"], 5)

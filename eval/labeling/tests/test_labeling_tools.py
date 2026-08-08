@@ -320,6 +320,42 @@ class BuildNonHitWorklistTests(unittest.TestCase):
         self.assertEqual(set(ranked), {"dev/two", "ops/three"})
         self.assertEqual(ranked, builder.ranked_candidates(inventory, hit_rows, "seed"))
 
+    def test_source_inventory_accepts_only_regular_blobs_and_nul_paths(self):
+        output = (
+            b"100644 blob " + b"1" * 40 + b"\tdev/line\nname/SKILL.md\0"
+            b"100755 blob " + b"2" * 40 + b"\tops/run.sh\0"
+            b"120000 blob " + b"3" * 40 + b"\tlinked/SKILL.md\0"
+            b"160000 commit " + b"4" * 40 + b"\tsubmodule\0"
+        )
+        with mock.patch.object(
+            builder.subprocess,
+            "check_output",
+            return_value=output,
+        ):
+            inventory = builder.source_inventory(Path("/source"))
+        self.assertEqual(
+            inventory,
+            {
+                "dev/line\nname/SKILL.md": "1" * 40,
+                "ops/run.sh": "2" * 40,
+            },
+        )
+
+    def test_verified_source_bytes_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "outside"
+            outside.write_text("secret", encoding="utf-8")
+            linked = root / "linked/SKILL.md"
+            linked.parent.mkdir()
+            linked.symlink_to(outside)
+            with self.assertRaisesRegex(RuntimeError, "cannot open pinned source"):
+                builder.verified_source_bytes(
+                    "linked/SKILL.md",
+                    {"linked/SKILL.md": builder.git_blob_sha1(b"secret")},
+                    root,
+                )
+
     def test_generated_row_keeps_provenance_and_no_human_label(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -509,6 +545,21 @@ class BuildNonHitWorklistTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "checkout commit"):
                 builder.verify_checkout(Path("/repo"), "commit", "tree", "source")
 
+    def test_verify_checkout_rejects_dirty_or_ignored_source_files(self):
+        with mock.patch.object(
+            builder,
+            "run_checked",
+            side_effect=["commit", "tree", "!! generated/payload.sh"],
+        ):
+            with self.assertRaisesRegex(SystemExit, "not pristine"):
+                builder.verify_checkout(
+                    Path("/repo"),
+                    "commit",
+                    "tree",
+                    "source",
+                    require_clean=True,
+                )
+
 
 class ComputeAgreementTests(unittest.TestCase):
     def write_reviewer_row(self, path, fieldnames=None, **updates):
@@ -571,6 +622,23 @@ class ComputeAgreementTests(unittest.TestCase):
             self.write_reviewer_row(path, sample_id="agt88-0000000000")
             with self.assertRaisesRegex(SystemExit, "sample_id does not match"):
                 agreement.read_reviewer_csv(path)
+
+    def test_manifest_binding_rejects_matching_reviewer_tampering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reviewer.csv"
+            self.write_reviewer_row(path)
+            rows = agreement.read_reviewer_csv(path)
+            sid = next(iter(rows))
+            expected = {
+                sid: {
+                    field: rows[sid][field]
+                    for field in agreement.IMMUTABLE_FIELDS
+                }
+            }
+            agreement.validate_frozen_assignments(rows, expected, "A")
+            rows[sid]["prediction_decision"] = "allow"
+            with self.assertRaisesRegex(SystemExit, "frozen manifest"):
+                agreement.validate_frozen_assignments(rows, expected, "A")
 
     def test_benchmark_metrics_derives_all_confusion_cells(self):
         rows = [

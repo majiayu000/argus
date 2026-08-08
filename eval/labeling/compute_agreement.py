@@ -27,10 +27,18 @@ import json
 import os
 import sys
 from collections import Counter
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import export_assignments as assignment_contract
 
 DEFINITIVE_LABELS = ("block", "non-block")
 UNCERTAIN_LABEL = "needs-context"
 VALID_LABELS = DEFINITIVE_LABELS + (UNCERTAIN_LABEL,)
+DEFAULT_MANIFEST = assignment_contract.DEFAULT_MANIFEST
 
 IMMUTABLE_FIELDS = (
     "sample_id",
@@ -195,6 +203,35 @@ def immutable_fields(row):
     return {key: row[key] for key in IMMUTABLE_FIELDS}
 
 
+def expected_manifest_records(manifest_path, repo_root):
+    rows = assignment_contract.load_manifest_worklists(
+        manifest_path,
+        repo_root=repo_root,
+    )
+    return {
+        record["sample_id"]: record
+        for record in assignment_contract.build_records(rows)
+    }
+
+
+def validate_frozen_assignments(rows, expected, reviewer):
+    if set(rows) != set(expected):
+        missing = sorted(set(expected) - set(rows))[:5]
+        extra = sorted(set(rows) - set(expected))[:5]
+        raise SystemExit(
+            f"error: reviewer {reviewer} does not cover the frozen manifest "
+            f"(missing: {missing} ... extra: {extra} ...)"
+        )
+    for sid, row in rows.items():
+        frozen = expected[sid]
+        for field in IMMUTABLE_FIELDS:
+            if row[field] != frozen[field]:
+                raise SystemExit(
+                    f"error: reviewer {reviewer} immutable field {field!r} "
+                    f"disagrees with the frozen manifest for {sid}"
+                )
+
+
 def final_record(row, label, source):
     return {
         "sample_id": row["sample_id"],
@@ -253,6 +290,18 @@ def main():
     ap.add_argument("--b", required=True, help="Reviewer B completed CSV")
     ap.add_argument("--out-dir", required=True, help="Output directory")
     ap.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST,
+        help="Frozen labeling manifest used to revalidate reviewer evidence",
+    )
+    ap.add_argument(
+        "--repo-root",
+        type=Path,
+        default=assignment_contract.REPO_ROOT,
+        help="Root used to resolve manifest-declared shard paths",
+    )
+    ap.add_argument(
         "--arbitration",
         help="disputes.csv copy with human-filled final_label/final_notes; "
         "enables the merge of arbitrated rows into final_labels.jsonl",
@@ -261,6 +310,9 @@ def main():
 
     rows_a = read_reviewer_csv(args.a)
     rows_b = read_reviewer_csv(args.b)
+    expected = expected_manifest_records(args.manifest, args.repo_root)
+    validate_frozen_assignments(rows_a, expected, "A")
+    validate_frozen_assignments(rows_b, expected, "B")
     if any(row["reviewer"] != "A" for row in rows_a.values()):
         raise SystemExit("error: reviewer A file contains a non-A reviewer row")
     if any(row["reviewer"] != "B" for row in rows_b.values()):

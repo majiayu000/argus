@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -33,13 +34,21 @@ MAX_SHARD_SIZE = 799
 SCAN_TIMEOUT_SECONDS = 60
 VALID_DECISIONS = {"allow", "allow-with-approval", "block"}
 EXIT_BY_DECISION = {"allow": 0, "block": 1, "allow-with-approval": 2}
+REGULAR_GIT_MODES = {"100644", "100755"}
 
 
 def run_checked(argv, *, cwd=None):
     return subprocess.check_output(argv, cwd=cwd, text=True).strip()
 
 
-def verify_checkout(repo, expected_commit, expected_tree, label):
+def verify_checkout(
+    repo,
+    expected_commit,
+    expected_tree,
+    label,
+    *,
+    require_clean=False,
+):
     actual_commit = run_checked(["git", "rev-parse", "HEAD"], cwd=repo)
     actual_tree = run_checked(["git", "rev-parse", "HEAD^{tree}"], cwd=repo)
     if actual_commit != expected_commit:
@@ -48,6 +57,22 @@ def verify_checkout(repo, expected_commit, expected_tree, label):
         )
     if actual_tree != expected_tree:
         raise SystemExit(f"error: {label} tree {actual_tree} != {expected_tree}")
+    if require_clean:
+        dirty = run_checked(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+            cwd=repo,
+        )
+        if dirty:
+            first = dirty.splitlines()[0]
+            raise SystemExit(
+                f"error: {label} checkout is not pristine: {first}"
+            )
 
 
 def load_jsonl(path):
@@ -95,16 +120,18 @@ def expand_hit_findings(rows):
 
 
 def source_inventory(source_repo):
-    output = run_checked(
-        ["git", "ls-tree", "-r", "HEAD"],
+    output = subprocess.check_output(
+        ["git", "ls-tree", "-r", "-z", "HEAD"],
         cwd=source_repo,
     )
     inventory = {}
-    for line in output.splitlines():
-        metadata, path = line.split("\t", 1)
-        _mode, kind, object_id = metadata.split()
-        if kind == "blob":
-            inventory[path] = object_id
+    for entry in output.split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        mode, kind, object_id = metadata.decode("ascii").split()
+        if kind == "blob" and mode in REGULAR_GIT_MODES:
+            inventory[os.fsdecode(raw_path)] = object_id
     return inventory
 
 
@@ -213,15 +240,40 @@ def git_blob_sha1(content):
     return hashlib.sha1(header + content).hexdigest()
 
 
-def source_provenance(path, inventory, source_repo):
-    content = (source_repo / path).read_bytes()
+def verified_source_bytes(path, inventory, source_repo):
+    expected_blob = inventory.get(path)
+    if expected_blob is None:
+        raise RuntimeError(f"{path}: source is not a regular blob in the pinned tree")
+    source_path = source_repo / path
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(source_path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"{path}: cannot open pinned source: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f"{path}: pinned source is not a regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            content = handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     actual_blob = git_blob_sha1(content)
-    if actual_blob != inventory[path]:
+    if actual_blob != expected_blob:
         raise RuntimeError(
-            f"{path}: checkout blob {actual_blob} != tree blob {inventory[path]}"
+            f"{path}: checkout blob {actual_blob} != tree blob {expected_blob}"
         )
+    return content
+
+
+def source_provenance(path, inventory, source_repo):
+    content = verified_source_bytes(path, inventory, source_repo)
     return {
-        "sourceBlobSha1": actual_blob,
+        "sourceBlobSha1": git_blob_sha1(content),
         "sourceBytes": len(content),
         "sourceContentSha256": hashlib.sha256(content).hexdigest(),
     }
@@ -236,7 +288,7 @@ def generated_non_block_row(
     source_repo,
 ):
     path = f"{root}/SKILL.md"
-    content = (source_repo / path).read_bytes()
+    content = verified_source_bytes(path, inventory, source_repo)
     return {
         "batch": "detector-non-block-v1",
         "category": root.split("/", 1)[0],
@@ -277,11 +329,11 @@ def restored_context(path, content, matched):
     }
 
 
-def verified_contexts(row, source_repo):
+def verified_contexts(row, inventory, source_repo):
     path = row.get("path")
     if not isinstance(path, str):
         raise RuntimeError("hit row path is not a string")
-    content = (source_repo / path).read_text(encoding="utf-8")
+    content = verified_source_bytes(path, inventory, source_repo).decode("utf-8")
     contexts = row.get("contexts")
     if not isinstance(contexts, list):
         raise RuntimeError(f"{path}: contexts is not an array")
@@ -325,7 +377,7 @@ def generated_hit_row(rows, root, result, inventory, source_repo):
     for row in rows:
         if row.get("label"):
             raise RuntimeError(f"{row.get('path', root)}: unexpected human label")
-        finding_contexts = verified_contexts(row, source_repo)
+        finding_contexts = verified_contexts(row, inventory, source_repo)
         finding = {
             key: value
             for key, value in row.items()
@@ -470,6 +522,7 @@ def main():
         args.source_commit,
         args.source_tree,
         "source",
+        require_clean=True,
     )
     verify_checkout(
         args.argus_repo,

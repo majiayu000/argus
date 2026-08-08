@@ -421,6 +421,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=REPO_ROOT,
+        help="Root used to resolve manifest-declared shard paths",
+    )
+    parser.add_argument(
         "--worklist",
         action="append",
         type=Path,
@@ -429,7 +435,11 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     args = parser.parse_args()
 
-    rows = load_manifest_worklists(args.manifest, args.worklist)
+    rows = load_manifest_worklists(
+        args.manifest,
+        args.worklist,
+        repo_root=args.repo_root,
+    )
     records = build_records(rows)
     write_assignments(args.out_dir, records)
     return 0

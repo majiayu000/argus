@@ -81,7 +81,10 @@ Outputs:
 - `final_labels.jsonl`: rows independently agreed as `block` or `non-block`.
 
 The command rejects reviewer files that differ in immutable source,
-prediction, or evidence fields.
+prediction, or evidence fields. It also reloads the frozen manifest and all
+declared worklist shards, then rejects any reviewer file whose sample set or
+immutable fields differ from the original exported assignments. Matching
+tampering in both reviewer files therefore cannot bypass provenance checks.
 
 ### 4. Human arbitration and final merge
 
