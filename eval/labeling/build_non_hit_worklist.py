@@ -219,7 +219,12 @@ def scan_candidate(argus, source_repo, root):
         if not isinstance(finding, dict):
             raise RuntimeError(f"{root}: finding {index} is not an object")
         rule_id = finding.get("rule_id")
-        if not isinstance(rule_id, str) or not rule_id:
+        if (
+            not isinstance(rule_id, str)
+            or not rule_id
+            or not rule_id.isprintable()
+            or any(character.isspace() for character in rule_id)
+        ):
             raise RuntimeError(f"{root}: finding {index} has invalid rule_id")
         rules.add(rule_id)
     return {

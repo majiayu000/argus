@@ -117,6 +117,58 @@ fn dotted_native_executables_in_skill_trees_require_approval() -> Result<()> {
 }
 
 #[test]
+fn dotted_native_executables_in_hook_trees_require_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("hooks"))?;
+    for (name, bytes) in [
+        ("tool.bin", b"\x7fELFpayload".as_slice()),
+        ("plugin.so", b"\x7fELFpayload".as_slice()),
+        ("plugin.dll", b"MZpayload".as_slice()),
+        ("plugin.dylib", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+        ("addon.node", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+    ] {
+        std::fs::write(root.path().join("hooks").join(name), bytes)?;
+    }
+    let expected: std::collections::BTreeSet<_> = [
+        "hooks/addon.node",
+        "hooks/plugin.dll",
+        "hooks/plugin.dylib",
+        "hooks/plugin.so",
+        "hooks/tool.bin",
+    ]
+    .into();
+
+    let report = scan_agent_surface(root.path())?;
+    let legacy_locations: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(legacy_locations, expected);
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+
+    let snapshot_root = tempfile::tempdir()?;
+    let snapshot = snapshot_root.path().join("approved.snapshot.json");
+    let outcome = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::None,
+        SnapshotMode::Update(&snapshot),
+        None,
+    )?;
+    let snapshot_locations: std::collections::BTreeSet<_> = outcome
+        .report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(snapshot_locations, expected);
+    assert_eq!(outcome.report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
 fn snapshot_native_executable_surface_keeps_inventory_and_approval() -> Result<()> {
     let root = tempfile::tempdir()?;
     std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;

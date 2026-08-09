@@ -544,7 +544,15 @@ class BuildNonHitWorklistTests(unittest.TestCase):
                     "dev/example",
                 )
 
-        for malformed in [None, {}, {"rule_id": ""}, {"rule_id": 7}]:
+        for malformed in [
+            None,
+            {},
+            {"rule_id": ""},
+            {"rule_id": " "},
+            {"rule_id": " AGT-1"},
+            {"rule_id": "AGT-\n1"},
+            {"rule_id": 7},
+        ]:
             bad_report = json.dumps(
                 {"decision": "allow", "findings": [malformed]}
             ).encode()

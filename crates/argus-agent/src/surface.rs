@@ -175,6 +175,7 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
     let supported = semantic_kind.is_some()
         || in_claude_dir(path)
         || path == "hooks"
+        || in_agent_hooks_dir(path)
         || skill_dirs
             .iter()
             .any(|directory| path.starts_with(directory.as_str()))
