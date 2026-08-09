@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the pinned human-labeling task builders."""
+"""Unit tests for the pinned AI-review task builders."""
 
 import csv
 import hashlib
@@ -23,7 +23,7 @@ def load_module(name, filename):
 
 builder = load_module("build_non_hit_worklist", "build_non_hit_worklist.py")
 exporter = load_module("export_assignments", "export_assignments.py")
-agreement = load_module("compute_agreement", "compute_agreement.py")
+finalizer = load_module("finalize_review", "finalize_review.py")
 
 
 class ExportAssignmentsTests(unittest.TestCase):
@@ -131,7 +131,7 @@ class ExportAssignmentsTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return manifest_path
 
-    def test_export_is_pinned_unlabeled_and_dual_reviewed(self):
+    def test_export_is_pinned_unlabeled_and_single_ai_reviewed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest_path = self.make_test_manifest(root)
@@ -140,7 +140,12 @@ class ExportAssignmentsTests(unittest.TestCase):
                 repo_root=root,
             )
             records = exporter.build_records(rows)
-            paths = exporter.write_assignments(root / "out", records)
+            path = exporter.write_assignment(
+                root / "out",
+                records,
+                reviewer_id="codex",
+                reviewer_model="gpt-5",
+            )
 
             self.assertEqual(len(records), 2)
             self.assertEqual(
@@ -161,24 +166,27 @@ class ExportAssignmentsTests(unittest.TestCase):
                 )
             )
 
-            exported = []
-            for path in paths:
-                with path.open(newline="", encoding="utf-8") as handle:
-                    exported.append(list(csv.DictReader(handle)))
-            reviewer_a, reviewer_b = exported
+            self.assertEqual(path.name, "reviewer.csv")
+            with path.open(newline="", encoding="utf-8") as handle:
+                exported = list(csv.DictReader(handle))
+            self.assertEqual(len(exported), 2)
+            self.assertEqual({row["reviewer"] for row in exported}, {"codex"})
             self.assertEqual(
-                [row["sample_id"] for row in reviewer_a],
-                [row["sample_id"] for row in reviewer_b],
+                {row["reviewer_model"] for row in exported},
+                {"gpt-5"},
             )
-            self.assertTrue(
-                all(
-                    {**left, "reviewer": ""}
-                    == {**right, "reviewer": ""}
-                    for left, right in zip(reviewer_a, reviewer_b)
-                )
-            )
-            self.assertEqual({row["reviewer"] for row in reviewer_a}, {"A"})
-            self.assertEqual({row["reviewer"] for row in reviewer_b}, {"B"})
+            self.assertNotIn(b"\r\n", path.read_bytes())
+
+    def test_context_export_strips_line_endings_and_trailing_whitespace(self):
+        text = exporter.contexts_text(
+            {
+                "path": "dev/one/SKILL.md",
+                "contexts": [
+                    {"context": " first  \r\nsecond\t\rthird  ", "line": 1}
+                ],
+            }
+        )
+        self.assertEqual(text, "[dev/one/SKILL.md:line 1]\nfirst\nsecond\nthird")
 
     def test_manifest_rejects_tampered_shard(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -356,7 +364,7 @@ class BuildNonHitWorklistTests(unittest.TestCase):
                     root,
                 )
 
-    def test_generated_row_keeps_provenance_and_no_human_label(self):
+    def test_generated_row_keeps_provenance_and_no_prefilled_label(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             skill = root / "dev/example/SKILL.md"
@@ -536,6 +544,31 @@ class BuildNonHitWorklistTests(unittest.TestCase):
                     "dev/example",
                 )
 
+        for malformed in [
+            None,
+            {},
+            {"rule_id": ""},
+            {"rule_id": " "},
+            {"rule_id": " AGT-1"},
+            {"rule_id": "AGT-\n1"},
+            {"rule_id": "AGT-\x001"},
+            {"rule_id": "AGT-\x7f1"},
+            {"rule_id": 7},
+        ]:
+            bad_report = json.dumps(
+                {"decision": "allow", "findings": [malformed]}
+            ).encode()
+            completed = subprocess.CompletedProcess([], 0, bad_report, b"")
+            with self.subTest(malformed=malformed), mock.patch.object(
+                builder.subprocess, "run", return_value=completed
+            ):
+                with self.assertRaisesRegex(RuntimeError, "finding"):
+                    builder.scan_candidate(
+                        Path("/trusted/argus"),
+                        Path("/trusted/source"),
+                        "dev/example",
+                    )
+
     def test_verify_checkout_fails_closed(self):
         with mock.patch.object(
             builder,
@@ -561,11 +594,12 @@ class BuildNonHitWorklistTests(unittest.TestCase):
                 )
 
 
-class ComputeAgreementTests(unittest.TestCase):
+class FinalizeReviewTests(unittest.TestCase):
     def write_reviewer_row(self, path, fieldnames=None, **updates):
         row = {
             "sample_id": exporter.sample_id("detector-hit", "dev/one"),
-            "reviewer": "A",
+            "reviewer": "codex",
+            "reviewer_model": "gpt-5",
             "cohort": "detector-hit",
             "batch": "detector-hit-v1",
             "category": "dev",
@@ -599,46 +633,74 @@ class ComputeAgreementTests(unittest.TestCase):
                 if field not in {"detector", "contexts"}
             ]
             self.write_reviewer_row(path, fieldnames=fieldnames)
-            with self.assertRaisesRegex(SystemExit, "missing columns"):
-                agreement.read_reviewer_csv(path)
+            with self.assertRaisesRegex(SystemExit, "exact columns"):
+                finalizer.read_review_csv(path)
+
+    def test_reviewer_csv_rejects_legacy_dual_review_columns(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reviewer.csv"
+            self.write_reviewer_row(
+                path,
+                fieldnames=[*exporter.FIELDNAMES, "reviewer_b", "arbitrator"],
+            )
+            with self.assertRaisesRegex(SystemExit, "exact columns"):
+                finalizer.read_review_csv(path)
 
     def test_reviewer_csv_rejects_empty_immutable_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "reviewer.csv"
             self.write_reviewer_row(path, detector="", contexts="")
             with self.assertRaisesRegex(SystemExit, "detector.*contexts"):
-                agreement.read_reviewer_csv(path)
+                finalizer.read_review_csv(path)
 
     def test_reviewer_csv_requires_non_empty_skill_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "reviewer.csv"
             self.write_reviewer_row(path, skill_root="")
             with self.assertRaisesRegex(SystemExit, "skill_root"):
-                agreement.read_reviewer_csv(path)
+                finalizer.read_review_csv(path)
 
     def test_reviewer_csv_rejects_sample_id_not_bound_to_package(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "reviewer.csv"
             self.write_reviewer_row(path, sample_id="agt88-0000000000")
             with self.assertRaisesRegex(SystemExit, "sample_id does not match"):
-                agreement.read_reviewer_csv(path)
+                finalizer.read_review_csv(path)
 
     def test_manifest_binding_rejects_matching_reviewer_tampering(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "reviewer.csv"
             self.write_reviewer_row(path)
-            rows = agreement.read_reviewer_csv(path)
+            rows = finalizer.read_review_csv(path)
             sid = next(iter(rows))
             expected = {
                 sid: {
                     field: rows[sid][field]
-                    for field in agreement.IMMUTABLE_FIELDS
+                    for field in finalizer.IMMUTABLE_FIELDS
                 }
             }
-            agreement.validate_frozen_assignments(rows, expected, "A")
+            finalizer.validate_frozen_assignment(rows, expected)
             rows[sid]["prediction_decision"] = "allow"
             with self.assertRaisesRegex(SystemExit, "frozen manifest"):
-                agreement.validate_frozen_assignments(rows, expected, "A")
+                finalizer.validate_frozen_assignment(rows, expected)
+
+    def test_reviewer_csv_rejects_mixed_ai_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.csv"
+            second = root / "second.csv"
+            self.write_reviewer_row(first)
+            self.write_reviewer_row(
+                second,
+                sample_id=exporter.sample_id("detector-hit", "dev/two"),
+                skill_root="dev/two",
+                reviewer_model="different-model",
+            )
+            rows = {}
+            rows.update(finalizer.read_review_csv(first))
+            rows.update(finalizer.read_review_csv(second))
+            with self.assertRaisesRegex(SystemExit, "single reviewer provenance"):
+                finalizer.reviewer_provenance(rows)
 
     def test_benchmark_metrics_derives_all_confusion_cells(self):
         rows = [
@@ -656,7 +718,7 @@ class ComputeAgreementTests(unittest.TestCase):
             },
         ]
         self.assertEqual(
-            agreement.benchmark_metrics(rows),
+            finalizer.benchmark_metrics(rows),
             {
                 "tp": 1,
                 "fp": 1,
@@ -668,9 +730,9 @@ class ComputeAgreementTests(unittest.TestCase):
         )
 
     def test_normalize_label_rejects_prediction_outcome_labels(self):
-        self.assertEqual(agreement.normalize_label("non block"), "non-block")
+        self.assertEqual(finalizer.normalize_label("non block"), "non-block")
         with self.assertRaisesRegex(ValueError, "invalid label"):
-            agreement.normalize_label("TP")
+            finalizer.normalize_label("TP")
 
 
 if __name__ == "__main__":

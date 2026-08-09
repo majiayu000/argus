@@ -7,13 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Freeze the GH-145 human benchmark tasks as 1,438 package-level samples:
+- Freeze the completed GH-145 single-AI review as 1,438 package-level samples:
   719 packages preserving all 849 original detector findings and 719
   deterministically sampled non-block predictions from the same pinned source
-  snapshot. The dual-review tooling verifies source and detector revisions,
+  snapshot. The single-review tooling verifies source and detector revisions,
   shard hashes, predictions, package identities, immutable reviewer evidence,
-  rationales, and complete arbitration without assigning labels. CI now tests
-  the labeling contract and exports the full frozen assignment set.
+  explicit reviewer/model provenance, rationales, and complete coverage.
+  The review contains 24 `block` and 1,414 `non-block` labels with no unresolved
+  rows. CI reproduces the frozen outputs and statically rescans the pinned source
+  with the current Argus binary, failing on any operational error or regression
+  below precision 0.060729 / recall 0.625.
+- Agent-surface scans report bundled ELF, Mach-O, and PE/DOS executables as an
+  explicit approval finding instead of treating them as unreadable text or
+  silently skipping their uninspected binary semantics.
 - `known-native-build-pattern` now also recognizes addons compiled locally
   from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
   only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages
@@ -35,8 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--risk-approval-threshold`, `--risk-block-threshold`). Weights derive from
   the severity detectors already assign, so `Low` and `Critical` stop being
   interchangeable and independent risks accumulate. Reports carry the score and
-  per-rule contributions in text, JSON, and SARIF. Off by default; calibrated
-  per-rule weights and confidence wait on the GH-145 benchmark.
+  per-rule contributions in text, JSON, and SARIF. The completed GH-145
+  benchmark publishes per-rule support and Wilson intervals, but cannot
+  distinguish 15 AGT-01 block labels from 229 non-block labels by rule id and
+  has only one or two observations for six other ids. The severity profile
+  therefore remains the non-overfit default rather than inventing per-rule
+  probabilities from sparse policy outcomes.
 - Add `argus lockfile-scan`, which fetches and statically scans every
   dependency a lockfile resolves and aggregates them into one decision and
   exit code. Dependencies that were skipped or could not be assessed are
@@ -52,8 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mangling and nested decoder chains. Shannon entropy, minified shape, and
   maximum line length are attached as evidence on a finding that already
   fired; they never raise one on their own, because legitimate bundles share
-  that shape. Threshold-based scoring of those metrics waits on the labeled
-  benchmark in GH-145.
+  that shape. The completed labeled benchmark contains no
+  `obfuscated-source` observations, so it cannot support standalone
+  entropy/minified thresholds; the structural signatures remain the trigger.
 
 ## [0.1.0] - 2026-07-23
 

@@ -344,12 +344,16 @@ SARIF `properties.argusRisk` — so a scored decision can be checked rather than
 taken on faith.
 
 Scoring is off by default and `--risk-scoring` alone does not change any exit
-code; `--risk-decides` is required for that. Two things are deliberately
-missing until the labeled benchmark in
-[#145](https://github.com/majiayu000/argus/issues/145) lands: calibrated
-per-rule weights, and real per-rule confidence (every finding is currently
-assessed at full confidence). Both are claims about real-world outcomes that
-no measurement yet supports.
+code; `--risk-decides` is required for that. The completed 1,438-sample
+benchmark does not justify a per-rule override: only eight agent rule ids were
+observed, and `AGT-01-injection-language` grouped all 15 of its block labels
+with 229 non-block labels under the same id. Six other ids had only one or two
+observations. A rule-id weight cannot separate those outcomes, and extending
+that sparse agent-only result to the cross-ecosystem catalog would overfit.
+The CI quality report therefore publishes per-rule support and 95% Wilson
+intervals while the runtime retains the severity-derived profile. Confidence
+remains full for an emitted detector observation; benchmark block frequency
+is a policy outcome, not a probability that the observation itself occurred.
 
 ### Explicit OSV vulnerability queries
 
@@ -532,6 +536,7 @@ executing anything.
 | `agent-config-write` | medium → approval or high → block | script writes `.claude/settings*.json` or hook paths; matching agent-config intent is declarative, mismatched intent blocks |
 | `hook-persistence` | high → block | script persists or auto-approves an agent hook |
 | `credential-access` / `network-exfiltration` | high → block | manifest-backed evidence for credential reads and off-box network exfiltration |
+| `agent-native-executable` | medium → approval | a skill or hook ships an ELF, Mach-O, or PE/DOS executable whose binary semantics cannot be inspected by the text rules |
 | `AGT-05-mcp-always-load` | medium → approval | `mcpServers.<name>.alwaysLoad: true` (permanent full trust) |
 | `AGT-05-enable-all-project-mcp` | medium → approval | `enableAllProjectMcpServers: true` |
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |

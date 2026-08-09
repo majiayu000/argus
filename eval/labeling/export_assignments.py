@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Export pinned labeling cohorts to two independent human reviewers.
+"""Export pinned labeling cohorts to one explicitly identified AI reviewer.
 
-Every selected sample goes to both reviewers. The CSV files differ only in
-the reviewer column. This script verifies the source manifest and worklist
-digests, but it never assigns or suggests a label.
+This script verifies the source manifest and worklist digests, but it never
+assigns or suggests a label. Reviewer identity and model are required so the
+completed review remains auditable.
 """
 
 import argparse
@@ -23,6 +23,7 @@ ASSIGNMENT_SEED = b"argus-label-assignment-v1\0"
 FIELDNAMES = [
     "sample_id",
     "reviewer",
+    "reviewer_model",
     "cohort",
     "batch",
     "category",
@@ -82,7 +83,7 @@ def finding_summary(row):
 
 
 def detector_summary(row):
-    """Return a human-readable detector summary without adding a judgment."""
+    """Return a readable detector summary without adding a judgment."""
     findings = row.get("detectorFindings")
     if findings is not None:
         if not isinstance(findings, list) or not findings:
@@ -126,7 +127,10 @@ def contexts_text(row):
         context_path = context.get("path", row.get("path"))
         if not isinstance(context_path, str):
             fail(f"{row.get('path', '<unknown>')}: invalid context path")
-        parts.append(f"[{context_path}:line {line}]\n{snippet.strip()}")
+        normalized = "\n".join(
+            source_line.rstrip() for source_line in snippet.splitlines()
+        ).strip()
+        parts.append(f"[{context_path}:line {line}]\n{normalized}")
     return "\n---\n".join(parts)
 
 
@@ -286,7 +290,7 @@ def load_manifest_worklists(manifest_path, selected_paths=None, repo_root=REPO_R
                 if row.get("cohort") not in (None, cohort_id):
                     fail(f"{path}: row cohort disagrees with manifest")
                 if row.get("label"):
-                    fail(f"{path}: worklist contains a human label")
+                    fail(f"{path}: worklist contains a label")
                 prediction_counts[prediction_decision] += 1
                 if include_rows:
                     row["_cohort"] = cohort_id
@@ -386,35 +390,43 @@ def build_records(rows):
     )
 
 
-def write_assignments(out_dir, records):
+def write_assignment(out_dir, records, reviewer_id, reviewer_model):
+    reviewer_id = reviewer_id.strip()
+    reviewer_model = reviewer_model.strip()
+    if not reviewer_id or not reviewer_model:
+        fail("reviewer ID and model must be non-empty")
     out_dir.mkdir(parents=True, exist_ok=True)
-    temporary_paths = []
-    final_paths = []
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".reviewer.",
+        suffix=".csv",
+        dir=out_dir,
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    final_path = out_dir / "reviewer.csv"
     try:
-        for reviewer in ("A", "B"):
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".reviewer_{reviewer}.",
-                suffix=".csv",
-                dir=out_dir,
-                text=True,
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=FIELDNAMES,
+                lineterminator="\n",
             )
-            temporary_path = Path(temporary_name)
-            temporary_paths.append(temporary_path)
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
-                writer.writeheader()
-                for record in records:
-                    writer.writerow(dict(record, reviewer=reviewer))
-                handle.flush()
-                os.fsync(handle.fileno())
-            final_paths.append(out_dir / f"reviewer_{reviewer}.csv")
-        for temporary_path, final_path in zip(temporary_paths, final_paths):
-            os.replace(temporary_path, final_path)
+            writer.writeheader()
+            for record in records:
+                writer.writerow(
+                    dict(
+                        record,
+                        reviewer=reviewer_id,
+                        reviewer_model=reviewer_model,
+                    )
+                )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, final_path)
     finally:
-        for temporary_path in temporary_paths:
-            if temporary_path.exists():
-                temporary_path.unlink()
-    return final_paths
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return final_path
 
 
 def main():
@@ -433,6 +445,16 @@ def main():
         help="Manifest-declared shard to export; repeat to select multiple shards",
     )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--reviewer-id",
+        required=True,
+        help="Stable identity of the AI reviewer",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        required=True,
+        help="Model identifier used for this review",
+    )
     args = parser.parse_args()
 
     rows = load_manifest_worklists(
@@ -441,7 +463,12 @@ def main():
         repo_root=args.repo_root,
     )
     records = build_records(rows)
-    write_assignments(args.out_dir, records)
+    write_assignment(
+        args.out_dir,
+        records,
+        reviewer_id=args.reviewer_id,
+        reviewer_model=args.reviewer_model,
+    )
     return 0
 
 

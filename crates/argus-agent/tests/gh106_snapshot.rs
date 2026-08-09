@@ -67,6 +67,135 @@ fn legacy_oversized_semantic_surfaces_fail_closed() -> Result<()> {
 }
 
 #[test]
+fn legacy_native_executable_surface_requires_explicit_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+
+    let mut executable = b"\x7fELF".to_vec();
+    executable.resize(TEXT_MAX_BYTES + 1, 0);
+    std::fs::write(root.path().join("bin/tool"), executable)?;
+
+    let report = scan_agent_surface(root.path())?;
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "agent-native-executable")
+        .expect("native executable finding");
+    assert_eq!(finding.severity, argus_core::Severity::Medium);
+    assert_eq!(finding.location.as_deref(), Some("bin/tool"));
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
+fn dotted_native_executables_in_skill_trees_require_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+    for (name, bytes) in [
+        ("tool.bin", b"\x7fELFpayload".as_slice()),
+        ("plugin.dll", b"MZpayload".as_slice()),
+        ("addon.node", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+    ] {
+        std::fs::write(root.path().join("bin").join(name), bytes)?;
+    }
+
+    let report = scan_agent_surface(root.path())?;
+    let locations: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(
+        locations,
+        ["bin/addon.node", "bin/plugin.dll", "bin/tool.bin"].into()
+    );
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
+fn dotted_native_executables_in_hook_trees_require_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("hooks"))?;
+    for (name, bytes) in [
+        ("tool.bin", b"\x7fELFpayload".as_slice()),
+        ("plugin.so", b"\x7fELFpayload".as_slice()),
+        ("plugin.dll", b"MZpayload".as_slice()),
+        ("plugin.dylib", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+        ("addon.node", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+    ] {
+        std::fs::write(root.path().join("hooks").join(name), bytes)?;
+    }
+    let expected: std::collections::BTreeSet<_> = [
+        "hooks/addon.node",
+        "hooks/plugin.dll",
+        "hooks/plugin.dylib",
+        "hooks/plugin.so",
+        "hooks/tool.bin",
+    ]
+    .into();
+
+    let report = scan_agent_surface(root.path())?;
+    let legacy_locations: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(legacy_locations, expected);
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+
+    let snapshot_root = tempfile::tempdir()?;
+    let snapshot = snapshot_root.path().join("approved.snapshot.json");
+    let outcome = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::None,
+        SnapshotMode::Update(&snapshot),
+        None,
+    )?;
+    let snapshot_locations: std::collections::BTreeSet<_> = outcome
+        .report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(snapshot_locations, expected);
+    assert_eq!(outcome.report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
+fn snapshot_native_executable_surface_keeps_inventory_and_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+    std::fs::write(root.path().join("bin/tool.bin"), b"MZpayload")?;
+    let snapshot_root = tempfile::tempdir()?;
+    let snapshot = snapshot_root.path().join("approved.snapshot.json");
+
+    let outcome = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::None,
+        SnapshotMode::Update(&snapshot),
+        None,
+    )?;
+
+    assert!(outcome.operational_error.is_none());
+    assert_eq!(outcome.report.decision, Decision::AllowWithApproval);
+    assert!(outcome
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "agent-native-executable"));
+    assert!(snapshot.exists());
+    Ok(())
+}
+
+#[test]
 fn legacy_malformed_or_binary_semantic_surfaces_fail_closed() -> Result<()> {
     let cases: &[(&str, &[u8])] = &[
         ("AGENTS.md", b"trusted\0hidden"),
@@ -273,6 +402,58 @@ fn snapshot_root_aware_coordinate_matrix_keeps_logical_keys() -> Result<()> {
         snapshot_update(root, &destination)?;
         assert!(snapshot_entries(&destination)?.contains_key(expected));
     }
+    Ok(())
+}
+
+#[test]
+fn snapshot_native_executable_root_context_requires_approval() -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let hooks = sandbox.path().join("hooks");
+    let claude_hooks = sandbox.path().join(".claude/hooks");
+    let ordinary = sandbox.path().join("assets");
+    for directory in [&hooks, &claude_hooks, &ordinary] {
+        std::fs::create_dir_all(directory)?;
+        std::fs::write(directory.join("tool.bin"), b"\x7fELFpayload")?;
+    }
+    let storage = tempfile::tempdir()?;
+
+    for (index, root) in [
+        hooks.as_path(),
+        hooks.join("tool.bin").as_path(),
+        claude_hooks.as_path(),
+        claude_hooks.join("tool.bin").as_path(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let snapshot = storage.path().join(format!("protected-{index}.json"));
+        let outcome = snapshot_update(root, &snapshot)?;
+        assert!(outcome.operational_error.is_none(), "{}", root.display());
+        assert_eq!(
+            outcome.report.decision,
+            Decision::AllowWithApproval,
+            "{}",
+            root.display()
+        );
+        assert!(
+            outcome.report.findings.iter().any(|finding| {
+                finding.rule_id == "agent-native-executable"
+                    && finding.location.as_deref() == Some("tool.bin")
+            }),
+            "{}",
+            root.display()
+        );
+    }
+
+    let ordinary_snapshot = storage.path().join("ordinary.json");
+    let ordinary_outcome = snapshot_update(&ordinary, &ordinary_snapshot)?;
+    assert!(ordinary_outcome.operational_error.is_none());
+    assert_eq!(ordinary_outcome.report.decision, Decision::Allow);
+    assert!(ordinary_outcome
+        .report
+        .findings
+        .iter()
+        .all(|finding| finding.rule_id != "agent-native-executable"));
     Ok(())
 }
 

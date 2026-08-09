@@ -10,7 +10,7 @@ full census of `claude-skill-registry-data` (202,660 skills). See
   corpus schema. All hosts point at `.example.invalid` (non-resolvable); no
   fixture downloads, executes, or sends anything real. Drop into `argus/corpus`.
 - `labeling-manifest.json` + `labeling-worklists/` — a pinned, sharded
-  two-cohort human benchmark: 719 unique census-hit packages preserving all
+  two-cohort AI-reviewed benchmark: 719 unique census-hit packages preserving all
   849 detector findings, plus 719 detector non-block packages.
 
 ## The 6 fixtures — and why the negatives matter most
@@ -32,7 +32,7 @@ must keep these two green, or it is not an improvement — it just relabels nois
 
 The manifest binds every shard to the exact source commit/tree, row count, and
 SHA-256. Each JSONL row contains its path, detector evidence, context, and empty
-human label/note fields.
+label/note fields.
 
 | legacy finding batch | count | purpose |
 |-------|-------|---------|
@@ -47,15 +47,15 @@ They are aggregated into 719 package samples so packages with several findings
 do not receive extra statistical weight; every finding and context remains in
 the package row.
 
-Reviewers label ground truth as `block` / `non-block` / `needs-context`; the
-evaluation pipeline derives TP/FP/FN/TN from that label and the frozen
-prediction. See `../../eval/labeling/README.md` for the independent dual-review
-and arbitration workflow.
+The declared AI reviewer labels ground truth as `block` / `non-block` /
+`needs-context`; the evaluation pipeline derives TP/FP/FN/TN from that label
+and a live scan by the current Argus binary. See
+`../../eval/labeling/README.md` for the single-review workflow.
 
-All 1,438 labels are intentionally empty pending two independent human
-reviews. Until review and arbitration are complete, no benchmark precision or
-recall may be claimed. The balanced case-control design does not estimate
-source-population prevalence.
+All 1,438 samples now have definitive evidence-backed labels: 24 `block` and
+1,414 `non-block`, with no unresolved rows. The initial current-scanner result
+is 15 TP, 232 FP, 9 FN, and 1,182 TN (precision 0.060729, recall 0.625). The
+balanced case-control design does not estimate source-population prevalence.
 
 ## Census headline (why this exists)
 
@@ -91,4 +91,4 @@ argus corpus eval --corpus corpus/agent --format json
 The result is explicitly a **synthetic fixture metric**, not a real-world
 quality claim. At the implementation head it reports 4 TP, 0 FP, 0 FN, 2 TN,
 precision 1.0, and recall 1.0. These six synthetic fixture metrics remain
-separate from the pinned 1,438-row human benchmark.
+separate from the pinned 1,438-row AI-reviewed benchmark.

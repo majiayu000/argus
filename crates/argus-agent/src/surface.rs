@@ -111,7 +111,7 @@ pub enum CoordinatePolicy<'a> {
 }
 
 const SCRIPT_EXTS: &[&str] = &[
-    ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1",
+    ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1", ".exe",
 ];
 const INVENTORY_BASENAMES: &[&str] = &[
     ".cursorrules",
@@ -130,6 +130,29 @@ pub fn classify(
     logical_path: &str,
     logical_skill_dirs: &[String],
 ) -> Option<SurfaceKind> {
+    let (classification_path, skill_dirs) =
+        resolve_coordinates(policy, logical_path, logical_skill_dirs);
+    classify_rules(&classification_path, &skill_dirs)
+}
+
+pub(super) fn is_native_executable_candidate(
+    policy: CoordinatePolicy<'_>,
+    logical_path: &str,
+    logical_skill_dirs: &[String],
+) -> bool {
+    let (classification_path, skill_dirs) =
+        resolve_coordinates(policy, logical_path, logical_skill_dirs);
+    in_agent_hooks_dir(&classification_path)
+        || skill_dirs
+            .iter()
+            .any(|directory| classification_path.starts_with(directory.as_str()))
+}
+
+fn resolve_coordinates(
+    policy: CoordinatePolicy<'_>,
+    logical_path: &str,
+    logical_skill_dirs: &[String],
+) -> (String, Vec<String>) {
     let (classification_path, skill_dirs) = match policy {
         CoordinatePolicy::LegacyRootRelative => {
             (logical_path.to_string(), logical_skill_dirs.to_vec())
@@ -139,7 +162,7 @@ pub fn classify(
             context.qualify_skill_dirs(logical_skill_dirs),
         ),
     };
-    classify_rules(&classification_path, &skill_dirs)
+    (classification_path, skill_dirs)
 }
 
 fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
@@ -175,6 +198,10 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
     let supported = semantic_kind.is_some()
         || in_claude_dir(path)
         || path == "hooks"
+        || in_agent_hooks_dir(path)
+        || skill_dirs
+            .iter()
+            .any(|directory| path.starts_with(directory.as_str()))
         || INVENTORY_BASENAMES.contains(&lower.as_str());
     if behind_legacy_prune && supported {
         return Some(SurfaceKind::InventoryOnly);

@@ -62,13 +62,50 @@ jobs:
       - name: Synthetic benchmark contract self-test
         run: python3 eval/benchmark/tests/run_fixture_test.py
 
-      - name: Human labeling contract tests
+      - name: AI review labeling contract tests
         shell: bash
         run: |
           python3 -m unittest discover -s eval/labeling/tests -p 'test_*.py'
           python3 eval/labeling/tests/run_fixture_test.py
           python3 eval/labeling/export_assignments.py \
+            --reviewer-id ci-contract-reviewer \
+            --reviewer-model fixture-model \
             --out-dir target/labeling-assignments
+
+      - name: Verify frozen single-AI review
+        shell: bash
+        run: |
+          python3 eval/labeling/finalize_review.py \
+            --review eval/labeling/frozen/reviewer.csv \
+            --out-dir target/frozen-agent-review
+          cmp eval/labeling/frozen/final_labels.jsonl target/frozen-agent-review/final_labels.jsonl
+          cmp eval/labeling/frozen/review_report.json target/frozen-agent-review/review_report.json
+          cmp eval/labeling/frozen/unresolved.csv target/frozen-agent-review/unresolved.csv
+          python3 eval/labeling/evaluate_current.py roots \
+            > target/agent-benchmark-roots.txt
+
+      - name: Check out pinned agent benchmark source
+        shell: bash
+        run: |
+          source_dir="$GITHUB_WORKSPACE/target/agent-benchmark-source"
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin \
+            https://github.com/majiayu000/claude-skill-registry-data
+          git -C "$source_dir" sparse-checkout init --cone
+          git -C "$source_dir" sparse-checkout set --stdin \
+            < target/agent-benchmark-roots.txt
+          git -C "$source_dir" fetch --depth=1 --filter=blob:none origin \
+            0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+
+      - name: Current agent benchmark quality gate
+        shell: bash
+        run: |
+          cargo build -p argus-cli
+          python3 eval/labeling/evaluate_current.py evaluate \
+            --source-repo target/agent-benchmark-source \
+            --argus target/debug/argus \
+            --out target/current-agent-quality.json
 
       - name: Check whitespace
         shell: bash

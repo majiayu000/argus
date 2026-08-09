@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build a deterministic, unlabeled detector-non-block review cohort.
 
-This script never assigns or suggests a human label. It selects skill roots
+This script never assigns or suggests a label. It selects skill roots
 from one pinned source tree, runs one pinned Argus binary against each root,
 and retains the first N reports whose decision is not the positive decision.
-The generated rows remain unlabeled until two independent humans review them.
+The generated rows remain unlabeled until the declared AI reviewer reviews them.
 """
 
 import argparse
@@ -214,16 +214,22 @@ def scan_candidate(argus, source_repo, root):
     findings = report.get("findings")
     if not isinstance(findings, list):
         raise RuntimeError(f"{root}: findings is not an array")
-    rules = sorted(
-        {
-            finding["rule_id"]
-            for finding in findings
-            if isinstance(finding, dict) and isinstance(finding.get("rule_id"), str)
-        }
-    )
+    rules = set()
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            raise RuntimeError(f"{root}: finding {index} is not an object")
+        rule_id = finding.get("rule_id")
+        if (
+            not isinstance(rule_id, str)
+            or not rule_id
+            or not rule_id.isprintable()
+            or any(character.isspace() for character in rule_id)
+        ):
+            raise RuntimeError(f"{root}: finding {index} has invalid rule_id")
+        rules.add(rule_id)
     return {
         "decision": decision,
-        "rules": rules,
+        "rules": sorted(rules),
     }
 
 
@@ -376,7 +382,7 @@ def generated_hit_row(rows, root, result, inventory, source_repo):
     priorities = []
     for row in rows:
         if row.get("label"):
-            raise RuntimeError(f"{row.get('path', root)}: unexpected human label")
+            raise RuntimeError(f"{row.get('path', root)}: unexpected label")
         finding_contexts = verified_contexts(row, inventory, source_repo)
         finding = {
             key: value

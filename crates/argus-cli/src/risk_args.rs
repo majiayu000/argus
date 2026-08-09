@@ -2,12 +2,11 @@
 //!
 //! Scoring is opt-in, and that is a deliberate contract choice rather than
 //! caution for its own sake. The default decision path is policy-driven and
-//! every existing consumer's exit codes depend on it. Switching that default
-//! to a scored decision is a behaviour change for everyone, and GH-146 states
-//! the precondition for making it: the weights cannot be calibrated until the
-//! labeled benchmark in GH-145 exists. Shipping the machinery now, off by
-//! default, lets the score be inspected and thresholds tuned without silently
-//! re-deciding anyone's builds.
+//! every existing consumer's exit codes depend on it. The completed GH-145
+//! benchmark cannot distinguish its 15 AGT-01 true positives from 229 false
+//! positives by rule id, and most other observed ids have only one or two
+//! samples. Keeping the machinery off by default lets the score be inspected
+//! without presenting an overfit per-rule mapping as a calibrated verdict.
 
 use anyhow::{Context, Result};
 use argus_core::rules::{RiskScore, RiskThresholds};
@@ -140,7 +139,7 @@ mod tests {
     #[test]
     fn scoring_reports_without_changing_the_decision_by_default() {
         // The point of the default: an operator can compare the scored verdict
-        // against the policy-driven one before trusting uncalibrated weights.
+        // against the policy-driven one before opting into scored decisions.
         let mut scan = report(
             Decision::Allow,
             vec![Finding::new("r", Severity::Critical, "d")],

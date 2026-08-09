@@ -42,5 +42,5 @@
 1. **别急着发 trust badge**。当前词法层做 badge 会误导。
 2. **重心放语义层**，因为 99.9% 的攻击面是 SKILL.md 文本，不是脚本。词法正则不够，需要意图-能力错配判断（规则分类 + 可选 LLM judge）。
 3. **脚本 L2 仍要做但覆盖小**，价值在"能力清单/权限页"叙事，不在恶意判定。用上面 245 个命中当第一批 fixture。
-4. **建 eval 集**：先人工标注 override_lang(210)、concealment(244)、脚本能力(245) 这三批小样本，得出 precision，再定义"够强"。
+4. **持续维护 eval 集**：已由单一 AI reviewer 完成 1,438 个 package-level 样本的证据化标注；当前 Argus 的基线 precision 为 0.060729、recall 为 0.625，CI 对两项做非回归门禁。
 5. 现有词法层降级为**第一道粗筛**，不作为最终 verdict。

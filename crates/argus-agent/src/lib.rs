@@ -12,11 +12,11 @@
 use anyhow::{bail, Context, Result};
 use argus_core::{ArtifactKind, Finding, ScanReport};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 mod baseline;
 mod capability;
+mod collection;
 mod config;
 mod decision;
 mod injection;
@@ -25,7 +25,9 @@ mod rule_runtime;
 mod snapshot;
 mod surface;
 
+use collection::{collect_surface_files, path_identity, project_semantic};
 pub use judge::{LlmJudge, LlmJudgeRequest, LlmJudgeResponse};
+use surface::is_native_executable_candidate;
 pub use surface::{classify, CoordinatePolicy, ScanRootContext, ScanRootEntryType, SurfaceKind};
 
 /// One text file collected from the scanned tree, with its surface class.
@@ -67,23 +69,7 @@ struct DiscoveredEntry {
     absolute_path: PathBuf,
     entry_type: snapshot::EntryType,
     surface_kind: Option<SurfaceKind>,
-}
-
-/// Maximum size we attempt to read as text (matches argus-rules).
-const TEXT_MAX_BYTES: u64 = 1024 * 1024;
-
-struct Candidate {
-    rel: String,
-    state: CandidateState,
-}
-
-enum CandidateState {
-    Bytes(Vec<u8>),
-    Oversized(u64),
-    MetadataError(String),
-    ReadError(String),
-    Symlink,
-    SymlinkTargetError(String),
+    native_executable_candidate: bool,
 }
 
 /// Top-level entry: scan a directory (or single file) as an agent surface.
@@ -183,9 +169,9 @@ fn scan_agent_surface_inner(
         BaselineMode::Check(p) | BaselineMode::Update(p) => Some(path_identity(p)),
         BaselineMode::None => None,
     };
-    let files = collect_surface_files(path, exclude.as_deref())?;
-
-    let mut findings: Vec<Finding> = Vec::new();
+    let collected = collect_surface_files(path, exclude.as_deref())?;
+    let files = collected.files;
+    let mut findings = collected.findings;
     rule_runtime::scan_files_with_context(rules, &files, &mut findings, execution)?;
     injection::run(&files, &mut findings);
     capability::run(&files, &mut findings)?;
@@ -261,11 +247,13 @@ fn scan_snapshot_mode(
     };
     let mut semantic_findings = Vec::new();
     let post_inventory: Result<()> = (|| {
-        let files = project_semantic(
+        let collected = project_semantic(
             &discovered,
             excluded.as_deref(),
             baseline_excluded.as_deref(),
         )?;
+        let files = collected.files;
+        semantic_findings.extend(collected.findings);
         rule_runtime::scan_files_with_context(rules, &files, &mut semantic_findings, execution)?;
         injection::run(&files, &mut semantic_findings);
         capability::run(&files, &mut semantic_findings)?;
@@ -397,18 +385,25 @@ fn discover_complete(path: &Path) -> Result<(ScanRootContext, Vec<DiscoveredEntr
     let skill_dirs = raw_skill_dirs(&raw);
     let discovered = raw
         .into_iter()
-        .map(
-            |(logical_path, absolute_path, entry_type)| DiscoveredEntry {
-                surface_kind: classify(
-                    CoordinatePolicy::SnapshotRootAware(&context),
-                    &logical_path,
-                    &skill_dirs,
-                ),
+        .map(|(logical_path, absolute_path, entry_type)| {
+            let surface_kind = classify(
+                CoordinatePolicy::SnapshotRootAware(&context),
+                &logical_path,
+                &skill_dirs,
+            );
+            let native_executable_candidate = is_native_executable_candidate(
+                CoordinatePolicy::SnapshotRootAware(&context),
+                &logical_path,
+                &skill_dirs,
+            );
+            DiscoveredEntry {
+                surface_kind,
+                native_executable_candidate,
                 logical_path,
                 absolute_path,
                 entry_type,
-            },
-        )
+            }
+        })
         .collect();
     Ok((context, discovered, canonical))
 }
@@ -519,265 +514,4 @@ fn capture_inventory(
         }
     }
     Ok(snapshot::Snapshot::new(entries))
-}
-
-fn project_semantic(
-    discovered: &[DiscoveredEntry],
-    snapshot_exclusion: Option<&Path>,
-    baseline_exclusion: Option<&Path>,
-) -> Result<Vec<SurfaceFile>> {
-    let mut files = Vec::new();
-    for entry in discovered {
-        if entry.entry_type == snapshot::EntryType::Directory
-            || entry.surface_kind == Some(SurfaceKind::InventoryOnly)
-            || entry.surface_kind.is_none()
-            || snapshot_exclusion.is_some_and(|path| entry.absolute_path == path)
-            || is_excluded(&entry.absolute_path, baseline_exclusion)
-        {
-            continue;
-        }
-        if entry.entry_type == snapshot::EntryType::Symlink {
-            bail!(
-                "protected agent surface `{}` is a symlink",
-                entry.logical_path
-            );
-        }
-        let metadata = std::fs::symlink_metadata(&entry.absolute_path)?;
-        files.push(materialize_candidate(
-            collect_candidate(
-                &entry.absolute_path,
-                entry.logical_path.clone(),
-                metadata.len(),
-            ),
-            entry.surface_kind.expect("semantic kind checked"),
-        )?);
-    }
-    Ok(files)
-}
-
-fn collect_surface_files(root: &Path, exclude: Option<&Path>) -> Result<Vec<SurfaceFile>> {
-    let root_metadata = std::fs::symlink_metadata(root)
-        .with_context(|| format!("inspect agent scan root {}", root.display()))?;
-    if root_metadata.file_type().is_symlink() {
-        bail!(
-            "agent scan root `{}` is a symlink; refusing incomplete scan",
-            root.display()
-        );
-    }
-    let mut candidates: Vec<Candidate> = Vec::new();
-
-    if root_metadata.is_file() {
-        if !is_excluded(root, exclude) {
-            let rel = root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let candidate = collect_candidate(root, rel, root_metadata.len());
-            if let CandidateState::ReadError(error) = &candidate.state {
-                bail!(
-                    "read agent scan root {}: {error}; refusing incomplete scan",
-                    root.display()
-                );
-            }
-            candidates.push(candidate);
-        }
-    } else if root_metadata.is_dir() {
-        // Opening the root separately distinguishes a completely unreadable
-        // root from a deeper entry that becomes unreadable during traversal.
-        std::fs::read_dir(root)
-            .with_context(|| format!("read agent scan root {}", root.display()))?;
-
-        // Vendored dependency trees drown the signal (a real ~/.claude scan
-        // surfaced hundreds of node_modules hits); the package supply chain
-        // is argus's existing scanners' job, not the agent surface's.
-        let walker = walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                name != "node_modules" && name != ".git"
-            });
-        for entry in walker {
-            let entry =
-                entry.with_context(|| format!("walk agent scan root {}", root.display()))?;
-            let file_type = entry.file_type();
-            if !file_type.is_file() && !file_type.is_symlink() {
-                continue;
-            }
-            let abs = entry.path();
-            if is_excluded(abs, exclude) {
-                continue; // never self-hash the baseline file
-            }
-            let rel = abs
-                .strip_prefix(root)
-                .unwrap_or(abs)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if file_type.is_symlink() {
-                let state = match std::fs::metadata(abs) {
-                    Ok(metadata) if metadata.is_dir() => {
-                        bail!(
-                            "agent scan tree contains directory symlink `{rel}`; \
-                             refusing incomplete scan"
-                        );
-                    }
-                    Ok(_) => CandidateState::Symlink,
-                    Err(error) => CandidateState::SymlinkTargetError(error.to_string()),
-                };
-                candidates.push(Candidate { rel, state });
-                continue;
-            }
-            let candidate = match entry.metadata() {
-                Ok(metadata) => collect_candidate(abs, rel, metadata.len()),
-                Err(error) => Candidate {
-                    rel,
-                    state: CandidateState::MetadataError(error.to_string()),
-                },
-            };
-            candidates.push(candidate);
-        }
-    } else {
-        bail!(
-            "agent scan root is neither a file nor directory: {}",
-            root.display()
-        );
-    }
-
-    classify_candidates(candidates)
-}
-
-fn collect_candidate(path: &Path, rel: String, metadata_len: u64) -> Candidate {
-    let state = if metadata_len > TEXT_MAX_BYTES {
-        CandidateState::Oversized(metadata_len)
-    } else {
-        match read_limited(path) {
-            Ok(state) => state,
-            Err(error) => CandidateState::ReadError(format!("{error:#}")),
-        }
-    };
-    Candidate { rel, state }
-}
-
-fn classify_candidates(candidates: Vec<Candidate>) -> Result<Vec<SurfaceFile>> {
-    // Directories that contain a SKILL.md: scripts underneath are skill scripts.
-    let skill_dirs: Vec<String> = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let file_name = candidate.rel.rsplit('/').next().unwrap_or(&candidate.rel);
-            file_name.eq_ignore_ascii_case("SKILL.md").then(|| {
-                candidate
-                    .rel
-                    .strip_suffix(file_name)
-                    .unwrap_or("")
-                    .to_string()
-            })
-        })
-        .collect();
-
-    let mut files = Vec::new();
-    for Candidate { rel, state } in candidates {
-        let kind = classify(CoordinatePolicy::LegacyRootRelative, &rel, &skill_dirs);
-        if matches!(&state, CandidateState::SymlinkTargetError(_))
-            && is_protected_tree_path(&rel, &skill_dirs)
-        {
-            let CandidateState::SymlinkTargetError(error) = state else {
-                unreachable!();
-            };
-            bail!(
-                "inspect protected agent tree symlink `{rel}` target: {error}; \
-                 refusing incomplete scan"
-            );
-        }
-        if kind == Some(SurfaceKind::InventoryOnly) {
-            continue;
-        }
-        let Some(kind) = kind else {
-            continue;
-        };
-        files.push(materialize_candidate(Candidate { rel, state }, kind)?);
-    }
-    Ok(files)
-}
-
-fn materialize_candidate(candidate: Candidate, kind: SurfaceKind) -> Result<SurfaceFile> {
-    let Candidate { rel, state } = candidate;
-    let bytes = match state {
-        CandidateState::Bytes(bytes) => bytes,
-        CandidateState::Oversized(size) => bail!(
-            "protected agent surface `{rel}` is at least {size} bytes, exceeds scan limit \
-             {TEXT_MAX_BYTES}; refusing incomplete scan"
-        ),
-        CandidateState::MetadataError(error) => {
-            bail!("inspect protected agent surface `{rel}`: {error}; refusing incomplete scan")
-        }
-        CandidateState::ReadError(error) => {
-            bail!("read protected agent surface `{rel}`: {error}; refusing incomplete scan")
-        }
-        CandidateState::Symlink | CandidateState::SymlinkTargetError(_) => {
-            bail!("protected agent surface `{rel}` is a symlink; refusing incomplete scan")
-        }
-    };
-    if argus_rules::looks_binary(&bytes) {
-        bail!("protected agent surface `{rel}` appears binary; refusing incomplete scan");
-    }
-    let content = String::from_utf8(bytes).with_context(|| {
-        format!("protected agent surface `{rel}` is not valid UTF-8; refusing incomplete scan")
-    })?;
-    Ok(SurfaceFile { rel, content, kind })
-}
-
-fn is_protected_tree_path(rel: &str, skill_dirs: &[String]) -> bool {
-    rel.split('/').any(|segment| segment == ".claude")
-        || rel == "hooks"
-        || rel.starts_with("hooks/")
-        || skill_dirs.iter().any(|dir| rel.starts_with(dir))
-}
-
-/// True only for the declared baseline path itself. A different symlink alias
-/// that resolves to the same target must still be classified so protected
-/// surfaces cannot bypass completeness checks by pointing at the baseline.
-fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
-    let Some(exclude) = exclude else {
-        return false;
-    };
-    if path_identity(candidate) == exclude {
-        return true;
-    }
-    if std::fs::symlink_metadata(exclude).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return false;
-    }
-    if std::fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return false;
-    }
-    match std::fs::canonicalize(candidate) {
-        Ok(abs) => std::fs::canonicalize(exclude).is_ok_and(|excluded| abs == excluded),
-        Err(_) => false,
-    }
-}
-
-fn path_identity(path: &Path) -> std::path::PathBuf {
-    let Some(file_name) = path.file_name() else {
-        return path.to_path_buf();
-    };
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::canonicalize(parent)
-        .map(|parent| parent.join(file_name))
-        .unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn read_limited(path: &Path) -> Result<CandidateState> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("open agent surface {}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(TEXT_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read agent surface {}", path.display()))?;
-    if bytes.len() as u64 > TEXT_MAX_BYTES {
-        return Ok(CandidateState::Oversized(bytes.len() as u64));
-    }
-    Ok(CandidateState::Bytes(bytes))
 }
