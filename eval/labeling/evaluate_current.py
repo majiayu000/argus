@@ -152,6 +152,8 @@ def rule_metric(counts):
 
 def enforce_thresholds(metrics, min_precision, min_recall):
     for name, minimum in (("precision", min_precision), ("recall", min_recall)):
+        if not math.isfinite(minimum) or not 0 <= minimum <= 1:
+            raise ValueError(f"minimum {name} must be finite and between 0 and 1")
         value = metrics.get(name)
         if value is None:
             raise RuntimeError(f"{name} is undefined")

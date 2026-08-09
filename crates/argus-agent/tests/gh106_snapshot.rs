@@ -89,12 +89,41 @@ fn legacy_native_executable_surface_requires_explicit_approval() -> Result<()> {
 }
 
 #[test]
+fn dotted_native_executables_in_skill_trees_require_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+    for (name, bytes) in [
+        ("tool.bin", b"\x7fELFpayload".as_slice()),
+        ("plugin.dll", b"MZpayload".as_slice()),
+        ("addon.node", b"\xfe\xed\xfa\xcfpayload".as_slice()),
+    ] {
+        std::fs::write(root.path().join("bin").join(name), bytes)?;
+    }
+
+    let report = scan_agent_surface(root.path())?;
+    let locations: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "agent-native-executable")
+        .filter_map(|finding| finding.location.as_deref())
+        .collect();
+    assert_eq!(
+        locations,
+        ["bin/addon.node", "bin/plugin.dll", "bin/tool.bin"].into()
+    );
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
 fn snapshot_native_executable_surface_keeps_inventory_and_approval() -> Result<()> {
     let root = tempfile::tempdir()?;
     std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
     std::fs::create_dir(root.path().join("bin"))?;
-    std::fs::write(root.path().join("bin/tool.exe"), b"MZpayload")?;
-    let snapshot = root.path().join("approved.snapshot.json");
+    std::fs::write(root.path().join("bin/tool.bin"), b"MZpayload")?;
+    let snapshot_root = tempfile::tempdir()?;
+    let snapshot = snapshot_root.path().join("approved.snapshot.json");
 
     let outcome = scan_agent_surface_with_snapshot(
         root.path(),

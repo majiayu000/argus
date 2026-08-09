@@ -175,6 +175,18 @@ class ExportAssignmentsTests(unittest.TestCase):
                 {row["reviewer_model"] for row in exported},
                 {"gpt-5"},
             )
+            self.assertNotIn(b"\r\n", path.read_bytes())
+
+    def test_context_export_strips_line_endings_and_trailing_whitespace(self):
+        text = exporter.contexts_text(
+            {
+                "path": "dev/one/SKILL.md",
+                "contexts": [
+                    {"context": " first  \r\nsecond\t\rthird  ", "line": 1}
+                ],
+            }
+        )
+        self.assertEqual(text, "[dev/one/SKILL.md:line 1]\nfirst\nsecond\nthird")
 
     def test_manifest_rejects_tampered_shard(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -532,6 +544,21 @@ class BuildNonHitWorklistTests(unittest.TestCase):
                     "dev/example",
                 )
 
+        for malformed in [None, {}, {"rule_id": ""}, {"rule_id": 7}]:
+            bad_report = json.dumps(
+                {"decision": "allow", "findings": [malformed]}
+            ).encode()
+            completed = subprocess.CompletedProcess([], 0, bad_report, b"")
+            with self.subTest(malformed=malformed), mock.patch.object(
+                builder.subprocess, "run", return_value=completed
+            ):
+                with self.assertRaisesRegex(RuntimeError, "finding"):
+                    builder.scan_candidate(
+                        Path("/trusted/argus"),
+                        Path("/trusted/source"),
+                        "dev/example",
+                    )
+
     def test_verify_checkout_fails_closed(self):
         with mock.patch.object(
             builder,
@@ -596,7 +623,17 @@ class FinalizeReviewTests(unittest.TestCase):
                 if field not in {"detector", "contexts"}
             ]
             self.write_reviewer_row(path, fieldnames=fieldnames)
-            with self.assertRaisesRegex(SystemExit, "missing columns"):
+            with self.assertRaisesRegex(SystemExit, "exact columns"):
+                finalizer.read_review_csv(path)
+
+    def test_reviewer_csv_rejects_legacy_dual_review_columns(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reviewer.csv"
+            self.write_reviewer_row(
+                path,
+                fieldnames=[*exporter.FIELDNAMES, "reviewer_b", "arbitrator"],
+            )
+            with self.assertRaisesRegex(SystemExit, "exact columns"):
                 finalizer.read_review_csv(path)
 
     def test_reviewer_csv_rejects_empty_immutable_evidence(self):

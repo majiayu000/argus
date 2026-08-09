@@ -71,6 +71,11 @@ def read_review_csv(path):
         raise SystemExit(f"error: cannot read {path}: {exc}") from exc
     with handle:
         reader = csv.DictReader(handle)
+        if reader.fieldnames != assignment_contract.FIELDNAMES:
+            raise SystemExit(
+                f"error: {path}: expected exact columns "
+                f"{assignment_contract.FIELDNAMES}, got {reader.fieldnames or []}"
+            )
         required = set(IMMUTABLE_FIELDS) | {
             "reviewer",
             "reviewer_model",
@@ -249,6 +254,7 @@ def write_outputs(out_dir, rows, reviewer):
             handle,
             fieldnames=UNRESOLVED_FIELDS,
             extrasaction="ignore",
+            lineterminator="\n",
         )
         writer.writeheader()
         writer.writerows(sorted(unresolved, key=lambda row: row["sample_id"]))

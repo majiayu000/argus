@@ -175,6 +175,9 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
     let supported = semantic_kind.is_some()
         || in_claude_dir(path)
         || path == "hooks"
+        || skill_dirs
+            .iter()
+            .any(|directory| path.starts_with(directory.as_str()))
         || INVENTORY_BASENAMES.contains(&lower.as_str());
     if behind_legacy_prune && supported {
         return Some(SurfaceKind::InventoryOnly);

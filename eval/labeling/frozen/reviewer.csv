@@ -8,8 +8,8 @@ Research findings can BLOCK user assumptions. User must acknowledge.",non-block,
 agt88-46b322bdcd,codex,gpt-5.6-sol,detector-non-block,detector-non-block-v1,marketing,normal,marketing/getting-feedback,marketing/getting-feedback/SKILL.md,0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3,https://github.com/majiayu000/claude-skill-registry-data/blob/0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3/marketing/getting-feedback/SKILL.md,allow,decision=allow; positive=block; rules=,"[marketing/getting-feedback/SKILL.md:line 1]
 ---
 name: Getting Feedback
-description: The user needs feedback on an idea or a question from his audience to improve the writing and create valuable content. 
---- 
+description: The user needs feedback on an idea or a question from his audience to improve the writing and create valuable content.
+---
 
 # Getting Feedback
 
@@ -3323,7 +3323,7 @@ agt88-7579eed6de,codex,gpt-5.6-sol,detector-non-block,detector-non-block-v1,ai-l
 name: ai-langchain4j
 description: |
   基于若依-vue-plus框架的LangChain4j AI大模型集成标准规范。全面规范模型配置管理、类型安全服务定义、RAG（检索增强生成）实现、流式响应处理及安全性保障。
-  
+
   触发场景：
   - 开发智能客服系统、文档问答助手、代码生成工具
   - 集成LLM大模型接口（OpenAI、智谱AI、通义千问等）
@@ -6019,7 +6019,7 @@ description: |
   Execute comprehensive load and stress testing to validate API performance and scalability.
   Use when validating API performance under load.
   Trigger with phrases like ""load test the API"", ""stress test API"", or ""benchmark API performance"".
-  
+
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash(api:load-*)
 version: 1.0.0
 author: Jeremy Longshore <jeremy@…",non-block,testing/load-testing-apis-byteworthy-upstream/SKILL.md is generic API/load-testing scaffolding documentation with a restricted Bash tool namespace.
@@ -7188,14 +7188,14 @@ agt88-947df03969,codex,gpt-5.6-sol,detector-hit,detector-hit-v1,design,normal,de
 agt88-3a4015be72,codex,gpt-5.6-sol,detector-non-block,detector-non-block-v1,design,normal,design/curating-backlinks-for-a-post,design/curating-backlinks-for-a-post/SKILL.md,0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3,https://github.com/majiayu000/claude-skill-registry-data/blob/0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3/design/curating-backlinks-for-a-post/SKILL.md,allow,decision=allow; positive=block; rules=,"[design/curating-backlinks-for-a-post/SKILL.md:line 1]
 ---
 name: Curating backlinks for a post
-description: Find suitable pieces from the blog to use as links in a post when requested at the stage of final draft.  
+description: Find suitable pieces from the blog to use as links in a post when requested at the stage of final draft.
 ---
 
 # Curating backlinks for a post
 
 ## Introduction
 
-Backlinks are very important for a blog as it allows Houfu to continue to make use of work 
+Backlinks are very important for a blog as it allows Houfu to continue to make use of work
 he has already done in news ways, inform readers of related content so that they can increase…",non-block,`design/curating-backlinks-for-a-post/SKILL.md` only searches a blog for relevant internal links and reports candidates to the user.
 agt88-b41247a951,codex,gpt-5.6-sol,detector-non-block,detector-non-block-v1,quality,normal,quality/architecture-validation-d-o-hub-rust-self-learning-m,quality/architecture-validation-d-o-hub-rust-self-learning-m/SKILL.md,0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3,https://github.com/majiayu000/claude-skill-registry-data/blob/0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3/quality/architecture-validation-d-o-hub-rust-self-learning-m/SKILL.md,allow,decision=allow; positive=block; rules=,"[quality/architecture-validation-d-o-hub-rust-self-learning-m/SKILL.md:line 1]
 ---
@@ -7632,7 +7632,7 @@ agt88-656e2fa77c,codex,gpt-5.6-sol,detector-non-block,detector-non-block-v1,data
 name: screenwriter
 description: >
   Transform creative ideas into professional, production-ready screenplays optimized for AI video generation pipelines. Converts raw concepts into structured scene-by-scene narratives with rich visual descriptions, proper screenplay formatting, and XML-tagged output for seamless integration with image/video generation tools (imagine, arch-v).
-  
+
   USE WHEN: Co…",non-block,"SKILL.md is a creative-writing workflow for structured screenplays and AI-video-oriented scene descriptions, with no unsafe execution or secret handling."
 agt88-58ea0e6b0f,codex,gpt-5.6-sol,detector-hit,detector-hit-v1,documents,normal,documents/docs-conventions-cloudposse-docs,documents/docs-conventions-cloudposse-docs/SKILL.md,0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3,https://github.com/majiayu000/claude-skill-registry-data/blob/0cd5e5daa71a0fd8e5de723904e5f33fb6e5eed3/documents/docs-conventions-cloudposse-docs/SKILL.md,allow,[concealment documents/docs-conventions-cloudposse-docs/SKILL.md] pattern=hide from,"[documents/docs-conventions-cloudposse-docs/SKILL.md:line 18]
 title: ""Human-Readable Title""
@@ -9713,7 +9713,7 @@ description: |
   Implement API throttling policies to protect backend services from overload.
   Use when controlling API request rates.
   Trigger with phrases like ""throttle API"", ""control request rate"", or ""add throttling"".
-  
+
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash(api:throttle-*)
 version: 1.0.0
 author: Jeremy Longshore <jeremy@intentsolutions.io>
@@ -11245,7 +11245,7 @@ description: |
   Monitor new token launches, IDOs, and fair launches with contract verification.
   Use when discovering new token launches.
   Trigger with phrases like ""track launches"", ""find new tokens"", or ""monitor IDOs"".
-  
+
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash(crypto:launch-*)
 version: 1.0.0
 author: Jeremy Longshore <jeremy@intentsolutions.io>

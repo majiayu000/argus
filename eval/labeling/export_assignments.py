@@ -127,7 +127,10 @@ def contexts_text(row):
         context_path = context.get("path", row.get("path"))
         if not isinstance(context_path, str):
             fail(f"{row.get('path', '<unknown>')}: invalid context path")
-        parts.append(f"[{context_path}:line {line}]\n{snippet.strip()}")
+        normalized = "\n".join(
+            source_line.rstrip() for source_line in snippet.splitlines()
+        ).strip()
+        parts.append(f"[{context_path}:line {line}]\n{normalized}")
     return "\n---\n".join(parts)
 
 
@@ -403,7 +406,11 @@ def write_assignment(out_dir, records, reviewer_id, reviewer_model):
     final_path = out_dir / "reviewer.csv"
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=FIELDNAMES,
+                lineterminator="\n",
+            )
             writer.writeheader()
             for record in records:
                 writer.writerow(

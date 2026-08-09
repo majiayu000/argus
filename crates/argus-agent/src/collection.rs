@@ -1,6 +1,8 @@
 //! Fail-closed collection and materialization of semantic agent surfaces.
 
-use crate::{classify, snapshot, CoordinatePolicy, DiscoveredEntry, SurfaceFile, SurfaceKind};
+use crate::{
+    classify, skill_dir, snapshot, CoordinatePolicy, DiscoveredEntry, SurfaceFile, SurfaceKind,
+};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use std::io::Read;
@@ -41,13 +43,31 @@ pub(super) fn project_semantic(
 ) -> Result<CollectedSurface> {
     let mut files = Vec::new();
     let mut findings = Vec::new();
+    let skill_dirs: Vec<_> = discovered
+        .iter()
+        .filter_map(|entry| skill_dir(&entry.logical_path))
+        .collect();
     for entry in discovered {
         if entry.entry_type == snapshot::EntryType::Directory
-            || entry.surface_kind == Some(SurfaceKind::InventoryOnly)
             || entry.surface_kind.is_none()
             || snapshot_exclusion.is_some_and(|path| entry.absolute_path == path)
             || is_excluded(&entry.absolute_path, baseline_exclusion)
         {
+            continue;
+        }
+        if entry.surface_kind == Some(SurfaceKind::InventoryOnly) {
+            if entry.entry_type == snapshot::EntryType::File
+                && is_native_candidate_tree(&entry.logical_path, &skill_dirs)
+            {
+                let metadata = std::fs::symlink_metadata(&entry.absolute_path)?;
+                if let Some(finding) = materialize_native_candidate(collect_candidate(
+                    &entry.absolute_path,
+                    entry.logical_path.clone(),
+                    metadata.len(),
+                ))? {
+                    findings.push(finding);
+                }
+            }
             continue;
         }
         if entry.entry_type == snapshot::EntryType::Symlink {
@@ -206,9 +226,17 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<CollectedSurface> {
                 "inspect protected agent tree symlink `{rel}` target: {error}; refusing incomplete scan"
             );
         }
-        let Some(kind) = kind.filter(|kind| *kind != SurfaceKind::InventoryOnly) else {
+        let Some(kind) = kind else {
             continue;
         };
+        if kind == SurfaceKind::InventoryOnly {
+            if is_native_candidate_tree(&rel, &skill_dirs) {
+                if let Some(finding) = materialize_native_candidate(Candidate { rel, state })? {
+                    findings.push(finding);
+                }
+            }
+            continue;
+        }
         push_materialized(
             &mut files,
             &mut findings,
@@ -235,14 +263,7 @@ fn materialize_candidate(candidate: Candidate, kind: SurfaceKind) -> Result<Mate
         CandidateState::Bytes(bytes) => bytes,
         CandidateState::NativeExecutable(format) => {
             return Ok(MaterializedCandidate::NativeExecutable(
-                Finding::new(
-                    "agent-native-executable",
-                    Severity::Medium,
-                    format!(
-                        "agent surface ships a native {format} executable; binary semantics were not inspected"
-                    ),
-                )
-                .at(rel),
+                native_executable_finding(rel, format),
             ));
         }
         CandidateState::Oversized(size) => bail!(
@@ -271,6 +292,36 @@ fn materialize_candidate(candidate: Candidate, kind: SurfaceKind) -> Result<Mate
     }))
 }
 
+fn materialize_native_candidate(candidate: Candidate) -> Result<Option<Finding>> {
+    let Candidate { rel, state } = candidate;
+    match state {
+        CandidateState::NativeExecutable(format) => {
+            Ok(Some(native_executable_finding(rel, format)))
+        }
+        CandidateState::MetadataError(error) => {
+            bail!("inspect protected agent asset `{rel}`: {error}; refusing incomplete scan")
+        }
+        CandidateState::ReadError(error) => {
+            bail!("read protected agent asset `{rel}`: {error}; refusing incomplete scan")
+        }
+        CandidateState::Bytes(_)
+        | CandidateState::Oversized(_)
+        | CandidateState::Symlink
+        | CandidateState::SymlinkTargetError(_) => Ok(None),
+    }
+}
+
+fn native_executable_finding(rel: String, format: &str) -> Finding {
+    Finding::new(
+        "agent-native-executable",
+        Severity::Medium,
+        format!(
+            "agent surface ships a native {format} executable; binary semantics were not inspected"
+        ),
+    )
+    .at(rel)
+}
+
 fn is_protected_tree_path(rel: &str, skill_dirs: &[String]) -> bool {
     rel.split('/').any(|segment| segment == ".claude")
         || rel == "hooks"
@@ -278,6 +329,22 @@ fn is_protected_tree_path(rel: &str, skill_dirs: &[String]) -> bool {
         || skill_dirs
             .iter()
             .any(|directory| rel.starts_with(directory))
+}
+
+fn is_native_candidate_tree(rel: &str, skill_dirs: &[String]) -> bool {
+    if rel.starts_with("hooks/")
+        || skill_dirs
+            .iter()
+            .any(|directory| rel.starts_with(directory))
+    {
+        return true;
+    }
+    let mut previous = None;
+    rel.split('/').any(|segment| {
+        let is_claude_hook = previous == Some(".claude") && segment == "hooks";
+        previous = Some(segment);
+        is_claude_hook
+    })
 }
 
 fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {

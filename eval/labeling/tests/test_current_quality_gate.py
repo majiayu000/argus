@@ -85,6 +85,15 @@ class CurrentQualityGateTests(unittest.TestCase):
             gate.enforce_thresholds(metrics, min_precision=0.26, min_recall=0.5)
         with self.assertRaisesRegex(RuntimeError, "recall"):
             gate.enforce_thresholds(metrics, min_precision=0.25, min_recall=0.51)
+        for invalid in [float("nan"), float("inf"), -0.01, 1.01]:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "between 0 and 1"
+            ):
+                gate.enforce_thresholds(
+                    metrics,
+                    min_precision=invalid,
+                    min_recall=0.5,
+                )
 
     def test_final_labels_must_exactly_match_validated_review(self):
         gate = load_gate()

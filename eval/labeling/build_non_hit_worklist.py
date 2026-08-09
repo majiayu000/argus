@@ -214,16 +214,17 @@ def scan_candidate(argus, source_repo, root):
     findings = report.get("findings")
     if not isinstance(findings, list):
         raise RuntimeError(f"{root}: findings is not an array")
-    rules = sorted(
-        {
-            finding["rule_id"]
-            for finding in findings
-            if isinstance(finding, dict) and isinstance(finding.get("rule_id"), str)
-        }
-    )
+    rules = set()
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            raise RuntimeError(f"{root}: finding {index} is not an object")
+        rule_id = finding.get("rule_id")
+        if not isinstance(rule_id, str) or not rule_id:
+            raise RuntimeError(f"{root}: finding {index} has invalid rule_id")
+        rules.add(rule_id)
     return {
         "decision": decision,
-        "rules": rules,
+        "rules": sorted(rules),
     }
 
 
