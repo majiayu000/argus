@@ -67,6 +67,54 @@ fn legacy_oversized_semantic_surfaces_fail_closed() -> Result<()> {
 }
 
 #[test]
+fn legacy_native_executable_surface_requires_explicit_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+
+    let mut executable = b"\x7fELF".to_vec();
+    executable.resize(TEXT_MAX_BYTES + 1, 0);
+    std::fs::write(root.path().join("bin/tool"), executable)?;
+
+    let report = scan_agent_surface(root.path())?;
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "agent-native-executable")
+        .expect("native executable finding");
+    assert_eq!(finding.severity, argus_core::Severity::Medium);
+    assert_eq!(finding.location.as_deref(), Some("bin/tool"));
+    assert_eq!(report.decision, Decision::AllowWithApproval);
+    Ok(())
+}
+
+#[test]
+fn snapshot_native_executable_surface_keeps_inventory_and_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("SKILL.md"), "---\nname: demo\n---\n")?;
+    std::fs::create_dir(root.path().join("bin"))?;
+    std::fs::write(root.path().join("bin/tool.exe"), b"MZpayload")?;
+    let snapshot = root.path().join("approved.snapshot.json");
+
+    let outcome = scan_agent_surface_with_snapshot(
+        root.path(),
+        BaselineMode::None,
+        SnapshotMode::Update(&snapshot),
+        None,
+    )?;
+
+    assert!(outcome.operational_error.is_none());
+    assert_eq!(outcome.report.decision, Decision::AllowWithApproval);
+    assert!(outcome
+        .report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "agent-native-executable"));
+    assert!(snapshot.exists());
+    Ok(())
+}
+
+#[test]
 fn legacy_malformed_or_binary_semantic_surfaces_fail_closed() -> Result<()> {
     let cases: &[(&str, &[u8])] = &[
         ("AGENTS.md", b"trusted\0hidden"),

@@ -532,6 +532,7 @@ executing anything.
 | `agent-config-write` | medium → approval or high → block | script writes `.claude/settings*.json` or hook paths; matching agent-config intent is declarative, mismatched intent blocks |
 | `hook-persistence` | high → block | script persists or auto-approves an agent hook |
 | `credential-access` / `network-exfiltration` | high → block | manifest-backed evidence for credential reads and off-box network exfiltration |
+| `agent-native-executable` | medium → approval | a skill or hook ships an ELF, Mach-O, or PE/DOS executable whose binary semantics cannot be inspected by the text rules |
 | `AGT-05-mcp-always-load` | medium → approval | `mcpServers.<name>.alwaysLoad: true` (permanent full trust) |
 | `AGT-05-enable-all-project-mcp` | medium → approval | `enableAllProjectMcpServers: true` |
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |

@@ -111,7 +111,7 @@ pub enum CoordinatePolicy<'a> {
 }
 
 const SCRIPT_EXTS: &[&str] = &[
-    ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1",
+    ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".mjs", ".rb", ".ps1", ".psm1", ".exe",
 ];
 const INVENTORY_BASENAMES: &[&str] = &[
     ".cursorrules",
