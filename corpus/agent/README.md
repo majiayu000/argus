@@ -9,8 +9,9 @@ full census of `claude-skill-registry-data` (202,660 skills). See
 - `fixtures/` + `index.json` — 6 **synthetic** agent-skill fixtures in argus
   corpus schema. All hosts point at `.example.invalid` (non-resolvable); no
   fixture downloads, executes, or sends anything real. Drop into `argus/corpus`.
-- `labeling-worklist.jsonl` — 849 **real** census hits with context, for manual
-  TP/FP labeling to measure the current detector's precision.
+- `labeling-manifest.json` + `labeling-worklists/` — a pinned, sharded
+  two-cohort human benchmark: 719 unique census-hit packages preserving all
+  849 detector findings, plus 719 detector non-block packages.
 
 ## The 6 fixtures — and why the negatives matter most
 
@@ -29,24 +30,32 @@ must keep these two green, or it is not an improvement — it just relabels nois
 
 ## Labeling worklist
 
-Each JSONL row: `path`, `category`, `batch`, matched capability/pattern,
-`contexts` (line + surrounding text), and empty `label` / `reviewer_note`.
+The manifest binds every shard to the exact source commit/tree, row count, and
+SHA-256. Each JSONL row contains its path, detector evidence, context, and empty
+human label/note fields.
 
-| batch | count | purpose |
+| legacy finding batch | count | purpose |
 |-------|-------|---------|
 | script-capability | 245 | real scripts with extracted capabilities (15 flagged high — misfit/obfuscation combos) |
 | override_lang | 210 | SKILL.md injection-language hits (mixed TP/FP) |
 | concealment | 244 | SKILL.md concealment-language hits (mixed) |
 | *-fp-sample | 150 | 50 each of exfil/curl_pipe/autorun — near-100% FP, to quantify the noise floor |
+| detector-non-block-v1 | 719 packages | deterministic non-block cohort for finding false negatives and true negatives |
 
-Fill `label` with `TP` / `FP` / `needs-context`. The high-priority scripts and
-override/concealment batches are the useful eval set; the fp-samples exist to
-put a number on the false-positive rate that motivated this work.
+The 849 legacy hit rows are detector findings, not independent package labels.
+They are aggregated into 719 package samples so packages with several findings
+do not receive extra statistical weight; every finding and context remains in
+the package row.
 
-This file is hit-only and currently has no labels or stored detector misses.
-It therefore cannot supply a false-negative denominator, so recall must not be
-claimed from it even after TP/FP labeling. It remains a future human precision
-worklist until a pinned source snapshot and labeled negatives are added.
+Reviewers label ground truth as `block` / `non-block` / `needs-context`; the
+evaluation pipeline derives TP/FP/FN/TN from that label and the frozen
+prediction. See `../../eval/labeling/README.md` for the independent dual-review
+and arbitration workflow.
+
+All 1,438 labels are intentionally empty pending two independent human
+reviews. Until review and arbitration are complete, no benchmark precision or
+recall may be claimed. The balanced case-control design does not estimate
+source-population prevalence.
 
 ## Census headline (why this exists)
 
@@ -81,6 +90,5 @@ argus corpus eval --corpus corpus/agent --format json
 
 The result is explicitly a **synthetic fixture metric**, not a real-world
 quality claim. At the implementation head it reports 4 TP, 0 FP, 0 FN, 2 TN,
-precision 1.0, and recall 1.0. Hand-labeling `labeling-worklist.jsonl` remains
-an external follow-up for real-hit precision; honest real-world recall also
-requires a frozen corpus containing detector misses.
+precision 1.0, and recall 1.0. These six synthetic fixture metrics remain
+separate from the pinned 1,438-row human benchmark.

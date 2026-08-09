@@ -62,6 +62,14 @@ jobs:
       - name: Synthetic benchmark contract self-test
         run: python3 eval/benchmark/tests/run_fixture_test.py
 
+      - name: Human labeling contract tests
+        shell: bash
+        run: |
+          python3 -m unittest discover -s eval/labeling/tests -p 'test_*.py'
+          python3 eval/labeling/tests/run_fixture_test.py
+          python3 eval/labeling/export_assignments.py \
+            --out-dir target/labeling-assignments
+
       - name: Check whitespace
         shell: bash
         run: |
