@@ -48,14 +48,14 @@ do not receive extra statistical weight; every finding and context remains in
 the package row.
 
 The declared AI reviewer labels ground truth as `block` / `non-block` /
-`needs-context`; the
-evaluation pipeline derives TP/FP/FN/TN from that label and the frozen
-prediction. See `../../eval/labeling/README.md` for the single-review workflow.
+`needs-context`; the evaluation pipeline derives TP/FP/FN/TN from that label
+and a live scan by the current Argus binary. See
+`../../eval/labeling/README.md` for the single-review workflow.
 
-All 1,438 labels are intentionally empty pending one declared AI review. Until
-every row has a definitive evidence-backed label, no benchmark precision or
-recall may be claimed. The balanced case-control design does not estimate
-source-population prevalence.
+All 1,438 samples now have definitive evidence-backed labels: 24 `block` and
+1,414 `non-block`, with no unresolved rows. The initial current-scanner result
+is 15 TP, 232 FP, 9 FN, and 1,182 TN (precision 0.060729, recall 0.625). The
+balanced case-control design does not estimate source-population prevalence.
 
 ## Census headline (why this exists)
 

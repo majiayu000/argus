@@ -89,8 +89,8 @@
     }
   ],
   "limitations": [
-    "All labels and reviewer notes are intentionally empty until the declared AI review is complete.",
     "This balanced case-control benchmark does not estimate source-population prevalence.",
-    "Recall is valid only after one AI reviewer gives every sample a definitive label with evidence; unresolved rows fail closed."
+    "The frozen labels are one declared AI review, not independent consensus annotations.",
+    "Current-scanner precision and recall are recomputed from live static scans; any unresolved label or operational scan error fails closed."
   ]
 }

@@ -21,10 +21,10 @@ are not production gates. Equality at a threshold passes and values below it
 fail.
 
 The 1,438-row worklist in `eval/labeling/` contains balanced detector-hit and
-detector-non-block cohorts. It still provides no quality statement until the
-single AI review is complete. Every source dataset and final-labels artifact
-is bound by an explicit path and SHA-256 and is verified under `--root`;
-per-sample decisions retain reviewer evidence.
+detector-non-block cohorts. Its completed single-AI review and current-scanner
+quality gate are documented in `eval/labeling/README.md`. Every source dataset
+and final-labels artifact is bound by an explicit path and SHA-256 and is
+verified under `--root`; per-sample decisions retain reviewer evidence.
 
 Manifest shape (schema version 1):
 

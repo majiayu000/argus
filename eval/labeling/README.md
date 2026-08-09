@@ -95,8 +95,29 @@ python3 eval/labeling/finalize_review.py \
   --allow-incomplete
 ```
 
-The benchmark is ready to commit only when all 1,438 rows have definitive
-evidence-backed labels and the strict command succeeds.
+The committed review in `frozen/` contains all 1,438 definitive,
+evidence-backed labels. It records 24 `block` and 1,414 `non-block` decisions
+from `codex` using `gpt-5.6-sol`; `unresolved.csv` is empty. Re-running the
+strict command above must reproduce all three generated artifacts byte for
+byte.
+
+### 4. Run the current-scanner quality gate
+
+After checking out the pinned source tree without executing any source
+content, build the trusted current Argus binary and run:
+
+```bash
+cargo build -p argus-cli
+python3 eval/labeling/evaluate_current.py evaluate \
+  --source-repo /path/to/claude-skill-registry-data \
+  --argus target/debug/argus
+```
+
+The evaluator verifies the frozen review and final labels, the source commit
+and tree, a pristine source checkout, every scan report and decision/exit-code
+pair, and all 1,438 live predictions. Any operational scan error fails the
+gate. The initial non-regression floors are precision `0.060729` and recall
+`0.625`; `allow-with-approval` remains a non-block prediction.
 
 ## Rebuild the non-block cohort
 

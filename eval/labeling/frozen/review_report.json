@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "review_method": "single-ai-review",
+  "reviewer": {
+    "id": "codex",
+    "model": "gpt-5.6-sol"
+  },
+  "total_samples": 1438,
+  "reviewed_samples": 1438,
+  "unresolved_samples": 0,
+  "unresolved_by_reason": {},
+  "final_labels": 1438,
+  "label_distribution": {
+    "non-block": 1414,
+    "block": 24
+  },
+  "benchmark": {
+    "tp": 15,
+    "fp": 232,
+    "fn": 9,
+    "tn": 1182,
+    "precision": 0.060729,
+    "recall": 0.625
+  }
+}

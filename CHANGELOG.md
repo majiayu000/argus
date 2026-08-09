@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Freeze the GH-145 AI review tasks as 1,438 package-level samples:
+- Freeze the completed GH-145 single-AI review as 1,438 package-level samples:
   719 packages preserving all 849 original detector findings and 719
   deterministically sampled non-block predictions from the same pinned source
   snapshot. The single-review tooling verifies source and detector revisions,
   shard hashes, predictions, package identities, immutable reviewer evidence,
-  explicit reviewer/model provenance, rationales, and complete coverage without
-  assigning labels. Unresolved rows fail closed and cannot produce benchmark
-  metrics. CI tests the labeling contract and exports the full assignment set.
+  explicit reviewer/model provenance, rationales, and complete coverage.
+  The review contains 24 `block` and 1,414 `non-block` labels with no unresolved
+  rows. CI reproduces the frozen outputs and statically rescans the pinned source
+  with the current Argus binary, failing on any operational error or regression
+  below precision 0.060729 / recall 0.625.
+- Agent-surface scans report bundled ELF, Mach-O, and PE/DOS executables as an
+  explicit approval finding instead of treating them as unreadable text or
+  silently skipping their uninspected binary semantics.
 - `known-native-build-pattern` now also recognizes addons compiled locally
   from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
   only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages
