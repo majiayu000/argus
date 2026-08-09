@@ -27,6 +27,7 @@ mod surface;
 
 use collection::{collect_surface_files, path_identity, project_semantic};
 pub use judge::{LlmJudge, LlmJudgeRequest, LlmJudgeResponse};
+use surface::is_native_executable_candidate;
 pub use surface::{classify, CoordinatePolicy, ScanRootContext, ScanRootEntryType, SurfaceKind};
 
 /// One text file collected from the scanned tree, with its surface class.
@@ -68,6 +69,7 @@ struct DiscoveredEntry {
     absolute_path: PathBuf,
     entry_type: snapshot::EntryType,
     surface_kind: Option<SurfaceKind>,
+    native_executable_candidate: bool,
 }
 
 /// Top-level entry: scan a directory (or single file) as an agent surface.
@@ -383,18 +385,25 @@ fn discover_complete(path: &Path) -> Result<(ScanRootContext, Vec<DiscoveredEntr
     let skill_dirs = raw_skill_dirs(&raw);
     let discovered = raw
         .into_iter()
-        .map(
-            |(logical_path, absolute_path, entry_type)| DiscoveredEntry {
-                surface_kind: classify(
-                    CoordinatePolicy::SnapshotRootAware(&context),
-                    &logical_path,
-                    &skill_dirs,
-                ),
+        .map(|(logical_path, absolute_path, entry_type)| {
+            let surface_kind = classify(
+                CoordinatePolicy::SnapshotRootAware(&context),
+                &logical_path,
+                &skill_dirs,
+            );
+            let native_executable_candidate = is_native_executable_candidate(
+                CoordinatePolicy::SnapshotRootAware(&context),
+                &logical_path,
+                &skill_dirs,
+            );
+            DiscoveredEntry {
+                surface_kind,
+                native_executable_candidate,
                 logical_path,
                 absolute_path,
                 entry_type,
-            },
-        )
+            }
+        })
         .collect();
     Ok((context, discovered, canonical))
 }

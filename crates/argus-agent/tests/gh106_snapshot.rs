@@ -405,6 +405,58 @@ fn snapshot_root_aware_coordinate_matrix_keeps_logical_keys() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn snapshot_native_executable_root_context_requires_approval() -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let hooks = sandbox.path().join("hooks");
+    let claude_hooks = sandbox.path().join(".claude/hooks");
+    let ordinary = sandbox.path().join("assets");
+    for directory in [&hooks, &claude_hooks, &ordinary] {
+        std::fs::create_dir_all(directory)?;
+        std::fs::write(directory.join("tool.bin"), b"\x7fELFpayload")?;
+    }
+    let storage = tempfile::tempdir()?;
+
+    for (index, root) in [
+        hooks.as_path(),
+        hooks.join("tool.bin").as_path(),
+        claude_hooks.as_path(),
+        claude_hooks.join("tool.bin").as_path(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let snapshot = storage.path().join(format!("protected-{index}.json"));
+        let outcome = snapshot_update(root, &snapshot)?;
+        assert!(outcome.operational_error.is_none(), "{}", root.display());
+        assert_eq!(
+            outcome.report.decision,
+            Decision::AllowWithApproval,
+            "{}",
+            root.display()
+        );
+        assert!(
+            outcome.report.findings.iter().any(|finding| {
+                finding.rule_id == "agent-native-executable"
+                    && finding.location.as_deref() == Some("tool.bin")
+            }),
+            "{}",
+            root.display()
+        );
+    }
+
+    let ordinary_snapshot = storage.path().join("ordinary.json");
+    let ordinary_outcome = snapshot_update(&ordinary, &ordinary_snapshot)?;
+    assert!(ordinary_outcome.operational_error.is_none());
+    assert_eq!(ordinary_outcome.report.decision, Decision::Allow);
+    assert!(ordinary_outcome
+        .report
+        .findings
+        .iter()
+        .all(|finding| finding.rule_id != "agent-native-executable"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn snapshot_root_context_rejects_non_utf8_marker_suffix() -> Result<()> {

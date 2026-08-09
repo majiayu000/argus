@@ -551,6 +551,8 @@ class BuildNonHitWorklistTests(unittest.TestCase):
             {"rule_id": " "},
             {"rule_id": " AGT-1"},
             {"rule_id": "AGT-\n1"},
+            {"rule_id": "AGT-\x001"},
+            {"rule_id": "AGT-\x7f1"},
             {"rule_id": 7},
         ]:
             bad_report = json.dumps(

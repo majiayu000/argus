@@ -1,8 +1,7 @@
 //! Fail-closed collection and materialization of semantic agent surfaces.
 
-use crate::{
-    classify, skill_dir, snapshot, CoordinatePolicy, DiscoveredEntry, SurfaceFile, SurfaceKind,
-};
+use crate::surface::is_native_executable_candidate;
+use crate::{classify, snapshot, CoordinatePolicy, DiscoveredEntry, SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use std::io::Read;
@@ -43,10 +42,6 @@ pub(super) fn project_semantic(
 ) -> Result<CollectedSurface> {
     let mut files = Vec::new();
     let mut findings = Vec::new();
-    let skill_dirs: Vec<_> = discovered
-        .iter()
-        .filter_map(|entry| skill_dir(&entry.logical_path))
-        .collect();
     for entry in discovered {
         if entry.entry_type == snapshot::EntryType::Directory
             || entry.surface_kind.is_none()
@@ -56,9 +51,7 @@ pub(super) fn project_semantic(
             continue;
         }
         if entry.surface_kind == Some(SurfaceKind::InventoryOnly) {
-            if entry.entry_type == snapshot::EntryType::File
-                && is_native_candidate_tree(&entry.logical_path, &skill_dirs)
-            {
+            if entry.entry_type == snapshot::EntryType::File && entry.native_executable_candidate {
                 let metadata = std::fs::symlink_metadata(&entry.absolute_path)?;
                 if let Some(finding) = materialize_native_candidate(collect_candidate(
                     &entry.absolute_path,
@@ -230,7 +223,11 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<CollectedSurface> {
             continue;
         };
         if kind == SurfaceKind::InventoryOnly {
-            if is_native_candidate_tree(&rel, &skill_dirs) {
+            if is_native_executable_candidate(
+                CoordinatePolicy::LegacyRootRelative,
+                &rel,
+                &skill_dirs,
+            ) {
                 if let Some(finding) = materialize_native_candidate(Candidate { rel, state })? {
                     findings.push(finding);
                 }
@@ -329,22 +326,6 @@ fn is_protected_tree_path(rel: &str, skill_dirs: &[String]) -> bool {
         || skill_dirs
             .iter()
             .any(|directory| rel.starts_with(directory))
-}
-
-fn is_native_candidate_tree(rel: &str, skill_dirs: &[String]) -> bool {
-    if rel.starts_with("hooks/")
-        || skill_dirs
-            .iter()
-            .any(|directory| rel.starts_with(directory))
-    {
-        return true;
-    }
-    let mut previous = None;
-    rel.split('/').any(|segment| {
-        let is_claude_hook = previous == Some(".claude") && segment == "hooks";
-        previous = Some(segment);
-        is_claude_hook
-    })
 }
 
 fn is_excluded(candidate: &Path, exclude: Option<&Path>) -> bool {
