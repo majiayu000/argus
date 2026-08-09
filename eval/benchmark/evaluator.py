@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Validate and evaluate Argus benchmark manifests.
 
-The manifest is deliberately synthetic-only.  Labels are accepted only when
-they carry human reviewer provenance; this module never infers or suggests a
-label.  Any malformed or incomplete input fails closed.
+The manifest is deliberately synthetic-only. Labels are accepted only when
+they carry explicit single-AI-review provenance; this module never infers or
+suggests a label. Any malformed or incomplete input fails closed.
 """
 
 from __future__ import annotations
@@ -124,30 +124,24 @@ def _findings(value: Any, where: str) -> list[dict[str, str]]:
 
 
 def _resolution(value: Any, status: str, where: str) -> None:
-    _keys(value, {"source", "reviewer_a", "reviewer_b", "arbitration"}, where)
-    source = _status(value.get("source"), f"{where}.source", {"agreed", "arbitrated"})
-
-    def reviewer(key: str) -> dict[str, str]:
-        item = value.get(key)
-        _keys(item, {"status", "evidence"}, f"{where}.{key}")
-        label = _status(item.get("status"), f"{where}.{key}.status", {"positive", "negative", "needs-context"})
-        _string(item.get("evidence"), f"{where}.{key}.evidence")
-        return {"status": label}
-
-    first = reviewer("reviewer_a")
-    second = reviewer("reviewer_b")
-    arbitration = value.get("arbitration")
-    if source == "agreed":
-        if first["status"] not in {"positive", "negative"} or first["status"] != second["status"] or first["status"] != status or arbitration is not None:
-            raise ValidationError(f"{where}: agreed resolution must match both reviewers and have no arbitration")
-    else:
-        if first["status"] == second["status"] and "needs-context" not in {first["status"], second["status"]}:
-            raise ValidationError(f"{where}: arbitration requires disagreement or needs-context")
-        _keys(arbitration, {"status", "evidence"}, f"{where}.arbitration")
-        final = _status(arbitration.get("status"), f"{where}.arbitration.status", {"positive", "negative"})
-        _string(arbitration.get("evidence"), f"{where}.arbitration.evidence")
-        if final != status:
-            raise ValidationError(f"{where}: arbitration status must match ground truth")
+    _keys(value, {"source", "reviewer"}, where)
+    _status(
+        value.get("source"),
+        f"{where}.source",
+        {"single-ai-review"},
+    )
+    reviewer = value.get("reviewer")
+    _keys(reviewer, {"status", "evidence"}, f"{where}.reviewer")
+    reviewed_status = _status(
+        reviewer.get("status"),
+        f"{where}.reviewer.status",
+        {"positive", "negative"},
+    )
+    _string(reviewer.get("evidence"), f"{where}.reviewer.evidence")
+    if reviewed_status != status:
+        raise ValidationError(
+            f"{where}: reviewer status must match ground truth"
+        )
 
 
 def _status(value: Any, where: str, allowed: set[str]) -> str:
@@ -267,22 +261,28 @@ def _validate_manifest(raw: Any, root: Path) -> tuple[dict[str, Any], list[dict[
         raise ValidationError("final-labels artifact must cover exactly the frozen dataset samples")
     _string(source.get("provenance"), "manifest.source.provenance")
 
-    reviewers = raw.get("reviewer_provenance")
-    _keys(reviewers, {"method", "reviewers", "arbitrator"}, "manifest.reviewer_provenance")
-    if reviewers.get("method") != "human-dual-review":
-        raise ValidationError("manifest.reviewer_provenance.method: expected human-dual-review")
-    names = reviewers.get("reviewers")
-    if not isinstance(names, list) or len(names) < 2 or any(not isinstance(n, str) or not n.strip() for n in names):
-        raise ValidationError("manifest.reviewer_provenance.reviewers: require at least two human names")
-    normalized_names = [" ".join(n.split()) for n in names]
-    if len({n.casefold() for n in normalized_names}) != len(normalized_names):
-        raise ValidationError("manifest.reviewer_provenance.reviewers: duplicate reviewer")
-    reviewers["reviewers"] = normalized_names
-    arbitrator = _string(reviewers.get("arbitrator"), "manifest.reviewer_provenance.arbitrator")
-    arbitrator = " ".join(arbitrator.split())
-    if arbitrator.casefold() in {n.casefold() for n in normalized_names}:
-        raise ValidationError("manifest.reviewer_provenance.arbitrator: must be distinct")
-    reviewers["arbitrator"] = arbitrator
+    reviewer = raw.get("reviewer_provenance")
+    _keys(
+        reviewer,
+        {"method", "reviewer", "model"},
+        "manifest.reviewer_provenance",
+    )
+    if reviewer.get("method") != "single-ai-review":
+        raise ValidationError(
+            "manifest.reviewer_provenance.method: expected single-ai-review"
+        )
+    reviewer["reviewer"] = " ".join(
+        _string(
+            reviewer.get("reviewer"),
+            "manifest.reviewer_provenance.reviewer",
+        ).split()
+    )
+    reviewer["model"] = " ".join(
+        _string(
+            reviewer.get("model"),
+            "manifest.reviewer_provenance.model",
+        ).split()
+    )
 
     samples = raw.get("samples")
     if not isinstance(samples, list) or not samples:

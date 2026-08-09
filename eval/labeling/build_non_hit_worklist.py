@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build a deterministic, unlabeled detector-non-block review cohort.
 
-This script never assigns or suggests a human label. It selects skill roots
+This script never assigns or suggests a label. It selects skill roots
 from one pinned source tree, runs one pinned Argus binary against each root,
 and retains the first N reports whose decision is not the positive decision.
-The generated rows remain unlabeled until two independent humans review them.
+The generated rows remain unlabeled until the declared AI reviewer reviews them.
 """
 
 import argparse
@@ -376,7 +376,7 @@ def generated_hit_row(rows, root, result, inventory, source_repo):
     priorities = []
     for row in rows:
         if row.get("label"):
-            raise RuntimeError(f"{row.get('path', root)}: unexpected human label")
+            raise RuntimeError(f"{row.get('path', root)}: unexpected label")
         finding_contexts = verified_contexts(row, inventory, source_repo)
         finding = {
             key: value

@@ -3,7 +3,7 @@
 This directory contains a versioned, strict, fail-closed evaluator for
 synthetic Argus fixtures. It is a contract and test harness, not a quality
 claim. The evaluator accepts only `dataset_type: synthetic-fixtures`, requires
-two named human reviewers plus an arbitrator, validates every artifact's
+one explicitly identified AI reviewer and model, validates every artifact's
 SHA-256, and emits deterministic JSON with sample sizes, TP/FP/FN/TN counts,
 precision, recall, and extensible per-group metrics.
 
@@ -20,13 +20,11 @@ thresholds are only exercised by the checked-in synthetic fixture test; they
 are not production gates. Equality at a threshold passes and values below it
 fail.
 
-The 849 hit-only worklist in `eval/labeling/` still requires two independent
-真人 reviewers and human arbitration. It cannot establish recall because it
-contains no non-hit population. Until a real frozen dataset is created and
-reviewed, this tool provides no precision/recall or other quality statement.
-Every source dataset and final-labels artifact is bound by an explicit path
-and SHA-256 and is verified under `--root`; per-sample decisions retain both
-reviewer evidence and, when needed, arbitration evidence.
+The 1,438-row worklist in `eval/labeling/` contains balanced detector-hit and
+detector-non-block cohorts. It still provides no quality statement until the
+single AI review is complete. Every source dataset and final-labels artifact
+is bound by an explicit path and SHA-256 and is verified under `--root`;
+per-sample decisions retain reviewer evidence.
 
 Manifest shape (schema version 1):
 
@@ -43,9 +41,9 @@ Manifest shape (schema version 1):
     "provenance": "..."
   },
   "reviewer_provenance": {
-    "method": "human-dual-review",
-    "reviewers": ["human-a", "human-b"],
-    "arbitrator": "human-arbitrator"
+    "method": "single-ai-review",
+    "reviewer": "codex",
+    "model": "gpt-5"
   },
   "samples": [{
     "id": "sample-1",
@@ -57,10 +55,8 @@ Manifest shape (schema version 1):
       "status": "positive",
       "findings": [{"rule_id": "R-1", "finding_id": "f-1"}],
       "resolution": {
-        "source": "agreed",
-        "reviewer_a": {"status": "positive", "evidence": "..."},
-        "reviewer_b": {"status": "positive", "evidence": "..."},
-        "arbitration": null
+        "source": "single-ai-review",
+        "reviewer": {"status": "positive", "evidence": "..."}
       }
     },
     "prediction": {"status": "positive", "findings": [{"rule_id": "R-1", "finding_id": "f-1"}]}

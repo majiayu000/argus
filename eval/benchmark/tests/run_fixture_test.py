@@ -27,10 +27,11 @@ def manifest(root: Path):
         findings = ([{"rule_id": "SYN-01", "finding_id": sid + "-prediction"}] if prediction == "positive" else [])
         truth_findings = ([{"rule_id": "SYN-01", "finding_id": sid + "-truth"}] if truth == "positive" else [])
         resolution = {
-            "source": "agreed",
-            "reviewer_a": {"status": truth, "evidence": f"human evidence for {sid}"},
-            "reviewer_b": {"status": truth, "evidence": f"independent evidence for {sid}"},
-            "arbitration": None,
+            "source": "single-ai-review",
+            "reviewer": {
+                "status": truth,
+                "evidence": f"AI review evidence for {sid}",
+            },
         }
         return {
             "id": sid,
@@ -66,7 +67,11 @@ def manifest(root: Path):
             "final_labels_artifact": {"path": "final-labels.jsonl", "sha256": labels_digest},
             "provenance": "checked-in synthetic fixture bound to its dataset and final-label artifacts",
         },
-        "reviewer_provenance": {"method": "human-dual-review", "reviewers": ["reviewer-A", "reviewer-B"], "arbitrator": "reviewer-arbitrator"},
+        "reviewer_provenance": {
+            "method": "single-ai-review",
+            "reviewer": "codex",
+            "model": "gpt-5",
+        },
         "samples": samples,
     }
 
@@ -100,12 +105,12 @@ def main():
         expect_reject(base, root, lambda x: x["source"].update(extra=True), "unknown nested key")
         expect_reject(base, root, lambda x: x.update(schema_version=True), "bool schema version")
         expect_reject(base, root, lambda x: x.update(schema_version="1"), "wrong schema version type")
-        expect_reject(base, root, lambda x: x["reviewer_provenance"].update(reviewers=[" reviewer-A ", "reviewer-A"]), "same reviewer after trim")
+        expect_reject(base, root, lambda x: x["reviewer_provenance"].update(reviewer="  "), "empty reviewer identity")
         expect_reject(base, root, lambda x: x["samples"][0].update(group="other-group"), "group bypass")
         expect_reject(base, root, lambda x: x["samples"][0].update(coordinate="free-coordinate"), "free coordinate bypass")
         expect_reject(base, root, lambda x: x["samples"].append({**copy.deepcopy(x["samples"][0]), "id": "different-id"}), "duplicate observation identity")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(3, {**x["samples"][3], "artifact": {**x["samples"][3]["artifact"], "sha256": "b" * 64}}), "hash drift")
-        expect_reject(base, root, lambda x: x["reviewer_provenance"].update(reviewers=["one"]), "reviewer provenance")
+        expect_reject(base, root, lambda x: x["reviewer_provenance"].update(model=""), "reviewer model provenance")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(0, {**x["samples"][0], "ground_truth": {**x["samples"][0]["ground_truth"], "status": "needs-context"}}), "unresolved label")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(0, {**x["samples"][0], "ground_truth": {**x["samples"][0]["ground_truth"], "findings": []}}), "positive finding contract")
         expect_reject(base, root, lambda x: x["samples"].__setitem__(1, {**x["samples"][1], "ground_truth": {**x["samples"][1]["ground_truth"], "status": "positive", "findings": [{"rule_id": "SYN-01", "finding_id": "fp-truth"}]}}), "negative/positive finding identity contract")
@@ -124,12 +129,11 @@ def main():
         expect_reject(base, root, empty_labels, "empty final-labels artifact")
         base = manifest(root)
 
-        # Arbitration cannot overturn two identical definitive reviewer labels.
-        def flip_agreed(x):
+        # Review evidence cannot disagree with the frozen ground truth.
+        def flip_review(x):
             resolution = x["samples"][0]["ground_truth"]["resolution"]
-            resolution["source"] = "arbitrated"
-            resolution["arbitration"] = {"status": "negative", "evidence": "invalid flip"}
-        expect_reject(base, root, flip_agreed, "invalid same-label arbitration")
+            resolution["reviewer"]["status"] = "negative"
+        expect_reject(base, root, flip_review, "review evidence mismatch")
 
         # Root containment and regular-file checks reject symlink escape.
         outside = Path(tmp).parent / (Path(tmp).name + "-outside")
