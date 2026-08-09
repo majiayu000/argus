@@ -3,7 +3,7 @@
 //! The property that matters most is the one about *not* changing behaviour:
 //! without `--risk-scoring` the exit code and report must be byte-identical to
 //! before, because every existing consumer depends on the policy-driven
-//! decision and the weights are not calibrated yet.
+//! decision and the benchmark does not justify a cross-catalog per-rule map.
 
 use serde_json::Value;
 use std::fs;

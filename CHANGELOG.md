@@ -41,8 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--risk-approval-threshold`, `--risk-block-threshold`). Weights derive from
   the severity detectors already assign, so `Low` and `Critical` stop being
   interchangeable and independent risks accumulate. Reports carry the score and
-  per-rule contributions in text, JSON, and SARIF. Off by default; calibrated
-  per-rule weights and confidence wait on the GH-145 benchmark.
+  per-rule contributions in text, JSON, and SARIF. The completed GH-145
+  benchmark publishes per-rule support and Wilson intervals, but cannot
+  distinguish 15 AGT-01 block labels from 229 non-block labels by rule id and
+  has only one or two observations for six other ids. The severity profile
+  therefore remains the non-overfit default rather than inventing per-rule
+  probabilities from sparse policy outcomes.
 - Add `argus lockfile-scan`, which fetches and statically scans every
   dependency a lockfile resolves and aggregates them into one decision and
   exit code. Dependencies that were skipped or could not be assessed are
@@ -58,8 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mangling and nested decoder chains. Shannon entropy, minified shape, and
   maximum line length are attached as evidence on a finding that already
   fired; they never raise one on their own, because legitimate bundles share
-  that shape. Threshold-based scoring of those metrics waits on the labeled
-  benchmark in GH-145.
+  that shape. The completed labeled benchmark contains no
+  `obfuscated-source` observations, so it cannot support standalone
+  entropy/minified thresholds; the structural signatures remain the trigger.
 
 ## [0.1.0] - 2026-07-23
 

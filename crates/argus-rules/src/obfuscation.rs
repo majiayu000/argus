@@ -22,9 +22,11 @@
 //!
 //! Entropy, minified shape, and maximum line length are computed and attached
 //! as **evidence on a finding that already fired**. They never raise a finding
-//! by themselves. Turning them into thresholds requires the labeled benchmark
-//! from GH-145; until that lands, a threshold here would be a guess that
-//! reproduces the census false-positive rate.
+//! by themselves. The completed GH-145 benchmark produced no
+//! `obfuscated-source` observations, so it supplies no positive or negative
+//! support from which to estimate a statistical threshold. Promoting these
+//! shapes anyway would still be a guess that reproduces the census
+//! false-positive rate; the structural signatures remain the trigger.
 //!
 //! Findings are approval-level: obfuscation is not malice, but it defeats
 //! review, so a human decides.

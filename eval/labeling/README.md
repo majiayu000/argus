@@ -119,6 +119,15 @@ pair, and all 1,438 live predictions. Any operational scan error fails the
 gate. The initial non-regression floors are precision `0.060729` and recall
 `0.625`; `allow-with-approval` remains a non-block prediction.
 
+The report also includes `rule_metrics`: support, block/non-block labels,
+benchmark block fraction, and a 95% Wilson interval for every observed rule.
+These are calibration evidence, not source-population probabilities. In the
+initial result, `AGT-01-injection-language` contains 15 block and 229 non-block
+labels under the same rule id; six other ids have only one or two samples.
+Consequently the benchmark cannot justify a per-rule risk weight that improves
+separation, and it contains no `obfuscated-source` observation from which to
+derive entropy/minified thresholds.
+
 ## Rebuild the non-block cohort
 
 Build Argus in a separate detached worktree at the detector baseline recorded

@@ -34,10 +34,11 @@ class CurrentQualityGateTests(unittest.TestCase):
             "root/three": "allow-with-approval",
             "root/four": "block",
         }
+        rules = {"root/one": ["rule-a"], "root/four": ["rule-a"]}
 
         report = gate.evaluate_rows(
             rows,
-            lambda root: {"decision": decisions[root], "rules": []},
+            lambda root: {"decision": decisions[root], "rules": rules.get(root, [])},
             jobs=2,
         )
 
@@ -48,6 +49,19 @@ class CurrentQualityGateTests(unittest.TestCase):
         self.assertEqual(
             report["decision_counts"],
             {"allow": 1, "allow-with-approval": 1, "block": 2},
+        )
+        self.assertEqual(
+            report["rule_metrics"],
+            {
+                "rule-a": {
+                    "support": 2,
+                    "block_labels": 1,
+                    "non_block_labels": 1,
+                    "benchmark_block_fraction": 0.5,
+                    "wilson_95_low": 0.094531,
+                    "wilson_95_high": 0.905469,
+                }
+            },
         )
 
     def test_all_operational_errors_are_reported(self):

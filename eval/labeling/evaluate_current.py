@@ -4,9 +4,10 @@
 import argparse
 import concurrent.futures
 import json
+import math
 import os
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import build_non_hit_worklist as worklist
@@ -103,15 +104,49 @@ def evaluate_rows(rows, scanner, jobs):
         )
 
     decision_counts = Counter()
+    rule_counts = defaultdict(Counter)
     live = []
     for row, prediction, _error in scanned:
         decision = prediction["decision"]
         decision_counts[decision] += 1
+        for rule_id in set(prediction["rules"]):
+            rule_counts[rule_id]["support"] += 1
+            label = "block_labels" if row["label"] == "block" else "non_block_labels"
+            rule_counts[rule_id][label] += 1
         live.append({**row, "prediction_decision": decision})
     return {
         "samples": len(live),
         "decision_counts": dict(sorted(decision_counts.items())),
+        "rule_metrics": {
+            rule_id: rule_metric(counts)
+            for rule_id, counts in sorted(rule_counts.items())
+        },
         "benchmark": review_contract.benchmark_metrics(live),
+    }
+
+
+def rule_metric(counts):
+    support = counts["support"]
+    block_labels = counts["block_labels"]
+    fraction = block_labels / support
+    z = 1.959963984540054
+    z_squared = z * z
+    denominator = 1 + z_squared / support
+    center = (fraction + z_squared / (2 * support)) / denominator
+    margin = (
+        z
+        * math.sqrt(
+            (fraction * (1 - fraction) + z_squared / (4 * support)) / support
+        )
+        / denominator
+    )
+    return {
+        "support": support,
+        "block_labels": block_labels,
+        "non_block_labels": counts["non_block_labels"],
+        "benchmark_block_fraction": round(fraction, 6),
+        "wilson_95_low": round(max(0, center - margin), 6),
+        "wilson_95_high": round(min(1, center + margin), 6),
     }
 
 

@@ -344,12 +344,16 @@ SARIF `properties.argusRisk` — so a scored decision can be checked rather than
 taken on faith.
 
 Scoring is off by default and `--risk-scoring` alone does not change any exit
-code; `--risk-decides` is required for that. Two things are deliberately
-missing until the labeled benchmark in
-[#145](https://github.com/majiayu000/argus/issues/145) lands: calibrated
-per-rule weights, and real per-rule confidence (every finding is currently
-assessed at full confidence). Both are claims about real-world outcomes that
-no measurement yet supports.
+code; `--risk-decides` is required for that. The completed 1,438-sample
+benchmark does not justify a per-rule override: only eight agent rule ids were
+observed, and `AGT-01-injection-language` grouped all 15 of its block labels
+with 229 non-block labels under the same id. Six other ids had only one or two
+observations. A rule-id weight cannot separate those outcomes, and extending
+that sparse agent-only result to the cross-ecosystem catalog would overfit.
+The CI quality report therefore publishes per-rule support and 95% Wilson
+intervals while the runtime retains the severity-derived profile. Confidence
+remains full for an emitted detector observation; benchmark block frequency
+is a policy outcome, not a probability that the observation itself occurred.
 
 ### Explicit OSV vulnerability queries
 

@@ -2,8 +2,7 @@
 //!
 //! [`super::risk`] is a pure contract: it takes weight and confidence
 //! resolvers and refuses to invent either. This module supplies the one
-//! profile that can be justified **without** the labeled benchmark from
-//! GH-145.
+//! profile justified by detector severity and the completed GH-145 benchmark.
 //!
 //! # Why severity, and why not per-rule weights
 //!
@@ -13,19 +12,22 @@
 //! part of the rule catalog contract, and it is already surfaced in every
 //! report. Letting it drive a score uses information the system has.
 //!
-//! Per-rule weights are different. "`typosquatting` is worth 0.8 and
-//! `lifecycle-script` 0.3" is a claim about real-world outcomes, and there is
-//! no measurement behind it yet. GH-146 says so directly: the labeled
-//! benchmark must come first or the weights cannot be calibrated. So this
-//! profile deliberately ships none.
+//! Per-rule weights are different. The completed benchmark observed only eight
+//! agent rule ids. `AGT-01-injection-language` contained all 15 rule-backed
+//! block labels and 229 non-block labels under the same id; a rule-id weight
+//! cannot separate them. Six other ids had only one or two observations, with
+//! 95% Wilson upper bounds of 0.66 or 0.79. Applying those sparse results to
+//! the full cross-ecosystem catalog would be overfitting, so this profile
+//! deliberately retains the severity mapping. CI publishes the support and
+//! Wilson interval for every observed rule in `rule_metrics`.
 //!
-//! # Confidence is wired but not calibrated
+//! # Confidence describes the emitted observation
 //!
-//! Every finding is assessed at full confidence. That is the honest value:
-//! there is no per-rule confidence measurement, and a proxy (evidence
-//! presence, match count) would encode detector implementation details as if
-//! they were a probability. The dimension exists in the contract so GH-145's
-//! results can populate it without an API change.
+//! Every finding is assessed at full confidence because the detector did emit
+//! that observation. The GH-145 block/non-block label measures policy outcome,
+//! not whether a detector correctly observed a string, capability, or file.
+//! Treating benchmark block frequency, evidence presence, or match count as a
+//! confidence probability would conflate those two claims.
 //!
 //! # Default thresholds reproduce the severity profile
 //!
@@ -46,7 +48,7 @@ use crate::{Finding, Severity};
 /// The spacing is ordinal, not a calibrated magnitude: it encodes
 /// "Critical outranks High outranks Medium outranks Low", plus the property
 /// that two Mediums reach the block threshold and two Lows do not. Anything
-/// finer requires GH-145.
+/// finer requires labeled support that distinguishes outcomes within a rule.
 pub fn severity_weight_basis_points(severity: Severity) -> u32 {
     match severity {
         Severity::Critical => 10_000,
