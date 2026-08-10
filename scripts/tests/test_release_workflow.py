@@ -30,9 +30,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # Publish stays pinned to the release environment and the immutability +
         # ruleset gates that fail closed.
         self.assertIn("environment: release", text)
-        self.assertIn("repos/$GITHUB_REPOSITORY/immutable-releases", text)
-        self.assertIn("X-GitHub-Api-Version: 2026-03-10", text)
-        self.assertIn("--jq '.enabled'", text)
+        self.assertNotIn("repos/$GITHUB_REPOSITORY/immutable-releases", text)
+        self.assertIn("Administration(read)", text)
+        self.assertIn('gh release verify "$tag"', text)
         self.assertIn("refs/tags/v*.*.*", text)
         self.assertIn("refs/heads/v1", text)
         self.assertIn("artifact-metadata: write", text)
