@@ -214,7 +214,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = true
+          # GitHub's immutable-releases settings endpoint requires
+          # Administration(read), which GITHUB_TOKEN cannot be granted. The
+          # release operator verifies that setting before pushing the tag; the
+          # gh release verify calls below then require GitHub's immutable
+          # release attestation and fail if one was not generated.
           # NOTE (2026-07-23): the `release` environment required-reviewer /
           # prevent-self-review assertions were removed. This is a
           # single-maintainer, user-owned repository with exactly one account
