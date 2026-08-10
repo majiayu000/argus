@@ -214,7 +214,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.immutable_releases')" = true
+          test "$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')" = true
           # NOTE (2026-07-23): the `release` environment required-reviewer /
           # prevent-self-review assertions were removed. This is a
           # single-maintainer, user-owned repository with exactly one account
