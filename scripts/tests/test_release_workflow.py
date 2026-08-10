@@ -33,6 +33,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("repos/$GITHUB_REPOSITORY/immutable-releases", text)
         self.assertIn("Administration(read)", text)
         self.assertIn('gh release verify "$tag"', text)
+        self.assertIn("for attempt in {1..12}", text)
+        self.assertIn('test "$attempt" -lt 12', text)
         self.assertIn("refs/tags/v*.*.*", text)
         self.assertIn("refs/heads/v1", text)
         self.assertIn("artifact-metadata: write", text)

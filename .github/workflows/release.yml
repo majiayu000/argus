@@ -295,7 +295,13 @@ jobs:
           gh release download "$tag" --dir "$audit_dir"
           python3 scripts/verify_release_assets.py --asset-dir "$audit_dir" --require-bundles
           gh release edit "$tag" --draft=false --latest
-          gh release verify "$tag" --format json >/dev/null
+          for attempt in {1..12}; do
+            if gh release verify "$tag" --format json >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 12
+            sleep 10
+          done
           for path in "$audit_dir"/*; do gh release verify-asset "$tag" "$path" --format json >/dev/null; done
       - name: Emit read-only v1 promotion plan
         env:
