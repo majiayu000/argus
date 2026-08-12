@@ -424,7 +424,13 @@ fn proc_macro_source_case_variant_is_not_treated_as_reparse_point() -> Result<()
         directory.path().join("src/lib.rs"),
         "#[path = \"SUPPORT.RS\"] mod support;",
     )?;
-    std::fs::write(directory.path().join("src/support.rs"), "")?;
+    std::fs::write(
+        directory.path().join("src/support.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    std::fs::write(directory.path().join("src/conventional.rs"), "")?;
 
     // The dedicated Windows CI runner must provide case-insensitive lookup;
     // failure here would make the regression test incapable of exercising it.
@@ -452,8 +458,30 @@ path = "SRC/LIB.RS"
 
     assert_eq!(
         source_files,
-        BTreeSet::from(["SRC/LIB.RS".to_string(), "SRC/SUPPORT.RS".to_string()])
+        BTreeSet::from(["src/lib.rs".to_string(), "src/support.rs".to_string()])
     );
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+    assert_eq!(
+        resolve_conventional_module_path(&canonical_pkg_dir, Path::new("src"), "CONVENTIONAL")?,
+        PathBuf::from("src/conventional.rs")
+    );
+
+    let execution = argus_core::ExecutionContext::serial()?;
+    let (per_file_findings, skipped) =
+        scan_text_files_with_context(directory.path(), TEXT_MAX_BYTES, &execution, |file| {
+            let mut findings = Vec::new();
+            if source_files.contains(&file.rel) {
+                scan_proc_macro_source(&file.content, &file.rel, &mut findings);
+            }
+            Ok::<_, anyhow::Error>(findings)
+        })?;
+    skipped.require_scanned("crate", is_crate_security_relevant)?;
+    let findings = per_file_findings.into_iter().flatten().collect::<Vec<_>>();
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("case-variant support file must reach proc-macro scanning")?;
+    assert!(finding.detail.contains("src/support.rs"));
     Ok(())
 }
 

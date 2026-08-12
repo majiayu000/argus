@@ -298,23 +298,28 @@ fn collect_proc_macro_source_files(
     pkg_dir: &Path,
     manifest: &CargoManifest,
 ) -> Result<BTreeSet<String>> {
-    let Some(root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
+    let Some(declared_root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
         return Ok(BTreeSet::new());
     };
     let canonical_pkg_dir = std::fs::canonicalize(pkg_dir)
         .with_context(|| format!("canonicalize crate root {}", pkg_dir.display()))?;
+    let root_path =
+        validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&declared_root_rel))?;
+    let root_rel = path_to_manifest_rel(&root_path)?;
     let mut source_files = BTreeSet::new();
     source_files.insert(root_rel.clone());
     let mut pending = vec![root_rel.clone()];
 
     while let Some(rel) = pending.pop() {
-        let abs = validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&rel))?;
+        let source_path = validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&rel))?;
+        let source_rel = path_to_manifest_rel(&source_path)?;
+        let abs = canonical_pkg_dir.join(&source_path);
         let content = argus_core::fs::read_bounded_utf8_regular_file(&abs, TEXT_MAX_BYTES as usize)
             .with_context(|| format!("read proc-macro source {}", abs.display()))?;
         if looks_binary(content.as_bytes()) {
             anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
-        let module_base = rust_module_base(Path::new(&rel), &root_rel);
+        let module_base = rust_module_base(Path::new(&source_rel), &root_rel);
         let mut declarations_seen = BTreeSet::new();
 
         for declaration in rules::rust_module_declarations(&content)
@@ -327,7 +332,11 @@ fn collect_proc_macro_source_files(
                 continue;
             }
             let module = if let Some(explicit_path) = declaration.explicit_path {
-                resolve_explicit_module_path(&canonical_pkg_dir, Path::new(&rel), &explicit_path)?
+                resolve_explicit_module_path(
+                    &canonical_pkg_dir,
+                    Path::new(&source_rel),
+                    &explicit_path,
+                )?
             } else {
                 resolve_conventional_module_path(
                     &canonical_pkg_dir,
@@ -359,17 +368,17 @@ fn resolve_conventional_module_path(
 ) -> Result<PathBuf> {
     let flat = module_base.join(format!("{module_name}.rs"));
     let nested = module_base.join(module_name).join("mod.rs");
-    let flat_exists = proc_macro_source_path_exists(canonical_pkg_dir, &flat)?;
-    let nested_exists = proc_macro_source_path_exists(canonical_pkg_dir, &nested)?;
-    match (flat_exists, nested_exists) {
-        (true, false) => Ok(flat),
-        (false, true) => Ok(nested),
-        (true, true) => anyhow::bail!(
+    let flat_path = proc_macro_source_path_exists(canonical_pkg_dir, &flat)?;
+    let nested_path = proc_macro_source_path_exists(canonical_pkg_dir, &nested)?;
+    match (flat_path, nested_path) {
+        (Some(flat_path), None) => Ok(flat_path),
+        (None, Some(nested_path)) => Ok(nested_path),
+        (Some(_), Some(_)) => anyhow::bail!(
             "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
             flat.display(),
             nested.display()
         ),
-        (false, false) => anyhow::bail!(
+        (None, None) => anyhow::bail!(
             "proc-macro module `{module_name}` is missing: expected {} or {}",
             flat.display(),
             nested.display()
@@ -399,8 +408,7 @@ fn resolve_explicit_module_path(
             "resolve proc-macro #[path] `{explicit_path}` from {}",
             declaring_source.display()
         )
-    })?;
-    Ok(candidate_rel)
+    })
 }
 
 fn normalize_proc_macro_module_path(path: &Path) -> Result<PathBuf> {
@@ -425,14 +433,11 @@ fn normalize_proc_macro_module_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result<bool> {
+fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result<Option<PathBuf>> {
     let candidate = canonical_pkg_dir.join(rel);
     match std::fs::symlink_metadata(&candidate) {
-        Ok(_) => {
-            validate_proc_macro_source_path(canonical_pkg_dir, rel)?;
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => {
             Err(error).with_context(|| format!("inspect proc-macro source {}", candidate.display()))
         }
@@ -486,7 +491,15 @@ fn validate_proc_macro_source_path(canonical_pkg_dir: &Path, rel: &Path) -> Resu
             candidate.display()
         );
     }
-    Ok(candidate)
+    resolved
+        .strip_prefix(canonical_pkg_dir)
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "derive on-disk proc-macro source identity for {}",
+                resolved.display()
+            )
+        })
 }
 
 fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
