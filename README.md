@@ -5,22 +5,28 @@
 
 > "100-eyed guardian." Static install-time scanner for eight package ecosystems, with opt-in Sigstore verification plumbing for npm provenance.
 
-`argus` is a pre-release Rust CLI that inspects package artifacts from npm,
+`argus` is a Rust CLI that inspects package artifacts from npm,
 PyPI, crates.io, Go modules, NuGet, Maven, RubyGems, and Composer/Packagist
 before package build or install hooks run. It combines artifact-integrity checks
 with ecosystem-specific static rules; neither a matching digest nor a clean
 static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
-Release automation and the repository-root GitHub Action are implemented but
-are not yet a public installation contract. Until an immutable release and the
-protected `v1` branch are published, do not reference `majiayu000/argus@v1` or
-assume that `v0.1.0` assets exist. The operator sequence and verification
-boundary are documented in [`docs/releasing.md`](docs/releasing.md).
+[`v0.1.0`](https://github.com/majiayu000/argus/releases/tag/v0.1.0) is the first
+immutable binary release. The repository-root GitHub Action is implemented,
+but the protected `v1` branch has not been promoted, so do not reference
+`majiayu000/argus@v1` yet. The operator sequence and verification boundary are
+documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Ecosystem capability matrix
 
-All rows describe code implemented on `main`, not a released binary contract.
+All rows describe current code on `main`. The immutable `v0.1.0` tag and its
+release manifest commit define the released binary contents. The
+[`[0.1.0]`](CHANGELOG.md#010---2026-07-23) changelog section summarizes the
+tagged source scope and capabilities;
+[`[Unreleased]`](CHANGELOG.md#unreleased) entries describe later `main`
+capabilities and are not part of `v0.1.0`. GitHub Release metadata is
+authoritative for publication status, date, and assets.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
@@ -758,20 +764,33 @@ local set anytime with `pre-commit run --all-files`.
 
 ## Status
 
-**Pre-release.** Argus is not yet cut as a tagged release or published to any
-package registry. Build it from source against `main`; we treat `main` as the
-shipping branch and the [`CHANGELOG`](CHANGELOG.md) `[Unreleased]` section as
-the current ship-list.
+Argus `v0.1.0` was published on 2026-08-10 as an immutable GitHub Release with
+21 assets: raw binaries and archives for five native targets, checksums,
+documentation, and Sigstore attestations. Pin the exact release and select the
+asset for your target; for example:
 
-Capability snapshot (as of 2026-07-18):
+```sh
+gh release download v0.1.0 --repo majiayu000/argus \
+  --pattern 'argus-v0.1.0-aarch64-apple-darwin.tar.gz'
+gh release verify-asset v0.1.0 \
+  argus-v0.1.0-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
+```
+
+There is no package-registry distribution. The protected `v1` Action branch
+has not been promoted, so do not reference `majiayu000/argus@v1` yet. Build
+from source against `main` only when you intentionally want the newer,
+pre-release capabilities recorded under the [`CHANGELOG`](CHANGELOG.md)
+`[Unreleased]` section.
+
+Baseline capability snapshot (as of 2026-07-18; see `[Unreleased]` for
+subsequent work):
 
 - **M0** — rule engine + regression corpus + CI ([#4](https://github.com/majiayu000/argus/pull/4), [#5](https://github.com/majiayu000/argus/pull/5)).
 - **M1** — npm tarball fetch + safe extraction + scan ([#6](https://github.com/majiayu000/argus/pull/6)); PyPI sdist/wheel ([#23](https://github.com/majiayu000/argus/pull/23)); crates.io `.crate` + `build.rs` analysis ([#24](https://github.com/majiayu000/argus/pull/24)); and the completed [#22](https://github.com/majiayu000/argus/issues/22) long-tail umbrella: NuGet ([#49](https://github.com/majiayu000/argus/pull/49)), Maven ([#50](https://github.com/majiayu000/argus/pull/50)), RubyGems ([#51](https://github.com/majiayu000/argus/pull/51)), Composer/Packagist ([#52](https://github.com/majiayu000/argus/pull/52)), and Go modules ([#53](https://github.com/majiayu000/argus/pull/53)).
 - **M2 verification** — the DSSE, Fulcio-chain, SCT, Rekor proof/checkpoint/SET, artifact-subject, and OIDC identity-policy path is opt-in behind the `sigstore` Cargo feature ([#14](https://github.com/majiayu000/argus/issues/14)). Real npm v0.2 `intoto/0.0.2` SLSA bundles are supported through the audited verifier compatibility patch documented in [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10. Invalid cryptographic material or policy mismatches remain Critical and block; npm-keyring bundles remain Unsupported. Builds without the `sigstore` feature hard-error when `--verify-sigstore` is requested.
 
-These entries mean implemented and covered by repository tests on `main`.
-Argus remains **unreleased**: there is no tagged binary distribution or package
-registry release yet, and normal installation still requires building from source.
+These entries mean implemented and covered by repository tests on `main`; they
+are not a claim that every item is present in the `v0.1.0` binary.
 
 Detection coverage is intentionally **not** claimed in headline numbers without
 benchmark evidence — see [`corpus/`](corpus/) for the regression set the
