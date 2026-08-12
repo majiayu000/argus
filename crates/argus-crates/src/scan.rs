@@ -396,13 +396,14 @@ fn resolve_explicit_module_path(
         anyhow::bail!("proc-macro #[path] must be a non-empty relative path: `{explicit_path}`");
     }
     let declaring_dir = declaring_source.parent().unwrap_or_else(|| Path::new(""));
-    let candidate_rel = normalize_proc_macro_module_path(&declaring_dir.join(explicit))
-        .with_context(|| {
-            format!(
-                "resolve proc-macro #[path] `{explicit_path}` from {}",
-                declaring_source.display()
-            )
-        })?;
+    let candidate_rel =
+        resolve_proc_macro_module_traversal(canonical_pkg_dir, declaring_dir, explicit)
+            .with_context(|| {
+                format!(
+                    "resolve proc-macro #[path] `{explicit_path}` from {}",
+                    declaring_source.display()
+                )
+            })?;
     validate_proc_macro_source_path(canonical_pkg_dir, &candidate_rel).with_context(|| {
         format!(
             "resolve proc-macro #[path] `{explicit_path}` from {}",
@@ -411,14 +412,42 @@ fn resolve_explicit_module_path(
     })
 }
 
-fn normalize_proc_macro_module_path(path: &Path) -> Result<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
+fn resolve_proc_macro_module_traversal(
+    canonical_pkg_dir: &Path,
+    declaring_dir: &Path,
+    explicit: &Path,
+) -> Result<PathBuf> {
+    let mut resolved_rel = PathBuf::new();
+    for component in declaring_dir.components() {
         match component {
-            Component::Normal(part) => normalized.push(part),
+            Component::Normal(part) => {
+                resolved_rel.push(part);
+                inspect_proc_macro_traversal_component(canonical_pkg_dir, &resolved_rel, true)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("declaring proc-macro source directory must be normalized")
+            }
+        }
+    }
+
+    let components = explicit.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            Component::Normal(part) => {
+                resolved_rel.push(part);
+                // Inspect before a later `..` can remove this component. Once
+                // prior components are known to be real directories and not
+                // links/reparse points, lexical pop matches filesystem traversal.
+                inspect_proc_macro_traversal_component(
+                    canonical_pkg_dir,
+                    &resolved_rel,
+                    index + 1 < components.len(),
+                )?;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
-                if !normalized.pop() {
+                if !resolved_rel.pop() {
                     anyhow::bail!("proc-macro module path escapes crate root");
                 }
             }
@@ -427,10 +456,37 @@ fn normalize_proc_macro_module_path(path: &Path) -> Result<PathBuf> {
             }
         }
     }
-    if normalized.as_os_str().is_empty() {
+    if resolved_rel.as_os_str().is_empty() {
         anyhow::bail!("proc-macro module path is empty");
     }
-    Ok(normalized)
+    Ok(resolved_rel)
+}
+
+fn inspect_proc_macro_traversal_component(
+    canonical_pkg_dir: &Path,
+    rel: &Path,
+    must_be_directory: bool,
+) -> Result<()> {
+    let component_path = canonical_pkg_dir.join(rel);
+    let metadata = std::fs::symlink_metadata(&component_path).with_context(|| {
+        format!(
+            "inspect proc-macro module path component {}",
+            component_path.display()
+        )
+    })?;
+    if metadata_is_symlink_or_reparse(&metadata) {
+        anyhow::bail!(
+            "proc-macro source path contains a symlink or reparse point: {}",
+            component_path.display()
+        );
+    }
+    if must_be_directory && !metadata.is_dir() {
+        anyhow::bail!(
+            "proc-macro module path component is not a directory: {}",
+            component_path.display()
+        );
+    }
+    Ok(())
 }
 
 fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result<Option<PathBuf>> {

@@ -280,7 +280,7 @@ proc-macro = true
 "#;
     let lib_rs = r##"
 use proc_macro::TokenStream;
-#[path = r#"../shared/network.rs"#]
+#[path = r#"../shared/nested/../network.rs"#]
 mod r#network;
 #[proc_macro]
 pub fn expand(input: TokenStream) -> TokenStream {
@@ -298,6 +298,7 @@ let _connection =
         ("Cargo.toml", manifest),
         ("src/lib.rs", lib_rs),
         ("shared/network.rs", network_rs),
+        ("shared/nested/placeholder.txt", ""),
     ])?;
     let finding = scan
         .findings
@@ -545,6 +546,79 @@ proc-macro = true
         .expect_err("symlinked explicit proc-macro module must fail closed");
     assert!(
         format!("{error:#}").contains("symlink or reparse point"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_explicit_path_checks_symlink_component_before_parent() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(outside.path().join("target"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[path = \"link/../outside.rs\"] mod outside;",
+    )?;
+    std::fs::write(
+        directory.path().join("src/outside.rs"),
+        r#"pub fn decoy() {
+            let _connection = std::net::TcpStream::connect("decoy.example.invalid:443");
+        }"#,
+    )?;
+    std::fs::write(outside.path().join("outside.rs"), "")?;
+    symlink(
+        outside.path().join("target"),
+        directory.path().join("src/link"),
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "linked-parent-path-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("symlink component before `..` must fail before scanning the in-root decoy");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("symlink or reparse point"), "got: {detail}");
+    assert!(detail.contains("src/link"), "got: {detail}");
+    Ok(())
+}
+
+#[test]
+fn proc_macro_explicit_path_parent_escape_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[path = \"../../outside.rs\"] mod outside;",
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "parent-escape-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("explicit module parent escape must fail closed");
+    assert!(
+        format!("{error:#}").contains("proc-macro module path escapes crate root"),
         "got: {error:#}"
     );
     Ok(())
