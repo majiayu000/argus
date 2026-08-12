@@ -437,7 +437,14 @@ fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result
     let candidate = canonical_pkg_dir.join(rel);
     match std::fs::symlink_metadata(&candidate) {
         Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
         Err(error) => {
             Err(error).with_context(|| format!("inspect proc-macro source {}", candidate.display()))
         }

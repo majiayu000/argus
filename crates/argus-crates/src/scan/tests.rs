@@ -583,6 +583,49 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_conventional_flat_module_ignores_non_directory_nested_obstruction() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    std::fs::write(directory.path().join("src/foo"), "not a directory")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "flat-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/foo.rs".to_string(), "src/lib.rs".to_string()])
+    );
+
+    let mut findings = Vec::new();
+    let foo_rel = "src/foo.rs";
+    assert!(source_files.contains(foo_rel));
+    let foo_source = std::fs::read_to_string(directory.path().join(foo_rel))?;
+    scan_proc_macro_source(&foo_source, foo_rel, &mut findings);
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("flat module must reach proc-macro scanning")?;
+    assert!(finding.detail.contains(foo_rel));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_module_graph_enforces_source_file_limit() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
