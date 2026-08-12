@@ -20,9 +20,12 @@ documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Ecosystem capability matrix
 
-All rows describe current code on `main`. Capabilities listed under
-[`[Unreleased]`](CHANGELOG.md#unreleased) may be newer than the `v0.1.0` binary;
-the versioned changelog section is the released binary contract.
+All rows describe current code on `main`. The immutable `v0.1.0` tag and its
+release manifest commit define the released binary contents. The
+[`[0.1.0]`](CHANGELOG.md#010---2026-07-23) changelog section summarizes that
+release;
+[`[Unreleased]`](CHANGELOG.md#unreleased) entries describe later `main`
+capabilities and are not part of `v0.1.0`.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
