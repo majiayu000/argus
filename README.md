@@ -22,10 +22,11 @@ documented in [`docs/releasing.md`](docs/releasing.md).
 
 All rows describe current code on `main`. The immutable `v0.1.0` tag and its
 release manifest commit define the released binary contents. The
-[`[0.1.0]`](CHANGELOG.md#010---2026-07-23) changelog section summarizes that
-release;
+[`[0.1.0]`](CHANGELOG.md#010---2026-07-23) changelog section summarizes the
+tagged source scope and capabilities;
 [`[Unreleased]`](CHANGELOG.md#unreleased) entries describe later `main`
-capabilities and are not part of `v0.1.0`.
+capabilities and are not part of `v0.1.0`. GitHub Release metadata is
+authoritative for publication status, date, and assets.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
