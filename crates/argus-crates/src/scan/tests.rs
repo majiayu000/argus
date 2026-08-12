@@ -344,6 +344,234 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_nested_source_enforces_exact_text_limit() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod bounded;")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "bounded-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    let bounded_path = directory.path().join("src/bounded.rs");
+
+    std::fs::write(&bounded_path, vec![b' '; TEXT_MAX_BYTES as usize])?;
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/bounded.rs"));
+
+    std::fs::write(&bounded_path, vec![b' '; (TEXT_MAX_BYTES + 1) as usize])?;
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("oversized nested proc-macro source must fail closed");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("read proc-macro source"), "got: {detail}");
+    assert!(
+        detail.contains("exceeds 1048576 byte limit"),
+        "got: {detail}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_binary_nested_source_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod binary;")?;
+    std::fs::write(directory.path().join("src/binary.rs"), [0, 1, 2])?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "binary-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("binary nested proc-macro source must fail closed");
+    assert!(
+        format!("{error:#}").contains("proc-macro source appears binary"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_root_source_symlink_fails_closed() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("real.rs"), "")?;
+    symlink("../real.rs", directory.path().join("src/lib.rs"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "linked-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("symlinked proc-macro root must fail closed");
+    assert!(
+        format!("{error:#}").contains("symlink or reparse point"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_explicit_path_file_symlink_fails_closed() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("shared"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[path = \"../shared/linked.rs\"] mod linked;",
+    )?;
+    std::fs::write(directory.path().join("shared/real.rs"), "")?;
+    symlink("real.rs", directory.path().join("shared/linked.rs"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "linked-path-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("symlinked explicit proc-macro module must fail closed");
+    assert!(
+        format!("{error:#}").contains("symlink or reparse point"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_conventional_symlinked_parent_escape_fails_closed() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod linked;")?;
+    std::fs::write(outside.path().join("mod.rs"), "")?;
+    symlink(outside.path(), directory.path().join("src/linked"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "linked-parent-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("symlinked conventional module parent must fail closed");
+    assert!(
+        format!("{error:#}").contains("escapes crate root"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_module_graph_enforces_source_file_limit() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "many-modules-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    let mut root_source = String::new();
+    for index in 0..MAX_PROC_MACRO_SOURCE_FILES - 1 {
+        root_source.push_str(&format!("mod module_{index};\n"));
+        std::fs::write(directory.path().join(format!("src/module_{index}.rs")), "")?;
+    }
+    std::fs::write(directory.path().join("src/lib.rs"), &root_source)?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(source_files.len(), MAX_PROC_MACRO_SOURCE_FILES);
+
+    let overflow_index = MAX_PROC_MACRO_SOURCE_FILES - 1;
+    root_source.push_str(&format!("mod module_{overflow_index};\n"));
+    std::fs::write(
+        directory
+            .path()
+            .join(format!("src/module_{overflow_index}.rs")),
+        "",
+    )?;
+    std::fs::write(directory.path().join("src/lib.rs"), root_source)?;
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("oversized proc-macro module graph must fail closed");
+    assert!(
+        format!("{error:#}").contains("module graph exceeds 1024 source files"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_duplicate_declarations_are_deduplicated_before_enqueue() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let root_source = "mod repeated;\n".repeat(MAX_PROC_MACRO_SOURCE_FILES * 4);
+    std::fs::write(directory.path().join("src/lib.rs"), root_source)?;
+    std::fs::write(directory.path().join("src/repeated.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "duplicate-modules-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/lib.rs".to_string(), "src/repeated.rs".to_string()])
+    );
+    Ok(())
+}
+
+#[test]
 fn oversized_rust_source_fails_closed() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::write(
