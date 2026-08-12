@@ -25,9 +25,10 @@ full census of `claude-skill-registry-data` (202,660 skills). See
 | **skill-benign-net-tool** | **allow-with-approval** | weather skill reads API key + calls its own API (capabilities match intent) |
 | **skill-benign-system-override** | **allow** | theme/gesture/game/branding docs use generic `override system` prose without agent-authority targets |
 
-The two negatives encode the census's core finding: the current lexical layer
-**false-positives on benign installers and legit API tools**. Any new detector
-must keep these two green, or it is not an improvement — it just relabels noise.
+The three negatives encode recurring false-positive traps in the lexical layer:
+**benign installers, legitimate API tools, and generic `override system` prose
+that does not target agent authority**. Any new detector must keep all three
+green, or it is not an improvement — it just relabels noise.
 
 ## Labeling worklist
 
@@ -71,7 +72,7 @@ balanced case-control design does not estimate source-population prevalence.
 ## Current implementation status
 
 `argus corpus test --corpus corpus/agent` asserts all 7 synthetic fixtures,
-including both negatives. `argus agent scan --format json` now emits manifest
+including all three negatives. `argus agent scan --format json` now emits manifest
 fields on capability-backed findings:
 
 ```json
@@ -82,8 +83,8 @@ fields on capability-backed findings:
 }
 ```
 
-`index.json` also carries a frozen evaluation contract for these six
-maintainer-merged fixtures. Recompute it with:
+`index.json` also carries a frozen evaluation contract for these seven
+maintainer-reviewed synthetic fixtures. Recompute it with:
 
 ```bash
 argus corpus eval --corpus corpus/agent --format json

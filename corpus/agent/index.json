@@ -4,7 +4,7 @@
   "evaluation": {
     "schemaVersion": 1,
     "datasetType": "synthetic-fixtures",
-    "labelSource": "maintainer-merged expectedDecision values from GH-58 PR #60",
+    "labelSource": "original six maintainer-reviewed expectedDecision values from GH-58 PR #60; system-override regression from GH-196 PR #197",
     "positiveDecision": "block",
     "frozen": true
   },
