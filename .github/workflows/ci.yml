@@ -158,8 +158,11 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Run proc-macro regressions
-        run: cargo test -p argus-crates proc_macro_
+      - name: Test proc-macro link metadata classification
+        run: cargo test -p argus-crates proc_macro_link_classification_uses_link_metadata_flags
+
+      - name: Test proc-macro case-variant path lookup
+        run: cargo test -p argus-crates proc_macro_source_case_variant_is_not_treated_as_reparse_point
 
   msrv:
     name: msrv (1.88)
