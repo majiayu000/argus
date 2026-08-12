@@ -22,6 +22,10 @@ fn is_crate_security_relevant(rel: &str) -> bool {
 }
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
+const MAX_PROC_MACRO_SOURCE_FILES: usize = 1024;
+const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(windows)]
+const WINDOWS_ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
 
 /// Top-level: extract `.crate` + scan everything inside.
 pub fn scan_crate_archive(
@@ -296,38 +300,63 @@ fn collect_proc_macro_source_files(
     pkg_dir: &Path,
     manifest: &CargoManifest,
 ) -> Result<BTreeSet<String>> {
-    let Some(root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
+    let Some(declared_root_rel) = cargo_manifest_proc_macro_lib_path(manifest)? else {
         return Ok(BTreeSet::new());
     };
     let canonical_pkg_dir = std::fs::canonicalize(pkg_dir)
         .with_context(|| format!("canonicalize crate root {}", pkg_dir.display()))?;
+    let root_path =
+        validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&declared_root_rel))?;
+    let root_rel = path_to_manifest_rel(&root_path)?;
     let mut source_files = BTreeSet::new();
+    source_files.insert(root_rel.clone());
     let mut pending = vec![root_rel.clone()];
 
     while let Some(rel) = pending.pop() {
-        if !source_files.insert(rel.clone()) {
-            continue;
-        }
-        let abs = pkg_dir.join(&rel);
-        let bytes = std::fs::read(&abs)
+        let source_path = validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&rel))?;
+        let source_rel = path_to_manifest_rel(&source_path)?;
+        let abs = canonical_pkg_dir.join(&source_path);
+        let content = argus_core::fs::read_bounded_utf8_regular_file(&abs, TEXT_MAX_BYTES as usize)
             .with_context(|| format!("read proc-macro source {}", abs.display()))?;
-        if bytes.len() as u64 > TEXT_MAX_BYTES || looks_binary(&bytes) {
-            continue;
+        if looks_binary(content.as_bytes()) {
+            anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
-        let content = std::str::from_utf8(&bytes)
-            .with_context(|| format!("proc-macro source is not UTF-8: {}", abs.display()))?;
-        let module_base = rust_module_base(Path::new(&rel), &root_rel);
+        let module_base = rust_module_base(Path::new(&source_rel), &root_rel);
+        let mut declarations_seen = BTreeSet::new();
 
-        for declaration in rules::rust_module_declarations(content)
+        for declaration in rules::rust_module_declarations(&content)
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?
         {
+            if !declarations_seen
+                .insert((declaration.name.clone(), declaration.explicit_path.clone()))
+            {
+                continue;
+            }
             let module = if let Some(explicit_path) = declaration.explicit_path {
-                resolve_explicit_module_path(&canonical_pkg_dir, Path::new(&rel), &explicit_path)?
+                resolve_explicit_module_path(
+                    &canonical_pkg_dir,
+                    Path::new(&source_rel),
+                    &explicit_path,
+                )?
             } else {
-                resolve_conventional_module_path(pkg_dir, &module_base, &declaration.name)?
+                resolve_conventional_module_path(
+                    &canonical_pkg_dir,
+                    &module_base,
+                    &declaration.name,
+                )?
             };
-            pending.push(path_to_manifest_rel(&module)?);
+            let module_rel = path_to_manifest_rel(&module)?;
+            if source_files.contains(&module_rel) {
+                continue;
+            }
+            if source_files.len() >= MAX_PROC_MACRO_SOURCE_FILES {
+                anyhow::bail!(
+                    "proc-macro module graph exceeds {MAX_PROC_MACRO_SOURCE_FILES} source files"
+                );
+            }
+            source_files.insert(module_rel.clone());
+            pending.push(module_rel);
         }
     }
 
@@ -335,27 +364,78 @@ fn collect_proc_macro_source_files(
 }
 
 fn resolve_conventional_module_path(
-    pkg_dir: &Path,
+    canonical_pkg_dir: &Path,
     module_base: &Path,
     module_name: &str,
 ) -> Result<PathBuf> {
     let flat = module_base.join(format!("{module_name}.rs"));
     let nested = module_base.join(module_name).join("mod.rs");
-    let flat_exists = pkg_dir.join(&flat).is_file();
-    let nested_exists = pkg_dir.join(&nested).is_file();
-    match (flat_exists, nested_exists) {
-        (true, false) => Ok(flat),
-        (false, true) => Ok(nested),
-        (true, true) => anyhow::bail!(
+    // Match rustc's two complete-path availability probes before applying the
+    // scanner's stricter path policy. An incomplete alternative may traverse a
+    // link, but the one selected complete candidate is always validated below.
+    let flat_availability = classify_conventional_module_candidate(canonical_pkg_dir, &flat)?;
+    let nested_availability = classify_conventional_module_candidate(canonical_pkg_dir, &nested)?;
+    resolve_classified_conventional_module_path(
+        canonical_pkg_dir,
+        module_name,
+        flat,
+        flat_availability,
+        nested,
+        nested_availability,
+    )
+}
+
+fn resolve_classified_conventional_module_path(
+    canonical_pkg_dir: &Path,
+    module_name: &str,
+    flat: PathBuf,
+    flat_availability: ConventionalCandidateAvailability,
+    nested: PathBuf,
+    nested_availability: ConventionalCandidateAvailability,
+) -> Result<PathBuf> {
+    match (flat_availability, nested_availability) {
+        (
+            ConventionalCandidateAvailability::Present,
+            ConventionalCandidateAvailability::Present,
+        ) => anyhow::bail!(
             "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
             flat.display(),
             nested.display()
         ),
-        (false, false) => anyhow::bail!(
-            "proc-macro module `{module_name}` is missing: expected {} or {}",
-            flat.display(),
-            nested.display()
-        ),
+        (
+            ConventionalCandidateAvailability::Present,
+            ConventionalCandidateAvailability::Unavailable(_),
+        ) => validate_proc_macro_source_path(canonical_pkg_dir, &flat),
+        (
+            ConventionalCandidateAvailability::Unavailable(_),
+            ConventionalCandidateAvailability::Present,
+        ) => validate_proc_macro_source_path(canonical_pkg_dir, &nested),
+        (
+            ConventionalCandidateAvailability::Unavailable(flat_error),
+            ConventionalCandidateAvailability::Unavailable(nested_error),
+        ) => {
+            if !conventional_candidate_unavailability_is_absence_like(&flat_error) {
+                return Err(flat_error).with_context(|| {
+                    format!(
+                        "inspect conventional proc-macro source candidate {}",
+                        canonical_pkg_dir.join(&flat).display()
+                    )
+                });
+            }
+            if !conventional_candidate_unavailability_is_absence_like(&nested_error) {
+                return Err(nested_error).with_context(|| {
+                    format!(
+                        "inspect conventional proc-macro source candidate {}",
+                        canonical_pkg_dir.join(&nested).display()
+                    )
+                });
+            }
+            anyhow::bail!(
+                "proc-macro module `{module_name}` is missing: expected {} or {}",
+                flat.display(),
+                nested.display()
+            )
+        }
     }
 }
 
@@ -369,30 +449,225 @@ fn resolve_explicit_module_path(
         anyhow::bail!("proc-macro #[path] must be a non-empty relative path: `{explicit_path}`");
     }
     let declaring_dir = declaring_source.parent().unwrap_or_else(|| Path::new(""));
-    let candidate = canonical_pkg_dir.join(declaring_dir).join(explicit);
-    let canonical_candidate = std::fs::canonicalize(&candidate)
-        .with_context(|| format!("resolve proc-macro #[path] {}", candidate.display()))?;
-    if !canonical_candidate.starts_with(canonical_pkg_dir) {
-        anyhow::bail!(
-            "proc-macro #[path] escapes crate root: `{explicit_path}` from {}",
+    let candidate_rel =
+        resolve_proc_macro_module_traversal(canonical_pkg_dir, declaring_dir, explicit)
+            .with_context(|| {
+                format!(
+                    "resolve proc-macro #[path] `{explicit_path}` from {}",
+                    declaring_source.display()
+                )
+            })?;
+    validate_proc_macro_source_path(canonical_pkg_dir, &candidate_rel).with_context(|| {
+        format!(
+            "resolve proc-macro #[path] `{explicit_path}` from {}",
             declaring_source.display()
-        );
+        )
+    })
+}
+
+fn resolve_proc_macro_module_traversal(
+    canonical_pkg_dir: &Path,
+    declaring_dir: &Path,
+    explicit: &Path,
+) -> Result<PathBuf> {
+    let mut resolved_rel = PathBuf::new();
+    for component in declaring_dir.components() {
+        match component {
+            Component::Normal(part) => {
+                resolved_rel.push(part);
+                inspect_proc_macro_traversal_component(canonical_pkg_dir, &resolved_rel, true)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("declaring proc-macro source directory must be normalized")
+            }
+        }
     }
-    if !canonical_candidate.is_file() {
+
+    let components = explicit.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        match component {
+            Component::Normal(part) => {
+                resolved_rel.push(part);
+                // Inspect before a later `..` can remove this component. Once
+                // prior components are known to be real directories and not
+                // links/reparse points, lexical pop matches filesystem traversal.
+                inspect_proc_macro_traversal_component(
+                    canonical_pkg_dir,
+                    &resolved_rel,
+                    index + 1 < components.len(),
+                )?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !resolved_rel.pop() {
+                    anyhow::bail!("proc-macro module path escapes crate root");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("proc-macro module path must be relative");
+            }
+        }
+    }
+    if resolved_rel.as_os_str().is_empty() {
+        anyhow::bail!("proc-macro module path is empty");
+    }
+    Ok(resolved_rel)
+}
+
+fn inspect_proc_macro_traversal_component(
+    canonical_pkg_dir: &Path,
+    rel: &Path,
+    must_be_directory: bool,
+) -> Result<()> {
+    let component_path = canonical_pkg_dir.join(rel);
+    let metadata = std::fs::symlink_metadata(&component_path).with_context(|| {
+        format!(
+            "inspect proc-macro module path component {}",
+            component_path.display()
+        )
+    })?;
+    if metadata_is_symlink_or_reparse(&metadata) {
         anyhow::bail!(
-            "proc-macro #[path] is not a file: {}",
-            canonical_candidate.display()
+            "proc-macro source path contains a symlink or reparse point: {}",
+            component_path.display()
         );
     }
-    canonical_candidate
+    if must_be_directory && !metadata.is_dir() {
+        anyhow::bail!(
+            "proc-macro module path component is not a directory: {}",
+            component_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum ConventionalCandidateAvailability {
+    Present,
+    Unavailable(std::io::Error),
+}
+
+fn classify_conventional_module_candidate(
+    canonical_pkg_dir: &Path,
+    rel: &Path,
+) -> Result<ConventionalCandidateAvailability> {
+    if rel
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!(
+            "conventional proc-macro source path contains a non-normal component: {}",
+            rel.display()
+        );
+    }
+    let candidate = canonical_pkg_dir.join(rel);
+    Ok(match std::fs::metadata(&candidate) {
+        Ok(_) => ConventionalCandidateAvailability::Present,
+        Err(error) => ConventionalCandidateAvailability::Unavailable(error),
+    })
+}
+
+fn conventional_candidate_unavailability_is_absence_like(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) || io_error_is_filesystem_loop(error)
+}
+
+#[cfg(unix)]
+fn io_error_is_filesystem_loop(error: &std::io::Error) -> bool {
+    rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::LOOP)
+}
+
+#[cfg(windows)]
+fn io_error_is_filesystem_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_ERROR_CANT_RESOLVE_FILENAME)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn io_error_is_filesystem_loop(_error: &std::io::Error) -> bool {
+    false
+}
+
+fn validate_proc_macro_source_path(canonical_pkg_dir: &Path, rel: &Path) -> Result<PathBuf> {
+    if rel
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!(
+            "proc-macro source path contains a non-normal component: {}",
+            rel.display()
+        );
+    }
+    let candidate = canonical_pkg_dir.join(rel);
+    let mut component_path = canonical_pkg_dir.to_path_buf();
+    for component in rel.components() {
+        let Component::Normal(part) = component else {
+            unreachable!("proc-macro source components were validated above");
+        };
+        component_path.push(part);
+        let metadata = std::fs::symlink_metadata(&component_path).with_context(|| {
+            format!(
+                "inspect proc-macro source path component {}",
+                component_path.display()
+            )
+        })?;
+        if metadata_is_symlink_or_reparse(&metadata) {
+            anyhow::bail!(
+                "proc-macro source path contains a symlink or reparse point: {}",
+                component_path.display()
+            );
+        }
+    }
+    let resolved = std::fs::canonicalize(&candidate)
+        .with_context(|| format!("resolve proc-macro source {}", candidate.display()))?;
+    if !resolved.starts_with(canonical_pkg_dir) {
+        anyhow::bail!(
+            "proc-macro source escapes crate root: {} resolves to {}",
+            candidate.display(),
+            resolved.display()
+        );
+    }
+    let metadata = std::fs::symlink_metadata(&candidate)
+        .with_context(|| format!("inspect proc-macro source {}", candidate.display()))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "proc-macro source is not a regular file: {}",
+            candidate.display()
+        );
+    }
+    resolved
         .strip_prefix(canonical_pkg_dir)
         .map(Path::to_path_buf)
         .with_context(|| {
             format!(
-                "make proc-macro #[path] relative to crate root: {}",
-                canonical_candidate.display()
+                "derive on-disk proc-macro source identity for {}",
+                resolved.display()
             )
         })
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    let windows_file_attributes = {
+        use std::os::windows::fs::MetadataExt as _;
+        metadata.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let windows_file_attributes = 0;
+
+    link_metadata_indicates_symlink_or_reparse(
+        metadata.file_type().is_symlink(),
+        windows_file_attributes,
+    )
+}
+
+fn link_metadata_indicates_symlink_or_reparse(
+    is_symlink: bool,
+    windows_file_attributes: u32,
+) -> bool {
+    is_symlink || windows_file_attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn rust_module_base(current: &Path, root_rel: &str) -> PathBuf {

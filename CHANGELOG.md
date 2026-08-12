@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent-surface scans report bundled ELF, Mach-O, and PE/DOS executables as an
   explicit approval finding instead of treating them as unreadable text or
   silently skipping their uninspected binary semantics.
+- Crates.io proc-macro source discovery now follows a bounded module graph of
+  at most 1,024 unique source files and fails closed with explicit operational
+  errors for oversized, binary, invalid, crate-root-escaping, or
+  symlink/reparse-backed reachable sources, instead of allowing an incomplete
+  traversal to appear clean (GH-194).
 - `known-native-build-pattern` now also recognizes addons compiled locally
   from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
   only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages
