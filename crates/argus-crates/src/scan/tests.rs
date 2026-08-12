@@ -518,7 +518,7 @@ proc-macro = true
 
 #[cfg(unix)]
 #[test]
-fn proc_macro_explicit_path_file_symlink_fails_closed() -> Result<()> {
+fn proc_macro_explicit_path_dangling_file_symlink_fails_closed() -> Result<()> {
     use std::os::unix::fs::symlink;
 
     let directory = tempfile::tempdir()?;
@@ -528,8 +528,7 @@ fn proc_macro_explicit_path_file_symlink_fails_closed() -> Result<()> {
         directory.path().join("src/lib.rs"),
         "#[path = \"../shared/linked.rs\"] mod linked;",
     )?;
-    std::fs::write(directory.path().join("shared/real.rs"), "")?;
-    symlink("real.rs", directory.path().join("shared/linked.rs"))?;
+    symlink("missing.rs", directory.path().join("shared/linked.rs"))?;
     let manifest: CargoManifest = toml::from_str(
         r#"
 [package]
@@ -543,7 +542,7 @@ proc-macro = true
     )?;
 
     let error = collect_proc_macro_source_files(directory.path(), &manifest)
-        .expect_err("symlinked explicit proc-macro module must fail closed");
+        .expect_err("dangling symlinked explicit proc-macro module must fail closed");
     assert!(
         format!("{error:#}").contains("symlink or reparse point"),
         "got: {error:#}"
@@ -696,6 +695,128 @@ proc-macro = true
         .find(|finding| finding.rule_id == "proc-macro-network")
         .context("flat module must reach proc-macro scanning")?;
     assert!(finding.detail.contains(foo_rel));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_conventional_flat_module_ignores_dangling_nested_alternative() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    symlink("missing.rs", directory.path().join("src/foo/mod.rs"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "flat-module-dangling-alternative-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/foo.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    let mut findings = Vec::new();
+    let foo_rel = "src/foo.rs";
+    let foo_source = std::fs::read_to_string(directory.path().join(foo_rel))?;
+    scan_proc_macro_source(&foo_source, foo_rel, &mut findings);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule_id == "proc-macro-network" && finding.detail.contains(foo_rel)
+        }),
+        "got: {findings:?}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_conventional_nested_module_ignores_dangling_flat_alternative() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo/mod.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    symlink("missing.rs", directory.path().join("src/foo.rs"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "nested-module-dangling-alternative-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/foo/mod.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    let mut findings = Vec::new();
+    let foo_rel = "src/foo/mod.rs";
+    let foo_source = std::fs::read_to_string(directory.path().join(foo_rel))?;
+    scan_proc_macro_source(&foo_source, foo_rel, &mut findings);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule_id == "proc-macro-network" && finding.detail.contains(foo_rel)
+        }),
+        "got: {findings:?}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn proc_macro_conventional_resolvable_leaf_symlink_fails_closed() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(directory.path().join("src/foo.rs"), "")?;
+    std::fs::write(directory.path().join("src/real.rs"), "")?;
+    symlink("../real.rs", directory.path().join("src/foo/mod.rs"))?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "linked-conventional-alternative-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("resolvable conventional leaf symlink must fail closed");
+    assert!(
+        format!("{error:#}").contains("symlink or reparse point"),
+        "got: {error:#}"
+    );
     Ok(())
 }
 

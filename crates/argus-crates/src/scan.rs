@@ -491,7 +491,60 @@ fn inspect_proc_macro_traversal_component(
 
 fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result<Option<PathBuf>> {
     let candidate = canonical_pkg_dir.join(rel);
+    let components = rel.components().collect::<Vec<_>>();
+    let mut parent_rel = PathBuf::new();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        let Component::Normal(part) = component else {
+            anyhow::bail!(
+                "conventional proc-macro source path contains a non-normal component: {}",
+                rel.display()
+            );
+        };
+        parent_rel.push(part);
+        let parent_path = canonical_pkg_dir.join(&parent_rel);
+        match std::fs::symlink_metadata(&parent_path) {
+            Ok(metadata) if metadata_is_symlink_or_reparse(&metadata) => {
+                anyhow::bail!(
+                    "proc-macro source path contains a symlink or reparse point: {}",
+                    parent_path.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => return Ok(None),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect conventional proc-macro source parent {}",
+                        parent_path.display()
+                    )
+                });
+            }
+        }
+    }
     match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata_is_symlink_or_reparse(&metadata) => {
+            match std::fs::metadata(&candidate) {
+                // rustc ignores an unresolved conventional alternative. This
+                // exception is leaf-only: all parent components were already
+                // checked as real directories without links/reparse points.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error).with_context(|| {
+                    format!(
+                        "resolve linked conventional proc-macro source {}",
+                        candidate.display()
+                    )
+                }),
+                Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
+            }
+        }
         Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
         Err(error)
             if matches!(
