@@ -1242,6 +1242,202 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_path_loaded_module_preserves_source_directory_context() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "path-context-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let real_network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"#[path = "../shared/entry.rs"]
+mod entry;"#,
+        ),
+        ("shared/entry.rs", "mod network;"),
+        ("shared/network.rs", real_network),
+        ("shared/entry/network.rs", "pub fn decoy() {}"),
+    ])?;
+
+    let findings: Vec<&Finding> = scan
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "proc-macro-network")
+        .collect();
+    assert_eq!(findings.len(), 1, "got: {:?}", scan.findings);
+    assert!(findings[0].detail.contains("shared/network.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_inline_module_context_follows_rust_module_path() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "inline-context-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"mod inline {
+    mod network;
+}"#,
+        ),
+        ("src/inline/network.rs", network),
+        ("src/network.rs", "pub fn decoy() {}"),
+    ])?;
+
+    let findings: Vec<&Finding> = scan
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "proc-macro-network")
+        .collect();
+    assert_eq!(findings.len(), 1, "got: {:?}", scan.findings);
+    assert!(findings[0].detail.contains("src/inline/network.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_cfg_attr_path_traverses_conditional_and_conventional_paths() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("shared"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"#[cfg_attr(unix, path = "../shared/unix.rs")]
+mod platform;"#,
+    )?;
+    std::fs::write(directory.path().join("src/platform.rs"), "")?;
+    std::fs::write(directory.path().join("shared/unix.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "cfg-attr-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from([
+            "shared/unix.rs".to_string(),
+            "src/lib.rs".to_string(),
+            "src/platform.rs".to_string(),
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_cfg_any_disabled_module_is_ignored() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[cfg(any())] mod missing;",
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "disabled-cfg-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_cfg_attr_definitely_true_path_skips_conventional_missing() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("shared"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"#[cfg_attr(all(), path = "../shared/active.rs")]
+mod platform;"#,
+    )?;
+    std::fs::write(directory.path().join("shared/active.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "cfg-attr-true-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["shared/active.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_resolution_edge_budget_limits_alias_flood() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let mut root_source = String::new();
+    for index in 0..=MAX_PROC_MACRO_RESOLUTION_EDGES {
+        root_source.push_str(&format!(
+            "#[cfg_attr(unix, path = \"shared.rs\")] mod alias_{index};\n"
+        ));
+    }
+    std::fs::write(directory.path().join("src/lib.rs"), root_source)?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "alias-flood-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("alias flood must fail before resolution work");
+    assert!(
+        format!("{error:#}").contains("module resolution edges exceed"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn oversized_rust_source_fails_closed() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::write(

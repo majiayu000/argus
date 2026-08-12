@@ -23,6 +23,8 @@ fn is_crate_security_relevant(rel: &str) -> bool {
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_PROC_MACRO_SOURCE_FILES: usize = 1024;
+const MAX_PROC_MACRO_MODULE_DECLARATIONS: usize = 8192;
+const MAX_PROC_MACRO_RESOLUTION_EDGES: usize = 4096;
 const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 #[cfg(windows)]
 const WINDOWS_ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
@@ -308,59 +310,463 @@ fn collect_proc_macro_source_files(
     let root_path =
         validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&declared_root_rel))?;
     let root_rel = path_to_manifest_rel(&root_path)?;
+    let root_context = ProcMacroSourceContext::root(root_rel.clone());
     let mut source_files = BTreeSet::new();
     source_files.insert(root_rel.clone());
-    let mut pending = vec![root_rel.clone()];
+    let mut visited_contexts = BTreeSet::new();
+    visited_contexts.insert(root_context.clone());
+    let mut resolved_edges = BTreeSet::new();
+    let mut pending = vec![root_context];
+    let mut budgets = ProcMacroModuleBudgets::default();
 
-    while let Some(rel) = pending.pop() {
-        let source_path = validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&rel))?;
-        let source_rel = path_to_manifest_rel(&source_path)?;
+    while let Some(context) = pending.pop() {
+        let source_path =
+            validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&context.source_rel))?;
         let abs = canonical_pkg_dir.join(&source_path);
         let content = argus_core::fs::read_bounded_utf8_regular_file(&abs, TEXT_MAX_BYTES as usize)
             .with_context(|| format!("read proc-macro source {}", abs.display()))?;
         if looks_binary(content.as_bytes()) {
             anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
-        let module_base = rust_module_base(Path::new(&source_rel), &root_rel);
-        let mut declarations_seen = BTreeSet::new();
+        let declarations = proc_macro_module_declarations(&content, &context, &mut budgets)
+            .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
 
-        for declaration in rules::rust_module_declarations(&content)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?
-        {
-            if !declarations_seen
-                .insert((declaration.name.clone(), declaration.explicit_path.clone()))
-            {
+        for declaration in declarations {
+            if !resolved_edges.insert(declaration.lookup.clone()) {
                 continue;
             }
-            let module = if let Some(explicit_path) = declaration.explicit_path {
-                resolve_explicit_module_path(
-                    &canonical_pkg_dir,
-                    Path::new(&source_rel),
-                    &explicit_path,
-                )?
-            } else {
-                resolve_conventional_module_path(
-                    &canonical_pkg_dir,
-                    &module_base,
-                    &declaration.name,
-                )?
-            };
+            let module = declaration.resolve(&canonical_pkg_dir)?;
             let module_rel = path_to_manifest_rel(&module)?;
-            if source_files.contains(&module_rel) {
-                continue;
+            if !source_files.contains(&module_rel) {
+                if source_files.len() >= MAX_PROC_MACRO_SOURCE_FILES {
+                    anyhow::bail!(
+                        "proc-macro module graph exceeds {MAX_PROC_MACRO_SOURCE_FILES} source files"
+                    );
+                }
+                source_files.insert(module_rel.clone());
             }
-            if source_files.len() >= MAX_PROC_MACRO_SOURCE_FILES {
-                anyhow::bail!(
-                    "proc-macro module graph exceeds {MAX_PROC_MACRO_SOURCE_FILES} source files"
-                );
+            let next_context = declaration.source_context(module_rel);
+            if visited_contexts.insert(next_context.clone()) {
+                pending.push(next_context);
             }
-            source_files.insert(module_rel.clone());
-            pending.push(module_rel);
         }
     }
 
     Ok(source_files)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ProcMacroSourceContext {
+    source_rel: String,
+    source_dir: PathBuf,
+    module_dir: PathBuf,
+}
+
+impl ProcMacroSourceContext {
+    fn root(source_rel: String) -> Self {
+        let source_dir = Path::new(&source_rel)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        Self {
+            source_rel,
+            source_dir: source_dir.clone(),
+            module_dir: source_dir,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ProcMacroModuleDeclaration {
+    lookup: ProcMacroModuleLookup,
+}
+
+impl ProcMacroModuleDeclaration {
+    fn resolve(&self, canonical_pkg_dir: &Path) -> Result<PathBuf> {
+        match &self.lookup {
+            ProcMacroModuleLookup::Conventional {
+                module_base,
+                module_name,
+            } => resolve_conventional_module_path(canonical_pkg_dir, module_base, module_name),
+            ProcMacroModuleLookup::Explicit {
+                base_dir,
+                explicit_path,
+                declaring_source,
+            } => resolve_explicit_module_path_from_base(
+                canonical_pkg_dir,
+                base_dir,
+                explicit_path,
+                declaring_source,
+            ),
+        }
+    }
+
+    fn source_context(&self, source_rel: String) -> ProcMacroSourceContext {
+        let source_dir = Path::new(&source_rel)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        let module_dir = match &self.lookup {
+            ProcMacroModuleLookup::Conventional {
+                module_base,
+                module_name,
+            } => module_base.join(module_name),
+            ProcMacroModuleLookup::Explicit { .. } => source_dir.clone(),
+        };
+        ProcMacroSourceContext {
+            source_rel,
+            source_dir,
+            module_dir,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ProcMacroModuleLookup {
+    Conventional {
+        module_base: PathBuf,
+        module_name: String,
+    },
+    Explicit {
+        base_dir: PathBuf,
+        explicit_path: String,
+        declaring_source: String,
+    },
+}
+
+#[derive(Default)]
+struct ProcMacroModuleBudgets {
+    declarations: usize,
+    resolution_edges: usize,
+}
+
+impl ProcMacroModuleBudgets {
+    fn note_declaration(&mut self) -> Result<()> {
+        if self.declarations >= MAX_PROC_MACRO_MODULE_DECLARATIONS {
+            anyhow::bail!(
+                "proc-macro module declarations exceed {MAX_PROC_MACRO_MODULE_DECLARATIONS}"
+            );
+        }
+        self.declarations += 1;
+        Ok(())
+    }
+
+    fn note_resolution_edge(&mut self) -> Result<()> {
+        if self.resolution_edges >= MAX_PROC_MACRO_RESOLUTION_EDGES {
+            anyhow::bail!(
+                "proc-macro module resolution edges exceed {MAX_PROC_MACRO_RESOLUTION_EDGES}"
+            );
+        }
+        self.resolution_edges += 1;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ProcMacroItemContext {
+    conventional_base: PathBuf,
+    explicit_base: PathBuf,
+    source_rel: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CfgEval {
+    True,
+    False,
+    Unknown,
+}
+
+#[derive(Default)]
+struct ModulePathPlan {
+    unconditional_paths: Vec<String>,
+    conditional_paths: Vec<(CfgEval, String)>,
+}
+
+fn proc_macro_module_declarations(
+    source: &str,
+    source_context: &ProcMacroSourceContext,
+    budgets: &mut ProcMacroModuleBudgets,
+) -> Result<Vec<ProcMacroModuleDeclaration>> {
+    let syntax = syn::parse_file(source)?;
+    let item_context = ProcMacroItemContext {
+        conventional_base: source_context.module_dir.clone(),
+        explicit_base: source_context.source_dir.clone(),
+        source_rel: source_context.source_rel.clone(),
+    };
+    let mut declarations = Vec::new();
+    collect_proc_macro_item_declarations(&syntax.items, &item_context, budgets, &mut declarations)?;
+    Ok(declarations)
+}
+
+fn collect_proc_macro_item_declarations(
+    items: &[syn::Item],
+    context: &ProcMacroItemContext,
+    budgets: &mut ProcMacroModuleBudgets,
+    declarations: &mut Vec<ProcMacroModuleDeclaration>,
+) -> Result<()> {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if module_attrs_are_definitely_disabled(&module.attrs)? {
+            continue;
+        }
+
+        budgets.note_declaration()?;
+        let name = rust_module_ident_name(&module.ident);
+        let path_plan = module_path_plan(&module.attrs)?;
+
+        if let Some((_brace, inline_items)) = &module.content {
+            for child_context in inline_module_contexts(context, &name, &path_plan)? {
+                collect_proc_macro_item_declarations(
+                    inline_items,
+                    &child_context,
+                    budgets,
+                    declarations,
+                )?;
+            }
+            continue;
+        }
+
+        for lookup in external_module_lookups(context, &name, &path_plan) {
+            budgets.note_resolution_edge()?;
+            declarations.push(ProcMacroModuleDeclaration { lookup });
+        }
+    }
+    Ok(())
+}
+
+fn rust_module_ident_name(ident: &syn::Ident) -> String {
+    let raw = ident.to_string();
+    raw.strip_prefix("r#").unwrap_or(&raw).to_string()
+}
+
+fn external_module_lookups(
+    context: &ProcMacroItemContext,
+    name: &str,
+    path_plan: &ModulePathPlan,
+) -> Vec<ProcMacroModuleLookup> {
+    let mut lookups = Vec::new();
+    if conventional_lookup_is_potentially_active(path_plan) {
+        lookups.push(ProcMacroModuleLookup::Conventional {
+            module_base: context.conventional_base.clone(),
+            module_name: name.to_string(),
+        });
+    }
+    for path in potentially_active_explicit_paths(path_plan) {
+        lookups.push(ProcMacroModuleLookup::Explicit {
+            base_dir: context.explicit_base.clone(),
+            explicit_path: path.clone(),
+            declaring_source: context.source_rel.clone(),
+        });
+    }
+    lookups
+}
+
+fn inline_module_contexts(
+    context: &ProcMacroItemContext,
+    name: &str,
+    path_plan: &ModulePathPlan,
+) -> Result<Vec<ProcMacroItemContext>> {
+    let mut contexts = Vec::new();
+    if conventional_lookup_is_potentially_active(path_plan) {
+        let base = context.conventional_base.join(name);
+        contexts.push(ProcMacroItemContext {
+            conventional_base: base.clone(),
+            explicit_base: base,
+            source_rel: context.source_rel.clone(),
+        });
+    }
+    for path in potentially_active_explicit_paths(path_plan) {
+        let base = normalize_inline_module_directory(&context.explicit_base, path)?;
+        contexts.push(ProcMacroItemContext {
+            conventional_base: base.clone(),
+            explicit_base: base,
+            source_rel: context.source_rel.clone(),
+        });
+    }
+    Ok(contexts)
+}
+
+fn conventional_lookup_is_potentially_active(path_plan: &ModulePathPlan) -> bool {
+    path_plan.unconditional_paths.is_empty()
+        && !path_plan
+            .conditional_paths
+            .iter()
+            .any(|(condition, _path)| *condition == CfgEval::True)
+}
+
+fn potentially_active_explicit_paths(path_plan: &ModulePathPlan) -> impl Iterator<Item = &String> {
+    path_plan.unconditional_paths.iter().chain(
+        path_plan
+            .conditional_paths
+            .iter()
+            .filter(|(condition, _path)| *condition != CfgEval::False)
+            .map(|(_condition, path)| path),
+    )
+}
+
+fn module_attrs_are_definitely_disabled(attrs: &[syn::Attribute]) -> Result<bool> {
+    for attr in attrs {
+        if !attr.path().is_ident("cfg") {
+            continue;
+        }
+        let meta = attr.parse_args::<syn::Meta>()?;
+        if eval_cfg_meta(&meta)? == CfgEval::False {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn module_path_plan(attrs: &[syn::Attribute]) -> Result<ModulePathPlan> {
+    let mut plan = ModulePathPlan::default();
+    for attr in attrs {
+        if attr.path().is_ident("path") {
+            plan.unconditional_paths.push(path_attr_value(attr)?);
+        } else if attr.path().is_ident("cfg_attr") {
+            collect_cfg_attr_path_values(attr, &mut plan)?;
+        }
+    }
+    Ok(plan)
+}
+
+fn collect_cfg_attr_path_values(attr: &syn::Attribute, plan: &mut ModulePathPlan) -> Result<()> {
+    let metas = attr.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    )?;
+    let mut metas = metas.iter();
+    let condition = metas
+        .next()
+        .context("cfg_attr on proc-macro module has no condition")?;
+    let condition = eval_cfg_meta(condition)?;
+    if condition == CfgEval::False {
+        return Ok(());
+    }
+    for meta in metas {
+        if meta.path().is_ident("path") {
+            plan.conditional_paths
+                .push((condition, path_meta_value(meta)?));
+        }
+    }
+    Ok(())
+}
+
+fn path_attr_value(attr: &syn::Attribute) -> Result<String> {
+    path_meta_value(&attr.meta)
+}
+
+fn path_meta_value(meta: &syn::Meta) -> Result<String> {
+    let syn::Meta::NameValue(name_value) = meta else {
+        anyhow::bail!("Rust path attribute must contain a string literal");
+    };
+    let syn::Expr::Lit(expr_lit) = &name_value.value else {
+        anyhow::bail!("Rust path attribute must contain a string literal");
+    };
+    let syn::Lit::Str(value) = &expr_lit.lit else {
+        anyhow::bail!("Rust path attribute must contain a string literal");
+    };
+    Ok(value.value())
+}
+
+fn eval_cfg_meta(meta: &syn::Meta) -> Result<CfgEval> {
+    let syn::Meta::List(list) = meta else {
+        return Ok(CfgEval::Unknown);
+    };
+    if list.path.is_ident("any") {
+        return eval_cfg_any(list);
+    }
+    if list.path.is_ident("all") {
+        return eval_cfg_all(list);
+    }
+    if list.path.is_ident("not") {
+        return eval_cfg_not(list);
+    }
+    Ok(CfgEval::Unknown)
+}
+
+fn eval_cfg_any(list: &syn::MetaList) -> Result<CfgEval> {
+    let nested = parse_cfg_list(list)?;
+    if nested.is_empty() {
+        return Ok(CfgEval::False);
+    }
+    let mut saw_unknown = false;
+    for meta in nested {
+        match eval_cfg_meta(&meta)? {
+            CfgEval::True => return Ok(CfgEval::True),
+            CfgEval::False => {}
+            CfgEval::Unknown => saw_unknown = true,
+        }
+    }
+    Ok(if saw_unknown {
+        CfgEval::Unknown
+    } else {
+        CfgEval::False
+    })
+}
+
+fn eval_cfg_all(list: &syn::MetaList) -> Result<CfgEval> {
+    let nested = parse_cfg_list(list)?;
+    let mut saw_unknown = false;
+    for meta in nested {
+        match eval_cfg_meta(&meta)? {
+            CfgEval::True => {}
+            CfgEval::False => return Ok(CfgEval::False),
+            CfgEval::Unknown => saw_unknown = true,
+        }
+    }
+    Ok(if saw_unknown {
+        CfgEval::Unknown
+    } else {
+        CfgEval::True
+    })
+}
+
+fn eval_cfg_not(list: &syn::MetaList) -> Result<CfgEval> {
+    let nested = parse_cfg_list(list)?;
+    if nested.len() != 1 {
+        return Ok(CfgEval::Unknown);
+    }
+    Ok(match eval_cfg_meta(&nested[0])? {
+        CfgEval::True => CfgEval::False,
+        CfgEval::False => CfgEval::True,
+        CfgEval::Unknown => CfgEval::Unknown,
+    })
+}
+
+fn parse_cfg_list(
+    list: &syn::MetaList,
+) -> Result<syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>> {
+    list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map_err(anyhow::Error::from)
+}
+
+fn normalize_inline_module_directory(base: &Path, explicit_path: &str) -> Result<PathBuf> {
+    let explicit = Path::new(explicit_path);
+    if explicit.as_os_str().is_empty() || explicit.is_absolute() {
+        anyhow::bail!(
+            "proc-macro inline #[path] must be a non-empty relative path: `{explicit_path}`"
+        );
+    }
+    let mut resolved = base.to_path_buf();
+    for component in explicit.components() {
+        match component {
+            Component::Normal(part) => resolved.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !resolved.pop() {
+                    anyhow::bail!("proc-macro inline module path escapes crate root");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("proc-macro inline module path must be relative");
+            }
+        }
+    }
+    if resolved.as_os_str().is_empty() {
+        anyhow::bail!("proc-macro inline module path is empty");
+    }
+    Ok(resolved)
 }
 
 fn resolve_conventional_module_path(
@@ -439,29 +845,22 @@ fn resolve_classified_conventional_module_path(
     }
 }
 
-fn resolve_explicit_module_path(
+fn resolve_explicit_module_path_from_base(
     canonical_pkg_dir: &Path,
-    declaring_source: &Path,
+    base_dir: &Path,
     explicit_path: &str,
+    declaring_source: &str,
 ) -> Result<PathBuf> {
     let explicit = Path::new(explicit_path);
     if explicit.as_os_str().is_empty() || explicit.is_absolute() {
         anyhow::bail!("proc-macro #[path] must be a non-empty relative path: `{explicit_path}`");
     }
-    let declaring_dir = declaring_source.parent().unwrap_or_else(|| Path::new(""));
-    let candidate_rel =
-        resolve_proc_macro_module_traversal(canonical_pkg_dir, declaring_dir, explicit)
-            .with_context(|| {
-                format!(
-                    "resolve proc-macro #[path] `{explicit_path}` from {}",
-                    declaring_source.display()
-                )
-            })?;
+    let candidate_rel = resolve_proc_macro_module_traversal(canonical_pkg_dir, base_dir, explicit)
+        .with_context(|| {
+            format!("resolve proc-macro #[path] `{explicit_path}` from {declaring_source}")
+        })?;
     validate_proc_macro_source_path(canonical_pkg_dir, &candidate_rel).with_context(|| {
-        format!(
-            "resolve proc-macro #[path] `{explicit_path}` from {}",
-            declaring_source.display()
-        )
+        format!("resolve proc-macro #[path] `{explicit_path}` from {declaring_source}")
     })
 }
 
@@ -668,15 +1067,6 @@ fn link_metadata_indicates_symlink_or_reparse(
     windows_file_attributes: u32,
 ) -> bool {
     is_symlink || windows_file_attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-fn rust_module_base(current: &Path, root_rel: &str) -> PathBuf {
-    let parent = current.parent().unwrap_or_else(|| Path::new(""));
-    if current == Path::new(root_rel) || current.file_name().is_some_and(|name| name == "mod.rs") {
-        parent.to_path_buf()
-    } else {
-        parent.join(current.file_stem().unwrap_or_default())
-    }
 }
 
 fn path_to_manifest_rel(path: &Path) -> Result<String> {

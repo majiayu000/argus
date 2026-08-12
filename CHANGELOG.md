@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors for oversized, binary, invalid, crate-root-escaping, or
   symlink/reparse-backed reachable sources, instead of allowing an incomplete
   traversal to appear clean (GH-194).
+- Crates.io proc-macro module traversal now parses Rust items structurally,
+  preserves rustc-style module directory ownership for `#[path]` and inline
+  modules, handles `cfg`/`cfg_attr(path)` conservatively, and caps declaration
+  and resolution-edge work before filesystem probes (GH-200).
 - `known-native-build-pattern` now also recognizes addons compiled locally
   from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
   only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages
