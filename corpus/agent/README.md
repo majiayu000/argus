@@ -91,5 +91,5 @@ argus corpus eval --corpus corpus/agent --format json
 
 The result is explicitly a **synthetic fixture metric**, not a real-world
 quality claim. At the implementation head it reports 4 TP, 0 FP, 0 FN, 3 TN,
-precision 1.0, and recall 1.0. These six synthetic fixture metrics remain
+precision 1.0, and recall 1.0. These seven synthetic fixture metrics remain
 separate from the pinned 1,438-row AI-reviewed benchmark.
