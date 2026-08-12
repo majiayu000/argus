@@ -23,6 +23,7 @@ fn is_crate_security_relevant(rel: &str) -> bool {
 
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_PROC_MACRO_SOURCE_FILES: usize = 1024;
+const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Top-level: extract `.crate` + scan everything inside.
 pub fn scan_crate_archive(
@@ -449,18 +450,30 @@ fn validate_proc_macro_source_path(canonical_pkg_dir: &Path, rel: &Path) -> Resu
         );
     }
     let candidate = canonical_pkg_dir.join(rel);
+    let mut component_path = canonical_pkg_dir.to_path_buf();
+    for component in rel.components() {
+        let Component::Normal(part) = component else {
+            unreachable!("proc-macro source components were validated above");
+        };
+        component_path.push(part);
+        let metadata = std::fs::symlink_metadata(&component_path).with_context(|| {
+            format!(
+                "inspect proc-macro source path component {}",
+                component_path.display()
+            )
+        })?;
+        if metadata_is_symlink_or_reparse(&metadata) {
+            anyhow::bail!(
+                "proc-macro source path contains a symlink or reparse point: {}",
+                component_path.display()
+            );
+        }
+    }
     let resolved = std::fs::canonicalize(&candidate)
         .with_context(|| format!("resolve proc-macro source {}", candidate.display()))?;
     if !resolved.starts_with(canonical_pkg_dir) {
         anyhow::bail!(
             "proc-macro source escapes crate root: {} resolves to {}",
-            candidate.display(),
-            resolved.display()
-        );
-    }
-    if resolved != candidate {
-        anyhow::bail!(
-            "proc-macro source path contains a symlink or reparse point: {} resolves to {}",
             candidate.display(),
             resolved.display()
         );
@@ -474,6 +487,28 @@ fn validate_proc_macro_source_path(canonical_pkg_dir: &Path, rel: &Path) -> Resu
         );
     }
     Ok(candidate)
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    let windows_file_attributes = {
+        use std::os::windows::fs::MetadataExt as _;
+        metadata.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let windows_file_attributes = 0;
+
+    link_metadata_indicates_symlink_or_reparse(
+        metadata.file_type().is_symlink(),
+        windows_file_attributes,
+    )
+}
+
+fn link_metadata_indicates_symlink_or_reparse(
+    is_symlink: bool,
+    windows_file_attributes: u32,
+) -> bool {
+    is_symlink || windows_file_attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn rust_module_base(current: &Path, root_rel: &str) -> PathBuf {

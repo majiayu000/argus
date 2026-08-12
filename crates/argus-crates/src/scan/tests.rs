@@ -404,6 +404,59 @@ proc-macro = true
     Ok(())
 }
 
+#[test]
+fn proc_macro_link_classification_uses_link_metadata_flags() {
+    assert!(!link_metadata_indicates_symlink_or_reparse(false, 0));
+    assert!(link_metadata_indicates_symlink_or_reparse(true, 0));
+    assert!(link_metadata_indicates_symlink_or_reparse(
+        false,
+        WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    ));
+    assert!(!link_metadata_indicates_symlink_or_reparse(false, 0x20));
+}
+
+#[cfg(windows)]
+#[test]
+fn proc_macro_source_case_variant_is_not_treated_as_reparse_point() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[path = \"SUPPORT.RS\"] mod support;",
+    )?;
+    std::fs::write(directory.path().join("src/support.rs"), "")?;
+
+    // The dedicated Windows CI runner must provide case-insensitive lookup;
+    // failure here would make the regression test incapable of exercising it.
+    let case_variant_path = directory.path().join("SRC/LIB.RS");
+    std::fs::symlink_metadata(&case_variant_path).with_context(|| {
+        format!(
+            "inspect case-variant proc-macro source {}",
+            case_variant_path.display()
+        )
+    })?;
+
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "case-variant-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+path = "SRC/LIB.RS"
+"#,
+    )?;
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["SRC/LIB.RS".to_string(), "SRC/SUPPORT.RS".to_string()])
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn proc_macro_root_source_symlink_fails_closed() -> Result<()> {
@@ -495,7 +548,7 @@ proc-macro = true
     let error = collect_proc_macro_source_files(directory.path(), &manifest)
         .expect_err("symlinked conventional module parent must fail closed");
     assert!(
-        format!("{error:#}").contains("escapes crate root"),
+        format!("{error:#}").contains("symlink or reparse point"),
         "got: {error:#}"
     );
     Ok(())

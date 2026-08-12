@@ -140,6 +140,27 @@ jobs:
           sarif_file: target/argus-sarif-smoke.sarif
           category: argus-sarif-smoke
 
+  windows-proc-macro-regressions:
+    name: windows proc-macro regressions
+    if: github.event_name == 'pull_request'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run proc-macro regressions
+        run: cargo test -p argus-crates proc_macro_
+
   msrv:
     name: msrv (1.88)
     runs-on: ubuntu-latest
