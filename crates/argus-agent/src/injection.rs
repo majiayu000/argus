@@ -8,17 +8,9 @@ use argus_core::{Finding, Severity};
 use regex::RegexSet;
 use std::sync::OnceLock;
 
-const RULE_ID: &str = "AGT-01-injection-language";
+mod system_authority;
 
-const SYSTEM_AUTHORITY_TARGET_PATTERN: &str = concat!(
-    r"(?i)overrides?\s+(?:the\s+)?system(?:-level)?(?:['’]s)?",
-    r"(?:\s+|-)",
-    r"(?:(?:safety|security)(?:\s+|-)){0,2}",
-    r"(?:[*_`~]{1,3})?",
-    r"(?:instructions?|prompts?|messages?|polic(?:y|ies)|rules?|directives?)",
-    r"(?:[*_`~]{1,3})?",
-    r"(?:[^A-Za-z0-9_]|$)",
-);
+const RULE_ID: &str = "AGT-01-injection-language";
 
 const PATTERNS: &[&str] = &[
     r"(?i)absolute\s+authority",
@@ -26,7 +18,6 @@ const PATTERNS: &[&str] = &[
     r"(?i)supersedes?\s+(the\s+)?user",
     r"(?i)overrides?\s+(the\s+)?user",
     r"(?i)ignore\s+(all\s+)?(prior|previous)\s+(instructions?|prompts?)",
-    SYSTEM_AUTHORITY_TARGET_PATTERN,
     r"(?i)disregard\s+the\s+user",
     r"(?i)do\s+not\s+(tell|mention|inform)\s+(the\s+)?(user|human)",
     r"(?i)hide\s+(this|these)\s+(change|changes|from)",
@@ -69,6 +60,17 @@ fn scan_text(rel: &str, text: &str, findings: &mut Vec<Finding>) {
                     "injection/override language matched pattern `{}`",
                     PATTERNS[idx]
                 ),
+            )
+            .at(rel),
+        );
+    }
+
+    if system_authority::contains_override(text) {
+        findings.push(
+            Finding::new(
+                RULE_ID,
+                Severity::Critical,
+                "injection/override language targets system authority",
             )
             .at(rel),
         );
