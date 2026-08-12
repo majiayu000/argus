@@ -745,6 +745,44 @@ proc-macro = true
 
 #[cfg(unix)]
 #[test]
+fn proc_macro_conventional_flat_module_ignores_dangling_nested_parent() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "flat-module-dangling-parent-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    symlink("missing-dir", directory.path().join("src/foo"))?;
+
+    let scan = scan_extracted_crate(directory.path())?;
+    let finding = scan
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("flat source must be scanned when nested parent link is dangling")?;
+    assert!(finding.detail.contains("src/foo.rs"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn proc_macro_conventional_nested_module_ignores_dangling_flat_alternative() -> Result<()> {
     use std::os::unix::fs::symlink;
 

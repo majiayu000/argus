@@ -502,61 +502,56 @@ fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result
         };
         parent_rel.push(part);
         let parent_path = canonical_pkg_dir.join(&parent_rel);
-        match std::fs::symlink_metadata(&parent_path) {
-            Ok(metadata) if metadata_is_symlink_or_reparse(&metadata) => {
-                anyhow::bail!(
-                    "proc-macro source path contains a symlink or reparse point: {}",
-                    parent_path.display()
-                );
-            }
-            Ok(metadata) if !metadata.is_dir() => return Ok(None),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "inspect conventional proc-macro source parent {}",
-                        parent_path.display()
-                    )
-                });
-            }
+        match conventional_candidate_component_metadata(&parent_path)? {
+            Some(metadata) if metadata.is_dir() => {}
+            Some(_) | None => return Ok(None),
         }
     }
-    match std::fs::symlink_metadata(&candidate) {
-        Ok(metadata) if metadata_is_symlink_or_reparse(&metadata) => {
-            match std::fs::metadata(&candidate) {
-                // rustc ignores an unresolved conventional alternative. This
-                // exception is leaf-only: all parent components were already
-                // checked as real directories without links/reparse points.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error).with_context(|| {
-                    format!(
-                        "resolve linked conventional proc-macro source {}",
-                        candidate.display()
-                    )
-                }),
-                Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
-            }
-        }
-        Ok(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
+    match conventional_candidate_component_metadata(&candidate)? {
+        Some(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn conventional_candidate_component_metadata(path: &Path) -> Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
         Err(error)
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            Ok(None)
+            return Ok(None);
         }
         Err(error) => {
-            Err(error).with_context(|| format!("inspect proc-macro source {}", candidate.display()))
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect conventional proc-macro source component {}",
+                    path.display()
+                )
+            });
         }
+    };
+    if !metadata_is_symlink_or_reparse(&metadata) {
+        return Ok(Some(metadata));
+    }
+
+    match std::fs::metadata(path) {
+        // rustc ignores an unresolved conventional alternative. Every path
+        // component uses this same classification, so a dangling parent link
+        // and a dangling leaf link are absent without weakening resolved links.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "resolve linked conventional proc-macro source component {}",
+                path.display()
+            )
+        }),
+        Ok(_) => anyhow::bail!(
+            "proc-macro source path contains a symlink or reparse point: {}",
+            path.display()
+        ),
     }
 }
 
