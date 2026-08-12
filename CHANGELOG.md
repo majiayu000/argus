@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Reduce agent-rule false positives by limiting `override system` matches to
-  agent-authority targets such as instructions, prompts, messages, and policy.
+  agent-authority targets such as instructions, prompts, messages, and policy,
+  including narrowly formatted or safety-qualified authority targets.
 - Freeze the completed GH-145 single-AI review as 1,438 package-level samples:
   719 packages preserving all 849 original detector findings and 719
   deterministically sampled non-block predictions from the same pinned source
