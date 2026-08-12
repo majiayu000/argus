@@ -62,6 +62,15 @@
       "expectedDecision": "allow-with-approval",
       "rules": ["capability-manifest"],
       "notes": "NEGATIVE / FP-trap. fetch.sh reads WEATHER_API_KEY + calls a weather API — capabilities present but consistent with declared intent and targeting the tool's own host. Should surface a capability manifest and require approval, NOT block. Guards against 'reads key + net egress = malicious'."
+    },
+    {
+      "id": "skill-benign-system-override",
+      "kind": "fixture",
+      "path": "fixtures/skill-benign-system-override",
+      "packageName": "cross-platform-theme-guide",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. SKILL.md uses generic 'override system' phrases for UI themes, gestures, game records, and tenant branding without attempting to supersede agent instructions or policy."
     }
   ]
 }
