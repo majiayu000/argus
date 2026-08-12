@@ -153,7 +153,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: stable
+          toolchain: "1.88.0"
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -163,6 +163,12 @@ jobs:
 
       - name: Test proc-macro case-variant path lookup
         run: cargo test -p argus-crates proc_macro_source_case_variant_is_not_treated_as_reparse_point
+
+      - name: Test proc-macro self-loop alternative
+        run: cargo test -p argus-crates proc_macro_conventional_flat_module_ignores_self_loop_nested_alternative
+
+      - name: Test proc-macro linked empty parent alternative
+        run: cargo test -p argus-crates proc_macro_conventional_flat_module_ignores_linked_empty_nested_parent
 
   msrv:
     name: msrv (1.88)

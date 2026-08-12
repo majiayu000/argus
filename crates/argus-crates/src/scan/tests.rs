@@ -12,6 +12,43 @@ fn scan_test_tree(files: &[(&str, &str)]) -> Result<crate::ArtifactScan> {
     scan_extracted_crate(root.path())
 }
 
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+fn proc_macro_findings_for_source_membership(
+    root: &Path,
+    source_files: &BTreeSet<String>,
+) -> Result<Vec<Finding>> {
+    let execution = argus_core::ExecutionContext::serial()?;
+    let (per_file_findings, skipped) =
+        scan_text_files_with_context(root, TEXT_MAX_BYTES, &execution, |file| {
+            let mut findings = Vec::new();
+            if source_files.contains(&file.rel) {
+                scan_proc_macro_source(&file.content, &file.rel, &mut findings);
+            }
+            Ok::<_, anyhow::Error>(findings)
+        })?;
+    skipped.require_scanned("crate", is_crate_security_relevant)?;
+    Ok(per_file_findings.into_iter().flatten().collect())
+}
+
 #[test]
 fn parse_cargo_basic() -> Result<()> {
     let manifest_toml = r#"
@@ -416,6 +453,109 @@ fn proc_macro_link_classification_uses_link_metadata_flags() {
     assert!(!link_metadata_indicates_symlink_or_reparse(false, 0x20));
 }
 
+#[test]
+fn proc_macro_present_candidate_wins_over_unavailable_sibling_and_is_validated() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/foo.rs"), "")?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+    let flat = PathBuf::from("src/foo.rs");
+    let nested = PathBuf::from("src/foo/mod.rs");
+
+    let resolved = resolve_classified_conventional_module_path(
+        &canonical_pkg_dir,
+        "foo",
+        flat.clone(),
+        ConventionalCandidateAvailability::Present,
+        nested,
+        ConventionalCandidateAvailability::Unavailable(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )),
+    )?;
+
+    assert_eq!(resolved, flat);
+    Ok(())
+}
+
+#[test]
+fn proc_macro_zero_present_candidates_propagates_permission_error() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+
+    let error = resolve_classified_conventional_module_path(
+        &canonical_pkg_dir,
+        "foo",
+        PathBuf::from("src/foo.rs"),
+        ConventionalCandidateAvailability::Unavailable(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )),
+        PathBuf::from("src/foo/mod.rs"),
+        ConventionalCandidateAvailability::Unavailable(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )),
+    )
+    .expect_err("zero present candidates must propagate an operational error");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("src/foo.rs"), "got: {detail}");
+    assert!(!detail.contains("module `foo` is missing"), "got: {detail}");
+    assert_eq!(
+        error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied)
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_zero_present_candidates_propagates_unknown_error() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+
+    let error = resolve_classified_conventional_module_path(
+        &canonical_pkg_dir,
+        "foo",
+        PathBuf::from("src/foo.rs"),
+        ConventionalCandidateAvailability::Unavailable(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )),
+        PathBuf::from("src/foo/mod.rs"),
+        ConventionalCandidateAvailability::Unavailable(std::io::Error::other(
+            "synthetic candidate inspection failure",
+        )),
+    )
+    .expect_err("unknown candidate failure must not collapse to missing");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("src/foo/mod.rs"), "got: {detail}");
+    assert!(
+        detail.contains("synthetic candidate inspection failure"),
+        "got: {detail}"
+    );
+    assert!(!detail.contains("module `foo` is missing"), "got: {detail}");
+    assert_eq!(
+        error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Other)
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_zero_present_absence_like_candidates_remain_missing() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+
+    let error = resolve_conventional_module_path(&canonical_pkg_dir, Path::new("src"), "foo")
+        .expect_err("two absent conventional candidates must remain missing");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("module `foo` is missing"), "got: {detail}");
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn proc_macro_source_case_variant_is_not_treated_as_reparse_point() -> Result<()> {
@@ -698,6 +838,179 @@ proc-macro = true
     Ok(())
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn proc_macro_conventional_flat_module_ignores_self_loop_nested_alternative() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    let loop_path = directory.path().join("src/foo/mod.rs");
+    create_file_symlink(Path::new("mod.rs"), &loop_path)?;
+    let link_metadata = std::fs::symlink_metadata(&loop_path)?;
+    assert!(metadata_is_symlink_or_reparse(&link_metadata));
+    let loop_error = std::fs::metadata(&loop_path)
+        .expect_err("self-loop conventional alternative must not resolve");
+    #[cfg(unix)]
+    assert_eq!(
+        rustix::io::Errno::from_io_error(&loop_error),
+        Some(rustix::io::Errno::LOOP),
+        "got: {loop_error}"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        loop_error.raw_os_error(),
+        Some(WINDOWS_ERROR_CANT_RESOLVE_FILENAME),
+        "got: {loop_error}"
+    );
+
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "flat-module-self-loop-alternative-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/foo.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    let findings = proc_macro_findings_for_source_membership(directory.path(), &source_files)?;
+    assert!(
+        findings.iter().any(|finding| {
+            finding.rule_id == "proc-macro-network" && finding.detail.contains("src/foo.rs")
+        }),
+        "got: {findings:?}"
+    );
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn proc_macro_conventional_flat_module_ignores_linked_empty_nested_parent() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let empty_directory = directory.path().join("empty");
+    std::fs::create_dir_all(&empty_directory)?;
+    let canonical_empty_directory = std::fs::canonicalize(&empty_directory)?;
+    std::fs::write(
+        directory.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "flat-module-linked-empty-parent-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
+    std::fs::write(
+        directory.path().join("src/foo.rs"),
+        r#"pub fn probe() {
+            let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+        }"#,
+    )?;
+    let linked_parent = directory.path().join("src/foo");
+    create_directory_symlink(&canonical_empty_directory, &linked_parent)?;
+    let link_metadata = std::fs::symlink_metadata(&linked_parent)?;
+    assert!(metadata_is_symlink_or_reparse(&link_metadata));
+    let followed_parent_metadata = std::fs::metadata(&linked_parent).with_context(|| {
+        format!(
+            "follow linked conventional module parent {}",
+            linked_parent.display()
+        )
+    })?;
+    assert!(
+        followed_parent_metadata.is_dir(),
+        "linked conventional parent must resolve to the existing directory: {}",
+        linked_parent.display()
+    );
+    let nested_path = linked_parent.join("mod.rs");
+    let missing_error = std::fs::metadata(&nested_path)
+        .expect_err("linked empty directory must not contain the nested alternative");
+    assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "flat-module-linked-empty-parent-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+    assert_eq!(
+        resolve_conventional_module_path(&canonical_pkg_dir, Path::new("src"), "foo")?,
+        PathBuf::from("src/foo.rs")
+    );
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/foo.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    let findings = proc_macro_findings_for_source_membership(directory.path(), &source_files)?;
+    let finding = findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("selected flat source must reach proc-macro membership and scanning")?;
+    assert_eq!(finding.severity, Severity::Critical);
+    assert!(finding.detail.contains("src/foo.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_conventional_module_rejects_two_regular_candidates_as_ambiguous() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/foo.rs"), "")?;
+    std::fs::write(directory.path().join("src/foo/mod.rs"), "")?;
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+
+    let error = resolve_conventional_module_path(&canonical_pkg_dir, Path::new("src"), "foo")
+        .expect_err("two complete conventional candidates must remain ambiguous");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("ambiguous"), "got: {detail}");
+    assert!(detail.contains("src/foo.rs"), "got: {detail}");
+    assert!(detail.contains("src/foo/mod.rs"), "got: {detail}");
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn proc_macro_conventional_module_rejects_linked_present_alternative_as_ambiguous() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/foo"))?;
+    std::fs::write(directory.path().join("src/foo.rs"), "")?;
+    std::fs::write(directory.path().join("src/real.rs"), "")?;
+    let linked_alternative = directory.path().join("src/foo/mod.rs");
+    create_file_symlink(Path::new("../real.rs"), &linked_alternative)?;
+    assert!(metadata_is_symlink_or_reparse(&std::fs::symlink_metadata(
+        &linked_alternative
+    )?));
+    assert!(std::fs::metadata(&linked_alternative)?.is_file());
+    let canonical_pkg_dir = std::fs::canonicalize(directory.path())?;
+
+    let error = resolve_conventional_module_path(&canonical_pkg_dir, Path::new("src"), "foo")
+        .expect_err("a resolvable linked alternative is present for ambiguity classification");
+    assert!(format!("{error:#}").contains("ambiguous"), "got: {error:#}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn proc_macro_conventional_flat_module_ignores_dangling_nested_alternative() -> Result<()> {
@@ -826,17 +1139,17 @@ proc-macro = true
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn proc_macro_conventional_resolvable_leaf_symlink_fails_closed() -> Result<()> {
-    use std::os::unix::fs::symlink;
-
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src/foo"))?;
     std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
-    std::fs::write(directory.path().join("src/foo.rs"), "")?;
     std::fs::write(directory.path().join("src/real.rs"), "")?;
-    symlink("../real.rs", directory.path().join("src/foo/mod.rs"))?;
+    create_file_symlink(
+        Path::new("../real.rs"),
+        &directory.path().join("src/foo/mod.rs"),
+    )?;
     let manifest: CargoManifest = toml::from_str(
         r#"
 [package]

@@ -23,6 +23,9 @@ regex = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
 [dev-dependencies]
 argus-test-support = { workspace = true }
 tar = { workspace = true }

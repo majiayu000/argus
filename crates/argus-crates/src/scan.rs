@@ -24,6 +24,8 @@ fn is_crate_security_relevant(rel: &str) -> bool {
 const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_PROC_MACRO_SOURCE_FILES: usize = 1024;
 const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(windows)]
+const WINDOWS_ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
 
 /// Top-level: extract `.crate` + scan everything inside.
 pub fn scan_crate_archive(
@@ -368,21 +370,72 @@ fn resolve_conventional_module_path(
 ) -> Result<PathBuf> {
     let flat = module_base.join(format!("{module_name}.rs"));
     let nested = module_base.join(module_name).join("mod.rs");
-    let flat_path = proc_macro_source_path_exists(canonical_pkg_dir, &flat)?;
-    let nested_path = proc_macro_source_path_exists(canonical_pkg_dir, &nested)?;
-    match (flat_path, nested_path) {
-        (Some(flat_path), None) => Ok(flat_path),
-        (None, Some(nested_path)) => Ok(nested_path),
-        (Some(_), Some(_)) => anyhow::bail!(
+    // Match rustc's two complete-path availability probes before applying the
+    // scanner's stricter path policy. An incomplete alternative may traverse a
+    // link, but the one selected complete candidate is always validated below.
+    let flat_availability = classify_conventional_module_candidate(canonical_pkg_dir, &flat)?;
+    let nested_availability = classify_conventional_module_candidate(canonical_pkg_dir, &nested)?;
+    resolve_classified_conventional_module_path(
+        canonical_pkg_dir,
+        module_name,
+        flat,
+        flat_availability,
+        nested,
+        nested_availability,
+    )
+}
+
+fn resolve_classified_conventional_module_path(
+    canonical_pkg_dir: &Path,
+    module_name: &str,
+    flat: PathBuf,
+    flat_availability: ConventionalCandidateAvailability,
+    nested: PathBuf,
+    nested_availability: ConventionalCandidateAvailability,
+) -> Result<PathBuf> {
+    match (flat_availability, nested_availability) {
+        (
+            ConventionalCandidateAvailability::Present,
+            ConventionalCandidateAvailability::Present,
+        ) => anyhow::bail!(
             "proc-macro module `{module_name}` is ambiguous: both {} and {} exist",
             flat.display(),
             nested.display()
         ),
-        (None, None) => anyhow::bail!(
-            "proc-macro module `{module_name}` is missing: expected {} or {}",
-            flat.display(),
-            nested.display()
-        ),
+        (
+            ConventionalCandidateAvailability::Present,
+            ConventionalCandidateAvailability::Unavailable(_),
+        ) => validate_proc_macro_source_path(canonical_pkg_dir, &flat),
+        (
+            ConventionalCandidateAvailability::Unavailable(_),
+            ConventionalCandidateAvailability::Present,
+        ) => validate_proc_macro_source_path(canonical_pkg_dir, &nested),
+        (
+            ConventionalCandidateAvailability::Unavailable(flat_error),
+            ConventionalCandidateAvailability::Unavailable(nested_error),
+        ) => {
+            if !conventional_candidate_unavailability_is_absence_like(&flat_error) {
+                return Err(flat_error).with_context(|| {
+                    format!(
+                        "inspect conventional proc-macro source candidate {}",
+                        canonical_pkg_dir.join(&flat).display()
+                    )
+                });
+            }
+            if !conventional_candidate_unavailability_is_absence_like(&nested_error) {
+                return Err(nested_error).with_context(|| {
+                    format!(
+                        "inspect conventional proc-macro source candidate {}",
+                        canonical_pkg_dir.join(&nested).display()
+                    )
+                });
+            }
+            anyhow::bail!(
+                "proc-macro module `{module_name}` is missing: expected {} or {}",
+                flat.display(),
+                nested.display()
+            )
+        }
     }
 }
 
@@ -489,70 +542,52 @@ fn inspect_proc_macro_traversal_component(
     Ok(())
 }
 
-fn proc_macro_source_path_exists(canonical_pkg_dir: &Path, rel: &Path) -> Result<Option<PathBuf>> {
-    let candidate = canonical_pkg_dir.join(rel);
-    let components = rel.components().collect::<Vec<_>>();
-    let mut parent_rel = PathBuf::new();
-    for component in components.iter().take(components.len().saturating_sub(1)) {
-        let Component::Normal(part) = component else {
-            anyhow::bail!(
-                "conventional proc-macro source path contains a non-normal component: {}",
-                rel.display()
-            );
-        };
-        parent_rel.push(part);
-        let parent_path = canonical_pkg_dir.join(&parent_rel);
-        match conventional_candidate_component_metadata(&parent_path)? {
-            Some(metadata) if metadata.is_dir() => {}
-            Some(_) | None => return Ok(None),
-        }
-    }
-    match conventional_candidate_component_metadata(&candidate)? {
-        Some(_) => validate_proc_macro_source_path(canonical_pkg_dir, rel).map(Some),
-        None => Ok(None),
-    }
+#[derive(Debug)]
+enum ConventionalCandidateAvailability {
+    Present,
+    Unavailable(std::io::Error),
 }
 
-fn conventional_candidate_component_metadata(path: &Path) -> Result<Option<std::fs::Metadata>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect conventional proc-macro source component {}",
-                    path.display()
-                )
-            });
-        }
-    };
-    if !metadata_is_symlink_or_reparse(&metadata) {
-        return Ok(Some(metadata));
+fn classify_conventional_module_candidate(
+    canonical_pkg_dir: &Path,
+    rel: &Path,
+) -> Result<ConventionalCandidateAvailability> {
+    if rel
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!(
+            "conventional proc-macro source path contains a non-normal component: {}",
+            rel.display()
+        );
     }
+    let candidate = canonical_pkg_dir.join(rel);
+    Ok(match std::fs::metadata(&candidate) {
+        Ok(_) => ConventionalCandidateAvailability::Present,
+        Err(error) => ConventionalCandidateAvailability::Unavailable(error),
+    })
+}
 
-    match std::fs::metadata(path) {
-        // rustc ignores an unresolved conventional alternative. Every path
-        // component uses this same classification, so a dangling parent link
-        // and a dangling leaf link are absent without weakening resolved links.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "resolve linked conventional proc-macro source component {}",
-                path.display()
-            )
-        }),
-        Ok(_) => anyhow::bail!(
-            "proc-macro source path contains a symlink or reparse point: {}",
-            path.display()
-        ),
-    }
+fn conventional_candidate_unavailability_is_absence_like(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) || io_error_is_filesystem_loop(error)
+}
+
+#[cfg(unix)]
+fn io_error_is_filesystem_loop(error: &std::io::Error) -> bool {
+    rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::LOOP)
+}
+
+#[cfg(windows)]
+fn io_error_is_filesystem_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_ERROR_CANT_RESOLVE_FILENAME)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn io_error_is_filesystem_loop(_error: &std::io::Error) -> bool {
+    false
 }
 
 fn validate_proc_macro_source_path(canonical_pkg_dir: &Path, rel: &Path) -> Result<PathBuf> {
