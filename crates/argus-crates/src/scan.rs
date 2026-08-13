@@ -685,6 +685,12 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         if self.error.is_some() {
             return;
         }
+        for attribute in &item.attrs {
+            self.visit_attribute(attribute);
+            if self.error.is_some() {
+                return;
+            }
+        }
         let result = if item.ident.is_some() {
             self.collect_macro_definition(item.mac.tokens.clone())
         } else {

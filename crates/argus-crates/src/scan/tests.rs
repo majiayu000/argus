@@ -1657,6 +1657,8 @@ proc-macro = true
 struct Marker;"#,
         r#"#[emitter::emit(mod payload;)]
 mod marker {}"#,
+        r#"#[emitter::emit(mod payload;)]
+nothing!();"#,
     ] {
         let scan = scan_test_tree(&[
             ("Cargo.toml", manifest),
