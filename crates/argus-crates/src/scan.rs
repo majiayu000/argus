@@ -632,6 +632,19 @@ impl ProcMacroModuleCollector<'_> {
 }
 
 impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if self.error.is_some() {
+            return;
+        }
+        if let syn::Meta::List(list) = &attribute.meta {
+            if let Err(error) = self.collect_macro_transcriber(list.tokens.clone(), 0) {
+                self.error = Some(error);
+                return;
+            }
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if self.error.is_some() {
             return;
