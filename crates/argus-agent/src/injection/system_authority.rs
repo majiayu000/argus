@@ -8,22 +8,22 @@ const MAX_DESTINATION_PROBE_SCALARS: usize = 512;
 #[cfg(test)]
 mod tests;
 pub(super) fn contains_override(text: &str) -> bool {
-    text.split(is_line_terminator).any(line_contains_override)
+    text_contains_override(text)
 }
 fn is_line_terminator(ch: char) -> bool {
     matches!(ch, '\n' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}')
 }
-fn line_contains_override(line: &str) -> bool {
-    line.char_indices().any(|(at, ch)| {
+fn text_contains_override(text: &str) -> bool {
+    text.char_indices().any(|(at, ch)| {
         ch.eq_ignore_ascii_case(&'o')
-            && AuthorityGrammar::seed(line, at).is_some_and(|grammar| grammar.parse())
+            && AuthorityGrammar::seed(text, at).is_some_and(|grammar| grammar.parse())
     })
 }
 fn identifier_continue(ch: char) -> bool {
     is_xid_continue(ch) || matches!(ch, '\u{200c}' | '\u{200d}')
 }
 fn is_semantic_separator(ch: char) -> bool {
-    matches!(ch, '\t' | ':' | '\u{2212}') || has_unicode_property(ch, 0)
+    matches!(ch, '\t' | ':' | '\u{2212}') || is_line_terminator(ch) || has_unicode_property(ch, 0)
 }
 fn is_default_ignorable(ch: char) -> bool {
     !matches!(ch, '\u{200c}' | '\u{200d}') && has_unicode_property(ch, 1)
@@ -132,6 +132,15 @@ impl<'a> DisplayCursor<'a> {
                 Some(']') if self.open_labels > 0 => {
                     self.charge_and_take()?;
                     self.open_labels -= 1;
+                    if self.next() == Some('(') {
+                        match probe_destination(*self) {
+                            DestinationProbe::Complete(cursor) => *self = cursor,
+                            DestinationProbe::Unknown => {
+                                *self = saved;
+                                return Err(ParseError::NoMatch);
+                            }
+                        }
+                    }
                 }
                 _ => break,
             }
