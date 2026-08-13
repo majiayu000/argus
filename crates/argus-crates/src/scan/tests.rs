@@ -497,7 +497,7 @@ fn proc_macro_zero_present_candidates_propagates_permission_error() -> Result<()
     .expect_err("zero present candidates must propagate an operational error");
     let detail = format!("{error:#}");
     assert!(
-        detail.contains(&PathBuf::from("src/foo.rs").display().to_string()),
+        detail.contains(&Path::new("src").join("foo.rs").display().to_string()),
         "got: {detail}"
     );
     assert!(!detail.contains("module `foo` is missing"), "got: {detail}");
@@ -531,7 +531,13 @@ fn proc_macro_zero_present_candidates_propagates_unknown_error() -> Result<()> {
     .expect_err("unknown candidate failure must not collapse to missing");
     let detail = format!("{error:#}");
     assert!(
-        detail.contains(&PathBuf::from("src/foo/mod.rs").display().to_string()),
+        detail.contains(
+            &Path::new("src")
+                .join("foo")
+                .join("mod.rs")
+                .display()
+                .to_string()
+        ),
         "got: {detail}"
     );
     assert!(
@@ -992,11 +998,17 @@ fn proc_macro_conventional_module_rejects_two_regular_candidates_as_ambiguous() 
     let detail = format!("{error:#}");
     assert!(detail.contains("ambiguous"), "got: {detail}");
     assert!(
-        detail.contains(&PathBuf::from("src/foo.rs").display().to_string()),
+        detail.contains(&Path::new("src").join("foo.rs").display().to_string()),
         "got: {detail}"
     );
     assert!(
-        detail.contains(&PathBuf::from("src/foo/mod.rs").display().to_string()),
+        detail.contains(
+            &Path::new("src")
+                .join("foo")
+                .join("mod.rs")
+                .display()
+                .to_string()
+        ),
         "got: {detail}"
     );
     Ok(())
