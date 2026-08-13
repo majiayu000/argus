@@ -1385,6 +1385,101 @@ const REGISTER: () = {
 }
 
 #[test]
+fn proc_macro_traverses_module_declarations_inside_macro_definitions() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "macro-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"macro_rules! declare_payload {
+    () => { mod payload; };
+}
+declare_payload!();"#,
+        ),
+        ("src/payload.rs", network),
+    ])?;
+
+    let finding = scan
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("macro-defined module must reach proc-macro scanning")?;
+    assert!(finding.detail.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unparseable_macro_module_body_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! declare_payload {
+    ($item:item) => { $item mod payload; };
+}"#,
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "ambiguous-macro-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("unparseable macro module body must fail closed");
+    assert!(
+        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_module_syntax_in_macro_matcher_is_not_a_declaration() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! accept_module {
+    (mod payload;) => {};
+}"#,
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "macro-matcher-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    assert_eq!(
+        collect_proc_macro_source_files(directory.path(), &manifest)?,
+        BTreeSet::from(["src/lib.rs".to_string()])
+    );
+    Ok(())
+}
+
+#[test]
 fn proc_macro_block_traversal_inherits_definitely_disabled_cfg() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
@@ -1487,6 +1582,41 @@ mod platform;"#,
         r#"
 [package]
 name = "cfg-attr-true-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["shared/active.rs".to_string(), "src/lib.rs".to_string()])
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_nested_cfg_attr_path_uses_composed_condition() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("shared"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"#[cfg_attr(all(), cfg_attr(all(), path = "../shared/active.rs"))]
+mod platform;"#,
+    )?;
+    std::fs::write(
+        directory.path().join("src/platform.rs"),
+        "pub fn decoy() {}",
+    )?;
+    std::fs::write(directory.path().join("shared/active.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "nested-cfg-attr-derive"
 version = "1.0.0"
 build = false
 

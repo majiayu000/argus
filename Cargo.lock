@@ -222,6 +222,7 @@ dependencies = [
  "argus-transport",
  "flate2",
  "hex",
+ "proc-macro2",
  "regex",
  "rustix",
  "serde",

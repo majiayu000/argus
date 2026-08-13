@@ -15,6 +15,7 @@ use argus_rules::{looks_binary, scan_text_file, scan_text_files_with_context, Ru
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+use syn::parse::Parser;
 use syn::visit::Visit;
 
 /// Crate paths whose contents the crates.io rules read.
@@ -26,6 +27,7 @@ const TEXT_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_PROC_MACRO_SOURCE_FILES: usize = 1024;
 const MAX_PROC_MACRO_MODULE_DECLARATIONS: usize = 8192;
 const MAX_PROC_MACRO_RESOLUTION_EDGES: usize = 4096;
+const MAX_PROC_MACRO_META_DEPTH: usize = 128;
 const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 #[cfg(windows)]
 const WINDOWS_ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
@@ -559,6 +561,60 @@ impl ProcMacroModuleCollector<'_> {
         }
         Ok(())
     }
+
+    fn collect_macro_definition(&mut self, tokens: proc_macro2::TokenStream) -> Result<()> {
+        let tokens = tokens.into_iter().collect::<Vec<_>>();
+        let mut index = 0;
+        while index + 2 < tokens.len() {
+            let is_fat_arrow = matches!(&tokens[index], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '=')
+                && matches!(&tokens[index + 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '>');
+            if is_fat_arrow {
+                let proc_macro2::TokenTree::Group(transcriber) = &tokens[index + 2] else {
+                    anyhow::bail!("proc-macro macro rule has an undelimited transcriber");
+                };
+                self.collect_macro_transcriber(transcriber.stream(), 0)?;
+                index += 3;
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_macro_transcriber(
+        &mut self,
+        tokens: proc_macro2::TokenStream,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > MAX_PROC_MACRO_META_DEPTH {
+            anyhow::bail!(
+                "proc-macro macro token nesting exceeds {MAX_PROC_MACRO_META_DEPTH} levels"
+            );
+        }
+        match syn::Block::parse_within.parse2(tokens.clone()) {
+            Ok(statements) => {
+                for statement in &statements {
+                    self.visit_stmt(statement);
+                    if self.error.is_some() {
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                for token in tokens.clone() {
+                    if let proc_macro2::TokenTree::Group(group) = token {
+                        self.collect_macro_transcriber(group.stream(), depth + 1)?;
+                    }
+                }
+                if token_stream_contains_external_module_declaration(tokens) {
+                    anyhow::bail!(
+                        "cannot statically interpret proc-macro macro body containing an external module declaration"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
@@ -585,6 +641,24 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
             self.error = Some(error);
         }
     }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if self.error.is_some() || item.ident.is_none() {
+            return;
+        }
+        if let Err(error) = self.collect_macro_definition(item.mac.tokens.clone()) {
+            self.error = Some(error);
+        }
+    }
+}
+
+fn token_stream_contains_external_module_declaration(tokens: proc_macro2::TokenStream) -> bool {
+    let tokens = tokens.into_iter().collect::<Vec<_>>();
+    tokens.windows(3).any(|window| {
+        matches!(&window[0], proc_macro2::TokenTree::Ident(ident) if ident == "mod")
+            && matches!(&window[1], proc_macro2::TokenTree::Ident(_))
+            && matches!(&window[2], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';')
+    })
 }
 
 fn item_attributes(item: &syn::Item) -> Option<&[syn::Attribute]> {
@@ -713,16 +787,54 @@ fn collect_cfg_attr_path_values(attr: &syn::Attribute, plan: &mut ModulePathPlan
         .next()
         .context("cfg_attr on proc-macro module has no condition")?;
     let condition = eval_cfg_meta(condition)?;
-    if condition == CfgEval::False {
-        return Ok(());
-    }
     for meta in metas {
-        if meta.path().is_ident("path") {
-            plan.conditional_paths
-                .push((condition, path_meta_value(meta)?));
-        }
+        collect_conditional_path_meta(meta, condition, plan, 0)?;
     }
     Ok(())
+}
+
+fn collect_conditional_path_meta(
+    meta: &syn::Meta,
+    inherited_condition: CfgEval,
+    plan: &mut ModulePathPlan,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_PROC_MACRO_META_DEPTH {
+        anyhow::bail!("proc-macro cfg_attr nesting exceeds {MAX_PROC_MACRO_META_DEPTH} levels");
+    }
+    if inherited_condition == CfgEval::False {
+        return Ok(());
+    }
+    if meta.path().is_ident("path") {
+        plan.conditional_paths
+            .push((inherited_condition, path_meta_value(meta)?));
+        return Ok(());
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return Ok(());
+    }
+
+    let syn::Meta::List(list) = meta else {
+        anyhow::bail!("nested cfg_attr on proc-macro module must contain arguments");
+    };
+    let metas = parse_cfg_list(list)?;
+    let mut metas = metas.iter();
+    let condition = metas
+        .next()
+        .context("nested cfg_attr on proc-macro module has no condition")?;
+    let condition = cfg_eval_and(inherited_condition, eval_cfg_meta(condition)?);
+    for meta in metas {
+        collect_conditional_path_meta(meta, condition, plan, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn cfg_eval_and(left: CfgEval, right: CfgEval) -> CfgEval {
+    match (left, right) {
+        (CfgEval::False, _) | (_, CfgEval::False) => CfgEval::False,
+        (CfgEval::True, CfgEval::True) => CfgEval::True,
+        _ => CfgEval::Unknown,
+    }
 }
 
 fn path_attr_value(attr: &syn::Attribute) -> Result<String> {
@@ -743,29 +855,36 @@ fn path_meta_value(meta: &syn::Meta) -> Result<String> {
 }
 
 fn eval_cfg_meta(meta: &syn::Meta) -> Result<CfgEval> {
+    eval_cfg_meta_at_depth(meta, 0)
+}
+
+fn eval_cfg_meta_at_depth(meta: &syn::Meta, depth: usize) -> Result<CfgEval> {
+    if depth > MAX_PROC_MACRO_META_DEPTH {
+        anyhow::bail!("proc-macro cfg expression exceeds {MAX_PROC_MACRO_META_DEPTH} levels");
+    }
     let syn::Meta::List(list) = meta else {
         return Ok(CfgEval::Unknown);
     };
     if list.path.is_ident("any") {
-        return eval_cfg_any(list);
+        return eval_cfg_any(list, depth + 1);
     }
     if list.path.is_ident("all") {
-        return eval_cfg_all(list);
+        return eval_cfg_all(list, depth + 1);
     }
     if list.path.is_ident("not") {
-        return eval_cfg_not(list);
+        return eval_cfg_not(list, depth + 1);
     }
     Ok(CfgEval::Unknown)
 }
 
-fn eval_cfg_any(list: &syn::MetaList) -> Result<CfgEval> {
+fn eval_cfg_any(list: &syn::MetaList, depth: usize) -> Result<CfgEval> {
     let nested = parse_cfg_list(list)?;
     if nested.is_empty() {
         return Ok(CfgEval::False);
     }
     let mut saw_unknown = false;
     for meta in nested {
-        match eval_cfg_meta(&meta)? {
+        match eval_cfg_meta_at_depth(&meta, depth)? {
             CfgEval::True => return Ok(CfgEval::True),
             CfgEval::False => {}
             CfgEval::Unknown => saw_unknown = true,
@@ -778,11 +897,11 @@ fn eval_cfg_any(list: &syn::MetaList) -> Result<CfgEval> {
     })
 }
 
-fn eval_cfg_all(list: &syn::MetaList) -> Result<CfgEval> {
+fn eval_cfg_all(list: &syn::MetaList, depth: usize) -> Result<CfgEval> {
     let nested = parse_cfg_list(list)?;
     let mut saw_unknown = false;
     for meta in nested {
-        match eval_cfg_meta(&meta)? {
+        match eval_cfg_meta_at_depth(&meta, depth)? {
             CfgEval::True => {}
             CfgEval::False => return Ok(CfgEval::False),
             CfgEval::Unknown => saw_unknown = true,
@@ -795,12 +914,12 @@ fn eval_cfg_all(list: &syn::MetaList) -> Result<CfgEval> {
     })
 }
 
-fn eval_cfg_not(list: &syn::MetaList) -> Result<CfgEval> {
+fn eval_cfg_not(list: &syn::MetaList, depth: usize) -> Result<CfgEval> {
     let nested = parse_cfg_list(list)?;
     if nested.len() != 1 {
         return Ok(CfgEval::Unknown);
     }
-    Ok(match eval_cfg_meta(&nested[0])? {
+    Ok(match eval_cfg_meta_at_depth(&nested[0], depth)? {
         CfgEval::True => CfgEval::False,
         CfgEval::False => CfgEval::True,
         CfgEval::Unknown => CfgEval::Unknown,
