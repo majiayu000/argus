@@ -253,8 +253,8 @@ enum InlineHtmlTag {
 
 fn is_inline_html_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
-        "b", "code", "del", "em", "i", "ins", "kbd", "mark", "s", "small", "span", "strong", "sub",
-        "sup", "u",
+        "a", "b", "code", "del", "em", "i", "ins", "kbd", "mark", "s", "small", "span", "strong",
+        "sub", "sup", "u",
     ];
     WRAPPERS
         .iter()
