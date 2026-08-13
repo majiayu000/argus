@@ -586,7 +586,13 @@ impl ProcMacroModuleCollector<'_> {
                 let proc_macro2::TokenTree::Group(transcriber) = &tokens[index + 2] else {
                     anyhow::bail!("proc-macro macro rule has an undelimited transcriber");
                 };
-                self.collect_macro_transcriber(transcriber.stream(), 0)?;
+                let transcriber = transcriber.stream();
+                if macro_definition_contains_external_module_declaration(transcriber.clone(), 0)? {
+                    anyhow::bail!(
+                        "cannot statically interpret proc-macro macro body: external module emission has an unknown invocation context"
+                    );
+                }
+                self.collect_macro_transcriber(transcriber, 0)?;
                 index += 3;
             } else {
                 index += 1;
@@ -701,6 +707,26 @@ fn token_stream_contains_external_module_declaration(tokens: proc_macro2::TokenS
                 |candidate| matches!(candidate, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';'),
             )
     })
+}
+
+fn macro_definition_contains_external_module_declaration(
+    tokens: proc_macro2::TokenStream,
+    depth: usize,
+) -> Result<bool> {
+    if depth > MAX_PROC_MACRO_META_DEPTH {
+        anyhow::bail!("proc-macro macro token nesting exceeds {MAX_PROC_MACRO_META_DEPTH} levels");
+    }
+    if token_stream_contains_external_module_declaration(tokens.clone()) {
+        return Ok(true);
+    }
+    for token in tokens {
+        if let proc_macro2::TokenTree::Group(group) = token {
+            if macro_definition_contains_external_module_declaration(group.stream(), depth + 1)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn token_is_ident(token: &proc_macro2::TokenTree, expected: &str) -> bool {

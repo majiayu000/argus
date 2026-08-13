@@ -31,9 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traversal to appear clean (GH-194).
 - Crates.io proc-macro module traversal now parses Rust items structurally,
   preserves rustc-style module directory ownership for `#[path]` and inline
-  modules, visits block and macro-definition bodies, recursively handles
-  `cfg`/`cfg_attr(path)` conservatively, and caps parsing and resolution work
-  before filesystem probes (GH-200).
+  modules, visits block, macro-invocation, and attribute inputs, fails closed
+  when a macro definition emits an external module whose invocation context is
+  unknown, recursively handles `cfg`/`cfg_attr(path)` conservatively, and caps
+  parsing and resolution work before filesystem probes (GH-200).
 - `known-native-build-pattern` now also recognizes addons compiled locally
   from bundled sources (`node-gyp`, `cmake-js`, `prebuildify`, `neon`), not
   only prebuilt platform `optionalDependencies`. Ordinary node-gyp packages

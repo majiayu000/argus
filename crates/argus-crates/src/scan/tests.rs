@@ -1424,8 +1424,31 @@ const REGISTER: () = {
 }
 
 #[test]
-fn proc_macro_traverses_module_declarations_inside_macro_definitions() -> Result<()> {
-    let manifest = r#"
+fn proc_macro_macro_definition_external_module_fails_closed_across_contexts() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src/helpers"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"mod helpers {
+    #[macro_export]
+    macro_rules! declare_payload {
+        () => { mod payload; };
+    }
+}
+declare_payload!();"#,
+    )?;
+    std::fs::write(
+        directory.path().join("src/payload.rs"),
+        r#"pub fn probe() {
+    let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+}"#,
+    )?;
+    std::fs::write(
+        directory.path().join("src/helpers/payload.rs"),
+        "pub fn probe() {}",
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
 [package]
 name = "macro-module-derive"
 version = "1.0.0"
@@ -1433,28 +1456,15 @@ build = false
 
 [lib]
 proc-macro = true
-"#;
-    let network = r#"pub fn probe() {
-        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
-    }"#;
-    let scan = scan_test_tree(&[
-        ("Cargo.toml", manifest),
-        (
-            "src/lib.rs",
-            r#"macro_rules! declare_payload {
-    () => { mod payload; };
-}
-declare_payload!();"#,
-        ),
-        ("src/payload.rs", network),
-    ])?;
+"#,
+    )?;
 
-    let finding = scan
-        .findings
-        .iter()
-        .find(|finding| finding.rule_id == "proc-macro-network")
-        .context("macro-defined module must reach proc-macro scanning")?;
-    assert!(finding.detail.contains("src/payload.rs"));
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("macro definition module context must fail closed");
+    assert!(
+        format!("{error:#}").contains("unknown invocation context"),
+        "got: {error:#}"
+    );
     Ok(())
 }
 
