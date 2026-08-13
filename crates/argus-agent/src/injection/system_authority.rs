@@ -144,7 +144,9 @@ impl<'a> DisplayCursor<'a> {
                 }
                 Some('<') => match self.consume_inline_html_tag()? {
                     Some(InlineHtmlTag::RenderedBoundary) => semantic = true,
-                    Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing) => {}
+                    Some(
+                        InlineHtmlTag::Opening | InlineHtmlTag::Closing | InlineHtmlTag::Comment,
+                    ) => {}
                     None => break,
                 },
                 _ => break,
@@ -172,7 +174,11 @@ impl<'a> DisplayCursor<'a> {
                 Some('<') => {
                     let saved = *self;
                     match self.consume_inline_html_tag()? {
-                        Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing) => {}
+                        Some(
+                            InlineHtmlTag::Opening
+                            | InlineHtmlTag::Closing
+                            | InlineHtmlTag::Comment,
+                        ) => {}
                         Some(InlineHtmlTag::RenderedBoundary) => return Ok((closed_label, true)),
                         None => {
                             *self = saved;
@@ -188,6 +194,9 @@ impl<'a> DisplayCursor<'a> {
     fn consume_inline_html_tag(&mut self) -> Result<Option<InlineHtmlTag>, ParseError> {
         if self.next() != Some('<') {
             return Ok(None);
+        }
+        if self.rest().starts_with("<!--") {
+            return self.consume_inline_html_comment();
         }
         let mut probe = *self;
         probe.charge_and_take()?;
@@ -220,7 +229,7 @@ impl<'a> DisplayCursor<'a> {
         let valid = match kind {
             InlineHtmlTag::Opening => probe.consume_opening_html_tag_suffix()?,
             InlineHtmlTag::Closing => probe.consume_closing_html_tag_suffix()?,
-            InlineHtmlTag::RenderedBoundary => {
+            InlineHtmlTag::Comment | InlineHtmlTag::RenderedBoundary => {
                 unreachable!("tag syntax is classified before semantics")
             }
         };
@@ -229,6 +238,32 @@ impl<'a> DisplayCursor<'a> {
         }
         *self = probe;
         Ok(Some(tag))
+    }
+
+    fn consume_inline_html_comment(&mut self) -> Result<Option<InlineHtmlTag>, ParseError> {
+        let mut probe = *self;
+        for _ in 0.."<!--".len() {
+            probe.charge_and_take()?;
+        }
+        if matches!(probe.next(), Some('>')) || probe.rest().starts_with("->") {
+            return Ok(None);
+        }
+        loop {
+            if probe.rest().starts_with("-->") {
+                for _ in 0.."-->".len() {
+                    probe.charge_and_take()?;
+                }
+                *self = probe;
+                return Ok(Some(InlineHtmlTag::Comment));
+            }
+            if probe.rest().starts_with("--") {
+                return Ok(None);
+            }
+            if probe.next().is_none() {
+                return Ok(None);
+            }
+            probe.charge_and_take()?;
+        }
     }
 
     fn consume_opening_html_tag_suffix(&mut self) -> Result<bool, ParseError> {
@@ -326,6 +361,7 @@ impl<'a> DisplayCursor<'a> {
 enum InlineHtmlTag {
     Opening,
     Closing,
+    Comment,
     RenderedBoundary,
 }
 
@@ -591,7 +627,9 @@ fn probe_rendered_boundary(cursor: DisplayCursor<'_>) -> RenderedBoundaryProbe {
                 Ok(Some(InlineHtmlTag::RenderedBoundary)) => {
                     return RenderedBoundaryProbe::Known(true);
                 }
-                Ok(Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing)) => {
+                Ok(Some(
+                    InlineHtmlTag::Opening | InlineHtmlTag::Closing | InlineHtmlTag::Comment,
+                )) => {
                     let consumed = cursor.line[at..html.at].chars().count();
                     let Some(next_remaining) = remaining.checked_sub(consumed) else {
                         return RenderedBoundaryProbe::Unknown;
