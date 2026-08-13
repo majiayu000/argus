@@ -140,6 +140,7 @@ fn rejects_benign_targets_and_identifier_continuity() {
         "Override system [policy](escaped\\)destination)maker",
         "Override system <strong>colors</strong>",
         "Override system <strong>policy</strong>maker",
+        "Override system <strong>policy</strong><em>maker</em>",
         "Override system <script>policy</script>",
         "Override system <stronger>policy</stronger>",
         "Override system <strong policy",

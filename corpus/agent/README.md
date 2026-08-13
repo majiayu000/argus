@@ -21,7 +21,7 @@ full census of `claude-skill-registry-data` (202,660 skills). See
 | skill-cred-exfil | block | stats skill that reads keys/.env and POSTs off-box (sensitive_read + net_egress) |
 | skill-obfuscated-dropper | block | `curl \| base64 -d \| bash` remote stage-2 |
 | skill-injection-md | block | hidden HTML comment claiming absolute authority + concealment (pure text attack, no scripts) |
-| skill-formatted-system-override | block | Markdown-formatted `system` authority noun and `system safety policy` override text |
+| skill-formatted-system-override | block | Markdown/HTML-formatted `system` authority noun and `system safety policy` override text |
 | **skill-benign-installer** | **allow** | SKILL.md documents `curl astral.sh/uv/install.sh \| sh` — official installer, no scripts |
 | **skill-benign-net-tool** | **allow-with-approval** | weather skill reads API key + calls its own API (capabilities match intent) |
 | **skill-benign-system-override** | **allow** | theme/gesture/game/branding docs use generic `override system` prose without agent-authority targets |

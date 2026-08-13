@@ -52,7 +52,7 @@
       "packageName": "formatted-system-override",
       "expectedDecision": "block",
       "rules": ["injection-override"],
-      "notes": "SKILL.md uses Markdown emphasis and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
+      "notes": "SKILL.md uses Markdown emphasis, an HTML anchor, and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
     },
     {
       "id": "skill-benign-installer",

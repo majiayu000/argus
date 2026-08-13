@@ -172,8 +172,8 @@ impl<'a> DisplayCursor<'a> {
                 Some('<') => {
                     let saved = *self;
                     match self.consume_inline_html_tag()? {
-                        Some(InlineHtmlTag::Closing) => {}
-                        Some(InlineHtmlTag::Opening) | None => {
+                        Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing) => {}
+                        None => {
                             *self = saved;
                             return Ok(closed_label);
                         }
