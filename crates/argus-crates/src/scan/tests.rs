@@ -1523,6 +1523,74 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_repeated_metavariable_module_name_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! declare_payload {
+    ($($name:ident)*) => { mod $($name)*; };
+}
+declare_payload!(payload);"#,
+    )?;
+    std::fs::write(directory.path().join("src/payload.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "repeated-metavariable-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("repeated metavariable module name must fail closed");
+    assert!(
+        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_traverses_module_items_passed_to_macro_invocations() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "forwarded-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"macro_rules! identity {
+    ($item:item) => { $item };
+}
+identity! { mod payload; }"#,
+        ),
+        ("src/payload.rs", network),
+    ])?;
+
+    let finding = scan
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("forwarded module item must reach proc-macro scanning")?;
+    assert!(finding.detail.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_module_syntax_in_macro_matcher_is_not_a_declaration() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;

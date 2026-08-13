@@ -657,10 +657,15 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
     }
 
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
-        if self.error.is_some() || item.ident.is_none() {
+        if self.error.is_some() {
             return;
         }
-        if let Err(error) = self.collect_macro_definition(item.mac.tokens.clone()) {
+        let result = if item.ident.is_some() {
+            self.collect_macro_definition(item.mac.tokens.clone())
+        } else {
+            self.collect_macro_transcriber(item.mac.tokens.clone(), 0)
+        };
+        if let Err(error) = result {
             self.error = Some(error);
         }
     }
@@ -668,18 +673,12 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
 
 fn token_stream_contains_external_module_declaration(tokens: proc_macro2::TokenStream) -> bool {
     let tokens = tokens.into_iter().collect::<Vec<_>>();
-    let fixed_name = tokens.windows(3).any(|window| {
-        token_is_ident(&window[0], "mod")
-            && matches!(&window[1], proc_macro2::TokenTree::Ident(_))
-            && matches!(&window[2], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';')
-    });
-    let metavariable_name = tokens.windows(4).any(|window| {
-        token_is_ident(&window[0], "mod")
-            && matches!(&window[1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '$')
-            && matches!(&window[2], proc_macro2::TokenTree::Ident(_))
-            && matches!(&window[3], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';')
-    });
-    fixed_name || metavariable_name
+    tokens.iter().enumerate().any(|(index, token)| {
+        token_is_ident(token, "mod")
+            && tokens[index + 1..].iter().any(
+                |candidate| matches!(candidate, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';'),
+            )
+    })
 }
 
 fn token_is_ident(token: &proc_macro2::TokenTree, expected: &str) -> bool {
