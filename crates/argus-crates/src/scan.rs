@@ -669,6 +669,15 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
             self.error = Some(error);
         }
     }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Err(error) = self.collect_macro_transcriber(mac.tokens.clone(), 0) {
+            self.error = Some(error);
+        }
+    }
 }
 
 fn token_stream_contains_external_module_declaration(tokens: proc_macro2::TokenStream) -> bool {

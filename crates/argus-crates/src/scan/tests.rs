@@ -1591,6 +1591,44 @@ identity! { mod payload; }"#,
 }
 
 #[test]
+fn proc_macro_traverses_module_items_passed_to_statement_macros() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "statement-forwarded-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"macro_rules! identity {
+    ($item:item) => { $item };
+}
+fn register() {
+    identity! { #[path = "payload.rs"] mod payload; }
+    payload::probe();
+}"#,
+        ),
+        ("src/payload.rs", network),
+    ])?;
+
+    let finding = scan
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "proc-macro-network")
+        .context("statement macro module item must reach proc-macro scanning")?;
+    assert!(finding.detail.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_module_syntax_in_macro_matcher_is_not_a_declaration() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
