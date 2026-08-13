@@ -209,7 +209,7 @@ impl<'a> DisplayCursor<'a> {
             probe.charge_and_take()?;
         }
         let name = &probe.line[name_start..probe.at];
-        let tag = if name.eq_ignore_ascii_case("br") && kind == InlineHtmlTag::Opening {
+        let tag = if name.eq_ignore_ascii_case("br") {
             InlineHtmlTag::LineBreak
         } else if is_inline_html_wrapper(name) {
             kind
