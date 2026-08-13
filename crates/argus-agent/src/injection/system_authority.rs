@@ -142,11 +142,11 @@ impl<'a> DisplayCursor<'a> {
                         }
                     }
                 }
-                Some('<') => {
-                    if self.consume_inline_html_tag()?.is_none() {
-                        break;
-                    }
-                }
+                Some('<') => match self.consume_inline_html_tag()? {
+                    Some(InlineHtmlTag::LineBreak) => semantic = true,
+                    Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing) => {}
+                    None => break,
+                },
                 _ => break,
             }
         }
@@ -157,7 +157,7 @@ impl<'a> DisplayCursor<'a> {
             Err(ParseError::NoMatch)
         }
     }
-    fn consume_transparent_tail(&mut self) -> Result<bool, ParseError> {
+    fn consume_transparent_tail(&mut self) -> Result<(bool, bool), ParseError> {
         let mut closed_label = false;
         loop {
             match self.next() {
@@ -173,13 +173,14 @@ impl<'a> DisplayCursor<'a> {
                     let saved = *self;
                     match self.consume_inline_html_tag()? {
                         Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing) => {}
+                        Some(InlineHtmlTag::LineBreak) => return Ok((closed_label, true)),
                         None => {
                             *self = saved;
-                            return Ok(closed_label);
+                            return Ok((closed_label, false));
                         }
                     }
                 }
-                _ => return Ok(closed_label),
+                _ => return Ok((closed_label, false)),
             }
         }
     }
@@ -207,9 +208,14 @@ impl<'a> DisplayCursor<'a> {
         {
             probe.charge_and_take()?;
         }
-        if !is_inline_html_wrapper(&probe.line[name_start..probe.at]) {
+        let name = &probe.line[name_start..probe.at];
+        let tag = if name.eq_ignore_ascii_case("br") && kind == InlineHtmlTag::Opening {
+            InlineHtmlTag::LineBreak
+        } else if is_inline_html_wrapper(name) {
+            kind
+        } else {
             return Ok(None);
-        }
+        };
 
         let mut quote = None;
         loop {
@@ -227,7 +233,7 @@ impl<'a> DisplayCursor<'a> {
                 '>' => {
                     probe.charge_and_take()?;
                     *self = probe;
-                    return Ok(Some(kind));
+                    return Ok(Some(tag));
                 }
                 '\'' | '"' if kind == InlineHtmlTag::Opening => {
                     quote = Some(ch);
@@ -249,6 +255,7 @@ impl<'a> DisplayCursor<'a> {
 enum InlineHtmlTag {
     Opening,
     Closing,
+    LineBreak,
 }
 
 fn is_inline_html_wrapper(name: &str) -> bool {
@@ -376,12 +383,18 @@ impl<'a> AuthorityGrammar<'a> {
     }
 
     fn finish_target(&mut self) -> Result<bool, ParseError> {
-        let closed_label = self.cursor.consume_transparent_tail()?;
+        let (closed_label, semantic_boundary) = self.cursor.consume_transparent_tail()?;
+        if semantic_boundary {
+            return Ok(true);
+        }
         if closed_label && self.cursor.next() == Some('(') {
             match probe_destination(self.cursor) {
                 DestinationProbe::Complete(cursor) => {
                     self.cursor = cursor;
-                    self.cursor.consume_transparent_tail()?;
+                    let (_, semantic_boundary) = self.cursor.consume_transparent_tail()?;
+                    if semantic_boundary {
+                        return Ok(true);
+                    }
                 }
                 DestinationProbe::Unknown => {
                     return Ok(match probe_rendered_boundary(self.cursor) {
@@ -484,6 +497,22 @@ fn probe_rendered_boundary(cursor: DisplayCursor<'_>) -> RenderedBoundaryProbe {
         let Some(ch) = cursor.line[at..].chars().next() else {
             return RenderedBoundaryProbe::Known(true);
         };
+        if ch == '<' {
+            let mut html = DisplayCursor::new(cursor.line, at);
+            match html.consume_inline_html_tag() {
+                Ok(Some(InlineHtmlTag::LineBreak)) => return RenderedBoundaryProbe::Known(true),
+                Ok(Some(InlineHtmlTag::Opening | InlineHtmlTag::Closing)) => {
+                    let consumed = cursor.line[at..html.at].chars().count();
+                    let Some(next_remaining) = remaining.checked_sub(consumed) else {
+                        return RenderedBoundaryProbe::Unknown;
+                    };
+                    remaining = next_remaining;
+                    at = html.at;
+                    continue;
+                }
+                Ok(None) | Err(_) => {}
+            }
+        }
         if !is_plain_markup(ch) && !is_default_ignorable(ch) {
             return RenderedBoundaryProbe::Known(is_rendered_boundary(Some(ch)));
         }
