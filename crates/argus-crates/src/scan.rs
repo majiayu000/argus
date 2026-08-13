@@ -331,8 +331,9 @@ fn collect_proc_macro_source_files(
         if looks_binary(content.as_bytes()) {
             anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
-        let declarations = proc_macro_module_declarations(&content, &context, &mut budgets)
-            .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
+        let declarations =
+            proc_macro_module_declarations(&content, &context, &canonical_pkg_dir, &mut budgets)
+                .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
 
         for declaration in declarations {
             if !resolved_edges.insert(declaration.lookup.clone()) {
@@ -488,6 +489,7 @@ struct ModulePathPlan {
 fn proc_macro_module_declarations(
     source: &str,
     source_context: &ProcMacroSourceContext,
+    canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
 ) -> Result<Vec<ProcMacroModuleDeclaration>> {
     let syntax = syn::parse_file(source)?;
@@ -497,18 +499,26 @@ fn proc_macro_module_declarations(
         source_rel: source_context.source_rel.clone(),
     };
     let mut declarations = Vec::new();
-    collect_proc_macro_item_declarations(&syntax.items, &item_context, budgets, &mut declarations)?;
+    collect_proc_macro_item_declarations(
+        &syntax.items,
+        &item_context,
+        canonical_pkg_dir,
+        budgets,
+        &mut declarations,
+    )?;
     Ok(declarations)
 }
 
 fn collect_proc_macro_item_declarations(
     items: &[syn::Item],
     context: &ProcMacroItemContext,
+    canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
 ) -> Result<()> {
     let mut collector = ProcMacroModuleCollector {
         context,
+        canonical_pkg_dir,
         budgets,
         declarations,
         error: None,
@@ -527,6 +537,7 @@ fn collect_proc_macro_item_declarations(
 
 struct ProcMacroModuleCollector<'a> {
     context: &'a ProcMacroItemContext,
+    canonical_pkg_dir: &'a Path,
     budgets: &'a mut ProcMacroModuleBudgets,
     declarations: &'a mut Vec<ProcMacroModuleDeclaration>,
     error: Option<anyhow::Error>,
@@ -543,10 +554,13 @@ impl ProcMacroModuleCollector<'_> {
         let path_plan = module_path_plan(&module.attrs)?;
 
         if let Some((_brace, inline_items)) = &module.content {
-            for child_context in inline_module_contexts(self.context, &name, &path_plan)? {
+            for child_context in
+                inline_module_contexts(self.context, &name, &path_plan, self.canonical_pkg_dir)?
+            {
                 collect_proc_macro_item_declarations(
                     inline_items,
                     &child_context,
+                    self.canonical_pkg_dir,
                     self.budgets,
                     self.declarations,
                 )?;
@@ -654,11 +668,22 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
 
 fn token_stream_contains_external_module_declaration(tokens: proc_macro2::TokenStream) -> bool {
     let tokens = tokens.into_iter().collect::<Vec<_>>();
-    tokens.windows(3).any(|window| {
-        matches!(&window[0], proc_macro2::TokenTree::Ident(ident) if ident == "mod")
+    let fixed_name = tokens.windows(3).any(|window| {
+        token_is_ident(&window[0], "mod")
             && matches!(&window[1], proc_macro2::TokenTree::Ident(_))
             && matches!(&window[2], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';')
-    })
+    });
+    let metavariable_name = tokens.windows(4).any(|window| {
+        token_is_ident(&window[0], "mod")
+            && matches!(&window[1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '$')
+            && matches!(&window[2], proc_macro2::TokenTree::Ident(_))
+            && matches!(&window[3], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';')
+    });
+    fixed_name || metavariable_name
+}
+
+fn token_is_ident(token: &proc_macro2::TokenTree, expected: &str) -> bool {
+    matches!(token, proc_macro2::TokenTree::Ident(ident) if ident == expected)
 }
 
 fn item_attributes(item: &syn::Item) -> Option<&[syn::Attribute]> {
@@ -714,6 +739,7 @@ fn inline_module_contexts(
     context: &ProcMacroItemContext,
     name: &str,
     path_plan: &ModulePathPlan,
+    canonical_pkg_dir: &Path,
 ) -> Result<Vec<ProcMacroItemContext>> {
     let mut contexts = Vec::new();
     if conventional_lookup_is_potentially_active(path_plan) {
@@ -725,7 +751,8 @@ fn inline_module_contexts(
         });
     }
     for path in potentially_active_explicit_paths(path_plan) {
-        let base = normalize_inline_module_directory(&context.explicit_base, path)?;
+        let base =
+            normalize_inline_module_directory(canonical_pkg_dir, &context.explicit_base, path)?;
         contexts.push(ProcMacroItemContext {
             conventional_base: base.clone(),
             explicit_base: base,
@@ -933,7 +960,11 @@ fn parse_cfg_list(
         .map_err(anyhow::Error::from)
 }
 
-fn normalize_inline_module_directory(base: &Path, explicit_path: &str) -> Result<PathBuf> {
+fn normalize_inline_module_directory(
+    canonical_pkg_dir: &Path,
+    base: &Path,
+    explicit_path: &str,
+) -> Result<PathBuf> {
     let explicit = Path::new(explicit_path);
     if explicit.as_os_str().is_empty() || explicit.is_absolute() {
         anyhow::bail!(
@@ -946,6 +977,7 @@ fn normalize_inline_module_directory(base: &Path, explicit_path: &str) -> Result
             Component::Normal(part) => resolved.push(part),
             Component::CurDir => {}
             Component::ParentDir => {
+                inspect_proc_macro_traversal_component(canonical_pkg_dir, &resolved, true)?;
                 if !resolved.pop() {
                     anyhow::bail!("proc-macro inline module path escapes crate root");
                 }

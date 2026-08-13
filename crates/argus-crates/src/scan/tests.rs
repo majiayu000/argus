@@ -1338,6 +1338,45 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_inline_path_checks_link_before_parent_component() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::create_dir_all(directory.path().join("actual/nested"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"#[path = "link/.."]
+mod inline {
+    mod payload;
+}"#,
+    )?;
+    std::fs::write(directory.path().join("src/payload.rs"), "pub fn decoy() {}")?;
+    std::fs::write(directory.path().join("actual/payload.rs"), "")?;
+    create_directory_symlink(
+        &directory.path().join("actual/nested"),
+        &directory.path().join("src/link"),
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "inline-link-parent-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("inline path must inspect a link before collapsing its parent component");
+    assert!(
+        format!("{error:#}").contains("symlink or reparse point"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn proc_macro_traverses_module_declarations_inside_rust_blocks() -> Result<()> {
     let manifest = r#"
 [package]
@@ -1443,6 +1482,39 @@ proc-macro = true
 
     let error = collect_proc_macro_source_files(directory.path(), &manifest)
         .expect_err("unparseable macro module body must fail closed");
+    assert!(
+        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
+        "got: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_metavariable_module_name_fails_closed() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! declare_payload {
+    ($name:ident) => { mod $name; };
+}
+declare_payload!(payload);"#,
+    )?;
+    std::fs::write(directory.path().join("src/payload.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "metavariable-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("metavariable module name must fail closed");
     assert!(
         format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
         "got: {error:#}"
