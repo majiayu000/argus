@@ -24,6 +24,14 @@ def load_module(name, filename):
 builder = load_module("build_non_hit_worklist", "build_non_hit_worklist.py")
 exporter = load_module("export_assignments", "export_assignments.py")
 finalizer = load_module("finalize_review", "finalize_review.py")
+with mock.patch.dict(
+    "sys.modules",
+    {
+        "build_non_hit_worklist": builder,
+        "finalize_review": finalizer,
+    },
+):
+    evaluator = load_module("evaluate_current", "evaluate_current.py")
 
 
 class ExportAssignmentsTests(unittest.TestCase):
@@ -733,6 +741,22 @@ class FinalizeReviewTests(unittest.TestCase):
         self.assertEqual(finalizer.normalize_label("non block"), "non-block")
         with self.assertRaisesRegex(ValueError, "invalid label"):
             finalizer.normalize_label("TP")
+
+
+class EvaluateCurrentTests(unittest.TestCase):
+    def test_evaluate_cli_uses_current_quality_floors_by_default(self):
+        argv = [
+            "evaluate_current.py",
+            "evaluate",
+            "--source-repo",
+            "/source",
+            "--argus",
+            "/argus",
+        ]
+        with mock.patch("sys.argv", argv):
+            args = evaluator.parse_args()
+        self.assertEqual(args.min_precision, 0.073171)
+        self.assertEqual(args.min_recall, 0.625)
 
 
 if __name__ == "__main__":

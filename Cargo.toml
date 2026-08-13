@@ -50,6 +50,7 @@ semver = "1"
 pep440_rs = "0.7.3"
 polycvss = "0.4"
 unicode_categories = "0.1.1"
+unicode-ident = "1"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 toml = "0.8.23"

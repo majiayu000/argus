@@ -387,6 +387,7 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         server_hits.fetch_add(1, Ordering::SeqCst);
+                        stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_millis(100)))?;
                         let mut buf = [0_u8; 1024];
                         let _read = std::io::Read::read(&mut stream, &mut buf)

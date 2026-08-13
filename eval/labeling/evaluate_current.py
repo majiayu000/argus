@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REVIEW = REPO_ROOT / "eval/labeling/frozen/reviewer.csv"
 DEFAULT_FINAL_LABELS = REPO_ROOT / "eval/labeling/frozen/final_labels.jsonl"
 DEFAULT_MANIFEST = REPO_ROOT / "corpus/agent/labeling-manifest.json"
-DEFAULT_MIN_PRECISION = 0.060729
+DEFAULT_MIN_PRECISION = 0.073171
 DEFAULT_MIN_RECALL = 0.625
 
 
