@@ -142,6 +142,11 @@ impl<'a> DisplayCursor<'a> {
                         }
                     }
                 }
+                Some('<') => {
+                    if self.consume_inline_html_tag()?.is_none() {
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
@@ -164,10 +169,96 @@ impl<'a> DisplayCursor<'a> {
                     self.open_labels -= 1;
                     closed_label = true;
                 }
+                Some('<') => {
+                    let saved = *self;
+                    match self.consume_inline_html_tag()? {
+                        Some(InlineHtmlTag::Closing) => {}
+                        Some(InlineHtmlTag::Opening) | None => {
+                            *self = saved;
+                            return Ok(closed_label);
+                        }
+                    }
+                }
                 _ => return Ok(closed_label),
             }
         }
     }
+
+    fn consume_inline_html_tag(&mut self) -> Result<Option<InlineHtmlTag>, ParseError> {
+        if self.next() != Some('<') {
+            return Ok(None);
+        }
+        let mut probe = *self;
+        probe.charge_and_take()?;
+        let kind = if probe.next() == Some('/') {
+            probe.charge_and_take()?;
+            InlineHtmlTag::Closing
+        } else {
+            InlineHtmlTag::Opening
+        };
+        let name_start = probe.at;
+        if !probe.next().is_some_and(|ch| ch.is_ascii_alphabetic()) {
+            return Ok(None);
+        }
+        probe.charge_and_take()?;
+        while probe
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            probe.charge_and_take()?;
+        }
+        if !is_inline_html_wrapper(&probe.line[name_start..probe.at]) {
+            return Ok(None);
+        }
+
+        let mut quote = None;
+        loop {
+            let Some(ch) = probe.next() else {
+                return Ok(None);
+            };
+            if let Some(active_quote) = quote {
+                probe.charge_and_take()?;
+                if ch == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '>' => {
+                    probe.charge_and_take()?;
+                    *self = probe;
+                    return Ok(Some(kind));
+                }
+                '\'' | '"' if kind == InlineHtmlTag::Opening => {
+                    quote = Some(ch);
+                    probe.charge_and_take()?;
+                }
+                '<' => return Ok(None),
+                ch if kind == InlineHtmlTag::Closing && !matches!(ch, ' ' | '\t' | '\n' | '\r') => {
+                    return Ok(None);
+                }
+                _ => {
+                    probe.charge_and_take()?;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InlineHtmlTag {
+    Opening,
+    Closing,
+}
+
+fn is_inline_html_wrapper(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &[
+        "b", "code", "del", "em", "i", "ins", "kbd", "mark", "s", "small", "span", "strong", "sub",
+        "sup", "u",
+    ];
+    WRAPPERS
+        .iter()
+        .any(|wrapper| name.eq_ignore_ascii_case(wrapper))
 }
 #[derive(Clone, Copy)]
 struct AuthorityGrammar<'a> {
