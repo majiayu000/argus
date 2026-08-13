@@ -1652,22 +1652,25 @@ proc-macro = true
     let network = r#"pub fn probe() {
         let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
     }"#;
-    let scan = scan_test_tree(&[
-        ("Cargo.toml", manifest),
-        (
-            "src/lib.rs",
-            r#"#[emitter::emit(mod payload;)]
+    for host in [
+        r#"#[emitter::emit(mod payload;)]
 struct Marker;"#,
-        ),
-        ("src/payload.rs", network),
-    ])?;
+        r#"#[emitter::emit(mod payload;)]
+mod marker {}"#,
+    ] {
+        let scan = scan_test_tree(&[
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", host),
+            ("src/payload.rs", network),
+        ])?;
 
-    let finding = scan
-        .findings
-        .iter()
-        .find(|finding| finding.rule_id == "proc-macro-network")
-        .context("attribute macro module item must reach proc-macro scanning")?;
-    assert!(finding.detail.contains("src/payload.rs"));
+        let finding = scan
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == "proc-macro-network")
+            .context("attribute macro module item must reach proc-macro scanning")?;
+        assert!(finding.detail.contains("src/payload.rs"));
+    }
     Ok(())
 }
 

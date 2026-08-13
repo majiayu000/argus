@@ -670,6 +670,12 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         if self.error.is_some() {
             return;
         }
+        for attribute in &module.attrs {
+            self.visit_attribute(attribute);
+            if self.error.is_some() {
+                return;
+            }
+        }
         if let Err(error) = self.collect_module(module) {
             self.error = Some(error);
         }
