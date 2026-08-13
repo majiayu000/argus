@@ -496,7 +496,10 @@ fn proc_macro_zero_present_candidates_propagates_permission_error() -> Result<()
     )
     .expect_err("zero present candidates must propagate an operational error");
     let detail = format!("{error:#}");
-    assert!(detail.contains("src/foo.rs"), "got: {detail}");
+    assert!(
+        detail.contains(&PathBuf::from("src/foo.rs").display().to_string()),
+        "got: {detail}"
+    );
     assert!(!detail.contains("module `foo` is missing"), "got: {detail}");
     assert_eq!(
         error
@@ -527,7 +530,10 @@ fn proc_macro_zero_present_candidates_propagates_unknown_error() -> Result<()> {
     )
     .expect_err("unknown candidate failure must not collapse to missing");
     let detail = format!("{error:#}");
-    assert!(detail.contains("src/foo/mod.rs"), "got: {detail}");
+    assert!(
+        detail.contains(&PathBuf::from("src/foo/mod.rs").display().to_string()),
+        "got: {detail}"
+    );
     assert!(
         detail.contains("synthetic candidate inspection failure"),
         "got: {detail}"
@@ -985,8 +991,14 @@ fn proc_macro_conventional_module_rejects_two_regular_candidates_as_ambiguous() 
         .expect_err("two complete conventional candidates must remain ambiguous");
     let detail = format!("{error:#}");
     assert!(detail.contains("ambiguous"), "got: {detail}");
-    assert!(detail.contains("src/foo.rs"), "got: {detail}");
-    assert!(detail.contains("src/foo/mod.rs"), "got: {detail}");
+    assert!(
+        detail.contains(&PathBuf::from("src/foo.rs").display().to_string()),
+        "got: {detail}"
+    );
+    assert!(
+        detail.contains(&PathBuf::from("src/foo/mod.rs").display().to_string()),
+        "got: {detail}"
+    );
     Ok(())
 }
 
@@ -998,7 +1010,7 @@ fn proc_macro_conventional_module_rejects_linked_present_alternative_as_ambiguou
     std::fs::write(directory.path().join("src/foo.rs"), "")?;
     std::fs::write(directory.path().join("src/real.rs"), "")?;
     let linked_alternative = directory.path().join("src/foo/mod.rs");
-    create_file_symlink(Path::new("../real.rs"), &linked_alternative)?;
+    create_file_symlink(&directory.path().join("src/real.rs"), &linked_alternative)?;
     assert!(metadata_is_symlink_or_reparse(&std::fs::symlink_metadata(
         &linked_alternative
     )?));
@@ -1147,7 +1159,7 @@ fn proc_macro_conventional_resolvable_leaf_symlink_fails_closed() -> Result<()> 
     std::fs::write(directory.path().join("src/lib.rs"), "mod foo;")?;
     std::fs::write(directory.path().join("src/real.rs"), "")?;
     create_file_symlink(
-        Path::new("../real.rs"),
+        &directory.path().join("src/real.rs"),
         &directory.path().join("src/foo/mod.rs"),
     )?;
     let manifest: CargoManifest = toml::from_str(
@@ -1310,6 +1322,80 @@ proc-macro = true
         .collect();
     assert_eq!(findings.len(), 1, "got: {:?}", scan.findings);
     assert!(findings[0].detail.contains("src/inline/network.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_traverses_module_declarations_inside_rust_blocks() -> Result<()> {
+    let manifest = r#"
+[package]
+name = "block-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#;
+    let network = r#"pub fn probe() {
+        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
+    }"#;
+    let scan = scan_test_tree(&[
+        ("Cargo.toml", manifest),
+        (
+            "src/lib.rs",
+            r#"fn register() {
+    #[path = "../shared/function_payload.rs"]
+    mod function_payload;
+}
+
+const REGISTER: () = {
+    #[path = "../shared/const_payload.rs"]
+    mod const_payload;
+};"#,
+        ),
+        ("shared/function_payload.rs", network),
+        ("shared/const_payload.rs", network),
+    ])?;
+
+    let findings: Vec<&Finding> = scan
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "proc-macro-network")
+        .collect();
+    assert_eq!(findings.len(), 2, "got: {:?}", scan.findings);
+    assert!(findings
+        .iter()
+        .any(|finding| finding.detail.contains("shared/function_payload.rs")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding.detail.contains("shared/const_payload.rs")));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_block_traversal_inherits_definitely_disabled_cfg() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "#[cfg(any())] fn disabled() { mod missing; }",
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "disabled-block-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    assert_eq!(
+        collect_proc_macro_source_files(directory.path(), &manifest)?,
+        BTreeSet::from(["src/lib.rs".to_string()])
+    );
     Ok(())
 }
 

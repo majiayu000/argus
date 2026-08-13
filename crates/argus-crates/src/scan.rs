@@ -15,6 +15,7 @@ use argus_rules::{looks_binary, scan_text_file, scan_text_files_with_context, Ru
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+use syn::visit::Visit;
 
 /// Crate paths whose contents the crates.io rules read.
 fn is_crate_security_relevant(rel: &str) -> bool {
@@ -504,36 +505,108 @@ fn collect_proc_macro_item_declarations(
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
 ) -> Result<()> {
+    let mut collector = ProcMacroModuleCollector {
+        context,
+        budgets,
+        declarations,
+        error: None,
+    };
     for item in items {
-        let syn::Item::Mod(module) = item else {
-            continue;
-        };
+        collector.visit_item(item);
+        if collector.error.is_some() {
+            break;
+        }
+    }
+    match collector.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+struct ProcMacroModuleCollector<'a> {
+    context: &'a ProcMacroItemContext,
+    budgets: &'a mut ProcMacroModuleBudgets,
+    declarations: &'a mut Vec<ProcMacroModuleDeclaration>,
+    error: Option<anyhow::Error>,
+}
+
+impl ProcMacroModuleCollector<'_> {
+    fn collect_module(&mut self, module: &syn::ItemMod) -> Result<()> {
         if module_attrs_are_definitely_disabled(&module.attrs)? {
-            continue;
+            return Ok(());
         }
 
-        budgets.note_declaration()?;
+        self.budgets.note_declaration()?;
         let name = rust_module_ident_name(&module.ident);
         let path_plan = module_path_plan(&module.attrs)?;
 
         if let Some((_brace, inline_items)) = &module.content {
-            for child_context in inline_module_contexts(context, &name, &path_plan)? {
+            for child_context in inline_module_contexts(self.context, &name, &path_plan)? {
                 collect_proc_macro_item_declarations(
                     inline_items,
                     &child_context,
-                    budgets,
-                    declarations,
+                    self.budgets,
+                    self.declarations,
                 )?;
             }
-            continue;
+            return Ok(());
         }
 
-        for lookup in external_module_lookups(context, &name, &path_plan) {
-            budgets.note_resolution_edge()?;
-            declarations.push(ProcMacroModuleDeclaration { lookup });
+        for lookup in external_module_lookups(self.context, &name, &path_plan) {
+            self.budgets.note_resolution_edge()?;
+            self.declarations
+                .push(ProcMacroModuleDeclaration { lookup });
+        }
+        Ok(())
+    }
+}
+
+impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if self.error.is_some() {
+            return;
+        }
+        match item_attributes(item).map(module_attrs_are_definitely_disabled) {
+            Some(Ok(true)) => return,
+            Some(Err(error)) => {
+                self.error = Some(error);
+                return;
+            }
+            Some(Ok(false)) | None => {}
+        }
+        syn::visit::visit_item(self, item);
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Err(error) = self.collect_module(module) {
+            self.error = Some(error);
         }
     }
-    Ok(())
+}
+
+fn item_attributes(item: &syn::Item) -> Option<&[syn::Attribute]> {
+    match item {
+        syn::Item::Const(item) => Some(&item.attrs),
+        syn::Item::Enum(item) => Some(&item.attrs),
+        syn::Item::ExternCrate(item) => Some(&item.attrs),
+        syn::Item::Fn(item) => Some(&item.attrs),
+        syn::Item::ForeignMod(item) => Some(&item.attrs),
+        syn::Item::Impl(item) => Some(&item.attrs),
+        syn::Item::Macro(item) => Some(&item.attrs),
+        syn::Item::Mod(item) => Some(&item.attrs),
+        syn::Item::Static(item) => Some(&item.attrs),
+        syn::Item::Struct(item) => Some(&item.attrs),
+        syn::Item::Trait(item) => Some(&item.attrs),
+        syn::Item::TraitAlias(item) => Some(&item.attrs),
+        syn::Item::Type(item) => Some(&item.attrs),
+        syn::Item::Union(item) => Some(&item.attrs),
+        syn::Item::Use(item) => Some(&item.attrs),
+        syn::Item::Verbatim(_) => None,
+        _ => None,
+    }
 }
 
 fn rust_module_ident_name(ident: &syn::Ident) -> String {

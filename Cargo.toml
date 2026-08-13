@@ -44,7 +44,7 @@ serde_json_canonicalizer = "0.3.2"
 regex = "1"
 rayon = "1"
 anyhow = "1"
-syn = { version = "2", default-features = false, features = ["clone-impls", "full", "parsing"] }
+syn = { version = "2", default-features = false, features = ["clone-impls", "full", "parsing", "visit"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 semver = "1"
 pep440_rs = "0.7.3"
