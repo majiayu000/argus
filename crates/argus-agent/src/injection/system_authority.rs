@@ -217,37 +217,106 @@ impl<'a> DisplayCursor<'a> {
             return Ok(None);
         };
 
-        let mut quote = None;
+        let valid = match kind {
+            InlineHtmlTag::Opening => probe.consume_opening_html_tag_suffix()?,
+            InlineHtmlTag::Closing => probe.consume_closing_html_tag_suffix()?,
+            InlineHtmlTag::LineBreak => unreachable!("tag syntax is classified before semantics"),
+        };
+        if !valid {
+            return Ok(None);
+        }
+        *self = probe;
+        Ok(Some(tag))
+    }
+
+    fn consume_opening_html_tag_suffix(&mut self) -> Result<bool, ParseError> {
+        if self.consume_html_tag_end(true)? {
+            return Ok(true);
+        }
+        if !self.consume_html_spaces()? {
+            return Ok(false);
+        }
+
         loop {
-            let Some(ch) = probe.next() else {
-                return Ok(None);
-            };
-            if let Some(active_quote) = quote {
-                probe.charge_and_take()?;
-                if ch == active_quote {
-                    quote = None;
-                }
-                continue;
+            if self.consume_html_tag_end(true)? {
+                return Ok(true);
             }
-            match ch {
-                '>' => {
-                    probe.charge_and_take()?;
-                    *self = probe;
-                    return Ok(Some(tag));
+            if !self.next().is_some_and(is_html_attribute_name_start) {
+                return Ok(false);
+            }
+            self.charge_and_take()?;
+            while self.next().is_some_and(is_html_attribute_name_continue) {
+                self.charge_and_take()?;
+            }
+
+            let had_space = self.consume_html_spaces()?;
+            if self.next() == Some('=') {
+                self.charge_and_take()?;
+                self.consume_html_spaces()?;
+                if !self.consume_html_attribute_value()? {
+                    return Ok(false);
                 }
-                '\'' | '"' if kind == InlineHtmlTag::Opening => {
-                    quote = Some(ch);
-                    probe.charge_and_take()?;
+                if self.consume_html_tag_end(true)? {
+                    return Ok(true);
                 }
-                '<' => return Ok(None),
-                ch if kind == InlineHtmlTag::Closing && !matches!(ch, ' ' | '\t' | '\n' | '\r') => {
-                    return Ok(None);
+                if !self.consume_html_spaces()? {
+                    return Ok(false);
                 }
-                _ => {
-                    probe.charge_and_take()?;
+            } else if self.consume_html_tag_end(true)? {
+                return Ok(true);
+            } else if !had_space {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn consume_closing_html_tag_suffix(&mut self) -> Result<bool, ParseError> {
+        self.consume_html_spaces()?;
+        self.consume_html_tag_end(false)
+    }
+
+    fn consume_html_tag_end(&mut self, allow_self_closing: bool) -> Result<bool, ParseError> {
+        if self.next() == Some('>') {
+            self.charge_and_take()?;
+            return Ok(true);
+        }
+        if allow_self_closing && self.rest().starts_with("/>") {
+            self.charge_and_take()?;
+            self.charge_and_take()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn consume_html_spaces(&mut self) -> Result<bool, ParseError> {
+        let mut consumed = false;
+        while self.next().is_some_and(is_html_space) {
+            self.charge_and_take()?;
+            consumed = true;
+        }
+        Ok(consumed)
+    }
+
+    fn consume_html_attribute_value(&mut self) -> Result<bool, ParseError> {
+        if let Some(quote @ ('\'' | '"')) = self.next() {
+            self.charge_and_take()?;
+            loop {
+                let Some(ch) = self.next() else {
+                    return Ok(false);
+                };
+                self.charge_and_take()?;
+                if ch == quote {
+                    return Ok(true);
                 }
             }
         }
+
+        let mut consumed = false;
+        while self.next().is_some_and(is_unquoted_html_attribute_value) {
+            self.charge_and_take()?;
+            consumed = true;
+        }
+        Ok(consumed)
     }
 }
 
@@ -260,12 +329,29 @@ enum InlineHtmlTag {
 
 fn is_inline_html_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
-        "a", "b", "code", "del", "em", "i", "ins", "kbd", "mark", "s", "small", "span", "strong",
-        "sub", "sup", "u",
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i", "ins",
+        "kbd", "mark", "q", "rp", "rt", "ruby", "s", "samp", "small", "span", "strong", "sub",
+        "sup", "time", "u", "var",
     ];
     WRAPPERS
         .iter()
         .any(|wrapper| name.eq_ignore_ascii_case(wrapper))
+}
+
+fn is_html_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\u{000c}' | '\r')
+}
+
+fn is_html_attribute_name_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | ':')
+}
+
+fn is_html_attribute_name_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':' | '-')
+}
+
+fn is_unquoted_html_attribute_value(ch: char) -> bool {
+    !is_html_space(ch) && !matches!(ch, '"' | '\'' | '=' | '<' | '>' | '`')
 }
 #[derive(Clone, Copy)]
 struct AuthorityGrammar<'a> {
