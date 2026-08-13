@@ -116,8 +116,10 @@ python3 eval/labeling/evaluate_current.py evaluate \
 The evaluator verifies the frozen review and final labels, the source commit
 and tree, a pristine source checkout, every scan report and decision/exit-code
 pair, and all 1,438 live predictions. Any operational scan error fails the
-gate. The initial non-regression floors are precision `0.060729` and recall
-`0.625`; `allow-with-approval` remains a non-block prediction.
+gate. The current non-regression floors are precision `0.073171` and recall
+`0.625`; `allow-with-approval` remains a non-block prediction. The immutable
+`frozen/review_report.json` remains the historical detector-baseline result;
+the live gate recomputes current predictions and does not rewrite it.
 
 The report also includes `rule_metrics`: support, block/non-block labels,
 benchmark block fraction, and a 95% Wilson interval for every observed rule.

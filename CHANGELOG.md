@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Reduce agent-rule false positives by limiting `override system` matches to
+  agent-authority targets such as instructions, prompts, messages, and policy,
+  including narrowly formatted or safety-qualified authority targets.
 - Freeze the completed GH-145 single-AI review as 1,438 package-level samples:
   719 packages preserving all 849 original detector findings and 719
   deterministically sampled non-block predictions from the same pinned source
@@ -16,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The review contains 24 `block` and 1,414 `non-block` labels with no unresolved
   rows. CI reproduces the frozen outputs and statically rescans the pinned source
   with the current Argus binary, failing on any operational error or regression
-  below precision 0.060729 / recall 0.625.
+  below precision 0.073171 / recall 0.625. The immutable frozen review report
+  remains the historical detector-baseline result.
 - Agent-surface scans report bundled ELF, Mach-O, and PE/DOS executables as an
   explicit approval finding instead of treating them as unreadable text or
   silently skipping their uninspected binary semantics.
