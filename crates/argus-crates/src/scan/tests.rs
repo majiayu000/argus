@@ -2335,6 +2335,26 @@ choose!({expression});"#
 }
 
 #[test]
+fn proc_macro_expr_fragments_reject_top_level_let() -> Result<()> {
+    for fragment in ["expr", "expr_2021"] {
+        let source = format!(
+            r#"macro_rules! choose {{
+    ($value:{fragment}) => {{}};
+    ($($token:tt)*) => {{ mod payload; }};
+}}
+choose!(let _value = 1);"#
+        );
+        let source_files = collect_test_proc_macro_source_with_edition(
+            &source,
+            &[("src/payload.rs", "")],
+            "2024",
+        )?;
+        assert!(source_files.contains("src/payload.rs"), "{fragment}");
+    }
+    Ok(())
+}
+
+#[test]
 fn proc_macro_signed_literal_fragment_selects_emitting_rule() -> Result<()> {
     for literal in ["-1", "true", "false", "-true", "-false"] {
         let source = format!(

@@ -614,7 +614,9 @@ fn is_macro_literal_token(token: &TokenTree) -> bool {
 
 fn expression_fragment_parses(candidate: TokenStream, accepts_2024_expressions: bool) -> bool {
     syn::parse2::<syn::Expr>(candidate).is_ok_and(|expression| {
-        accepts_2024_expressions || !matches!(expression, syn::Expr::Const(_) | syn::Expr::Infer(_))
+        !matches!(expression, syn::Expr::Let(_))
+            && (accepts_2024_expressions
+                || !matches!(expression, syn::Expr::Const(_) | syn::Expr::Infer(_)))
     })
 }
 
