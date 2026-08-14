@@ -272,6 +272,39 @@ pub(super) fn item_attributes(item: &syn::Item) -> Option<&[syn::Attribute]> {
     }
 }
 
+pub(super) fn impl_item_attributes(item: &syn::ImplItem) -> Option<&[syn::Attribute]> {
+    match item {
+        syn::ImplItem::Const(item) => Some(&item.attrs),
+        syn::ImplItem::Fn(item) => Some(&item.attrs),
+        syn::ImplItem::Type(item) => Some(&item.attrs),
+        syn::ImplItem::Macro(item) => Some(&item.attrs),
+        syn::ImplItem::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
+pub(super) fn trait_item_attributes(item: &syn::TraitItem) -> Option<&[syn::Attribute]> {
+    match item {
+        syn::TraitItem::Const(item) => Some(&item.attrs),
+        syn::TraitItem::Fn(item) => Some(&item.attrs),
+        syn::TraitItem::Type(item) => Some(&item.attrs),
+        syn::TraitItem::Macro(item) => Some(&item.attrs),
+        syn::TraitItem::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
+pub(super) fn foreign_item_attributes(item: &syn::ForeignItem) -> Option<&[syn::Attribute]> {
+    match item {
+        syn::ForeignItem::Fn(item) => Some(&item.attrs),
+        syn::ForeignItem::Static(item) => Some(&item.attrs),
+        syn::ForeignItem::Type(item) => Some(&item.attrs),
+        syn::ForeignItem::Macro(item) => Some(&item.attrs),
+        syn::ForeignItem::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
 pub(super) fn rust_module_ident_name(ident: &syn::Ident) -> String {
     let raw = ident.to_string();
     raw.strip_prefix("r#").unwrap_or(&raw).to_string()

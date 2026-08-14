@@ -2012,6 +2012,19 @@ struct Marker;"#,
 mod marker {}"#,
         r#"#[emitter::emit(mod payload;)]
 nothing!();"#,
+        r#"struct Marker;
+impl Marker {
+    #[emitter::emit(const GENERATED: () = { #[path = "payload.rs"] mod payload; };)]
+    fn generated() {}
+}"#,
+        r#"trait Marker {
+    #[emitter::emit(const GENERATED: () = { #[path = "payload.rs"] mod payload; };)]
+    fn generated();
+}"#,
+        r#"unsafe extern "C" {
+    #[emitter::emit(const GENERATED: () = { #[path = "payload.rs"] mod payload; };)]
+    fn generated();
+}"#,
     ] {
         let result = scan_test_tree(&[
             ("Cargo.toml", manifest),
@@ -2022,8 +2035,26 @@ nothing!();"#,
             Ok(_) => anyhow::bail!("attribute macro expansion unexpectedly scanned cleanly"),
             Err(error) => error,
         };
-        assert!(format!("{error:#}").contains("OpaqueExpansion"));
+        assert!(
+            format!("{error:#}").contains("OpaqueExpansion"),
+            "host `{host}` returned: {error:#}"
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_disabled_associated_item_attribute_is_ignored() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"struct Marker;
+impl Marker {
+    #[cfg(any())]
+    #[emitter::emit(mod payload;)]
+    fn generated() {}
+}"#,
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
     Ok(())
 }
 

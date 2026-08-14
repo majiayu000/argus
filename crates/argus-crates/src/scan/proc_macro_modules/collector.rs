@@ -142,6 +142,43 @@ struct ProcMacroModuleCollector<'a> {
 }
 
 impl ProcMacroModuleCollector<'_> {
+    fn validate_associated_item_attributes(
+        &mut self,
+        attributes: Option<&[syn::Attribute]>,
+        unsupported_syntax: bool,
+    ) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if unsupported_syntax {
+            self.error = Some(
+                OpaqueExpansion::new(
+                    "unsupported Rust associated item syntax may emit modules and cannot be traversed statically",
+                )
+                .into(),
+            );
+            return false;
+        }
+        let Some(attributes) = attributes else {
+            return true;
+        };
+        match module_attrs_are_definitely_disabled(attributes) {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        }
+        if let Err(error) =
+            validate_proc_macro_attributes(attributes, |name| self.macro_name_may_be_imported(name))
+        {
+            self.error = Some(error);
+            return false;
+        }
+        true
+    }
+
     fn collect_module(&mut self, module: &syn::ItemMod) -> Result<()> {
         if module_attrs_are_definitely_disabled(&module.attrs)? {
             return Ok(());
@@ -319,6 +356,33 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         };
         if let Err(error) = result {
             self.error = Some(error);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        if self.validate_associated_item_attributes(
+            impl_item_attributes(item),
+            matches!(item, syn::ImplItem::Verbatim(_)),
+        ) {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        if self.validate_associated_item_attributes(
+            trait_item_attributes(item),
+            matches!(item, syn::TraitItem::Verbatim(_)),
+        ) {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        if self.validate_associated_item_attributes(
+            foreign_item_attributes(item),
+            matches!(item, syn::ForeignItem::Verbatim(_)),
+        ) {
+            syn::visit::visit_foreign_item(self, item);
         }
     }
 
