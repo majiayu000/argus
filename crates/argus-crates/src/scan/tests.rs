@@ -2269,6 +2269,18 @@ fn proc_macro_false_cfg_statement_macro_is_ignored() -> Result<()> {
 }
 
 #[test]
+fn proc_macro_false_cfg_fields_are_ignored() -> Result<()> {
+    for source in [
+        "struct Marker { #[cfg(any())] field: unknown_macro!(), }",
+        "enum Marker { Variant(#[cfg_attr(all(), cfg(any()))] unknown_macro!()) }",
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[])?;
+        assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    }
+    Ok(())
+}
+
+#[test]
 fn proc_macro_edition_2024_expr_differs_from_expr_2021() -> Result<()> {
     for expression in ["_", "const { 1 }"] {
         let source = format!(
