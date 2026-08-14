@@ -2082,6 +2082,10 @@ declare!(1 + 2);"#,
     ($($token:tt)*) => {};
 }
 choose!(<u8 as Trait>::Assoc);"#,
+        r#"macro_rules! declare { ($statement:stmt) => { mod payload; } }
+declare!(let _value = 1);"#,
+        r#"macro_rules! declare { ($statement:stmt) => { mod payload; } }
+declare!(struct Payload;);"#,
     ] {
         let source_files = collect_test_proc_macro_source(source, &[("src/payload.rs", "")])?;
         assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
@@ -2097,6 +2101,36 @@ fn proc_macro_underscore_does_not_match_ident_fragment() -> Result<()> {
     ($value:tt) => { mod payload; };
 }
 choose!(_);"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_stmt_fragment_excludes_non_item_trailing_semicolon() -> Result<()> {
+    for invocation in ["1;", "let _value = 1;", "inner!();"] {
+        let source = format!(
+            r#"macro_rules! choose {{
+    ($statement:stmt) => {{}};
+    ($($token:tt)*) => {{ mod payload; }};
+}}
+choose!({invocation});"#
+        );
+        let source_files = collect_test_proc_macro_source(&source, &[("src/payload.rs", "")])?;
+        assert!(source_files.contains("src/payload.rs"), "{invocation}");
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_stmt_fragment_accepts_empty_statement() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! choose {
+    ($statement:stmt) => { mod payload; };
+    ($($token:tt)*) => {};
+}
+choose!(;);"#,
         &[("src/payload.rs", "")],
     )?;
     assert!(source_files.contains("src/payload.rs"));

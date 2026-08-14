@@ -560,9 +560,7 @@ fn fragment_ends(
             }
             "pat" => syn::Pat::parse_single.parse2(candidate).is_ok(),
             "pat_param" => syn::Pat::parse_single.parse2(candidate).is_ok(),
-            "stmt" => syn::Block::parse_within
-                .parse2(candidate)
-                .is_ok_and(|statements| statements.len() == 1),
+            "stmt" => statement_fragment_parses(candidate),
             "vis" => syn::parse2::<syn::Visibility>(candidate).is_ok(),
             other => return opaque(format!("unsupported macro fragment specifier `{other}`")),
         };
@@ -571,6 +569,39 @@ fn fragment_ends(
         }
     }
     Ok(ends)
+}
+
+fn statement_fragment_parses(candidate: TokenStream) -> bool {
+    let parsed = syn::Block::parse_within.parse2(candidate.clone());
+    if parsed.is_ok_and(|statements| match statements.as_slice() {
+        [syn::Stmt::Item(_)] | [syn::Stmt::Expr(_, None)] => true,
+        [syn::Stmt::Expr(syn::Expr::Verbatim(tokens), Some(_))] => tokens.is_empty(),
+        [syn::Stmt::Macro(statement)] => statement.semi_token.is_none(),
+        _ => false,
+    }) {
+        return true;
+    }
+
+    if matches!(candidate.clone().into_iter().last(), Some(TokenTree::Punct(punct)) if punct.as_char() == ';')
+    {
+        return false;
+    }
+
+    let mut completed = candidate;
+    completed.extend([TokenTree::Punct(proc_macro2::Punct::new(
+        ';',
+        proc_macro2::Spacing::Alone,
+    ))]);
+    syn::Block::parse_within
+        .parse2(completed)
+        .is_ok_and(|statements| {
+            matches!(
+                statements.as_slice(),
+                [syn::Stmt::Local(_)]
+                    | [syn::Stmt::Macro(_)]
+                    | [syn::Stmt::Expr(syn::Expr::Macro(_), Some(_))]
+            )
+        })
 }
 
 fn is_macro_literal_token(token: &TokenTree) -> bool {
