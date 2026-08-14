@@ -1,5 +1,5 @@
 use super::super::macro_expansion::{MacroRulesDefinition, MacroRulesEdition, OpaqueExpansion};
-use super::attributes::validate_proc_macro_attributes;
+use super::attributes::{expression_attributes, validate_proc_macro_attributes};
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -305,6 +305,27 @@ impl ProcMacroModuleCollector<'_> {
 }
 
 impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
+    fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
+        if self.error.is_some() {
+            return;
+        }
+        let attributes = match statement {
+            syn::Stmt::Local(local) => Some(local.attrs.as_slice()),
+            syn::Stmt::Item(item) => item_attributes(item),
+            syn::Stmt::Macro(statement_macro) => Some(statement_macro.attrs.as_slice()),
+            syn::Stmt::Expr(expression, _) => expression_attributes(expression),
+        };
+        match attributes.map(module_attrs_are_definitely_disabled) {
+            Some(Ok(true)) => return,
+            Some(Err(error)) => {
+                self.error = Some(error);
+                return;
+            }
+            Some(Ok(false)) | None => {}
+        }
+        syn::visit::visit_stmt(self, statement);
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if self.error.is_some() {
             return;

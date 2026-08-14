@@ -1940,6 +1940,23 @@ fn proc_macro_false_cfg_gate_short_circuits_later_gates() -> Result<()> {
 }
 
 #[test]
+fn proc_macro_false_cfg_statement_macro_is_ignored() -> Result<()> {
+    for statement in [
+        "unknown_macro!();",
+        "unknown_macro!()",
+        "{ unknown_macro!(); }",
+        "let _value = unknown_macro!();",
+    ] {
+        for gate in ["#[cfg(any())]", "#[cfg_attr(all(), cfg(any()))]"] {
+            let source = format!("fn register() {{ {gate} {statement} }}");
+            let source_files = collect_test_proc_macro_source(&source, &[])?;
+            assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn proc_macro_edition_2024_expr_differs_from_expr_2021() -> Result<()> {
     for expression in ["_", "const { 1 }"] {
         let source = format!(

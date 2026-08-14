@@ -1,6 +1,52 @@
 use super::super::macro_expansion::OpaqueExpansion;
 use super::*;
 
+pub(super) fn expression_attributes(expression: &syn::Expr) -> Option<&[syn::Attribute]> {
+    match expression {
+        syn::Expr::Array(expression) => Some(&expression.attrs),
+        syn::Expr::Assign(expression) => Some(&expression.attrs),
+        syn::Expr::Async(expression) => Some(&expression.attrs),
+        syn::Expr::Await(expression) => Some(&expression.attrs),
+        syn::Expr::Binary(expression) => Some(&expression.attrs),
+        syn::Expr::Block(expression) => Some(&expression.attrs),
+        syn::Expr::Break(expression) => Some(&expression.attrs),
+        syn::Expr::Call(expression) => Some(&expression.attrs),
+        syn::Expr::Cast(expression) => Some(&expression.attrs),
+        syn::Expr::Closure(expression) => Some(&expression.attrs),
+        syn::Expr::Const(expression) => Some(&expression.attrs),
+        syn::Expr::Continue(expression) => Some(&expression.attrs),
+        syn::Expr::Field(expression) => Some(&expression.attrs),
+        syn::Expr::ForLoop(expression) => Some(&expression.attrs),
+        syn::Expr::Group(expression) => Some(&expression.attrs),
+        syn::Expr::If(expression) => Some(&expression.attrs),
+        syn::Expr::Index(expression) => Some(&expression.attrs),
+        syn::Expr::Infer(expression) => Some(&expression.attrs),
+        syn::Expr::Let(expression) => Some(&expression.attrs),
+        syn::Expr::Lit(expression) => Some(&expression.attrs),
+        syn::Expr::Loop(expression) => Some(&expression.attrs),
+        syn::Expr::Macro(expression) => Some(&expression.attrs),
+        syn::Expr::Match(expression) => Some(&expression.attrs),
+        syn::Expr::MethodCall(expression) => Some(&expression.attrs),
+        syn::Expr::Paren(expression) => Some(&expression.attrs),
+        syn::Expr::Path(expression) => Some(&expression.attrs),
+        syn::Expr::Range(expression) => Some(&expression.attrs),
+        syn::Expr::RawAddr(expression) => Some(&expression.attrs),
+        syn::Expr::Reference(expression) => Some(&expression.attrs),
+        syn::Expr::Repeat(expression) => Some(&expression.attrs),
+        syn::Expr::Return(expression) => Some(&expression.attrs),
+        syn::Expr::Struct(expression) => Some(&expression.attrs),
+        syn::Expr::Try(expression) => Some(&expression.attrs),
+        syn::Expr::TryBlock(expression) => Some(&expression.attrs),
+        syn::Expr::Tuple(expression) => Some(&expression.attrs),
+        syn::Expr::Unary(expression) => Some(&expression.attrs),
+        syn::Expr::Unsafe(expression) => Some(&expression.attrs),
+        syn::Expr::While(expression) => Some(&expression.attrs),
+        syn::Expr::Yield(expression) => Some(&expression.attrs),
+        syn::Expr::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
 pub(super) fn validate_proc_macro_attributes(
     attributes: &[syn::Attribute],
     macro_name_may_be_imported: impl Fn(&str) -> bool,
