@@ -515,10 +515,10 @@ fn fragment_ends(
     let single_length = match fragment {
         "tt" if !remaining.is_empty() => Some(1),
         "ident" if matches!(remaining.first(), Some(TokenTree::Ident(_))) => Some(1),
-        "literal" if matches!(remaining.first(), Some(TokenTree::Literal(_))) => Some(1),
+        "literal" if remaining.first().is_some_and(is_macro_literal_token) => Some(1),
         "literal"
             if punct_at(remaining, 0, '-')
-                && matches!(remaining.get(1), Some(TokenTree::Literal(_))) =>
+                && remaining.get(1).is_some_and(is_macro_literal_token) =>
         {
             Some(2)
         }
@@ -569,6 +569,14 @@ fn fragment_ends(
         }
     }
     Ok(ends)
+}
+
+fn is_macro_literal_token(token: &TokenTree) -> bool {
+    match token {
+        TokenTree::Literal(_) => true,
+        TokenTree::Ident(ident) => ident == "true" || ident == "false",
+        TokenTree::Punct(_) | TokenTree::Group(_) => false,
+    }
 }
 
 fn expression_fragment_parses(candidate: TokenStream, accepts_2024_expressions: bool) -> bool {

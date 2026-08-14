@@ -1961,15 +1961,17 @@ choose!({expression});"#
 
 #[test]
 fn proc_macro_signed_literal_fragment_selects_emitting_rule() -> Result<()> {
-    let source_files = collect_test_proc_macro_source(
-        r#"macro_rules! choose {
-    ($value:literal) => { mod payload; };
-    ($($token:tt)*) => {};
-}
-choose!(-1);"#,
-        &[("src/payload.rs", "")],
-    )?;
-    assert!(source_files.contains("src/payload.rs"));
+    for literal in ["-1", "true", "false", "-true", "-false"] {
+        let source = format!(
+            r#"macro_rules! choose {{
+    ($value:literal) => {{ mod payload; }};
+    ($($token:tt)*) => {{}};
+}}
+choose!({literal});"#
+        );
+        let source_files = collect_test_proc_macro_source(&source, &[("src/payload.rs", "")])?;
+        assert!(source_files.contains("src/payload.rs"), "{literal}");
+    }
     Ok(())
 }
 
