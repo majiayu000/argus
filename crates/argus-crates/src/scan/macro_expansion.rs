@@ -540,7 +540,7 @@ fn fragment_ends(
             }
             "expr_2021" => expression_fragment_parses(candidate, false),
             "ty" => syn::parse2::<syn::Type>(candidate).is_ok(),
-            "path" => syn::parse2::<syn::Path>(candidate).is_ok(),
+            "path" => syn::parse2::<syn::TypePath>(candidate).is_ok(),
             "meta" => syn::parse2::<syn::Meta>(candidate).is_ok(),
             "pat" if budget.edition.accepts_top_level_or_patterns() => {
                 syn::Pat::parse_multi.parse2(candidate).is_ok()

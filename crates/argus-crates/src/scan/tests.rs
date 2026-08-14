@@ -1779,6 +1779,11 @@ declare!(payload);"#,
 declare!(Some(_) | None);"#,
         r#"macro_rules! declare { ($value:expr_2021) => { mod payload; } }
 declare!(1 + 2);"#,
+        r#"macro_rules! choose {
+    ($value:path) => { mod payload; };
+    ($($token:tt)*) => {};
+}
+choose!(<u8 as Trait>::Assoc);"#,
     ] {
         let source_files = collect_test_proc_macro_source(source, &[("src/payload.rs", "")])?;
         assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
