@@ -142,6 +142,15 @@ impl<'a> DisplayCursor<'a> {
                         }
                     }
                 }
+                Some('<') => match self.consume_inline_html_tag()? {
+                    Some(InlineHtmlTag::RenderedBoundary | InlineHtmlTag::BreakOpportunity) => {
+                        semantic = true
+                    }
+                    Some(
+                        InlineHtmlTag::Opening | InlineHtmlTag::Closing | InlineHtmlTag::Comment,
+                    ) => {}
+                    None => break,
+                },
                 _ => break,
             }
         }
@@ -152,7 +161,7 @@ impl<'a> DisplayCursor<'a> {
             Err(ParseError::NoMatch)
         }
     }
-    fn consume_transparent_tail(&mut self) -> Result<bool, ParseError> {
+    fn consume_transparent_tail(&mut self) -> Result<(bool, bool), ParseError> {
         let mut closed_label = false;
         loop {
             match self.next() {
@@ -164,10 +173,235 @@ impl<'a> DisplayCursor<'a> {
                     self.open_labels -= 1;
                     closed_label = true;
                 }
-                _ => return Ok(closed_label),
+                Some('<') => {
+                    let saved = *self;
+                    match self.consume_inline_html_tag()? {
+                        Some(
+                            InlineHtmlTag::Opening
+                            | InlineHtmlTag::Closing
+                            | InlineHtmlTag::Comment
+                            | InlineHtmlTag::BreakOpportunity,
+                        ) => {}
+                        Some(InlineHtmlTag::RenderedBoundary) => return Ok((closed_label, true)),
+                        None => {
+                            *self = saved;
+                            return Ok((closed_label, false));
+                        }
+                    }
+                }
+                _ => return Ok((closed_label, false)),
             }
         }
     }
+
+    fn consume_inline_html_tag(&mut self) -> Result<Option<InlineHtmlTag>, ParseError> {
+        if self.next() != Some('<') {
+            return Ok(None);
+        }
+        if self.rest().starts_with("<!--") {
+            return self.consume_inline_html_comment();
+        }
+        let mut probe = *self;
+        probe.charge_and_take()?;
+        let kind = if probe.next() == Some('/') {
+            probe.charge_and_take()?;
+            InlineHtmlTag::Closing
+        } else {
+            InlineHtmlTag::Opening
+        };
+        let name_start = probe.at;
+        if !probe.next().is_some_and(|ch| ch.is_ascii_alphabetic()) {
+            return Ok(None);
+        }
+        probe.charge_and_take()?;
+        while probe
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            probe.charge_and_take()?;
+        }
+        let name = &probe.line[name_start..probe.at];
+        let tag = if name.eq_ignore_ascii_case("br") || name.eq_ignore_ascii_case("q") {
+            InlineHtmlTag::RenderedBoundary
+        } else if name.eq_ignore_ascii_case("wbr") {
+            if kind == InlineHtmlTag::Opening {
+                InlineHtmlTag::BreakOpportunity
+            } else {
+                InlineHtmlTag::Closing
+            }
+        } else if is_inline_html_wrapper(name) {
+            kind
+        } else {
+            return Ok(None);
+        };
+
+        let valid = match kind {
+            InlineHtmlTag::Opening => probe.consume_opening_html_tag_suffix()?,
+            InlineHtmlTag::Closing => probe.consume_closing_html_tag_suffix()?,
+            InlineHtmlTag::Comment
+            | InlineHtmlTag::RenderedBoundary
+            | InlineHtmlTag::BreakOpportunity => {
+                unreachable!("tag syntax is classified before semantics")
+            }
+        };
+        if !valid {
+            return Ok(None);
+        }
+        *self = probe;
+        Ok(Some(tag))
+    }
+
+    fn consume_inline_html_comment(&mut self) -> Result<Option<InlineHtmlTag>, ParseError> {
+        let mut probe = *self;
+        for _ in 0.."<!--".len() {
+            probe.charge_and_take()?;
+        }
+        if matches!(probe.next(), Some('>')) || probe.rest().starts_with("->") {
+            return Ok(None);
+        }
+        loop {
+            if probe.rest().starts_with("-->") {
+                for _ in 0.."-->".len() {
+                    probe.charge_and_take()?;
+                }
+                *self = probe;
+                return Ok(Some(InlineHtmlTag::Comment));
+            }
+            if probe.rest().starts_with("--") {
+                return Ok(None);
+            }
+            if probe.next().is_none() {
+                return Ok(None);
+            }
+            probe.charge_and_take()?;
+        }
+    }
+
+    fn consume_opening_html_tag_suffix(&mut self) -> Result<bool, ParseError> {
+        if self.consume_html_tag_end(true)? {
+            return Ok(true);
+        }
+        if !self.consume_html_spaces()? {
+            return Ok(false);
+        }
+
+        loop {
+            if self.consume_html_tag_end(true)? {
+                return Ok(true);
+            }
+            if !self.next().is_some_and(is_html_attribute_name_start) {
+                return Ok(false);
+            }
+            self.charge_and_take()?;
+            while self.next().is_some_and(is_html_attribute_name_continue) {
+                self.charge_and_take()?;
+            }
+
+            let had_space = self.consume_html_spaces()?;
+            if self.next() == Some('=') {
+                self.charge_and_take()?;
+                self.consume_html_spaces()?;
+                if !self.consume_html_attribute_value()? {
+                    return Ok(false);
+                }
+                if self.consume_html_tag_end(true)? {
+                    return Ok(true);
+                }
+                if !self.consume_html_spaces()? {
+                    return Ok(false);
+                }
+            } else if self.consume_html_tag_end(true)? {
+                return Ok(true);
+            } else if !had_space {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn consume_closing_html_tag_suffix(&mut self) -> Result<bool, ParseError> {
+        self.consume_html_spaces()?;
+        self.consume_html_tag_end(false)
+    }
+
+    fn consume_html_tag_end(&mut self, allow_self_closing: bool) -> Result<bool, ParseError> {
+        if self.next() == Some('>') {
+            self.charge_and_take()?;
+            return Ok(true);
+        }
+        if allow_self_closing && self.rest().starts_with("/>") {
+            self.charge_and_take()?;
+            self.charge_and_take()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn consume_html_spaces(&mut self) -> Result<bool, ParseError> {
+        let mut consumed = false;
+        while self.next().is_some_and(is_html_space) {
+            self.charge_and_take()?;
+            consumed = true;
+        }
+        Ok(consumed)
+    }
+
+    fn consume_html_attribute_value(&mut self) -> Result<bool, ParseError> {
+        if let Some(quote @ ('\'' | '"')) = self.next() {
+            self.charge_and_take()?;
+            loop {
+                let Some(ch) = self.next() else {
+                    return Ok(false);
+                };
+                self.charge_and_take()?;
+                if ch == quote {
+                    return Ok(true);
+                }
+            }
+        }
+
+        let mut consumed = false;
+        while self.next().is_some_and(is_unquoted_html_attribute_value) {
+            self.charge_and_take()?;
+            consumed = true;
+        }
+        Ok(consumed)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InlineHtmlTag {
+    Opening,
+    Closing,
+    Comment,
+    RenderedBoundary,
+    BreakOpportunity,
+}
+
+fn is_inline_html_wrapper(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &[
+        "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i", "ins",
+        "kbd", "mark", "rp", "rt", "ruby", "s", "samp", "small", "span", "strong", "sub", "sup",
+        "time", "u", "var",
+    ];
+    WRAPPERS
+        .iter()
+        .any(|wrapper| name.eq_ignore_ascii_case(wrapper))
+}
+
+fn is_html_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\u{000c}' | '\r')
+}
+
+fn is_html_attribute_name_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | ':')
+}
+
+fn is_html_attribute_name_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':' | '-')
+}
+
+fn is_unquoted_html_attribute_value(ch: char) -> bool {
+    !is_html_space(ch) && !matches!(ch, '"' | '\'' | '=' | '<' | '>' | '`')
 }
 #[derive(Clone, Copy)]
 struct AuthorityGrammar<'a> {
@@ -285,12 +519,18 @@ impl<'a> AuthorityGrammar<'a> {
     }
 
     fn finish_target(&mut self) -> Result<bool, ParseError> {
-        let closed_label = self.cursor.consume_transparent_tail()?;
+        let (closed_label, semantic_boundary) = self.cursor.consume_transparent_tail()?;
+        if semantic_boundary {
+            return Ok(true);
+        }
         if closed_label && self.cursor.next() == Some('(') {
             match probe_destination(self.cursor) {
                 DestinationProbe::Complete(cursor) => {
                     self.cursor = cursor;
-                    self.cursor.consume_transparent_tail()?;
+                    let (_, semantic_boundary) = self.cursor.consume_transparent_tail()?;
+                    if semantic_boundary {
+                        return Ok(true);
+                    }
                 }
                 DestinationProbe::Unknown => {
                     return Ok(match probe_rendered_boundary(self.cursor) {
@@ -393,6 +633,29 @@ fn probe_rendered_boundary(cursor: DisplayCursor<'_>) -> RenderedBoundaryProbe {
         let Some(ch) = cursor.line[at..].chars().next() else {
             return RenderedBoundaryProbe::Known(true);
         };
+        if ch == '<' {
+            let mut html = DisplayCursor::new(cursor.line, at);
+            match html.consume_inline_html_tag() {
+                Ok(Some(InlineHtmlTag::RenderedBoundary)) => {
+                    return RenderedBoundaryProbe::Known(true);
+                }
+                Ok(Some(
+                    InlineHtmlTag::Opening
+                    | InlineHtmlTag::Closing
+                    | InlineHtmlTag::Comment
+                    | InlineHtmlTag::BreakOpportunity,
+                )) => {
+                    let consumed = cursor.line[at..html.at].chars().count();
+                    let Some(next_remaining) = remaining.checked_sub(consumed) else {
+                        return RenderedBoundaryProbe::Unknown;
+                    };
+                    remaining = next_remaining;
+                    at = html.at;
+                    continue;
+                }
+                Ok(None) | Err(_) => {}
+            }
+        }
         if !is_plain_markup(ch) && !is_default_ignorable(ch) {
             return RenderedBoundaryProbe::Known(is_rendered_boundary(Some(ch)));
         }
