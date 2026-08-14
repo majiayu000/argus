@@ -52,7 +52,7 @@
       "packageName": "formatted-system-override",
       "expectedDecision": "block",
       "rules": ["injection-override"],
-      "notes": "SKILL.md uses Markdown emphasis, an HTML anchor, and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
+      "notes": "SKILL.md uses Markdown emphasis, bounded inline HTML, and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
     },
     {
       "id": "skill-benign-installer",
@@ -62,6 +62,15 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. SKILL.md documents `curl https://astral.sh/uv/install.sh | sh` (official vendor installer) as a prerequisite. No bundled scripts. The current lexical curl_pipe_sh rule flags this — it must NOT block. Census showed 1571 such benign hits."
+    },
+    {
+      "id": "skill-wbr-system-override",
+      "kind": "fixture",
+      "path": "fixtures/skill-wbr-system-override",
+      "packageName": "wbr-system-override",
+      "expectedDecision": "block",
+      "rules": ["injection-override"],
+      "notes": "SKILL.md isolates a no-space `<wbr>` break opportunity between `system` and the authority target. Pure text/LLM-instruction attack (no scripts)."
     },
     {
       "id": "skill-benign-net-tool",

@@ -143,7 +143,9 @@ impl<'a> DisplayCursor<'a> {
                     }
                 }
                 Some('<') => match self.consume_inline_html_tag()? {
-                    Some(InlineHtmlTag::RenderedBoundary) => semantic = true,
+                    Some(InlineHtmlTag::RenderedBoundary | InlineHtmlTag::BreakOpportunity) => {
+                        semantic = true
+                    }
                     Some(
                         InlineHtmlTag::Opening | InlineHtmlTag::Closing | InlineHtmlTag::Comment,
                     ) => {}
@@ -177,7 +179,8 @@ impl<'a> DisplayCursor<'a> {
                         Some(
                             InlineHtmlTag::Opening
                             | InlineHtmlTag::Closing
-                            | InlineHtmlTag::Comment,
+                            | InlineHtmlTag::Comment
+                            | InlineHtmlTag::BreakOpportunity,
                         ) => {}
                         Some(InlineHtmlTag::RenderedBoundary) => return Ok((closed_label, true)),
                         None => {
@@ -220,6 +223,12 @@ impl<'a> DisplayCursor<'a> {
         let name = &probe.line[name_start..probe.at];
         let tag = if name.eq_ignore_ascii_case("br") || name.eq_ignore_ascii_case("q") {
             InlineHtmlTag::RenderedBoundary
+        } else if name.eq_ignore_ascii_case("wbr") {
+            if kind == InlineHtmlTag::Opening {
+                InlineHtmlTag::BreakOpportunity
+            } else {
+                InlineHtmlTag::Closing
+            }
         } else if is_inline_html_wrapper(name) {
             kind
         } else {
@@ -229,7 +238,9 @@ impl<'a> DisplayCursor<'a> {
         let valid = match kind {
             InlineHtmlTag::Opening => probe.consume_opening_html_tag_suffix()?,
             InlineHtmlTag::Closing => probe.consume_closing_html_tag_suffix()?,
-            InlineHtmlTag::Comment | InlineHtmlTag::RenderedBoundary => {
+            InlineHtmlTag::Comment
+            | InlineHtmlTag::RenderedBoundary
+            | InlineHtmlTag::BreakOpportunity => {
                 unreachable!("tag syntax is classified before semantics")
             }
         };
@@ -363,6 +374,7 @@ enum InlineHtmlTag {
     Closing,
     Comment,
     RenderedBoundary,
+    BreakOpportunity,
 }
 
 fn is_inline_html_wrapper(name: &str) -> bool {
@@ -628,7 +640,10 @@ fn probe_rendered_boundary(cursor: DisplayCursor<'_>) -> RenderedBoundaryProbe {
                     return RenderedBoundaryProbe::Known(true);
                 }
                 Ok(Some(
-                    InlineHtmlTag::Opening | InlineHtmlTag::Closing | InlineHtmlTag::Comment,
+                    InlineHtmlTag::Opening
+                    | InlineHtmlTag::Closing
+                    | InlineHtmlTag::Comment
+                    | InlineHtmlTag::BreakOpportunity,
                 )) => {
                     let consumed = cursor.line[at..html.at].chars().count();
                     let Some(next_remaining) = remaining.checked_sub(consumed) else {
