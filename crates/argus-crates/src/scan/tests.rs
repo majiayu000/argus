@@ -2303,15 +2303,28 @@ fn proc_macro_false_cfg_statement_macro_is_ignored() -> Result<()> {
 }
 
 #[test]
-fn proc_macro_false_cfg_fields_are_ignored() -> Result<()> {
+fn proc_macro_false_cfg_fields_and_variants_are_ignored() -> Result<()> {
     for source in [
         "struct Marker { #[cfg(any())] field: unknown_macro!(), }",
         "enum Marker { Variant(#[cfg_attr(all(), cfg(any()))] unknown_macro!()) }",
+        "enum Marker { #[cfg(any())] Variant(unknown_macro!()), Present }",
+        "enum Marker { #[cfg_attr(all(), cfg(any()))] Variant { field: unknown_macro!() } }",
+        "enum Marker { #[cfg(any())] Hidden = unknown_macro!(), Present }",
     ] {
         let source_files = collect_test_proc_macro_source(source, &[])?;
         assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
     }
     Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_variant_still_traverses_discriminant() {
+    let error = collect_test_proc_macro_source(
+        "enum Marker { #[cfg(windows)] Hidden = unknown_macro!(), Present }",
+        &[],
+    )
+    .expect_err("an unknown cfg variant must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
 }
 
 #[test]

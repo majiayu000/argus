@@ -504,6 +504,21 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         syn::visit::visit_field(self, field);
     }
 
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        if self.error.is_some() {
+            return;
+        }
+        match module_attrs_are_definitely_disabled(&variant.attrs) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+        syn::visit::visit_variant(self, variant);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_none() {
             if let Err(error) = self.expand_macro(mac) {
