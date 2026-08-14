@@ -1,10 +1,16 @@
 use super::*;
+use std::rc::Rc;
+use std::sync::Arc;
 
 mod attributes;
 mod collector;
 mod path_resolution;
 use collector::*;
 pub(super) use path_resolution::*;
+
+const MAX_PROC_MACRO_REPEATED_CONTEXT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROC_MACRO_RETAINED_SCOPE_ENTRIES: usize = 65_536;
+const MAX_PROC_MACRO_SCOPE_SNAPSHOT_ENTRIES: usize = 65_536;
 
 pub(super) fn collect_proc_macro_source_files(
     pkg_dir: &Path,
@@ -22,13 +28,15 @@ pub(super) fn collect_proc_macro_source_files(
     let mut source_files = BTreeSet::new();
     source_files.insert(root_rel.clone());
     let mut visited_contexts = BTreeSet::new();
-    visited_contexts.insert(root_context.clone());
+    visited_contexts.insert((root_context.clone(), Vec::new()));
     let mut resolved_edges = BTreeSet::new();
-    let mut pending = vec![root_context];
+    let mut evaluated_sources = BTreeSet::new();
+    let root_ancestry = ProcMacroSourceAncestry::root(root_context.clone(), Vec::new());
+    let mut pending = vec![(root_context, Vec::new(), root_ancestry)];
     let mut budgets = ProcMacroModuleBudgets::default();
     let edition = cargo_manifest_macro_rules_edition(manifest)?;
 
-    while let Some(context) = pending.pop() {
+    while let Some((context, inherited_macro_scopes, ancestry)) = pending.pop() {
         let source_path =
             validate_proc_macro_source_path(&canonical_pkg_dir, Path::new(&context.source_rel))?;
         let abs = canonical_pkg_dir.join(&source_path);
@@ -37,17 +45,25 @@ pub(super) fn collect_proc_macro_source_files(
         if looks_binary(content.as_bytes()) {
             anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
+        if !evaluated_sources.insert(context.source_rel.clone()) {
+            budgets.note_repeated_context_bytes(content.len())?;
+        }
         let declarations = proc_macro_module_declarations(
             &content,
             &context,
             &canonical_pkg_dir,
             &mut budgets,
+            &inherited_macro_scopes,
             edition,
         )
         .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
 
         for declaration in declarations {
-            if !resolved_edges.insert(declaration.lookup.clone()) {
+            let edge_key = (
+                declaration.lookup.clone(),
+                declaration.inherited_scope_revisions.clone(),
+            );
+            if !resolved_edges.insert(edge_key) {
                 continue;
             }
             let module = declaration.resolve(&canonical_pkg_dir)?;
@@ -61,8 +77,18 @@ pub(super) fn collect_proc_macro_source_files(
                 source_files.insert(module_rel.clone());
             }
             let next_context = declaration.source_context(module_rel);
-            if visited_contexts.insert(next_context.clone()) {
-                pending.push(next_context);
+            let next_ancestry =
+                ancestry.descend(&next_context, &declaration.inherited_scope_revisions)?;
+            let next_key = (
+                next_context.clone(),
+                declaration.inherited_scope_revisions.clone(),
+            );
+            if visited_contexts.insert(next_key) {
+                pending.push((
+                    next_context,
+                    declaration.inherited_macro_scopes,
+                    next_ancestry,
+                ));
             }
         }
     }
@@ -94,6 +120,47 @@ fn cargo_manifest_macro_rules_edition(
     }
 }
 
+#[derive(Clone)]
+struct ProcMacroSourceAncestry {
+    context: ProcMacroSourceContext,
+    inherited_scope_revisions: Vec<usize>,
+    parent: Option<Arc<Self>>,
+}
+
+impl ProcMacroSourceAncestry {
+    fn root(context: ProcMacroSourceContext, inherited_scope_revisions: Vec<usize>) -> Self {
+        Self {
+            context,
+            inherited_scope_revisions,
+            parent: None,
+        }
+    }
+
+    fn descend(
+        &self,
+        context: &ProcMacroSourceContext,
+        inherited_scope_revisions: &[usize],
+    ) -> Result<Self> {
+        let mut ancestor = Some(self);
+        while let Some(current) = ancestor {
+            if current.context == *context
+                && current.inherited_scope_revisions == inherited_scope_revisions
+            {
+                anyhow::bail!(
+                    "proc-macro module source cycle reaches `{}`",
+                    context.source_rel
+                );
+            }
+            ancestor = current.parent.as_deref();
+        }
+        Ok(Self {
+            context: context.clone(),
+            inherited_scope_revisions: inherited_scope_revisions.to_vec(),
+            parent: Some(Arc::new(self.clone())),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct ProcMacroSourceContext {
     source_rel: String,
@@ -115,9 +182,10 @@ impl ProcMacroSourceContext {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct ProcMacroModuleDeclaration {
     lookup: ProcMacroModuleLookup,
+    inherited_macro_scopes: Vec<Rc<MacroScope>>,
+    inherited_scope_revisions: Vec<usize>,
 }
 
 impl ProcMacroModuleDeclaration {
@@ -180,9 +248,57 @@ pub(super) struct ProcMacroModuleBudgets {
     expansions: usize,
     expanded_tokens: usize,
     expansion_depth: usize,
+    scope_revisions: usize,
+    scope_snapshot_entries: usize,
+    repeated_context_bytes: usize,
+    retained_scope_entries: usize,
 }
 
 impl ProcMacroModuleBudgets {
+    fn note_retained_scope_entries(&mut self, entries: usize) -> Result<()> {
+        if self.retained_scope_entries.saturating_add(entries)
+            > MAX_PROC_MACRO_RETAINED_SCOPE_ENTRIES
+        {
+            anyhow::bail!(
+                "retained proc-macro scope chains exceed {MAX_PROC_MACRO_RETAINED_SCOPE_ENTRIES} entries"
+            );
+        }
+        self.retained_scope_entries += entries;
+        Ok(())
+    }
+
+    fn note_scope_snapshot_entries(&mut self, entries: usize) -> Result<()> {
+        if self.scope_snapshot_entries.saturating_add(entries)
+            > MAX_PROC_MACRO_SCOPE_SNAPSHOT_ENTRIES
+        {
+            anyhow::bail!(
+                "proc-macro scope snapshot work exceeds {MAX_PROC_MACRO_SCOPE_SNAPSHOT_ENTRIES} entries"
+            );
+        }
+        self.scope_snapshot_entries += entries;
+        Ok(())
+    }
+
+    fn note_repeated_context_bytes(&mut self, bytes: usize) -> Result<()> {
+        if self.repeated_context_bytes.saturating_add(bytes) > MAX_PROC_MACRO_REPEATED_CONTEXT_BYTES
+        {
+            anyhow::bail!(
+                "repeated proc-macro source context evaluation exceeds {MAX_PROC_MACRO_REPEATED_CONTEXT_BYTES} bytes"
+            );
+        }
+        self.repeated_context_bytes += bytes;
+        Ok(())
+    }
+
+    fn next_scope_revision(&mut self) -> Result<usize> {
+        let revision = self.scope_revisions;
+        self.scope_revisions = self
+            .scope_revisions
+            .checked_add(1)
+            .context("proc-macro scope revision counter overflow")?;
+        Ok(revision)
+    }
+
     fn note_declaration(&mut self) -> Result<()> {
         if self.declarations >= MAX_PROC_MACRO_MODULE_DECLARATIONS {
             anyhow::bail!(
@@ -229,6 +345,7 @@ pub(super) fn proc_macro_module_declarations(
     source_context: &ProcMacroSourceContext,
     canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
+    inherited_macro_scopes: &[Rc<MacroScope>],
     edition: super::macro_expansion::MacroRulesEdition,
 ) -> Result<Vec<ProcMacroModuleDeclaration>> {
     let syntax = syn::parse_file(source)?;
@@ -245,6 +362,7 @@ pub(super) fn proc_macro_module_declarations(
         canonical_pkg_dir,
         budgets,
         &mut declarations,
+        inherited_macro_scopes,
         edition,
     )?;
     Ok(declarations)

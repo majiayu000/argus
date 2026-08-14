@@ -74,6 +74,9 @@ fn validate_attribute_meta(
         return Ok(());
     }
     let name = rust_path_display(path);
+    if name == "macro_use" {
+        return Ok(());
+    }
     if name == "unsafe" {
         let syn::Meta::List(list) = meta else {
             anyhow::bail!("unsafe attribute wrapper must contain an attribute");

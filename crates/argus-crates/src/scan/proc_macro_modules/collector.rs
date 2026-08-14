@@ -2,6 +2,7 @@ use super::super::macro_expansion::{MacroRulesDefinition, MacroRulesEdition, Opa
 use super::attributes::{expression_attributes, validate_proc_macro_attributes};
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 const MAX_EXPANSIONS: usize = 4096;
 const MAX_EXPANDED_TOKENS: usize = 65_536;
@@ -39,13 +40,16 @@ pub(super) fn collect_proc_macro_item_declarations(
     canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
+    inherited_macro_scopes: &[Rc<MacroScope>],
     edition: MacroRulesEdition,
 ) -> Result<()> {
     let mut exported_macros = BTreeMap::new();
     collect_exported_macros(items, &mut exported_macros, edition)?;
-    let mut root_scope = MacroScope::for_items(items)?;
-    root_scope.exported_definitions = exported_macros;
-    let macro_scopes = vec![root_scope];
+    let root_revision = budgets.next_scope_revision()?;
+    let mut root_scope = MacroScope::for_items(items, root_revision)?;
+    root_scope.exported_definitions = Rc::new(exported_macros);
+    let mut macro_scopes = inherited_macro_scopes.to_vec();
+    macro_scopes.push(Rc::new(root_scope));
     collect_items_with_state(
         items,
         context,
@@ -59,7 +63,7 @@ pub(super) fn collect_proc_macro_item_declarations(
 
 fn collect_exported_macros(
     items: &[syn::Item],
-    exported: &mut BTreeMap<String, MacroRulesDefinition>,
+    exported: &mut BTreeMap<String, DeferredMacroRulesDefinition>,
     edition: MacroRulesEdition,
 ) -> Result<()> {
     for item in items {
@@ -85,7 +89,10 @@ fn collect_exported_macros(
                     .as_ref()
                     .ok_or_else(|| OpaqueExpansion::new("macro_rules export has no name"))?
                     .to_string();
-                let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), edition)?;
+                let definition = DeferredMacroRulesDefinition {
+                    tokens: item.mac.tokens.clone(),
+                    edition,
+                };
                 if exported.insert(name.clone(), definition).is_some() {
                     return Err(OpaqueExpansion::new(format!(
                         "multiple potentially active #[macro_export] definitions are named `{name}`"
@@ -110,7 +117,7 @@ fn collect_items_with_state(
     canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
-    inherited_macro_scopes: &[MacroScope],
+    inherited_macro_scopes: &[Rc<MacroScope>],
     edition: MacroRulesEdition,
 ) -> Result<()> {
     let mut collector = ProcMacroModuleCollector {
@@ -136,7 +143,7 @@ struct ProcMacroModuleCollector<'a> {
     canonical_pkg_dir: &'a Path,
     budgets: &'a mut ProcMacroModuleBudgets,
     declarations: &'a mut Vec<ProcMacroModuleDeclaration>,
-    macro_scopes: Vec<MacroScope>,
+    macro_scopes: Vec<Rc<MacroScope>>,
     edition: MacroRulesEdition,
     error: Option<anyhow::Error>,
 }
@@ -191,7 +198,11 @@ impl ProcMacroModuleCollector<'_> {
                 inline_module_contexts(self.context, &name, &path_plan, self.canonical_pkg_dir)?
             {
                 let mut child_scopes = self.macro_scopes.clone();
-                child_scopes.push(MacroScope::for_items(inline_items)?);
+                let child_revision = self.budgets.next_scope_revision()?;
+                child_scopes.push(Rc::new(MacroScope::for_items(
+                    inline_items,
+                    child_revision,
+                )?));
                 collect_items_with_state(
                     inline_items,
                     &child_context,
@@ -204,10 +215,25 @@ impl ProcMacroModuleCollector<'_> {
             }
             return Ok(());
         }
+        let inherited_macro_scopes: Vec<_> = self
+            .macro_scopes
+            .iter()
+            .map(|scope| scope.for_child_module())
+            .collect();
+        let inherited_scope_revisions: Vec<_> = inherited_macro_scopes
+            .iter()
+            .filter(|scope| scope.affects_child_macro_resolution())
+            .map(|scope| scope.revision)
+            .collect();
         for lookup in external_module_lookups(self.context, &name, &path_plan) {
             self.budgets.note_resolution_edge()?;
-            self.declarations
-                .push(ProcMacroModuleDeclaration { lookup });
+            self.budgets
+                .note_retained_scope_entries(inherited_macro_scopes.len())?;
+            self.declarations.push(ProcMacroModuleDeclaration {
+                lookup,
+                inherited_macro_scopes: inherited_macro_scopes.clone(),
+                inherited_scope_revisions: inherited_scope_revisions.clone(),
+            });
         }
         Ok(())
     }
@@ -224,18 +250,47 @@ impl ProcMacroModuleCollector<'_> {
         let conflicts_with_visible_candidate = self.macro_scopes.iter().rev().any(|scope| {
             scope.definitions.contains_key(&name)
                 || (!is_exported && scope.exported_definitions.contains_key(&name))
+                || scope.macro_use_revision.is_some()
+                || scope.macro_use_prelude_candidate
         });
-        let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), self.edition)?;
+        let definition = DeferredMacroRulesDefinition {
+            tokens: item.mac.tokens.clone(),
+            edition: self.edition,
+        };
+        let revision = self.budgets.next_scope_revision()?;
         let binding = if activation == CfgEval::Unknown && conflicts_with_visible_candidate {
             MacroBinding::Ambiguous
         } else {
-            MacroBinding::Known(definition)
+            MacroBinding::Known {
+                definition,
+                revision,
+            }
         };
+        let snapshot_entries = self
+            .macro_scopes
+            .last()
+            .filter(|scope| Rc::strong_count(&scope.definitions) > 1)
+            .map_or(0, |scope| scope.definitions.len());
+        self.budgets.note_scope_snapshot_entries(snapshot_entries)?;
         let scope = self
             .macro_scopes
             .last_mut()
             .context("local macro scope stack is empty")?;
-        scope.definitions.insert(name, binding);
+        let scope = Rc::make_mut(scope);
+        Rc::make_mut(&mut scope.definitions).insert(name, binding);
+        scope.revision = revision;
+        Ok(())
+    }
+
+    fn note_macro_use_module(&mut self) -> Result<()> {
+        let revision = self.budgets.next_scope_revision()?;
+        let scope = self
+            .macro_scopes
+            .last_mut()
+            .context("local macro scope stack is empty")?;
+        let scope = Rc::make_mut(scope);
+        scope.macro_use_revision = Some(revision);
+        scope.revision = revision;
         Ok(())
     }
 
@@ -247,27 +302,48 @@ impl ProcMacroModuleCollector<'_> {
             return Ok(None);
         };
         let name = segment.ident.to_string();
-        if self.macro_name_may_be_imported(&name) {
+        if self.macro_name_may_be_directly_imported(&name) {
             return Ok(None);
         }
         for scope in self.macro_scopes.iter().rev() {
             if let Some(binding) = scope.definitions.get(&name) {
                 return match binding {
-                    MacroBinding::Known(definition) => Ok(Some(definition.clone())),
+                    MacroBinding::Known {
+                        definition,
+                        revision,
+                    } if scope
+                        .macro_use_revision
+                        .is_none_or(|macro_use_revision| *revision > macro_use_revision) =>
+                    {
+                        Ok(Some(definition.parse()?))
+                    }
+                    MacroBinding::Known { .. } => Ok(None),
                     MacroBinding::Ambiguous => Err(OpaqueExpansion::new(format!(
                         "multiple potentially active local macro_rules definitions are named `{name}`"
                     ))
                     .into()),
                 };
             }
+            if scope.macro_use_revision.is_some() {
+                return Ok(None);
+            }
             if let Some(definition) = scope.exported_definitions.get(&name) {
-                return Ok(Some(definition.clone()));
+                return Ok(Some(definition.parse()?));
             }
         }
         Ok(None)
     }
 
     fn macro_name_may_be_imported(&self, name: &str) -> bool {
+        self.macro_scopes.iter().rev().any(|scope| {
+            scope.wildcard_import
+                || scope.macro_use_revision.is_some()
+                || scope.macro_use_prelude_candidate
+                || scope.imported_names.contains(name)
+        })
+    }
+
+    fn macro_name_may_be_directly_imported(&self, name: &str) -> bool {
         self.macro_scopes
             .iter()
             .rev()
@@ -360,7 +436,13 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         if self.error.is_none() {
-            if let Err(error) = self.collect_module(module) {
+            let result = self.collect_module(module).and_then(|()| {
+                if has_attribute(&module.attrs, "macro_use") {
+                    self.note_macro_use_module()?;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
                 self.error = Some(error);
             }
         }
@@ -419,14 +501,21 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         if self.error.is_some() {
             return;
         }
-        let scope = match MacroScope::for_statements(&block.stmts) {
+        let revision = match self.budgets.next_scope_revision() {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        let scope = match MacroScope::for_statements(&block.stmts, revision) {
             Ok(scope) => scope,
             Err(error) => {
                 self.error = Some(error);
                 return;
             }
         };
-        self.macro_scopes.push(scope);
+        self.macro_scopes.push(Rc::new(scope));
         for statement in &block.stmts {
             self.visit_stmt(statement);
             if self.error.is_some() {
@@ -437,31 +526,73 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
     }
 }
 
+#[derive(Clone)]
+struct DeferredMacroRulesDefinition {
+    tokens: proc_macro2::TokenStream,
+    edition: MacroRulesEdition,
+}
+
+impl DeferredMacroRulesDefinition {
+    fn parse(&self) -> Result<MacroRulesDefinition> {
+        MacroRulesDefinition::parse(self.tokens.clone(), self.edition)
+    }
+}
+
 #[derive(Clone, Default)]
-struct MacroScope {
-    definitions: BTreeMap<String, MacroBinding>,
-    exported_definitions: BTreeMap<String, MacroRulesDefinition>,
+pub(in crate::scan) struct MacroScope {
+    revision: usize,
+    definitions: Rc<BTreeMap<String, MacroBinding>>,
+    exported_definitions: Rc<BTreeMap<String, DeferredMacroRulesDefinition>>,
     imported_names: BTreeSet<String>,
     wildcard_import: bool,
+    macro_use_revision: Option<usize>,
+    macro_use_prelude_candidate: bool,
 }
 
 #[derive(Clone)]
 enum MacroBinding {
-    Known(MacroRulesDefinition),
+    Known {
+        definition: DeferredMacroRulesDefinition,
+        revision: usize,
+    },
     Ambiguous,
 }
 
 impl MacroScope {
-    fn for_items(items: &[syn::Item]) -> Result<Self> {
-        let mut scope = Self::default();
+    fn for_child_module(&self) -> Rc<Self> {
+        Rc::new(Self {
+            revision: self.revision,
+            definitions: self.definitions.clone(),
+            exported_definitions: Rc::default(),
+            imported_names: BTreeSet::new(),
+            wildcard_import: false,
+            macro_use_revision: self.macro_use_revision,
+            macro_use_prelude_candidate: self.macro_use_prelude_candidate,
+        })
+    }
+
+    pub(super) fn affects_child_macro_resolution(&self) -> bool {
+        !self.definitions.is_empty()
+            || self.macro_use_revision.is_some()
+            || self.macro_use_prelude_candidate
+    }
+
+    fn for_items(items: &[syn::Item], revision: usize) -> Result<Self> {
+        let mut scope = Self {
+            revision,
+            ..Self::default()
+        };
         for item in items {
             scope.note_item_imports(item)?;
         }
         Ok(scope)
     }
 
-    fn for_statements(statements: &[syn::Stmt]) -> Result<Self> {
-        let mut scope = Self::default();
+    fn for_statements(statements: &[syn::Stmt], revision: usize) -> Result<Self> {
+        let mut scope = Self {
+            revision,
+            ..Self::default()
+        };
         for statement in statements {
             if let syn::Stmt::Item(item) = statement {
                 scope.note_item_imports(item)?;
@@ -478,20 +609,18 @@ impl MacroScope {
         {
             return Ok(());
         }
-        match item {
-            syn::Item::Use(item) => collect_use_tree(
+        if let syn::Item::Use(item) = item {
+            collect_use_tree(
                 &item.tree,
                 None,
                 &mut self.imported_names,
                 &mut self.wildcard_import,
-            ),
-            syn::Item::ExternCrate(item) if has_attribute(&item.attrs, "macro_use") => {
-                self.wildcard_import = true;
-            }
-            syn::Item::Mod(item) if has_attribute(&item.attrs, "macro_use") => {
-                self.wildcard_import = true;
-            }
-            _ => {}
+            );
+        } else if matches!(item, syn::Item::ExternCrate(_))
+            && item_attributes(item)
+                .is_some_and(|attributes| has_attribute(attributes, "macro_use"))
+        {
+            self.macro_use_prelude_candidate = true;
         }
         Ok(())
     }

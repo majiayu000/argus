@@ -1530,6 +1530,304 @@ proc-macro = true
 }
 
 #[test]
+fn proc_macro_uninvoked_unsupported_matcher_is_ignored() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "macro_rules! nested { ($( $( $value:ident ),* );*) => {}; }",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_invoked_unsupported_matcher_is_opaque() {
+    let error = collect_test_proc_macro_source(
+        "macro_rules! nested { ($( $( $value:ident ),* );*) => {}; }\nnested!(value);",
+        &[],
+    )
+    .expect_err("an invoked unsupported matcher must fail closed");
+    assert!(format!("{error:#}").contains("nested macro matcher repetitions"));
+}
+
+#[test]
+fn proc_macro_external_module_inherits_parent_textual_macros() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! declare { () => { #[path = "payload.rs"] mod payload; } }
+mod child;"#,
+        &[("src/child.rs", "declare!();"), ("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/child.rs"));
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_external_module_does_not_inherit_path_only_exports() {
+    let error = collect_test_proc_macro_source(
+        r#"mod child;
+#[macro_export]
+macro_rules! include { ($path:literal) => {} }"#,
+        &[
+            ("src/child.rs", "include!(\"payload.rs\");"),
+            ("src/payload.rs", ""),
+        ],
+    )
+    .expect_err("a later path-only export must not replace a child built-in macro invocation");
+    assert!(format!("{error:#}").contains("OpaqueExpansion"));
+}
+
+#[test]
+fn proc_macro_shared_external_module_is_revisited_for_distinct_macro_scopes() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! declare { () => { #[path = "first.rs"] mod payload; } }
+#[path = "shared.rs"]
+mod first;
+macro_rules! declare { () => { #[path = "second.rs"] mod payload; } }
+#[path = "shared.rs"]
+mod second;"#,
+        &[
+            ("src/shared.rs", "declare!();"),
+            ("src/first.rs", ""),
+            ("src/second.rs", ""),
+        ],
+    )?;
+    assert!(source_files.contains("src/first.rs"));
+    assert!(source_files.contains("src/second.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_external_module_does_not_inherit_parent_use_imports() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "use dependency::declare;\nmod child;",
+        &[
+            (
+                "src/child.rs",
+                r#"macro_rules! declare { () => { #[path = "payload.rs"] mod payload; } }
+declare!();"#,
+            ),
+            ("src/payload.rs", ""),
+        ],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_child_textual_macro_shadows_parent_macro_use_import() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "#[macro_use] extern crate dependency;\nmod child;",
+        &[
+            (
+                "src/child.rs",
+                r#"macro_rules! declare { () => { mod payload; } }
+declare!();"#,
+            ),
+            ("src/child/payload.rs", ""),
+        ],
+    )?;
+    assert!(source_files.contains("src/child/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_macro_use_shadowing_is_explicitly_opaque() {
+    let error = collect_test_proc_macro_source(
+        r#"macro_rules! choose { () => {} }
+#[macro_use]
+mod imported {
+    macro_rules! choose { () => { mod payload; } }
+}
+choose!();"#,
+        &[("src/payload.rs", "")],
+    )
+    .expect_err("macro_use shadowing must not select the earlier textual macro");
+    assert!(format!("{error:#}").contains("OpaqueExpansion"));
+}
+
+#[test]
+fn proc_macro_macro_use_shadowing_propagates_to_external_children() {
+    let error = collect_test_proc_macro_source(
+        r#"macro_rules! choose { () => {} }
+#[macro_use]
+mod imported {
+    macro_rules! choose { () => { mod payload; } }
+}
+mod child;"#,
+        &[("src/child.rs", "choose!();"), ("src/payload.rs", "")],
+    )
+    .expect_err("macro_use shadowing in a parent must remain opaque in an external child");
+    assert!(format!("{error:#}").contains("OpaqueExpansion"));
+}
+
+#[test]
+fn proc_macro_textual_macro_shadows_earlier_macro_use_module() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"#[macro_use]
+mod imported {
+    macro_rules! choose { () => {} }
+}
+macro_rules! choose { () => { mod payload; } }
+choose!();"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_macro_use_prelude_can_shadow_builtin_derive() {
+    let error = collect_test_proc_macro_source(
+        "#[macro_use] extern crate attacker;\n#[derive(Clone)] struct Marker;",
+        &[],
+    )
+    .expect_err("a macro-use prelude candidate must make a built-in derive opaque");
+    assert!(format!("{error:#}").contains("derive macro `Clone`"));
+}
+
+#[test]
+fn proc_macro_conditional_textual_macro_over_macro_use_is_ambiguous() {
+    let error = collect_test_proc_macro_source(
+        r#"#[macro_use] extern crate attacker;
+fn register() {
+    #[cfg(feature = "local")]
+    macro_rules! choose { () => {} }
+    choose!();
+}"#,
+        &[],
+    )
+    .expect_err("a conditional textual macro over macro-use must remain opaque");
+    assert!(format!("{error:#}").contains("OpaqueExpansion"));
+}
+
+#[test]
+fn proc_macro_module_source_cycle_fails_closed() {
+    let error = collect_test_proc_macro_source("#[path = \"lib.rs\"] mod again;", &[])
+        .expect_err("a cyclic module source graph must fail explicitly");
+    assert!(format!("{error:#}").contains("module source cycle"));
+}
+
+#[test]
+fn proc_macro_source_reentry_with_changed_macro_scope_can_terminate() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! step {
+    () => {
+        macro_rules! step { () => {} }
+        #[path = "shared.rs"] mod child;
+    };
+}
+#[path = "shared.rs"]
+mod first;"#,
+        &[("src/shared.rs", "step!();")],
+    )?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from(["src/lib.rs".to_string(), "src/shared.rs".to_string()])
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_source_reuse_with_distinct_module_context_is_allowed() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "mod a;",
+        &[
+            ("src/a.rs", "mod child;"),
+            ("src/a/child.rs", "#[path = \"../a.rs\"] mod repeated;"),
+            ("src/child.rs", ""),
+        ],
+    )?;
+    assert_eq!(
+        source_files,
+        BTreeSet::from([
+            "src/a.rs".to_string(),
+            "src/a/child.rs".to_string(),
+            "src/child.rs".to_string(),
+            "src/lib.rs".to_string(),
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn proc_macro_scope_snapshot_work_is_bounded() {
+    let mut source = String::new();
+    for index in 0..512 {
+        source.push_str(&format!(
+            "macro_rules! macro_{index} {{ () => {{}} }}\n#[path = \"shared.rs\"] mod child_{index};\n"
+        ));
+    }
+    let error = collect_test_proc_macro_source(&source, &[("src/shared.rs", "")])
+        .expect_err("retained macro scope snapshots must have a cumulative work bound");
+    assert!(format!("{error:#}").contains("scope snapshot work exceeds"));
+}
+
+#[test]
+fn proc_macro_retained_scope_chains_are_bounded() {
+    let depth = 32;
+    let mut source = String::new();
+    for index in 0..depth {
+        source.push_str(&format!("mod layer_{index} {{"));
+    }
+    for index in 0..=2048 {
+        source.push_str(&format!("#[path = \"shared.rs\"] mod child_{index};"));
+    }
+    source.extend(std::iter::repeat_n('}', depth));
+    let error = collect_test_proc_macro_source(&source, &[("src/shared.rs", "")])
+        .expect_err("retained scope chains must have a cumulative entry bound");
+    assert!(format!("{error:#}").contains("scope chains exceed"));
+}
+
+#[test]
+fn proc_macro_repeated_source_context_evaluation_is_bounded() {
+    let mut source = String::new();
+    for index in 0..40 {
+        source.push_str(&format!(
+            "macro_rules! declare {{ () => {{}} }}\n#[path = \"shared.rs\"] mod child_{index};\n"
+        ));
+    }
+    let mut shared = " ".repeat(256 * 1024);
+    shared.push_str("declare!();");
+    let error = collect_test_proc_macro_source(&source, &[("src/shared.rs", &shared)])
+        .expect_err("repeated parsing under distinct scope revisions must be byte-bounded");
+    assert!(format!("{error:#}").contains("context evaluation exceeds"));
+}
+
+#[test]
+fn proc_macro_inert_scope_revisions_do_not_repeat_shared_source() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    let mut root = String::new();
+    for index in 0..10 {
+        root.push_str(&format!("mod wrapper_{index};\n"));
+        std::fs::write(
+            directory.path().join(format!("src/wrapper_{index}.rs")),
+            "#[path = \"shared.rs\"] mod shared;",
+        )?;
+    }
+    std::fs::write(directory.path().join("src/lib.rs"), root)?;
+    std::fs::write(
+        directory.path().join("src/shared.rs"),
+        " ".repeat(1024 * 1024),
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "shared-inert-scopes"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/shared.rs"));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_metavariable_module_name_expands_at_invocation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
