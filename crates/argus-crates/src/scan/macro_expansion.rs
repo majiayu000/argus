@@ -100,10 +100,17 @@ enum RepeatKind {
     ZeroOrOne,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CaptureBinding {
     values: Vec<TokenStream>,
     repeated: bool,
+    fragment: String,
+}
+
+impl CaptureBinding {
+    fn requires_opaque_forwarding(&self) -> bool {
+        !matches!(self.fragment.as_str(), "ident" | "lifetime" | "tt")
+    }
 }
 
 type Bindings = BTreeMap<String, CaptureBinding>;
@@ -403,7 +410,11 @@ fn match_sequence(
         } => {
             for end in fragment_ends(fragment, input, state.at, budget)? {
                 let mut bindings = state.bindings.clone();
-                let binding = bindings.entry(name.clone()).or_default();
+                let Some(binding) = bindings.get_mut(name) else {
+                    return opaque(format!(
+                        "local macro matcher has no initialized binding for `${name}`"
+                    ));
+                };
                 binding.repeated = *repeated;
                 binding
                     .values
@@ -569,12 +580,17 @@ fn expression_fragment_parses(candidate: TokenStream, accepts_2024_expressions: 
 fn initialize_bindings(elements: &[MatcherElem], bindings: &mut Bindings) {
     for element in elements {
         match element {
-            MatcherElem::Capture { name, repeated, .. } => {
+            MatcherElem::Capture {
+                name,
+                fragment,
+                repeated,
+            } => {
                 bindings
                     .entry(name.clone())
                     .or_insert_with(|| CaptureBinding {
                         values: Vec::new(),
                         repeated: *repeated,
+                        fragment: fragment.clone(),
                     });
             }
             MatcherElem::Group { body, .. } | MatcherElem::Repeat { body, .. } => {

@@ -10,8 +10,30 @@ pub(super) fn transcribe_bounded(
     max_output_tokens: usize,
 ) -> Result<(TokenStream, usize)> {
     let mut output_budget = OutputBudget::new(max_output_tokens);
-    let tokens = transcribe(tokens, bindings, None, 0, &mut output_budget)?;
+    let output = transcribe(tokens, bindings, None, 0, &mut output_budget)?;
+    let tokens = output.into_token_stream();
     Ok((tokens, output_budget.emitted))
+}
+
+struct TranscribedStream {
+    tokens: Vec<TranscribedToken>,
+    contains_opaque_fragment: bool,
+}
+
+impl TranscribedStream {
+    fn into_token_stream(self) -> TokenStream {
+        self.tokens.into_iter().map(|token| token.tree).collect()
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.contains_opaque_fragment |= other.contains_opaque_fragment;
+        self.tokens.extend(other.tokens);
+    }
+}
+
+struct TranscribedToken {
+    tree: TokenTree,
+    contains_opaque_fragment: bool,
 }
 
 fn transcribe(
@@ -20,14 +42,17 @@ fn transcribe(
     repetition_index: Option<usize>,
     depth: usize,
     output_budget: &mut OutputBudget,
-) -> Result<TokenStream> {
+) -> Result<TranscribedStream> {
     if depth > MAX_TRANSCRIBE_DEPTH {
         return opaque(format!(
             "local macro transcription exceeds {MAX_TRANSCRIBE_DEPTH} levels"
         ));
     }
     let tokens = token_vec(tokens.clone());
-    let mut output = TokenStream::new();
+    let mut output = TranscribedStream {
+        tokens: Vec::new(),
+        contains_opaque_fragment: false,
+    };
     let mut at = 0;
     while at < tokens.len() {
         if punct_at(&tokens, at, '$') {
@@ -50,7 +75,14 @@ fn transcribe(
                         )))
                     })?;
                     output_budget.note_stream(selected)?;
-                    output.extend(selected.clone());
+                    let is_opaque = captures.requires_opaque_forwarding();
+                    output.contains_opaque_fragment |= is_opaque;
+                    output
+                        .tokens
+                        .extend(selected.clone().into_iter().map(|tree| TranscribedToken {
+                            tree,
+                            contains_opaque_fragment: is_opaque,
+                        }));
                     at += 2;
                     continue;
                 }
@@ -89,7 +121,10 @@ fn transcribe(
                         if index > 0 {
                             if let Some(separator) = &separator {
                                 output_budget.note_token()?;
-                                output.extend(std::iter::once(separator.clone()));
+                                output.tokens.push(TranscribedToken {
+                                    tree: separator.clone(),
+                                    contains_opaque_fragment: false,
+                                });
                             }
                         }
                         output.extend(transcribe(
@@ -108,28 +143,57 @@ fn transcribe(
         }
         match &tokens[at] {
             TokenTree::Group(group) => {
-                let mut expanded = Group::new(
-                    group.delimiter(),
-                    transcribe(
-                        &group.stream(),
-                        bindings,
-                        repetition_index,
-                        depth + 1,
-                        output_budget,
-                    )?,
-                );
+                let nested = transcribe(
+                    &group.stream(),
+                    bindings,
+                    repetition_index,
+                    depth + 1,
+                    output_budget,
+                )?;
+                let contains_opaque_fragment = nested.contains_opaque_fragment;
+                let mut expanded = Group::new(group.delimiter(), nested.into_token_stream());
                 expanded.set_span(group.span());
                 output_budget.note_token()?;
-                output.extend(std::iter::once(TokenTree::Group(expanded)));
+                output.tokens.push(TranscribedToken {
+                    tree: TokenTree::Group(expanded),
+                    contains_opaque_fragment,
+                });
             }
             token => {
                 output_budget.note_token()?;
-                output.extend(std::iter::once(token.clone()));
+                output.tokens.push(TranscribedToken {
+                    tree: token.clone(),
+                    contains_opaque_fragment: false,
+                });
             }
         }
         at += 1;
     }
+    reject_opaque_macro_arguments(&output.tokens)?;
     Ok(output)
+}
+
+fn reject_opaque_macro_arguments(tokens: &[TranscribedToken]) -> Result<()> {
+    for window in tokens.windows(3) {
+        let [path_end, bang, arguments] = window else {
+            unreachable!("windows(3) always yields three elements");
+        };
+        if token_can_end_macro_path(&path_end.tree)
+            && matches!(&bang.tree, TokenTree::Punct(punct) if punct.as_char() == '!')
+            && matches!(arguments.tree, TokenTree::Group(_))
+            && arguments.contains_opaque_fragment
+        {
+            return opaque(
+                "macro transcriber forwards an opaque fragment into another macro invocation",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn token_can_end_macro_path(token: &TokenTree) -> bool {
+    let candidate: TokenStream = std::iter::once(token.clone()).collect();
+    syn::parse2::<syn::Path>(candidate).is_ok()
 }
 
 struct OutputBudget {

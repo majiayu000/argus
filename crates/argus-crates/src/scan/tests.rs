@@ -1792,6 +1792,73 @@ choose!(<u8 as Trait>::Assoc);"#,
 }
 
 #[test]
+fn proc_macro_forwarded_expr_fragment_is_explicitly_opaque() {
+    let error = collect_test_proc_macro_source(
+        r#"macro_rules! inner {
+    (1) => {};
+    ($value:expr) => { mod payload; };
+}
+macro_rules! outer {
+    ($value:expr) => { inner!($value); };
+}
+outer!(1);"#,
+        &[("src/payload.rs", "")],
+    )
+    .expect_err("forwarded expr fragments cannot be retokenized for nested matching");
+    assert!(format!("{error:#}").contains("forwards an opaque fragment"));
+}
+
+#[test]
+fn proc_macro_generated_bang_does_not_bypass_opaque_forwarding() {
+    let error = collect_test_proc_macro_source(
+        r#"macro_rules! inner {
+    (1) => {};
+    ($value:expr) => { mod payload; };
+}
+macro_rules! outer {
+    ($bang:tt, $value:expr) => { inner $bang ($value); };
+}
+outer!(!, 1);"#,
+        &[("src/payload.rs", "")],
+    )
+    .expect_err("a generated macro bang must preserve opaque fragment forwarding");
+    assert!(format!("{error:#}").contains("forwards an opaque fragment"));
+}
+
+#[test]
+fn proc_macro_forwarded_ident_fragment_remains_transparent() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! inner {
+    (payload) => { mod payload; };
+    ($token:tt) => {};
+}
+macro_rules! outer {
+    ($name:ident) => { inner!($name); };
+}
+outer!(payload);"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unary_not_with_expr_capture_is_not_macro_forwarding() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! declare {
+    ($value:expr) => {
+        const VALUE: bool = !($value);
+        mod payload;
+    };
+}
+declare!(true);"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_cfg_gated_macro_redefinitions_are_opaque() {
     let error = collect_test_proc_macro_source(
         r#"#[cfg(unix)]
