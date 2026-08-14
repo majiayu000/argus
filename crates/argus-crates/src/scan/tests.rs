@@ -1701,6 +1701,43 @@ fn register() {
 }
 
 #[test]
+fn proc_macro_conditional_textual_macro_over_builtin_is_ambiguous() {
+    let error = collect_test_proc_macro_source(
+        r#"#[cfg(windows)]
+macro_rules! include { ($path:literal) => {} }
+include!("generated.rs");"#,
+        &[("src/generated.rs", "mod payload;"), ("src/payload.rs", "")],
+    )
+    .expect_err("a conditional textual macro must not hide a built-in candidate");
+    assert!(format!("{error:#}").contains("multiple potentially active local macro_rules"));
+}
+
+#[test]
+fn proc_macro_conditional_export_over_builtin_is_ambiguous() {
+    for source in [
+        r#"mod holder {
+    #[cfg(windows)]
+    #[macro_export]
+    macro_rules! include { ($path:literal) => {} }
+}
+include!("generated.rs");"#,
+        r#"#[cfg(windows)]
+mod holder {
+    #[macro_export]
+    macro_rules! include { ($path:literal) => {} }
+}
+include!("generated.rs");"#,
+    ] {
+        let error = collect_test_proc_macro_source(
+            source,
+            &[("src/generated.rs", "mod payload;"), ("src/payload.rs", "")],
+        )
+        .expect_err("a conditional export must not hide a built-in candidate");
+        assert!(format!("{error:#}").contains("unknown cfg activation"));
+    }
+}
+
+#[test]
 fn proc_macro_module_source_cycle_fails_closed() {
     let error = collect_test_proc_macro_source("#[path = \"lib.rs\"] mod again;", &[])
         .expect_err("a cyclic module source graph must fail explicitly");
@@ -2300,6 +2337,26 @@ fn proc_macro_false_cfg_statement_macro_is_ignored() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn proc_macro_false_cfg_match_arm_is_ignored() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "fn register() { match () { #[cfg(any())] () => unknown_macro!(), () => {} } }",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_match_arm_still_traverses_body() {
+    let error = collect_test_proc_macro_source(
+        "fn register() { match () { #[cfg(windows)] () => unknown_macro!(), () => {} } }",
+        &[],
+    )
+    .expect_err("an unknown cfg match arm must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
 }
 
 #[test]

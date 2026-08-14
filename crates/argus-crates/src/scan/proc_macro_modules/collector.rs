@@ -44,7 +44,7 @@ pub(super) fn collect_proc_macro_item_declarations(
     edition: MacroRulesEdition,
 ) -> Result<()> {
     let mut exported_macros = BTreeMap::new();
-    collect_exported_macros(items, &mut exported_macros, edition)?;
+    collect_exported_macros(items, &mut exported_macros, edition, CfgEval::True)?;
     let root_revision = budgets.next_scope_revision()?;
     let mut root_scope = MacroScope::for_items(items, root_revision)?;
     root_scope.exported_definitions = Rc::new(exported_macros);
@@ -63,15 +63,18 @@ pub(super) fn collect_proc_macro_item_declarations(
 
 fn collect_exported_macros(
     items: &[syn::Item],
-    exported: &mut BTreeMap<String, DeferredMacroRulesDefinition>,
+    exported: &mut BTreeMap<String, ExportedMacroBinding>,
     edition: MacroRulesEdition,
+    inherited_activation: CfgEval,
 ) -> Result<()> {
     for item in items {
-        if item_attributes(item)
-            .map(module_attrs_are_definitely_disabled)
+        let activation = item_attributes(item)
+            .map(item_cfg_activation)
             .transpose()?
-            .unwrap_or(false)
-        {
+            .map_or(inherited_activation, |activation| {
+                cfg_eval_and(inherited_activation, activation)
+            });
+        if activation == CfgEval::False {
             continue;
         }
         match item {
@@ -93,7 +96,12 @@ fn collect_exported_macros(
                     tokens: item.mac.tokens.clone(),
                     edition,
                 };
-                if exported.insert(name.clone(), definition).is_some() {
+                let binding = if activation == CfgEval::Unknown {
+                    ExportedMacroBinding::Ambiguous
+                } else {
+                    ExportedMacroBinding::Known(definition)
+                };
+                if exported.insert(name.clone(), binding).is_some() {
                     return Err(OpaqueExpansion::new(format!(
                         "multiple potentially active #[macro_export] definitions are named `{name}`"
                     ))
@@ -102,7 +110,7 @@ fn collect_exported_macros(
             }
             syn::Item::Mod(module) => {
                 if let Some((_brace, children)) = &module.content {
-                    collect_exported_macros(children, exported, edition)?;
+                    collect_exported_macros(children, exported, edition, activation)?;
                 }
             }
             _ => {}
@@ -245,20 +253,13 @@ impl ProcMacroModuleCollector<'_> {
             .as_ref()
             .context("macro_rules definition has no name")?
             .to_string();
-        let is_exported = has_attribute(&item.attrs, "macro_export");
         let activation = item_cfg_activation(&item.attrs)?;
-        let conflicts_with_visible_candidate = self.macro_scopes.iter().rev().any(|scope| {
-            scope.definitions.contains_key(&name)
-                || (!is_exported && scope.exported_definitions.contains_key(&name))
-                || scope.macro_use_revision.is_some()
-                || scope.macro_use_prelude_candidate
-        });
         let definition = DeferredMacroRulesDefinition {
             tokens: item.mac.tokens.clone(),
             edition: self.edition,
         };
         let revision = self.budgets.next_scope_revision()?;
-        let binding = if activation == CfgEval::Unknown && conflicts_with_visible_candidate {
+        let binding = if activation == CfgEval::Unknown {
             MacroBinding::Ambiguous
         } else {
             MacroBinding::Known {
@@ -327,8 +328,14 @@ impl ProcMacroModuleCollector<'_> {
             if scope.macro_use_revision.is_some() {
                 return Ok(None);
             }
-            if let Some(definition) = scope.exported_definitions.get(&name) {
-                return Ok(Some(definition.parse()?));
+            if let Some(binding) = scope.exported_definitions.get(&name) {
+                return match binding {
+                    ExportedMacroBinding::Known(definition) => Ok(Some(definition.parse()?)),
+                    ExportedMacroBinding::Ambiguous => Err(OpaqueExpansion::new(format!(
+                        "potentially active #[macro_export] definition `{name}` has unknown cfg activation"
+                    ))
+                    .into()),
+                };
             }
         }
         Ok(None)
@@ -519,6 +526,21 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         syn::visit::visit_variant(self, variant);
     }
 
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if self.error.is_some() {
+            return;
+        }
+        match module_attrs_are_definitely_disabled(&arm.attrs) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+        syn::visit::visit_arm(self, arm);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_none() {
             if let Err(error) = self.expand_macro(mac) {
@@ -568,11 +590,17 @@ impl DeferredMacroRulesDefinition {
     }
 }
 
+#[derive(Clone)]
+enum ExportedMacroBinding {
+    Known(DeferredMacroRulesDefinition),
+    Ambiguous,
+}
+
 #[derive(Clone, Default)]
 pub(in crate::scan) struct MacroScope {
     revision: usize,
     definitions: Rc<BTreeMap<String, MacroBinding>>,
-    exported_definitions: Rc<BTreeMap<String, DeferredMacroRulesDefinition>>,
+    exported_definitions: Rc<BTreeMap<String, ExportedMacroBinding>>,
     imported_names: BTreeSet<String>,
     wildcard_import: bool,
     macro_use_revision: Option<usize>,
