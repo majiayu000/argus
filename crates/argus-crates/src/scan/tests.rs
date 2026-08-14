@@ -12,6 +12,34 @@ fn scan_test_tree(files: &[(&str, &str)]) -> Result<crate::ArtifactScan> {
     scan_extracted_crate(root.path())
 }
 
+fn collect_test_proc_macro_source(
+    source: &str,
+    extra_files: &[(&str, &str)],
+) -> Result<BTreeSet<String>> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(directory.path().join("src/lib.rs"), source)?;
+    for (relative, content) in extra_files {
+        let path = directory.path().join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+    }
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "macro-expansion-test"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+    collect_proc_macro_source_files(directory.path(), &manifest)
+}
+
 #[cfg(unix)]
 fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -1424,7 +1452,7 @@ const REGISTER: () = {
 }
 
 #[test]
-fn proc_macro_macro_definition_external_module_fails_closed_across_contexts() -> Result<()> {
+fn proc_macro_exported_macro_expands_in_callers_module_context() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src/helpers"))?;
     std::fs::write(
@@ -1459,17 +1487,14 @@ proc-macro = true
 "#,
     )?;
 
-    let error = collect_proc_macro_source_files(directory.path(), &manifest)
-        .expect_err("macro definition module context must fail closed");
-    assert!(
-        format!("{error:#}").contains("unknown invocation context"),
-        "got: {error:#}"
-    );
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
+    assert!(!source_files.contains("src/helpers/payload.rs"));
     Ok(())
 }
 
 #[test]
-fn proc_macro_unparseable_macro_module_body_fails_closed() -> Result<()> {
+fn proc_macro_uninvoked_transcriber_is_not_treated_as_compiled_source() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
     std::fs::write(
@@ -1490,17 +1515,13 @@ proc-macro = true
 "#,
     )?;
 
-    let error = collect_proc_macro_source_files(directory.path(), &manifest)
-        .expect_err("unparseable macro module body must fail closed");
-    assert!(
-        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
-        "got: {error:#}"
-    );
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
     Ok(())
 }
 
 #[test]
-fn proc_macro_metavariable_module_name_fails_closed() -> Result<()> {
+fn proc_macro_metavariable_module_name_expands_at_invocation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
     std::fs::write(
@@ -1523,17 +1544,13 @@ proc-macro = true
 "#,
     )?;
 
-    let error = collect_proc_macro_source_files(directory.path(), &manifest)
-        .expect_err("metavariable module name must fail closed");
-    assert!(
-        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
-        "got: {error:#}"
-    );
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
     Ok(())
 }
 
 #[test]
-fn proc_macro_repeated_metavariable_module_name_fails_closed() -> Result<()> {
+fn proc_macro_repeated_metavariable_module_name_expands_at_invocation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
     std::fs::write(
@@ -1556,13 +1573,228 @@ proc-macro = true
 "#,
     )?;
 
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
+    Ok(())
+}
+
+#[test]
+fn proc_macro_metavariable_terminator_expands_at_invocation() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! declare {
+    ($semi:tt) => { mod payload $semi };
+}
+declare!(;);"#,
+    )?;
+    std::fs::write(directory.path().join("src/payload.rs"), "")?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "terminator-module-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let source_files = collect_proc_macro_source_files(directory.path(), &manifest)?;
+    assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
+    Ok(())
+}
+
+#[test]
+fn proc_macro_imported_macro_expansion_is_explicitly_opaque() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        "emitter::declare_payload!();",
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "imported-macro-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
     let error = collect_proc_macro_source_files(directory.path(), &manifest)
-        .expect_err("repeated metavariable module name must fail closed");
+        .expect_err("imported macro output must remain opaque");
+    let message = format!("{error:#}");
+    assert!(message.contains("OpaqueExpansion"), "got: {message}");
+    assert!(message.contains("emitter::declare_payload"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_ambiguous_local_match_is_explicitly_opaque() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! ambiguous {
+    ($($left:ident)* $($right:ident)*) => { mod payload; };
+}
+ambiguous!(value);"#,
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "ambiguous-local-macro-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("ambiguous local macro match must remain opaque");
+    let message = format!("{error:#}");
+    assert!(message.contains("OpaqueExpansion"), "got: {message}");
+    assert!(message.contains("ambiguous matcher"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_local_expansion_depth_is_bounded() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::create_dir_all(directory.path().join("src"))?;
+    std::fs::write(
+        directory.path().join("src/lib.rs"),
+        r#"macro_rules! recurse {
+    () => { recurse!(); };
+}
+recurse!();"#,
+    )?;
+    let manifest: CargoManifest = toml::from_str(
+        r#"
+[package]
+name = "recursive-local-macro-derive"
+version = "1.0.0"
+build = false
+
+[lib]
+proc-macro = true
+"#,
+    )?;
+
+    let error = collect_proc_macro_source_files(directory.path(), &manifest)
+        .expect_err("recursive local expansion must hit a deterministic budget");
     assert!(
-        format!("{error:#}").contains("cannot statically interpret proc-macro macro body"),
+        format!("{error:#}").contains("expansion nesting exceeds 32"),
         "got: {error:#}"
     );
     Ok(())
+}
+
+#[test]
+fn proc_macro_import_shadowing_local_export_is_opaque() {
+    let error = collect_test_proc_macro_source(
+        r#"#[macro_export]
+macro_rules! declare { () => {} }
+use attacker::declare;
+declare!();"#,
+        &[],
+    )
+    .expect_err("an imported macro can shadow the local exported definition");
+    assert!(format!("{error:#}").contains("OpaqueExpansion"));
+}
+
+#[test]
+fn proc_macro_import_shadowing_builtin_derive_is_opaque() {
+    let error = collect_test_proc_macro_source(
+        "use attacker::Clone;\n#[derive(Clone)]\nstruct Marker;",
+        &[],
+    )
+    .expect_err("an imported derive can shadow the built-in derive");
+    assert!(format!("{error:#}").contains("derive macro `Clone`"));
+}
+
+#[test]
+fn proc_macro_local_inner_macros_hygiene_is_opaque() {
+    let error = collect_test_proc_macro_source(
+        r#"#[macro_export(local_inner_macros)]
+macro_rules! outer { () => { helper!(); } }"#,
+        &[],
+    )
+    .expect_err("local_inner_macros rewrites inner calls hygienically");
+    assert!(format!("{error:#}").contains("local_inner_macros"));
+}
+
+#[test]
+fn proc_macro_expansion_output_is_bounded_during_transcription() {
+    let repeated_output = "$( $token )* ".repeat(100);
+    let input = "value ".repeat(1_000);
+    let source = format!(
+        "macro_rules! amplify {{ ($($token:ident)*) => {{ {repeated_output} }} }}\namplify!({input});"
+    );
+    let error = collect_test_proc_macro_source(&source, &[])
+        .expect_err("large transcriptions must stop at the shared token budget");
+    assert!(format!("{error:#}").contains("shared output token budget"));
+}
+
+#[test]
+fn proc_macro_fragment_parser_work_is_bounded() {
+    let input = "value ".repeat(400);
+    let source = format!("macro_rules! parse {{ ($value:expr) => {{}} }}\nparse!({input});");
+    let error = collect_test_proc_macro_source(&source, &[])
+        .expect_err("fragment prefix parsing must stop at a deterministic budget");
+    assert!(format!("{error:#}").contains("fragment parsing exceeds"));
+}
+
+#[test]
+fn proc_macro_true_cfg_attr_disable_is_ignored() -> Result<()> {
+    let source_files =
+        collect_test_proc_macro_source("#[cfg_attr(all(), cfg(any()))]\nmod missing;", &[])?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_supported_fragments_expand_at_invocation() -> Result<()> {
+    for source in [
+        r#"macro_rules! declare { ($vis:vis $name:ident) => { $vis mod $name; } }
+declare!(payload);"#,
+        r#"macro_rules! declare { ($pattern:pat) => { mod payload; } }
+declare!(Some(_) | None);"#,
+        r#"macro_rules! declare { ($value:expr_2021) => { mod payload; } }
+declare!(1 + 2);"#,
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[("src/payload.rs", "")])?;
+        assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_stable_inert_attributes_remain_supported() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "#[expect(dead_code)]\n#[unsafe(no_mangle)]\npub extern \"C\" fn marker() {}",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_literal_rule_mismatch_is_opaque() {
+    let error = collect_test_proc_macro_source(
+        "macro_rules! declare { (t) => { mod payload; } }\ndeclare!(;);",
+        &[],
+    )
+    .expect_err("a nonmatching macro rule cannot be treated as a clean expansion");
+    assert!(format!("{error:#}").contains("no statically matching rule"));
 }
 
 #[test]
@@ -1639,7 +1871,7 @@ fn register() {
 }
 
 #[test]
-fn proc_macro_traverses_module_items_passed_to_attribute_macros() -> Result<()> {
+fn proc_macro_attribute_expansion_is_explicitly_opaque() -> Result<()> {
     let manifest = r#"
 [package]
 name = "attribute-forwarded-module-derive"
@@ -1649,9 +1881,6 @@ build = false
 [lib]
 proc-macro = true
 "#;
-    let network = r#"pub fn probe() {
-        let _connection = std::net::TcpStream::connect("collector.example.invalid:443");
-    }"#;
     for host in [
         r#"#[emitter::emit(mod payload;)]
 struct Marker;"#,
@@ -1660,18 +1889,16 @@ mod marker {}"#,
         r#"#[emitter::emit(mod payload;)]
 nothing!();"#,
     ] {
-        let scan = scan_test_tree(&[
+        let result = scan_test_tree(&[
             ("Cargo.toml", manifest),
             ("src/lib.rs", host),
-            ("src/payload.rs", network),
-        ])?;
-
-        let finding = scan
-            .findings
-            .iter()
-            .find(|finding| finding.rule_id == "proc-macro-network")
-            .context("attribute macro module item must reach proc-macro scanning")?;
-        assert!(finding.detail.contains("src/payload.rs"));
+            ("src/payload.rs", ""),
+        ]);
+        let error = match result {
+            Ok(_) => anyhow::bail!("attribute macro expansion unexpectedly scanned cleanly"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("OpaqueExpansion"));
     }
     Ok(())
 }
