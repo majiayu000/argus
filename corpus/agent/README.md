@@ -6,14 +6,14 @@ full census of `claude-skill-registry-data` (202,660 skills). See
 
 ## What's here
 
-- `fixtures/` + `index.json` — 8 **synthetic** agent-skill fixtures in argus
+- `fixtures/` + `index.json` — 9 **synthetic** agent-skill fixtures in argus
   corpus schema. All hosts point at `.example.invalid` (non-resolvable); no
   fixture downloads, executes, or sends anything real. Drop into `argus/corpus`.
 - `labeling-manifest.json` + `labeling-worklists/` — a pinned, sharded
   two-cohort AI-reviewed benchmark: 719 unique census-hit packages preserving all
   849 detector findings, plus 719 detector non-block packages.
 
-## The 8 fixtures — and why the negatives matter most
+## The 9 fixtures — and why the negatives matter most
 
 | id | expected | shape |
 |----|----------|-------|
@@ -21,7 +21,8 @@ full census of `claude-skill-registry-data` (202,660 skills). See
 | skill-cred-exfil | block | stats skill that reads keys/.env and POSTs off-box (sensitive_read + net_egress) |
 | skill-obfuscated-dropper | block | `curl \| base64 -d \| bash` remote stage-2 |
 | skill-injection-md | block | hidden HTML comment claiming absolute authority + concealment (pure text attack, no scripts) |
-| skill-formatted-system-override | block | Markdown-formatted `system` authority noun and `system safety policy` override text |
+| skill-formatted-system-override | block | Markdown/HTML-formatted `system` authority noun and `system safety policy` override text |
+| skill-wbr-system-override | block | isolated no-space `<wbr>` break opportunity inside a system-authority directive |
 | **skill-benign-installer** | **allow** | SKILL.md documents `curl astral.sh/uv/install.sh \| sh` — official installer, no scripts |
 | **skill-benign-net-tool** | **allow-with-approval** | weather skill reads API key + calls its own API (capabilities match intent) |
 | **skill-benign-system-override** | **allow** | theme/gesture/game/branding docs use generic `override system` prose without agent-authority targets |
@@ -72,7 +73,7 @@ balanced case-control design does not estimate source-population prevalence.
 
 ## Current implementation status
 
-`argus corpus test --corpus corpus/agent` asserts all 8 synthetic fixtures,
+`argus corpus test --corpus corpus/agent` asserts all 9 synthetic fixtures,
 including all three negatives. `argus agent scan --format json` now emits manifest
 fields on capability-backed findings:
 
@@ -84,7 +85,7 @@ fields on capability-backed findings:
 }
 ```
 
-`index.json` also carries a frozen evaluation contract for these eight
+`index.json` also carries a frozen evaluation contract for these nine
 maintainer-reviewed synthetic fixtures. Recompute it with:
 
 ```bash
@@ -92,6 +93,6 @@ argus corpus eval --corpus corpus/agent --format json
 ```
 
 The result is explicitly a **synthetic fixture metric**, not a real-world
-quality claim. At the implementation head it reports 5 TP, 0 FP, 0 FN, 3 TN,
-precision 1.0, and recall 1.0. These eight synthetic fixture metrics remain
+quality claim. At the implementation head it reports 6 TP, 0 FP, 0 FN, 3 TN,
+precision 1.0, and recall 1.0. These nine synthetic fixture metrics remain
 separate from the pinned 1,438-row AI-reviewed benchmark.
