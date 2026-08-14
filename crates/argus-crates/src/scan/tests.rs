@@ -1801,6 +1801,49 @@ declare!();"#,
 }
 
 #[test]
+fn proc_macro_cfg_gated_local_definition_cannot_hide_export() {
+    let error = collect_test_proc_macro_source(
+        r#"#[cfg(windows)]
+macro_rules! choose { () => {} }
+choose!();
+mod holder {
+    #[macro_export]
+    macro_rules! choose { () => { mod payload; } }
+}"#,
+        &[("src/payload.rs", "")],
+    )
+    .expect_err("an unknown local definition must not overwrite a visible exported candidate");
+    assert!(format!("{error:#}").contains("multiple potentially active local macro_rules"));
+}
+
+#[test]
+fn proc_macro_exported_definition_updates_textual_scope() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! choose { () => {} }
+#[macro_export]
+macro_rules! choose { () => { mod payload; } }
+choose!();"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unused_conditional_inner_shadow_is_allowed() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! choose { () => {} }
+fn harmless() {
+    #[cfg(feature = "alternate")]
+    macro_rules! choose { () => {} }
+}"#,
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_false_cfg_attr_does_not_parse_discarded_cfg_gate() -> Result<()> {
     let source_files = collect_test_proc_macro_source(
         r#"#[cfg_attr(any(), cfg)]
@@ -1841,6 +1884,20 @@ choose!({expression});"#
         )?;
         assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_signed_literal_fragment_selects_emitting_rule() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! choose {
+    ($value:literal) => { mod payload; };
+    ($($token:tt)*) => {};
+}
+choose!(-1);"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
     Ok(())
 }
 

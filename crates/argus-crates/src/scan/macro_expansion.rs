@@ -501,24 +501,26 @@ fn fragment_ends(
     budget: &mut MatchBudget,
 ) -> Result<Vec<usize>> {
     let remaining = &input[at..];
-    let single = match fragment {
-        "tt" => !remaining.is_empty(),
-        "ident" => matches!(remaining.first(), Some(TokenTree::Ident(_))),
-        "literal" => matches!(remaining.first(), Some(TokenTree::Literal(_))),
-        "lifetime" => {
-            punct_at(remaining, 0, '\'') && matches!(remaining.get(1), Some(TokenTree::Ident(_)))
+    let single_length = match fragment {
+        "tt" if !remaining.is_empty() => Some(1),
+        "ident" if matches!(remaining.first(), Some(TokenTree::Ident(_))) => Some(1),
+        "literal" if matches!(remaining.first(), Some(TokenTree::Literal(_))) => Some(1),
+        "literal"
+            if punct_at(remaining, 0, '-')
+                && matches!(remaining.get(1), Some(TokenTree::Literal(_))) =>
+        {
+            Some(2)
         }
-        "block" => {
-            matches!(remaining.first(), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace)
+        "lifetime" => (punct_at(remaining, 0, '\'')
+            && matches!(remaining.get(1), Some(TokenTree::Ident(_))))
+        .then_some(2),
+        "block" if matches!(remaining.first(), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace) => {
+            Some(1)
         }
-        _ => false,
+        _ => None,
     };
-    if single {
-        return Ok(vec![if fragment == "lifetime" {
-            at + 2
-        } else {
-            at + 1
-        }]);
+    if let Some(length) = single_length {
+        return Ok(vec![at + length]);
     }
     if matches!(fragment, "tt" | "ident" | "literal" | "lifetime" | "block") {
         return Ok(Vec::new());

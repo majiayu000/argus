@@ -44,7 +44,7 @@ pub(super) fn collect_proc_macro_item_declarations(
     let mut exported_macros = BTreeMap::new();
     collect_exported_macros(items, &mut exported_macros, edition)?;
     let mut root_scope = MacroScope::for_items(items)?;
-    root_scope.definitions = exported_macros;
+    root_scope.exported_definitions = exported_macros;
     let macro_scopes = vec![root_scope];
     collect_items_with_state(
         items,
@@ -182,35 +182,52 @@ impl ProcMacroModuleCollector<'_> {
             .as_ref()
             .context("macro_rules definition has no name")?
             .to_string();
+        let is_exported = has_attribute(&item.attrs, "macro_export");
         let activation = item_cfg_activation(&item.attrs)?;
+        let conflicts_with_visible_candidate = self.macro_scopes.iter().rev().any(|scope| {
+            scope.definitions.contains_key(&name)
+                || (!is_exported && scope.exported_definitions.contains_key(&name))
+        });
+        let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), self.edition)?;
+        let binding = if activation == CfgEval::Unknown && conflicts_with_visible_candidate {
+            MacroBinding::Ambiguous
+        } else {
+            MacroBinding::Known(definition)
+        };
         let scope = self
             .macro_scopes
             .last_mut()
             .context("local macro scope stack is empty")?;
-        if activation == CfgEval::Unknown && scope.textually_defined_names.contains(&name) {
-            return Err(OpaqueExpansion::new(format!(
-                "multiple potentially active local macro_rules definitions are named `{name}`"
-            ))
-            .into());
-        }
-        let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), self.edition)?;
-        scope.textually_defined_names.insert(name.clone());
-        scope.definitions.insert(name, definition);
+        scope.definitions.insert(name, binding);
         Ok(())
     }
 
-    fn local_macro(&self, path: &syn::Path) -> Option<MacroRulesDefinition> {
+    fn local_macro(&self, path: &syn::Path) -> Result<Option<MacroRulesDefinition>> {
         if path.leading_colon.is_some() || path.segments.len() != 1 {
-            return None;
+            return Ok(None);
         }
-        let name = path.segments.first()?.ident.to_string();
+        let Some(segment) = path.segments.first() else {
+            return Ok(None);
+        };
+        let name = segment.ident.to_string();
         if self.macro_name_may_be_imported(&name) {
-            return None;
+            return Ok(None);
         }
-        self.macro_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.definitions.get(&name).cloned())
+        for scope in self.macro_scopes.iter().rev() {
+            if let Some(binding) = scope.definitions.get(&name) {
+                return match binding {
+                    MacroBinding::Known(definition) => Ok(Some(definition.clone())),
+                    MacroBinding::Ambiguous => Err(OpaqueExpansion::new(format!(
+                        "multiple potentially active local macro_rules definitions are named `{name}`"
+                    ))
+                    .into()),
+                };
+            }
+            if let Some(definition) = scope.exported_definitions.get(&name) {
+                return Ok(Some(definition.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn macro_name_may_be_imported(&self, name: &str) -> bool {
@@ -222,7 +239,7 @@ impl ProcMacroModuleCollector<'_> {
 
     fn expand_macro(&mut self, mac: &syn::Macro) -> Result<()> {
         let name = rust_path_display(&mac.path);
-        let definition = self.local_macro(&mac.path).ok_or_else(|| {
+        let definition = self.local_macro(&mac.path)?.ok_or_else(|| {
             anyhow::Error::new(OpaqueExpansion::new(format!(
                 "macro `{name}` is imported, procedural, built-in, or outside the statically known local scope"
             )))
@@ -337,10 +354,16 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
 
 #[derive(Clone, Default)]
 struct MacroScope {
-    definitions: BTreeMap<String, MacroRulesDefinition>,
-    textually_defined_names: BTreeSet<String>,
+    definitions: BTreeMap<String, MacroBinding>,
+    exported_definitions: BTreeMap<String, MacroRulesDefinition>,
     imported_names: BTreeSet<String>,
     wildcard_import: bool,
+}
+
+#[derive(Clone)]
+enum MacroBinding {
+    Known(MacroRulesDefinition),
+    Ambiguous,
 }
 
 impl MacroScope {
