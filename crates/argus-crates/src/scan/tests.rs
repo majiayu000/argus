@@ -16,6 +16,14 @@ fn collect_test_proc_macro_source(
     source: &str,
     extra_files: &[(&str, &str)],
 ) -> Result<BTreeSet<String>> {
+    collect_test_proc_macro_source_with_edition(source, extra_files, "2021")
+}
+
+fn collect_test_proc_macro_source_with_edition(
+    source: &str,
+    extra_files: &[(&str, &str)],
+    edition: &str,
+) -> Result<BTreeSet<String>> {
     let directory = tempfile::tempdir()?;
     std::fs::create_dir_all(directory.path().join("src"))?;
     std::fs::write(directory.path().join("src/lib.rs"), source)?;
@@ -26,17 +34,18 @@ fn collect_test_proc_macro_source(
         }
         std::fs::write(path, content)?;
     }
-    let manifest: CargoManifest = toml::from_str(
+    let manifest: CargoManifest = toml::from_str(&format!(
         r#"
 [package]
 name = "macro-expansion-test"
 version = "1.0.0"
 build = false
+edition = "{edition}"
 
 [lib]
 proc-macro = true
 "#,
-    )?;
+    ))?;
     collect_proc_macro_source_files(directory.path(), &manifest)
 }
 
@@ -1772,6 +1781,64 @@ declare!(Some(_) | None);"#,
 declare!(1 + 2);"#,
     ] {
         let source_files = collect_test_proc_macro_source(source, &[("src/payload.rs", "")])?;
+        assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_cfg_gated_macro_redefinitions_are_opaque() {
+    let error = collect_test_proc_macro_source(
+        r#"#[cfg(unix)]
+macro_rules! declare { () => { mod payload; } }
+#[cfg(windows)]
+macro_rules! declare { () => {} }
+declare!();"#,
+        &[("src/payload.rs", "")],
+    )
+    .expect_err("unknown cfg branches must not overwrite a potentially active macro definition");
+    assert!(format!("{error:#}").contains("multiple potentially active local macro_rules"));
+}
+
+#[test]
+fn proc_macro_false_cfg_attr_does_not_parse_discarded_cfg_gate() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"#[cfg_attr(any(), cfg)]
+macro_rules! declare { () => { mod payload; } }
+declare!();"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_false_cfg_gate_short_circuits_later_gates() -> Result<()> {
+    for source in [
+        "#[cfg(any())]\n#[cfg]\nmacro_rules! disabled { () => {} }",
+        "#[cfg_attr(all(), cfg(any()), cfg)]\nmacro_rules! disabled { () => {} }",
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[])?;
+        assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_edition_2024_expr_differs_from_expr_2021() -> Result<()> {
+    for expression in ["_", "const { 1 }"] {
+        let source = format!(
+            r#"macro_rules! choose {{
+    ($value:expr_2021) => {{}};
+    ($value:expr) => {{ mod payload; }}
+}}
+choose!({expression});"#
+        );
+        let source_files = collect_test_proc_macro_source_with_edition(
+            &source,
+            &[("src/payload.rs", "")],
+            "2024",
+        )?;
         assert!(source_files.contains("src/payload.rs"), "{source_files:?}");
     }
     Ok(())

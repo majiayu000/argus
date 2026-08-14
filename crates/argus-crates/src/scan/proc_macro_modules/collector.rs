@@ -1,4 +1,4 @@
-use super::super::macro_expansion::{MacroRulesDefinition, OpaqueExpansion};
+use super::super::macro_expansion::{MacroRulesDefinition, MacroRulesEdition, OpaqueExpansion};
 use super::attributes::validate_proc_macro_attributes;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,9 +39,10 @@ pub(super) fn collect_proc_macro_item_declarations(
     canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
+    edition: MacroRulesEdition,
 ) -> Result<()> {
     let mut exported_macros = BTreeMap::new();
-    collect_exported_macros(items, &mut exported_macros)?;
+    collect_exported_macros(items, &mut exported_macros, edition)?;
     let mut root_scope = MacroScope::for_items(items)?;
     root_scope.definitions = exported_macros;
     let macro_scopes = vec![root_scope];
@@ -52,12 +53,14 @@ pub(super) fn collect_proc_macro_item_declarations(
         budgets,
         declarations,
         &macro_scopes,
+        edition,
     )
 }
 
 fn collect_exported_macros(
     items: &[syn::Item],
     exported: &mut BTreeMap<String, MacroRulesDefinition>,
+    edition: MacroRulesEdition,
 ) -> Result<()> {
     for item in items {
         if item_attributes(item)
@@ -82,7 +85,7 @@ fn collect_exported_macros(
                     .as_ref()
                     .ok_or_else(|| OpaqueExpansion::new("macro_rules export has no name"))?
                     .to_string();
-                let definition = MacroRulesDefinition::parse(item.mac.tokens.clone())?;
+                let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), edition)?;
                 if exported.insert(name.clone(), definition).is_some() {
                     return Err(OpaqueExpansion::new(format!(
                         "multiple potentially active #[macro_export] definitions are named `{name}`"
@@ -92,7 +95,7 @@ fn collect_exported_macros(
             }
             syn::Item::Mod(module) => {
                 if let Some((_brace, children)) = &module.content {
-                    collect_exported_macros(children, exported)?;
+                    collect_exported_macros(children, exported, edition)?;
                 }
             }
             _ => {}
@@ -108,6 +111,7 @@ fn collect_items_with_state(
     budgets: &mut ProcMacroModuleBudgets,
     declarations: &mut Vec<ProcMacroModuleDeclaration>,
     inherited_macro_scopes: &[MacroScope],
+    edition: MacroRulesEdition,
 ) -> Result<()> {
     let mut collector = ProcMacroModuleCollector {
         context,
@@ -115,6 +119,7 @@ fn collect_items_with_state(
         budgets,
         declarations,
         macro_scopes: inherited_macro_scopes.to_vec(),
+        edition,
         error: None,
     };
     for item in items {
@@ -132,6 +137,7 @@ struct ProcMacroModuleCollector<'a> {
     budgets: &'a mut ProcMacroModuleBudgets,
     declarations: &'a mut Vec<ProcMacroModuleDeclaration>,
     macro_scopes: Vec<MacroScope>,
+    edition: MacroRulesEdition,
     error: Option<anyhow::Error>,
 }
 
@@ -156,6 +162,7 @@ impl ProcMacroModuleCollector<'_> {
                     self.budgets,
                     self.declarations,
                     &child_scopes,
+                    self.edition,
                 )?;
             }
             return Ok(());
@@ -175,12 +182,20 @@ impl ProcMacroModuleCollector<'_> {
             .as_ref()
             .context("macro_rules definition has no name")?
             .to_string();
-        let definition = MacroRulesDefinition::parse(item.mac.tokens.clone())?;
-        self.macro_scopes
+        let activation = item_cfg_activation(&item.attrs)?;
+        let scope = self
+            .macro_scopes
             .last_mut()
-            .context("local macro scope stack is empty")?
-            .definitions
-            .insert(name, definition);
+            .context("local macro scope stack is empty")?;
+        if activation == CfgEval::Unknown && scope.textually_defined_names.contains(&name) {
+            return Err(OpaqueExpansion::new(format!(
+                "multiple potentially active local macro_rules definitions are named `{name}`"
+            ))
+            .into());
+        }
+        let definition = MacroRulesDefinition::parse(item.mac.tokens.clone(), self.edition)?;
+        scope.textually_defined_names.insert(name.clone());
+        scope.definitions.insert(name, definition);
         Ok(())
     }
 
@@ -323,6 +338,7 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
 #[derive(Clone, Default)]
 struct MacroScope {
     definitions: BTreeMap<String, MacroRulesDefinition>,
+    textually_defined_names: BTreeSet<String>,
     imported_names: BTreeSet<String>,
     wildcard_import: bool,
 }

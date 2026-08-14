@@ -198,6 +198,7 @@ struct CargoPackage {
     name: Option<String>,
     version: Option<String>,
     build: Option<CargoBuildField>,
+    edition: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]

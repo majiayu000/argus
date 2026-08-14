@@ -16,6 +16,24 @@ const MAX_MATCHER_ELEMENTS: usize = 1024;
 const MAX_FRAGMENT_PARSE_TOKENS: usize = 65_536;
 const MAX_MATCHER_DEPTH: usize = 32;
 
+#[derive(Clone, Copy)]
+pub(super) enum MacroRulesEdition {
+    Edition2015,
+    Edition2018,
+    Edition2021,
+    Edition2024,
+}
+
+impl MacroRulesEdition {
+    fn accepts_top_level_or_patterns(self) -> bool {
+        matches!(self, Self::Edition2021 | Self::Edition2024)
+    }
+
+    fn accepts_2024_expressions(self) -> bool {
+        matches!(self, Self::Edition2024)
+    }
+}
+
 mod transcriber;
 use transcriber::transcribe_bounded;
 
@@ -47,6 +65,7 @@ fn opaque<T>(detail: impl Into<String>) -> Result<T> {
 #[derive(Clone)]
 pub(super) struct MacroRulesDefinition {
     rules: Vec<MacroRule>,
+    edition: MacroRulesEdition,
 }
 
 #[derive(Clone)]
@@ -96,7 +115,7 @@ struct MatchState {
 }
 
 impl MacroRulesDefinition {
-    pub(super) fn parse(tokens: TokenStream) -> Result<Self> {
+    pub(super) fn parse(tokens: TokenStream, edition: MacroRulesEdition) -> Result<Self> {
         let tokens = token_vec(tokens);
         let mut at = 0;
         let mut rules = Vec::new();
@@ -136,7 +155,7 @@ impl MacroRulesDefinition {
         if rules.is_empty() {
             return opaque("local macro_rules definition has no rules");
         }
-        Ok(Self { rules })
+        Ok(Self { rules, edition })
     }
 
     pub(super) fn expand(
@@ -146,7 +165,7 @@ impl MacroRulesDefinition {
         max_output_tokens: usize,
     ) -> Result<(TokenStream, usize)> {
         let input = token_vec(input);
-        let mut budget = MatchBudget::default();
+        let mut budget = MatchBudget::new(self.edition);
         for rule in &self.rules {
             let mut bindings = Bindings::new();
             initialize_bindings(&rule.matcher, &mut bindings);
@@ -193,13 +212,21 @@ fn matcher_element_count(elements: &[MatcherElem]) -> usize {
         .fold(0usize, usize::saturating_add)
 }
 
-#[derive(Default)]
 struct MatchBudget {
     states: usize,
     fragment_parse_tokens: usize,
+    edition: MacroRulesEdition,
 }
 
 impl MatchBudget {
+    fn new(edition: MacroRulesEdition) -> Self {
+        Self {
+            states: 0,
+            fragment_parse_tokens: 0,
+            edition,
+        }
+    }
+
     fn note(&mut self) -> Result<()> {
         if self.states >= MAX_MATCH_STATES {
             return opaque(format!(
@@ -506,11 +533,17 @@ fn fragment_ends(
         let candidate: TokenStream = remaining[..length].iter().cloned().collect();
         let parses = match fragment {
             "item" => syn::parse2::<syn::Item>(candidate).is_ok(),
-            "expr" | "expr_2021" => syn::parse2::<syn::Expr>(candidate).is_ok(),
+            "expr" => {
+                expression_fragment_parses(candidate, budget.edition.accepts_2024_expressions())
+            }
+            "expr_2021" => expression_fragment_parses(candidate, false),
             "ty" => syn::parse2::<syn::Type>(candidate).is_ok(),
             "path" => syn::parse2::<syn::Path>(candidate).is_ok(),
             "meta" => syn::parse2::<syn::Meta>(candidate).is_ok(),
-            "pat" => syn::Pat::parse_multi.parse2(candidate).is_ok(),
+            "pat" if budget.edition.accepts_top_level_or_patterns() => {
+                syn::Pat::parse_multi.parse2(candidate).is_ok()
+            }
+            "pat" => syn::Pat::parse_single.parse2(candidate).is_ok(),
             "pat_param" => syn::Pat::parse_single.parse2(candidate).is_ok(),
             "stmt" => syn::Block::parse_within
                 .parse2(candidate)
@@ -523,6 +556,12 @@ fn fragment_ends(
         }
     }
     Ok(ends)
+}
+
+fn expression_fragment_parses(candidate: TokenStream, accepts_2024_expressions: bool) -> bool {
+    syn::parse2::<syn::Expr>(candidate).is_ok_and(|expression| {
+        accepts_2024_expressions || !matches!(expression, syn::Expr::Const(_) | syn::Expr::Infer(_))
+    })
 }
 
 fn initialize_bindings(elements: &[MatcherElem], bindings: &mut Bindings) {

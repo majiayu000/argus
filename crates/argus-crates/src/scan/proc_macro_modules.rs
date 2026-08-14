@@ -26,6 +26,7 @@ pub(super) fn collect_proc_macro_source_files(
     let mut resolved_edges = BTreeSet::new();
     let mut pending = vec![root_context];
     let mut budgets = ProcMacroModuleBudgets::default();
+    let edition = cargo_manifest_macro_rules_edition(manifest)?;
 
     while let Some(context) = pending.pop() {
         let source_path =
@@ -36,9 +37,14 @@ pub(super) fn collect_proc_macro_source_files(
         if looks_binary(content.as_bytes()) {
             anyhow::bail!("proc-macro source appears binary: {}", abs.display());
         }
-        let declarations =
-            proc_macro_module_declarations(&content, &context, &canonical_pkg_dir, &mut budgets)
-                .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
+        let declarations = proc_macro_module_declarations(
+            &content,
+            &context,
+            &canonical_pkg_dir,
+            &mut budgets,
+            edition,
+        )
+        .with_context(|| format!("parse proc-macro modules in {}", abs.display()))?;
 
         for declaration in declarations {
             if !resolved_edges.insert(declaration.lookup.clone()) {
@@ -62,6 +68,30 @@ pub(super) fn collect_proc_macro_source_files(
     }
 
     Ok(source_files)
+}
+
+fn cargo_manifest_macro_rules_edition(
+    manifest: &CargoManifest,
+) -> Result<super::macro_expansion::MacroRulesEdition> {
+    use super::macro_expansion::MacroRulesEdition;
+
+    let edition = manifest
+        .package
+        .as_ref()
+        .and_then(|package| package.edition.as_ref());
+    let Some(edition) = edition else {
+        return Ok(MacroRulesEdition::Edition2015);
+    };
+    let Some(edition) = edition.as_str() else {
+        anyhow::bail!("proc-macro package edition is inherited or is not a string");
+    };
+    match edition {
+        "2015" => Ok(MacroRulesEdition::Edition2015),
+        "2018" => Ok(MacroRulesEdition::Edition2018),
+        "2021" => Ok(MacroRulesEdition::Edition2021),
+        "2024" => Ok(MacroRulesEdition::Edition2024),
+        other => anyhow::bail!("unsupported proc-macro package edition `{other}`"),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -199,6 +229,7 @@ pub(super) fn proc_macro_module_declarations(
     source_context: &ProcMacroSourceContext,
     canonical_pkg_dir: &Path,
     budgets: &mut ProcMacroModuleBudgets,
+    edition: super::macro_expansion::MacroRulesEdition,
 ) -> Result<Vec<ProcMacroModuleDeclaration>> {
     let syntax = syn::parse_file(source)?;
     attributes::validate_proc_macro_attributes(&syntax.attrs, |_| false)?;
@@ -214,6 +245,7 @@ pub(super) fn proc_macro_module_declarations(
         canonical_pkg_dir,
         budgets,
         &mut declarations,
+        edition,
     )?;
     Ok(declarations)
 }
@@ -323,31 +355,21 @@ pub(super) fn potentially_active_explicit_paths(
 }
 
 pub(super) fn module_attrs_are_definitely_disabled(attrs: &[syn::Attribute]) -> Result<bool> {
-    for attr in attrs {
-        if attr.path().is_ident("cfg") {
-            let meta = attr.parse_args::<syn::Meta>()?;
-            if eval_cfg_meta(&meta)? == CfgEval::False {
-                return Ok(true);
-            }
-        } else if attr.path().is_ident("cfg_attr") {
-            let metas = attr.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-            )?;
-            let mut metas = metas.iter();
-            let condition = metas.next().context("cfg_attr has no condition")?;
-            if eval_cfg_meta(condition)? == CfgEval::True {
-                for meta in metas {
-                    if meta_definitely_disables_item(meta, 0)? {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-    Ok(false)
+    Ok(item_cfg_activation(attrs)? == CfgEval::False)
 }
 
-fn meta_definitely_disables_item(meta: &syn::Meta, depth: usize) -> Result<bool> {
+pub(super) fn item_cfg_activation(attrs: &[syn::Attribute]) -> Result<CfgEval> {
+    let mut activation = CfgEval::True;
+    for attribute in attrs {
+        activation = cfg_eval_and(activation, cfg_gate_activation(&attribute.meta, 0)?);
+        if activation == CfgEval::False {
+            break;
+        }
+    }
+    Ok(activation)
+}
+
+fn cfg_gate_activation(meta: &syn::Meta, depth: usize) -> Result<CfgEval> {
     if depth > MAX_PROC_MACRO_META_DEPTH {
         anyhow::bail!("proc-macro cfg_attr nesting exceeds {MAX_PROC_MACRO_META_DEPTH} levels");
     }
@@ -355,7 +377,7 @@ fn meta_definitely_disables_item(meta: &syn::Meta, depth: usize) -> Result<bool>
         let syn::Meta::List(list) = meta else {
             anyhow::bail!("cfg must contain a predicate");
         };
-        return Ok(eval_cfg_meta(&syn::parse2(list.tokens.clone())?)? == CfgEval::False);
+        return eval_cfg_meta(&syn::parse2(list.tokens.clone())?);
     }
     if meta.path().is_ident("cfg_attr") {
         let syn::Meta::List(list) = meta else {
@@ -364,15 +386,26 @@ fn meta_definitely_disables_item(meta: &syn::Meta, depth: usize) -> Result<bool>
         let metas = parse_cfg_list(list)?;
         let mut metas = metas.iter();
         let condition = metas.next().context("nested cfg_attr has no condition")?;
-        if eval_cfg_meta(condition)? == CfgEval::True {
-            for nested in metas {
-                if meta_definitely_disables_item(nested, depth + 1)? {
-                    return Ok(true);
-                }
+        let condition = eval_cfg_meta(condition)?;
+        if condition == CfgEval::False {
+            return Ok(CfgEval::True);
+        }
+        let mut applied_activation = CfgEval::True;
+        for nested in metas {
+            applied_activation =
+                cfg_eval_and(applied_activation, cfg_gate_activation(nested, depth + 1)?);
+            if applied_activation == CfgEval::False {
+                break;
             }
         }
+        return Ok(match condition {
+            CfgEval::True => applied_activation,
+            CfgEval::Unknown if applied_activation == CfgEval::True => CfgEval::True,
+            CfgEval::Unknown => CfgEval::Unknown,
+            CfgEval::False => CfgEval::True,
+        });
     }
-    Ok(false)
+    Ok(CfgEval::True)
 }
 
 pub(super) fn module_path_plan(attrs: &[syn::Attribute]) -> Result<ModulePathPlan> {
