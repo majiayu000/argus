@@ -2090,6 +2090,20 @@ choose!(<u8 as Trait>::Assoc);"#,
 }
 
 #[test]
+fn proc_macro_underscore_does_not_match_ident_fragment() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        r#"macro_rules! choose {
+    ($value:ident) => {};
+    ($value:tt) => { mod payload; };
+}
+choose!(_);"#,
+        &[("src/payload.rs", "")],
+    )?;
+    assert!(source_files.contains("src/payload.rs"));
+    Ok(())
+}
+
+#[test]
 fn proc_macro_forwarded_expr_fragment_is_explicitly_opaque() {
     let error = collect_test_proc_macro_source(
         r#"macro_rules! inner {

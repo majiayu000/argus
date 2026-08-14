@@ -514,7 +514,9 @@ fn fragment_ends(
     let remaining = &input[at..];
     let single_length = match fragment {
         "tt" if !remaining.is_empty() => Some(1),
-        "ident" if matches!(remaining.first(), Some(TokenTree::Ident(_))) => Some(1),
+        "ident" if matches!(remaining.first(), Some(TokenTree::Ident(ident)) if ident != "_") => {
+            Some(1)
+        }
         "literal" if remaining.first().is_some_and(is_macro_literal_token) => Some(1),
         "literal"
             if punct_at(remaining, 0, '-')
