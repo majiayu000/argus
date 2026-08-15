@@ -541,6 +541,25 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
         syn::visit::visit_arm(self, arm);
     }
 
+    fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
+        if self.error.is_some() {
+            return;
+        }
+        let attributes = match argument {
+            syn::FnArg::Receiver(receiver) => &receiver.attrs,
+            syn::FnArg::Typed(typed) => &typed.attrs,
+        };
+        match module_attrs_are_definitely_disabled(attributes) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+        syn::visit::visit_fn_arg(self, argument);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.error.is_none() {
             if let Err(error) = self.expand_macro(mac) {

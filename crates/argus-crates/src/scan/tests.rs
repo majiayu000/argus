@@ -2360,6 +2360,30 @@ fn proc_macro_unknown_cfg_match_arm_still_traverses_body() {
 }
 
 #[test]
+fn proc_macro_false_cfg_function_parameter_is_ignored() -> Result<()> {
+    for source in [
+        "fn register(#[cfg(any())] value: unknown_macro!()) {}",
+        "struct Marker; impl Marker { fn register(#[cfg(any())] self: unknown_macro!()) {} }",
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[])?;
+        assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_function_parameter_still_traverses_type() {
+    for source in [
+        "fn register(#[cfg(windows)] value: unknown_macro!()) {}",
+        "struct Marker; impl Marker { fn register(#[cfg(windows)] self: unknown_macro!()) {} }",
+    ] {
+        let error = collect_test_proc_macro_source(source, &[])
+            .expect_err("an unknown cfg function parameter must retain fail-closed traversal");
+        assert!(format!("{error:#}").contains("unknown_macro"));
+    }
+}
+
+#[test]
 fn proc_macro_false_cfg_fields_and_variants_are_ignored() -> Result<()> {
     for source in [
         "struct Marker { #[cfg(any())] field: unknown_macro!(), }",
