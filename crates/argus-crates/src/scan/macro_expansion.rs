@@ -1,0 +1,799 @@
+//! Bounded local `macro_rules!` parsing, matching, and transcription.
+//!
+//! This intentionally does not guess at imported or procedural macro output.
+//! Callers must turn every unsupported or ambiguous case into an explicit
+//! `OpaqueExpansion` operational error.
+
+use anyhow::Result;
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use syn::parse::Parser;
+
+const MAX_RULES: usize = 256;
+const MAX_MATCH_STATES: usize = 4096;
+const MAX_MATCHER_ELEMENTS: usize = 1024;
+const MAX_FRAGMENT_PARSE_TOKENS: usize = 65_536;
+const MAX_MATCHER_DEPTH: usize = 32;
+
+#[derive(Clone, Copy)]
+pub(super) enum MacroRulesEdition {
+    Edition2015,
+    Edition2018,
+    Edition2021,
+    Edition2024,
+}
+
+impl MacroRulesEdition {
+    fn accepts_top_level_or_patterns(self) -> bool {
+        matches!(self, Self::Edition2021 | Self::Edition2024)
+    }
+
+    fn accepts_2024_expressions(self) -> bool {
+        matches!(self, Self::Edition2024)
+    }
+}
+
+mod transcriber;
+use transcriber::transcribe_bounded;
+
+#[derive(Debug)]
+pub(super) struct OpaqueExpansion {
+    detail: String,
+}
+
+impl OpaqueExpansion {
+    pub(super) fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for OpaqueExpansion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "OpaqueExpansion: {}", self.detail)
+    }
+}
+
+impl std::error::Error for OpaqueExpansion {}
+
+fn opaque<T>(detail: impl Into<String>) -> Result<T> {
+    Err(OpaqueExpansion::new(detail).into())
+}
+
+#[derive(Clone)]
+pub(super) struct MacroRulesDefinition {
+    rules: Vec<MacroRule>,
+    edition: MacroRulesEdition,
+}
+
+#[derive(Clone)]
+struct MacroRule {
+    matcher: Vec<MatcherElem>,
+    transcriber: TokenStream,
+}
+
+#[derive(Clone)]
+enum MatcherElem {
+    Token(TokenTree),
+    Group {
+        delimiter: Delimiter,
+        body: Vec<MatcherElem>,
+    },
+    Capture {
+        name: String,
+        fragment: String,
+        repeated: bool,
+    },
+    Repeat {
+        body: Vec<MatcherElem>,
+        separator: Option<TokenTree>,
+        kind: RepeatKind,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum RepeatKind {
+    ZeroOrMore,
+    OneOrMore,
+    ZeroOrOne,
+}
+
+#[derive(Clone)]
+struct CaptureBinding {
+    values: Vec<TokenStream>,
+    repeated: bool,
+    fragment: String,
+}
+
+impl CaptureBinding {
+    fn requires_opaque_forwarding(&self) -> bool {
+        !matches!(self.fragment.as_str(), "ident" | "lifetime" | "tt")
+    }
+}
+
+type Bindings = BTreeMap<String, CaptureBinding>;
+
+#[derive(Clone)]
+struct MatchState {
+    at: usize,
+    bindings: Bindings,
+}
+
+impl MacroRulesDefinition {
+    pub(super) fn parse(tokens: TokenStream, edition: MacroRulesEdition) -> Result<Self> {
+        let tokens = token_vec(tokens);
+        let mut at = 0;
+        let mut rules = Vec::new();
+        let mut matcher_elements = 0usize;
+        while at < tokens.len() {
+            if rules.len() >= MAX_RULES {
+                return opaque(format!("local macro_rules has more than {MAX_RULES} rules"));
+            }
+            let Some(TokenTree::Group(matcher)) = tokens.get(at) else {
+                return opaque("local macro_rules matcher is not delimited");
+            };
+            at += 1;
+            if !punct_at(&tokens, at, '=') || !punct_at(&tokens, at + 1, '>') {
+                return opaque("local macro_rules rule is missing `=>`");
+            }
+            at += 2;
+            let Some(TokenTree::Group(transcriber)) = tokens.get(at) else {
+                return opaque("local macro_rules transcriber is not delimited");
+            };
+            at += 1;
+            let mut names = BTreeSet::new();
+            let matcher = parse_matcher(matcher.stream(), 0, false, &mut names)?;
+            matcher_elements = matcher_elements.saturating_add(matcher_element_count(&matcher));
+            if matcher_elements > MAX_MATCHER_ELEMENTS {
+                return opaque(format!(
+                    "local macro matchers exceed {MAX_MATCHER_ELEMENTS} elements"
+                ));
+            }
+            rules.push(MacroRule {
+                matcher,
+                transcriber: transcriber.stream(),
+            });
+            if punct_at(&tokens, at, ';') || punct_at(&tokens, at, ',') {
+                at += 1;
+            }
+        }
+        if rules.is_empty() {
+            return opaque("local macro_rules definition has no rules");
+        }
+        Ok(Self { rules, edition })
+    }
+
+    pub(super) fn expand(
+        &self,
+        input: TokenStream,
+        name: &str,
+        max_output_tokens: usize,
+    ) -> Result<(TokenStream, usize)> {
+        let input = token_vec(input);
+        let mut budget = MatchBudget::new(self.edition);
+        for rule in &self.rules {
+            let mut bindings = Bindings::new();
+            initialize_bindings(&rule.matcher, &mut bindings);
+            let matches = match_sequence(
+                &rule.matcher,
+                &input,
+                MatchState { at: 0, bindings },
+                &mut budget,
+            )?
+            .into_iter()
+            .filter(|state| state.at == input.len())
+            .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [] => continue,
+                [matched] => {
+                    return transcribe_bounded(
+                        &rule.transcriber,
+                        &matched.bindings,
+                        max_output_tokens,
+                    )
+                }
+                _ => {
+                    return opaque(format!(
+                        "local macro `{name}` has an ambiguous matcher for this invocation"
+                    ))
+                }
+            }
+        }
+        opaque(format!(
+            "local macro `{name}` has no statically matching rule"
+        ))
+    }
+}
+
+fn matcher_element_count(elements: &[MatcherElem]) -> usize {
+    elements
+        .iter()
+        .map(|element| match element {
+            MatcherElem::Group { body, .. } | MatcherElem::Repeat { body, .. } => {
+                1usize.saturating_add(matcher_element_count(body))
+            }
+            MatcherElem::Token(_) | MatcherElem::Capture { .. } => 1,
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+struct MatchBudget {
+    states: usize,
+    fragment_parse_tokens: usize,
+    edition: MacroRulesEdition,
+}
+
+impl MatchBudget {
+    fn new(edition: MacroRulesEdition) -> Self {
+        Self {
+            states: 0,
+            fragment_parse_tokens: 0,
+            edition,
+        }
+    }
+
+    fn note(&mut self) -> Result<()> {
+        if self.states >= MAX_MATCH_STATES {
+            return opaque(format!(
+                "local macro matching exceeds {MAX_MATCH_STATES} states"
+            ));
+        }
+        self.states += 1;
+        Ok(())
+    }
+
+    fn note_fragment_parse(&mut self, tokens: usize) -> Result<()> {
+        if self.fragment_parse_tokens.saturating_add(tokens) > MAX_FRAGMENT_PARSE_TOKENS {
+            return opaque(format!(
+                "local macro fragment parsing exceeds {MAX_FRAGMENT_PARSE_TOKENS} token visits"
+            ));
+        }
+        self.fragment_parse_tokens += tokens;
+        Ok(())
+    }
+}
+
+fn parse_matcher(
+    tokens: TokenStream,
+    depth: usize,
+    inside_repeat: bool,
+    names: &mut BTreeSet<String>,
+) -> Result<Vec<MatcherElem>> {
+    if depth > MAX_MATCHER_DEPTH {
+        return opaque(format!(
+            "local macro matcher nesting exceeds {MAX_MATCHER_DEPTH} levels"
+        ));
+    }
+    let tokens = token_vec(tokens);
+    let mut parsed = Vec::new();
+    let mut at = 0;
+    while at < tokens.len() {
+        if punct_at(&tokens, at, '$') {
+            match tokens.get(at + 1) {
+                Some(TokenTree::Group(group)) => {
+                    if inside_repeat {
+                        return opaque(
+                            "nested macro matcher repetitions are not statically supported",
+                        );
+                    }
+                    let (separator, kind, consumed) = parse_repeat_suffix(&tokens, at + 2)?;
+                    parsed.push(MatcherElem::Repeat {
+                        body: parse_matcher(group.stream(), depth + 1, true, names)?,
+                        separator,
+                        kind,
+                    });
+                    at += 2 + consumed;
+                }
+                Some(TokenTree::Ident(name))
+                    if punct_at(&tokens, at + 2, ':')
+                        && matches!(tokens.get(at + 3), Some(TokenTree::Ident(_))) =>
+                {
+                    let TokenTree::Ident(fragment) = &tokens[at + 3] else {
+                        unreachable!("guard establishes the fragment token type")
+                    };
+                    let name = name.to_string();
+                    if !names.insert(name.clone()) {
+                        return opaque(format!(
+                            "local macro matcher binds `${name}` more than once"
+                        ));
+                    }
+                    parsed.push(MatcherElem::Capture {
+                        name,
+                        fragment: fragment.to_string(),
+                        repeated: inside_repeat,
+                    });
+                    at += 4;
+                }
+                _ => return opaque("unsupported `$` form in local macro matcher"),
+            }
+            continue;
+        }
+        match &tokens[at] {
+            TokenTree::Group(group) => parsed.push(MatcherElem::Group {
+                delimiter: group.delimiter(),
+                body: parse_matcher(group.stream(), depth + 1, inside_repeat, names)?,
+            }),
+            token => parsed.push(MatcherElem::Token(token.clone())),
+        }
+        at += 1;
+    }
+    Ok(parsed)
+}
+
+fn parse_repeat_suffix(
+    tokens: &[TokenTree],
+    at: usize,
+) -> Result<(Option<TokenTree>, RepeatKind, usize)> {
+    if let Some(kind) = tokens.get(at).and_then(repeat_kind) {
+        return Ok((None, kind, 1));
+    }
+    let Some(separator) = tokens.get(at).cloned() else {
+        return opaque("macro repetition is missing its operator");
+    };
+    let Some(kind) = tokens.get(at + 1).and_then(repeat_kind) else {
+        return opaque("macro repetition has an unsupported separator or operator");
+    };
+    if matches!(kind, RepeatKind::ZeroOrOne) {
+        return opaque("optional macro repetition cannot have a separator");
+    }
+    Ok((Some(separator), kind, 2))
+}
+
+fn repeat_kind(token: &TokenTree) -> Option<RepeatKind> {
+    match token {
+        TokenTree::Punct(punct) => match punct.as_char() {
+            '*' => Some(RepeatKind::ZeroOrMore),
+            '+' => Some(RepeatKind::OneOrMore),
+            '?' => Some(RepeatKind::ZeroOrOne),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn match_sequence(
+    elements: &[MatcherElem],
+    input: &[TokenTree],
+    state: MatchState,
+    budget: &mut MatchBudget,
+) -> Result<Vec<MatchState>> {
+    budget.note()?;
+    let Some((first, rest)) = elements.split_first() else {
+        return Ok(vec![state]);
+    };
+    let mut next = Vec::new();
+    match first {
+        MatcherElem::Token(expected) => {
+            if input
+                .get(state.at)
+                .is_some_and(|actual| tokens_equal(expected, actual))
+            {
+                next.push(MatchState {
+                    at: state.at + 1,
+                    bindings: state.bindings,
+                });
+            }
+        }
+        MatcherElem::Group { delimiter, body } => {
+            let Some(TokenTree::Group(actual)) = input.get(state.at) else {
+                return Ok(Vec::new());
+            };
+            if &actual.delimiter() != delimiter {
+                return Ok(Vec::new());
+            }
+            let nested_input = token_vec(actual.stream());
+            let nested = match_sequence(
+                body,
+                &nested_input,
+                MatchState {
+                    at: 0,
+                    bindings: state.bindings,
+                },
+                budget,
+            )?;
+            for nested in nested
+                .into_iter()
+                .filter(|nested| nested.at == nested_input.len())
+            {
+                next.push(MatchState {
+                    at: state.at + 1,
+                    bindings: nested.bindings,
+                });
+            }
+        }
+        MatcherElem::Capture {
+            name,
+            fragment,
+            repeated,
+        } => {
+            for end in fragment_ends(fragment, input, state.at, budget)? {
+                let mut bindings = state.bindings.clone();
+                let Some(binding) = bindings.get_mut(name) else {
+                    return opaque(format!(
+                        "local macro matcher has no initialized binding for `${name}`"
+                    ));
+                };
+                binding.repeated = *repeated;
+                binding
+                    .values
+                    .push(input[state.at..end].iter().cloned().collect());
+                next.push(MatchState { at: end, bindings });
+            }
+        }
+        MatcherElem::Repeat {
+            body,
+            separator,
+            kind,
+        } => {
+            return match_repetition(body, separator.as_ref(), *kind, rest, input, state, budget);
+        }
+    }
+    let mut completed = Vec::new();
+    for state in next {
+        completed.extend(match_sequence(rest, input, state, budget)?);
+        if completed.len() > MAX_MATCH_STATES {
+            return opaque("local macro match result set is too large");
+        }
+    }
+    Ok(completed)
+}
+
+fn match_repetition(
+    body: &[MatcherElem],
+    separator: Option<&TokenTree>,
+    kind: RepeatKind,
+    rest: &[MatcherElem],
+    input: &[TokenTree],
+    initial: MatchState,
+    budget: &mut MatchBudget,
+) -> Result<Vec<MatchState>> {
+    let minimum = usize::from(matches!(kind, RepeatKind::OneOrMore));
+    let maximum = if matches!(kind, RepeatKind::ZeroOrOne) {
+        1
+    } else {
+        input.len().saturating_add(1)
+    };
+    let mut frontier = vec![initial];
+    let mut count = 0;
+    let mut completed = Vec::new();
+    loop {
+        if count >= minimum {
+            for state in &frontier {
+                completed.extend(match_sequence(rest, input, state.clone(), budget)?);
+            }
+        }
+        if count == maximum || frontier.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for state in frontier {
+            let start = if count > 0 {
+                if let Some(separator) = separator {
+                    if !input
+                        .get(state.at)
+                        .is_some_and(|actual| tokens_equal(separator, actual))
+                    {
+                        continue;
+                    }
+                    state.at + 1
+                } else {
+                    state.at
+                }
+            } else {
+                state.at
+            };
+            for matched in match_sequence(
+                body,
+                input,
+                MatchState {
+                    at: start,
+                    bindings: state.bindings.clone(),
+                },
+                budget,
+            )? {
+                if matched.at == start {
+                    return opaque("local macro repetition can match an empty token sequence");
+                }
+                next.push(matched);
+            }
+        }
+        frontier = next;
+        count += 1;
+    }
+    Ok(completed)
+}
+
+fn fragment_ends(
+    fragment: &str,
+    input: &[TokenTree],
+    at: usize,
+    budget: &mut MatchBudget,
+) -> Result<Vec<usize>> {
+    let remaining = &input[at..];
+    let single_length = match fragment {
+        "tt" if !remaining.is_empty() => Some(1),
+        "ident" if matches!(remaining.first(), Some(TokenTree::Ident(ident)) if ident != "_") => {
+            Some(1)
+        }
+        "literal" if remaining.first().is_some_and(is_macro_literal_token) => Some(1),
+        "literal"
+            if punct_at(remaining, 0, '-')
+                && remaining.get(1).is_some_and(is_macro_literal_token) =>
+        {
+            Some(2)
+        }
+        "lifetime" => (punct_at(remaining, 0, '\'')
+            && matches!(remaining.get(1), Some(TokenTree::Ident(_))))
+        .then_some(2),
+        "block" if matches!(remaining.first(), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace) => {
+            Some(1)
+        }
+        _ => None,
+    };
+    if let Some(length) = single_length {
+        return Ok(vec![at + length]);
+    }
+    if matches!(fragment, "tt" | "ident" | "literal" | "lifetime" | "block") {
+        return Ok(Vec::new());
+    }
+
+    let mut ends = Vec::new();
+    if fragment == "vis" && syn::parse2::<syn::Visibility>(TokenStream::new()).is_ok() {
+        ends.push(at);
+    }
+    for length in 1..=remaining.len() {
+        budget.note_fragment_parse(length)?;
+        let candidate: TokenStream = remaining[..length].iter().cloned().collect();
+        let parses = match fragment {
+            "item" => syn::parse2::<syn::Item>(candidate).is_ok(),
+            "expr" => {
+                expression_fragment_parses(candidate, budget.edition.accepts_2024_expressions())
+            }
+            "expr_2021" => expression_fragment_parses(candidate, false),
+            "ty" => syn::parse2::<syn::Type>(candidate).is_ok(),
+            "path" => syn::parse2::<syn::TypePath>(candidate).is_ok(),
+            "meta" => syn::parse2::<syn::Meta>(candidate).is_ok(),
+            "pat" if budget.edition.accepts_top_level_or_patterns() => {
+                pattern_fragment_parses(candidate, true, budget)?
+            }
+            "pat" | "pat_param" => pattern_fragment_parses(candidate, false, budget)?,
+            "stmt" => statement_fragment_parses(candidate),
+            "vis" => syn::parse2::<syn::Visibility>(candidate).is_ok(),
+            other => return opaque(format!("unsupported macro fragment specifier `{other}`")),
+        };
+        if parses {
+            ends.push(at + length);
+        }
+    }
+    Ok(ends)
+}
+
+fn pattern_fragment_parses(
+    candidate: TokenStream,
+    accepts_top_level_or: bool,
+    budget: &mut MatchBudget,
+) -> Result<bool> {
+    let parsed = if accepts_top_level_or {
+        syn::Pat::parse_multi.parse2(candidate)
+    } else {
+        syn::Pat::parse_single.parse2(candidate)
+    };
+    let Ok(pattern) = parsed else {
+        return Ok(false);
+    };
+    if pattern_contains_verbatim(&pattern, budget)? {
+        return opaque(
+            "compiler-accepted pattern cannot be represented by the static macro matcher",
+        );
+    }
+    Ok(true)
+}
+
+fn pattern_contains_verbatim(root: &syn::Pat, budget: &mut MatchBudget) -> Result<bool> {
+    let mut pending = vec![root];
+    while let Some(pattern) = pending.pop() {
+        budget.note_fragment_parse(1)?;
+        match pattern {
+            syn::Pat::Verbatim(_) => return Ok(true),
+            syn::Pat::Ident(pattern) => {
+                if let Some((_at, subpattern)) = &pattern.subpat {
+                    pending.push(subpattern);
+                }
+            }
+            syn::Pat::Or(pattern) => pending.extend(pattern.cases.iter()),
+            syn::Pat::Paren(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Reference(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Slice(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::Struct(pattern) => {
+                pending.extend(pattern.fields.iter().map(|field| field.pat.as_ref()));
+            }
+            syn::Pat::Tuple(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::TupleStruct(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::Type(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Const(_)
+            | syn::Pat::Lit(_)
+            | syn::Pat::Macro(_)
+            | syn::Pat::Path(_)
+            | syn::Pat::Range(_)
+            | syn::Pat::Rest(_)
+            | syn::Pat::Wild(_) => {}
+            _ => return opaque("unsupported Syn pattern variant in static macro matcher"),
+        }
+    }
+    Ok(false)
+}
+
+fn statement_fragment_parses(candidate: TokenStream) -> bool {
+    let parsed = syn::Block::parse_within.parse2(candidate.clone());
+    if parsed.is_ok_and(|statements| match statements.as_slice() {
+        [syn::Stmt::Item(_)] | [syn::Stmt::Expr(_, None)] => true,
+        [syn::Stmt::Expr(syn::Expr::Verbatim(tokens), Some(_))] => tokens.is_empty(),
+        [syn::Stmt::Macro(statement)] => statement.semi_token.is_none(),
+        _ => false,
+    }) {
+        return true;
+    }
+
+    if matches!(candidate.clone().into_iter().last(), Some(TokenTree::Punct(punct)) if punct.as_char() == ';')
+    {
+        return false;
+    }
+
+    let mut completed = candidate;
+    completed.extend([TokenTree::Punct(proc_macro2::Punct::new(
+        ';',
+        proc_macro2::Spacing::Alone,
+    ))]);
+    syn::Block::parse_within
+        .parse2(completed)
+        .is_ok_and(|statements| {
+            matches!(
+                statements.as_slice(),
+                [syn::Stmt::Local(_)]
+                    | [syn::Stmt::Macro(_)]
+                    | [syn::Stmt::Expr(syn::Expr::Macro(_), Some(_))]
+            )
+        })
+}
+
+fn is_macro_literal_token(token: &TokenTree) -> bool {
+    match token {
+        TokenTree::Literal(_) => true,
+        TokenTree::Ident(ident) => ident == "true" || ident == "false",
+        TokenTree::Punct(_) | TokenTree::Group(_) => false,
+    }
+}
+
+fn expression_fragment_parses(candidate: TokenStream, accepts_2024_expressions: bool) -> bool {
+    syn::parse2::<syn::Expr>(candidate).is_ok_and(|expression| {
+        !matches!(expression, syn::Expr::Let(_))
+            && (accepts_2024_expressions
+                || !matches!(expression, syn::Expr::Const(_) | syn::Expr::Infer(_)))
+    })
+}
+
+fn initialize_bindings(elements: &[MatcherElem], bindings: &mut Bindings) {
+    for element in elements {
+        match element {
+            MatcherElem::Capture {
+                name,
+                fragment,
+                repeated,
+            } => {
+                bindings
+                    .entry(name.clone())
+                    .or_insert_with(|| CaptureBinding {
+                        values: Vec::new(),
+                        repeated: *repeated,
+                        fragment: fragment.clone(),
+                    });
+            }
+            MatcherElem::Group { body, .. } | MatcherElem::Repeat { body, .. } => {
+                initialize_bindings(body, bindings);
+            }
+            MatcherElem::Token(_) => {}
+        }
+    }
+}
+
+pub(super) fn token_tree_count(tokens: &TokenStream) -> usize {
+    let mut pending = vec![tokens.clone()];
+    let mut count = 0usize;
+    while let Some(stream) = pending.pop() {
+        for token in stream {
+            count = count.saturating_add(1);
+            if let TokenTree::Group(group) = token {
+                pending.push(group.stream());
+            }
+        }
+    }
+    count
+}
+
+fn token_vec(tokens: TokenStream) -> Vec<TokenTree> {
+    tokens.into_iter().collect()
+}
+
+fn punct_at(tokens: &[TokenTree], at: usize, expected: char) -> bool {
+    matches!(tokens.get(at), Some(TokenTree::Punct(punct)) if punct.as_char() == expected)
+}
+
+fn tokens_equal(expected: &TokenTree, actual: &TokenTree) -> bool {
+    match (expected, actual) {
+        (TokenTree::Ident(left), TokenTree::Ident(right)) => left == right,
+        (TokenTree::Punct(left), TokenTree::Punct(right)) => {
+            left.as_char() == right.as_char() && left.spacing() == right.spacing()
+        }
+        (TokenTree::Literal(left), TokenTree::Literal(right)) => {
+            left.to_string() == right.to_string()
+        }
+        (TokenTree::Group(left), TokenTree::Group(right)) => {
+            left.delimiter() == right.delimiter()
+                && token_vec(left.stream())
+                    .iter()
+                    .zip(token_vec(right.stream()).iter())
+                    .all(|(left, right)| tokens_equal(left, right))
+                && token_vec(left.stream()).len() == token_vec(right.stream()).len()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_macro_compiler_only_box_pattern_fragments_fail_closed() -> Result<()> {
+        for (fragment, invocation) in [
+            ("pat", "box value"),
+            ("pat", "head | box tail"),
+            ("pat_param", "box value"),
+            ("pat_param", "head @ box tail"),
+        ] {
+            let rules =
+                format!("($value:{fragment}) => {{ mod payload; }}; ($($token:tt)*) => {{}}")
+                    .parse()
+                    .expect("the fixed macro_rules test definition must tokenize");
+            let definition = MacroRulesDefinition::parse(rules, MacroRulesEdition::Edition2021)?;
+            let error = definition
+                .expand(
+                    invocation
+                        .parse()
+                        .expect("the fixed box-pattern invocation must tokenize"),
+                    "choose",
+                    1024,
+                )
+                .expect_err("compiler-only patterns must not select a benign fallback");
+            assert!(
+                format!("{error:#}").contains("compiler-accepted pattern"),
+                "{fragment} {invocation}: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_non_syntactic_box_tokens_remain_matchable() -> Result<()> {
+        for (rules, invocation) in [
+            ("($value:pat, box) => { matched }", "value, box"),
+            ("($value:pat) => { matched }", "inner!(box)"),
+        ] {
+            let definition = MacroRulesDefinition::parse(
+                rules.parse().expect("the fixed rule must tokenize"),
+                MacroRulesEdition::Edition2021,
+            )?;
+            let (expanded, _) = definition.expand(
+                invocation
+                    .parse()
+                    .expect("the fixed invocation must tokenize"),
+                "choose",
+                1024,
+            )?;
+            assert_eq!(expanded.to_string(), "matched");
+        }
+        Ok(())
+    }
+}
