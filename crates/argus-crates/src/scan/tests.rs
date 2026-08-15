@@ -2384,6 +2384,135 @@ fn proc_macro_unknown_cfg_function_parameter_still_traverses_type() {
 }
 
 #[test]
+fn proc_macro_false_cfg_nested_expression_is_ignored() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "fn register() { let _value = (#[cfg(any())] unknown_macro!(), 1); }",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_nested_expression_still_expands_macro() {
+    let error = collect_test_proc_macro_source(
+        "fn register() { let _value = (#[cfg(windows)] unknown_macro!(), 1); }",
+        &[],
+    )
+    .expect_err("an unknown cfg nested expression must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
+}
+
+#[test]
+fn proc_macro_false_cfg_generic_parameter_is_ignored() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "fn register<#[cfg(any())] const N: unknown_macro!()>() {}",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_generic_parameter_still_traverses_type() {
+    let error = collect_test_proc_macro_source(
+        "fn register<#[cfg(windows)] const N: unknown_macro!()>() {}",
+        &[],
+    )
+    .expect_err("an unknown cfg generic parameter must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
+}
+
+#[test]
+fn proc_macro_false_cfg_nested_ast_children_are_ignored() -> Result<()> {
+    for source in [
+        "struct Marker { #[cfg(any())] field: u8 } fn register() { let _value = Marker { #[cfg(any())] field: unknown_macro!() }; }",
+        "struct Marker { #[cfg(any())] field: u8 } fn register(value: Marker) { let Marker { #[cfg(any())] field: unknown_macro!() } = value; }",
+        "type Callback = fn(#[cfg(any())] unknown_macro!());",
+        "fn register() { let _closure = |#[cfg(any())] value: unknown_macro!()| (); }",
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[])?;
+        assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    }
+    Ok(())
+}
+
+#[test]
+fn proc_macro_unknown_cfg_nested_ast_children_remain_fail_closed() {
+    for source in [
+        "struct Marker { #[cfg(windows)] field: u8 } fn register() { let _value = Marker { #[cfg(windows)] field: unknown_macro!() }; }",
+        "struct Marker { #[cfg(windows)] field: u8 } fn register(value: Marker) { let Marker { #[cfg(windows)] field: unknown_macro!() } = value; }",
+        "type Callback = fn(#[cfg(windows)] unknown_macro!());",
+        "fn register() { let _closure = |#[cfg(windows)] value: unknown_macro!()| (); }",
+    ] {
+        let error = collect_test_proc_macro_source(source, &[])
+            .expect_err("an unknown cfg nested AST child must retain fail-closed traversal");
+        assert!(format!("{error:#}").contains("unknown_macro"), "{source}");
+    }
+}
+
+#[test]
+fn proc_macro_cfg_generic_parameter_variants_are_gated() -> Result<()> {
+    let source_files = collect_test_proc_macro_source(
+        "fn register<#[cfg(any())] T = unknown_macro!(), #[cfg(any())] 'a>() {}",
+        &[],
+    )?;
+    assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+
+    let error = collect_test_proc_macro_source(
+        "fn register<#[cfg(windows)] T = unknown_macro!(), #[cfg(windows)] 'a>() {}",
+        &[],
+    )
+    .expect_err("an unknown cfg type parameter must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_cfg_variadic_children_are_gated() -> Result<()> {
+    for source in [
+        "type Callback = fn(#[cfg(any())] ...);",
+        "extern \"C\" { fn register(#[cfg(any())] unknown_macro!(): ...); }",
+    ] {
+        let source_files = collect_test_proc_macro_source(source, &[])?;
+        assert_eq!(source_files, BTreeSet::from(["src/lib.rs".to_string()]));
+    }
+
+    let error = collect_test_proc_macro_source(
+        "extern \"C\" { fn register(#[cfg(windows)] unknown_macro!(): ...); }",
+        &[],
+    )
+    .expect_err("an unknown cfg variadic pattern must retain fail-closed traversal");
+    assert!(format!("{error:#}").contains("unknown_macro"));
+    Ok(())
+}
+
+#[test]
+fn proc_macro_malformed_cfg_nested_ast_children_fail_closed() {
+    for source in [
+        "fn register() { let _value = (#[cfg] 1, 2); }",
+        "fn register<#[cfg] const N: usize>() {}",
+        "fn register<#[cfg] T>() {}",
+        "fn register<#[cfg] 'a>() {}",
+        "struct Marker { #[cfg] field: u8 }",
+        "fn register() { let _value = Marker { #[cfg] field: 1 }; }",
+        "fn register(value: Marker) { let Marker { #[cfg] field } = value; }",
+        "type Callback = fn(#[cfg] u8);",
+        "type Callback = fn(#[cfg] ...);",
+        "extern \"C\" { fn register(#[cfg] value: ...); }",
+        "fn register(#[cfg] value: u8) {}",
+        "fn register() { let _closure = |#[cfg] value: u8| (); }",
+    ] {
+        let error = collect_test_proc_macro_source(source, &[])
+            .expect_err("a malformed cfg nested AST child must fail closed");
+        assert!(
+            format!("{error:#}").contains("cfg must contain a predicate"),
+            "{source}: {error:#}"
+        );
+    }
+}
+
+#[test]
 fn proc_macro_false_cfg_fields_and_variants_are_ignored() -> Result<()> {
     for source in [
         "struct Marker { #[cfg(any())] field: unknown_macro!(), }",

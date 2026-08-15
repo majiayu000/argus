@@ -47,6 +47,29 @@ pub(super) fn expression_attributes(expression: &syn::Expr) -> Option<&[syn::Att
     }
 }
 
+pub(super) fn pattern_attributes(pattern: &syn::Pat) -> Option<&[syn::Attribute]> {
+    match pattern {
+        syn::Pat::Const(pattern) => Some(&pattern.attrs),
+        syn::Pat::Ident(pattern) => Some(&pattern.attrs),
+        syn::Pat::Lit(pattern) => Some(&pattern.attrs),
+        syn::Pat::Macro(pattern) => Some(&pattern.attrs),
+        syn::Pat::Or(pattern) => Some(&pattern.attrs),
+        syn::Pat::Paren(pattern) => Some(&pattern.attrs),
+        syn::Pat::Path(pattern) => Some(&pattern.attrs),
+        syn::Pat::Range(pattern) => Some(&pattern.attrs),
+        syn::Pat::Reference(pattern) => Some(&pattern.attrs),
+        syn::Pat::Rest(pattern) => Some(&pattern.attrs),
+        syn::Pat::Slice(pattern) => Some(&pattern.attrs),
+        syn::Pat::Struct(pattern) => Some(&pattern.attrs),
+        syn::Pat::Tuple(pattern) => Some(&pattern.attrs),
+        syn::Pat::TupleStruct(pattern) => Some(&pattern.attrs),
+        syn::Pat::Type(pattern) => Some(&pattern.attrs),
+        syn::Pat::Wild(pattern) => Some(&pattern.attrs),
+        syn::Pat::Verbatim(_) => None,
+        _ => None,
+    }
+}
+
 pub(super) fn validate_proc_macro_attributes(
     attributes: &[syn::Attribute],
     macro_name_may_be_imported: impl Fn(&str) -> bool,

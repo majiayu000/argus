@@ -1,5 +1,7 @@
 use super::super::macro_expansion::{MacroRulesDefinition, MacroRulesEdition, OpaqueExpansion};
-use super::attributes::{expression_attributes, validate_proc_macro_attributes};
+use super::attributes::{
+    expression_attributes, pattern_attributes, validate_proc_macro_attributes,
+};
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -157,6 +159,19 @@ struct ProcMacroModuleCollector<'a> {
 }
 
 impl ProcMacroModuleCollector<'_> {
+    fn cfg_node_is_disabled(&mut self, attributes: &[syn::Attribute]) -> bool {
+        if self.error.is_some() {
+            return true;
+        }
+        match module_attrs_are_definitely_disabled(attributes) {
+            Ok(disabled) => disabled,
+            Err(error) => {
+                self.error = Some(error);
+                true
+            }
+        }
+    }
+
     fn validate_associated_item_attributes(
         &mut self,
         attributes: Option<&[syn::Attribute]>,
@@ -177,13 +192,8 @@ impl ProcMacroModuleCollector<'_> {
         let Some(attributes) = attributes else {
             return true;
         };
-        match module_attrs_are_definitely_disabled(attributes) {
-            Ok(true) => return false,
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return false;
-            }
+        if self.cfg_node_is_disabled(attributes) {
+            return false;
         }
         if let Err(error) =
             validate_proc_macro_attributes(attributes, |name| self.macro_name_may_be_imported(name))
@@ -497,67 +507,90 @@ impl<'ast> Visit<'ast> for ProcMacroModuleCollector<'_> {
     }
 
     fn visit_field(&mut self, field: &'ast syn::Field) {
-        if self.error.is_some() {
-            return;
+        if !self.cfg_node_is_disabled(&field.attrs) {
+            syn::visit::visit_field(self, field);
         }
-        match module_attrs_are_definitely_disabled(&field.attrs) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        }
-        syn::visit::visit_field(self, field);
     }
 
     fn visit_variant(&mut self, variant: &'ast syn::Variant) {
-        if self.error.is_some() {
-            return;
+        if !self.cfg_node_is_disabled(&variant.attrs) {
+            syn::visit::visit_variant(self, variant);
         }
-        match module_attrs_are_definitely_disabled(&variant.attrs) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        }
-        syn::visit::visit_variant(self, variant);
     }
 
     fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-        if self.error.is_some() {
-            return;
+        if !self.cfg_node_is_disabled(&arm.attrs) {
+            syn::visit::visit_arm(self, arm);
         }
-        match module_attrs_are_definitely_disabled(&arm.attrs) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        }
-        syn::visit::visit_arm(self, arm);
     }
 
     fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
-        if self.error.is_some() {
-            return;
-        }
         let attributes = match argument {
             syn::FnArg::Receiver(receiver) => &receiver.attrs,
             syn::FnArg::Typed(typed) => &typed.attrs,
         };
-        match module_attrs_are_definitely_disabled(attributes) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
+        if !self.cfg_node_is_disabled(attributes) {
+            syn::visit::visit_fn_arg(self, argument);
         }
-        syn::visit::visit_fn_arg(self, argument);
+    }
+
+    fn visit_expr(&mut self, expression: &'ast syn::Expr) {
+        if expression_attributes(expression)
+            .is_some_and(|attributes| self.cfg_node_is_disabled(attributes))
+        {
+            return;
+        }
+        syn::visit::visit_expr(self, expression);
+    }
+
+    fn visit_generic_param(&mut self, parameter: &'ast syn::GenericParam) {
+        let attributes = match parameter {
+            syn::GenericParam::Lifetime(parameter) => &parameter.attrs,
+            syn::GenericParam::Type(parameter) => &parameter.attrs,
+            syn::GenericParam::Const(parameter) => &parameter.attrs,
+        };
+        if !self.cfg_node_is_disabled(attributes) {
+            syn::visit::visit_generic_param(self, parameter);
+        }
+    }
+
+    fn visit_field_value(&mut self, field: &'ast syn::FieldValue) {
+        if !self.cfg_node_is_disabled(&field.attrs) {
+            syn::visit::visit_field_value(self, field);
+        }
+    }
+
+    fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
+        if !self.cfg_node_is_disabled(&field.attrs) {
+            syn::visit::visit_field_pat(self, field);
+        }
+    }
+
+    fn visit_bare_fn_arg(&mut self, argument: &'ast syn::BareFnArg) {
+        if !self.cfg_node_is_disabled(&argument.attrs) {
+            syn::visit::visit_bare_fn_arg(self, argument);
+        }
+    }
+
+    fn visit_bare_variadic(&mut self, variadic: &'ast syn::BareVariadic) {
+        if !self.cfg_node_is_disabled(&variadic.attrs) {
+            syn::visit::visit_bare_variadic(self, variadic);
+        }
+    }
+
+    fn visit_variadic(&mut self, variadic: &'ast syn::Variadic) {
+        if !self.cfg_node_is_disabled(&variadic.attrs) {
+            syn::visit::visit_variadic(self, variadic);
+        }
+    }
+
+    fn visit_pat(&mut self, pattern: &'ast syn::Pat) {
+        if pattern_attributes(pattern)
+            .is_some_and(|attributes| self.cfg_node_is_disabled(attributes))
+        {
+            return;
+        }
+        syn::visit::visit_pat(self, pattern);
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
