@@ -556,10 +556,9 @@ fn fragment_ends(
             "path" => syn::parse2::<syn::TypePath>(candidate).is_ok(),
             "meta" => syn::parse2::<syn::Meta>(candidate).is_ok(),
             "pat" if budget.edition.accepts_top_level_or_patterns() => {
-                syn::Pat::parse_multi.parse2(candidate).is_ok()
+                pattern_fragment_parses(candidate, true, budget)?
             }
-            "pat" => syn::Pat::parse_single.parse2(candidate).is_ok(),
-            "pat_param" => syn::Pat::parse_single.parse2(candidate).is_ok(),
+            "pat" | "pat_param" => pattern_fragment_parses(candidate, false, budget)?,
             "stmt" => statement_fragment_parses(candidate),
             "vis" => syn::parse2::<syn::Visibility>(candidate).is_ok(),
             other => return opaque(format!("unsupported macro fragment specifier `{other}`")),
@@ -569,6 +568,61 @@ fn fragment_ends(
         }
     }
     Ok(ends)
+}
+
+fn pattern_fragment_parses(
+    candidate: TokenStream,
+    accepts_top_level_or: bool,
+    budget: &mut MatchBudget,
+) -> Result<bool> {
+    let parsed = if accepts_top_level_or {
+        syn::Pat::parse_multi.parse2(candidate)
+    } else {
+        syn::Pat::parse_single.parse2(candidate)
+    };
+    let Ok(pattern) = parsed else {
+        return Ok(false);
+    };
+    if pattern_contains_verbatim(&pattern, budget)? {
+        return opaque(
+            "compiler-accepted pattern cannot be represented by the static macro matcher",
+        );
+    }
+    Ok(true)
+}
+
+fn pattern_contains_verbatim(root: &syn::Pat, budget: &mut MatchBudget) -> Result<bool> {
+    let mut pending = vec![root];
+    while let Some(pattern) = pending.pop() {
+        budget.note_fragment_parse(1)?;
+        match pattern {
+            syn::Pat::Verbatim(_) => return Ok(true),
+            syn::Pat::Ident(pattern) => {
+                if let Some((_at, subpattern)) = &pattern.subpat {
+                    pending.push(subpattern);
+                }
+            }
+            syn::Pat::Or(pattern) => pending.extend(pattern.cases.iter()),
+            syn::Pat::Paren(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Reference(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Slice(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::Struct(pattern) => {
+                pending.extend(pattern.fields.iter().map(|field| field.pat.as_ref()));
+            }
+            syn::Pat::Tuple(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::TupleStruct(pattern) => pending.extend(pattern.elems.iter()),
+            syn::Pat::Type(pattern) => pending.push(&pattern.pat),
+            syn::Pat::Const(_)
+            | syn::Pat::Lit(_)
+            | syn::Pat::Macro(_)
+            | syn::Pat::Path(_)
+            | syn::Pat::Range(_)
+            | syn::Pat::Rest(_)
+            | syn::Pat::Wild(_) => {}
+            _ => return opaque("unsupported Syn pattern variant in static macro matcher"),
+        }
+    }
+    Ok(false)
 }
 
 fn statement_fragment_parses(candidate: TokenStream) -> bool {
@@ -684,5 +738,62 @@ fn tokens_equal(expected: &TokenTree, actual: &TokenTree) -> bool {
                 && token_vec(left.stream()).len() == token_vec(right.stream()).len()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_macro_compiler_only_box_pattern_fragments_fail_closed() -> Result<()> {
+        for (fragment, invocation) in [
+            ("pat", "box value"),
+            ("pat", "head | box tail"),
+            ("pat_param", "box value"),
+            ("pat_param", "head @ box tail"),
+        ] {
+            let rules =
+                format!("($value:{fragment}) => {{ mod payload; }}; ($($token:tt)*) => {{}}")
+                    .parse()
+                    .expect("the fixed macro_rules test definition must tokenize");
+            let definition = MacroRulesDefinition::parse(rules, MacroRulesEdition::Edition2021)?;
+            let error = definition
+                .expand(
+                    invocation
+                        .parse()
+                        .expect("the fixed box-pattern invocation must tokenize"),
+                    "choose",
+                    1024,
+                )
+                .expect_err("compiler-only patterns must not select a benign fallback");
+            assert!(
+                format!("{error:#}").contains("compiler-accepted pattern"),
+                "{fragment} {invocation}: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proc_macro_non_syntactic_box_tokens_remain_matchable() -> Result<()> {
+        for (rules, invocation) in [
+            ("($value:pat, box) => { matched }", "value, box"),
+            ("($value:pat) => { matched }", "inner!(box)"),
+        ] {
+            let definition = MacroRulesDefinition::parse(
+                rules.parse().expect("the fixed rule must tokenize"),
+                MacroRulesEdition::Edition2021,
+            )?;
+            let (expanded, _) = definition.expand(
+                invocation
+                    .parse()
+                    .expect("the fixed invocation must tokenize"),
+                "choose",
+                1024,
+            )?;
+            assert_eq!(expanded.to_string(), "matched");
+        }
+        Ok(())
     }
 }
