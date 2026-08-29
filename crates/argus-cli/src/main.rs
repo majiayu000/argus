@@ -1,11 +1,13 @@
 //! argus CLI binary and subcommand router.
 
 mod agent;
+mod approvals;
 mod corpus;
 mod corpus_path;
 mod execution;
 mod intel;
 mod lockfile_scan;
+mod observation;
 mod report;
 mod risk_args;
 mod router;
@@ -553,6 +555,7 @@ fn cmd_ecosystem_fetch(
     let opts = CommonFetchOptions {
         registry,
         cache_dir: args.cache_dir,
+        expected_integrity: Vec::new(),
     };
     let transport = HttpTransport::new();
     let report = fetcher

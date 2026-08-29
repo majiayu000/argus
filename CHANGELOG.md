@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Make lockfile admission artifact-bound for npm, PyPI, and crates.io by
+  checking downloaded bytes against lockfile-retained digests. Add exact
+  purl/digest/capability/reason/expiry approvals that cannot downgrade blocks,
+  an isolated-observation manifest with suggested CI restrictions, implicit
+  npm `binding.gyp` execution detection, real paired npm/PyPI/crates/agent
+  process E2E coverage, and a lockfile-aware root Action contract.
+
 - Reduce agent-rule false positives by limiting `override system` matches to
   agent-authority targets such as instructions, prompts, messages, and policy,
   including narrowly formatted or safety-qualified authority targets. Bounded

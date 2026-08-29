@@ -14,7 +14,9 @@ test("input contract rejects empty and open-ended values", () => {
   assert.throws(() => readInputs({}, config), /scanType/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_ARGUSVERSION: "latest" }, config), /canonical/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_ARGUSVERSION: "0.2.0" }, config), /outside/);
-  assert.deepEqual(readInputs({ INPUT_SCANTYPE: "agent", INPUT_PATH: "." }, config), { scanType: "agent", inputPath: ".", format: "text", version: "0.1.0", failOn: "block" });
+  assert.deepEqual(readInputs({ INPUT_SCANTYPE: "agent", INPUT_PATH: "." }, config), { scanType: "agent", inputPath: ".", format: "text", version: "0.1.0", failOn: "block", base: "", baseLockfileFormat: "", maliciousDb: "", approvalLedger: "" });
+  assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_BASE: "base.lock" }, config), /scanType=lockfile/);
+  assert.throws(() => readInputs({ INPUT_SCANTYPE: "lockfile", INPUT_PATH: "Cargo.lock", INPUT_BASELOCKFILEFORMAT: "cargo" }, config), /requires base/);
 });
 
 test("platform matrix is closed", () => {
@@ -49,14 +51,17 @@ test("manifest validates identity and complete asset matrix", () => {
 });
 
 test("reports bind decision to exit code and format", () => {
-  assert.equal(validateReport("text", "decision: allow  package: x\npath: .\nfindings: none\n", 0, "0.1.0"), "allow");
+  assert.equal(validateReport("text", "decision: allow  package: x\npath: .\nfindings: none\n", 0, "0.1.0", "package"), "allow");
   const blocked = JSON.stringify({ artifact: "package-dir", path: ".", package_name: "x", package_version: "1.0.0", decision: "block", findings: [{}] });
-  assert.equal(validateReport("json", blocked, 1, "0.1.0"), "block");
-  assert.equal(validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: { version: 1 }, future_additive_field: true }), 1, "0.1.0"), "block");
-  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: [] }), 1, "0.1.0"), /contract/);
+  assert.equal(validateReport("json", blocked, 1, "0.1.0", "package"), "block");
+  assert.equal(validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: { version: 1 }, future_additive_field: true }), 1, "0.1.0", "package"), "block");
+  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: [] }), 1, "0.1.0", "package"), /contract/);
+  const lockfile = JSON.stringify({ lockfile: "Cargo.lock", decision: "block", targets_total: 1, scanned: 0, reports: [], skipped: [], failed: [{}], comparisons_total: 0, version_changes: [], comparison_failed: [], approvals: [] });
+  assert.equal(validateReport("json", lockfile, 1, "0.1.0", "lockfile"), "block");
   const sarif = JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "argus", version: "0.1.0" } }, invocations: [{ executionSuccessful: true }], results: [] }] });
-  assert.equal(validateReport("sarif", sarif, 0, "0.1.0"), "allow");
-  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), decision: "allow" }), 1, "0.1.0"), /contract/);
+  assert.equal(validateReport("sarif", sarif, 0, "0.1.0", "agent"), "allow");
+  assert.equal(validateReport("sarif", JSON.stringify({ version: "2.1.0", runs: [] }), 1, "0.1.0", "lockfile"), "block");
+  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), decision: "allow" }), 1, "0.1.0", "package"), /contract/);
   assert.throws(() => decisionForExit(3), /unsupported/);
 });
 

@@ -74,6 +74,7 @@ impl CrateRef {
 pub struct CratesFetchOptions {
     pub registry: String,
     pub cache_dir: Option<PathBuf>,
+    pub expected_integrity: Vec<argus_pipeline::ExpectedIntegrity>,
     pub max_artifact_bytes: u64,
     pub max_extracted_bytes: u64,
 }
@@ -83,6 +84,7 @@ impl Default for CratesFetchOptions {
         Self {
             registry: "https://crates.io".to_string(),
             cache_dir: None,
+            expected_integrity: Vec::new(),
             max_artifact_bytes: 100 * 1024 * 1024,
             max_extracted_bytes: 500 * 1024 * 1024,
         }
@@ -181,6 +183,8 @@ pub fn fetch_and_scan_crate_with_rules_and_context(
             crate_bytes.len()
         )
     })?;
+    argus_pipeline::verify_expected_integrity(&crate_bytes, &opts.expected_integrity)
+        .context("verify downloaded crate against lockfile integrity")?;
 
     let extract_root = match &opts.cache_dir {
         Some(parent) => {
@@ -263,6 +267,7 @@ impl argus_pipeline::EcosystemFetcher for CratesFetcher {
         let opts = CratesFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
+            expected_integrity: opts.expected_integrity.clone(),
             ..CratesFetchOptions::default()
         };
         fetch_and_scan_crate_with_rules_and_context(&pkg, &opts, transport, rules, execution)

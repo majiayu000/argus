@@ -1,4 +1,4 @@
-# P0 technical specification
+# Admission technical specification
 
 ## Existing components to reuse
 
@@ -17,12 +17,20 @@ The implementation stays within the existing lockfile scan path:
 No new cross-crate trait, baseline database, policy language, or execution mode
 is required.
 
+The completed P1/P2 implementation adds two CLI-local boundary modules:
+`approvals` parses and assesses exact approval bindings, while `observation`
+writes the isolated-observation manifest atomically. Fetchers receive the
+lockfile-retained digest through the existing pipeline options; no second
+fetch path or execution runtime was introduced.
+
 ## Command contract
 
 `lockfile-scan` gains the existing shared option:
 
 ```text
 --malicious-db <PATH>
+--approval-ledger <PATH>
+--export-observation <PATH>
 ```
 
 Without `--base`, all current targets are scanned and the malicious snapshot is
@@ -42,6 +50,18 @@ The malicious snapshot is applied to current reports only. Historical base
 matching is not needed to decide whether the current coordinate is known
 malicious, and a historical intelligence match must not create a current SARIF
 alert.
+
+For npm SRI, uv/PyPI artifact hashes, and Cargo checksums, the selected
+downloaded bytes must match at least one lockfile-retained SHA-1/256/384/512
+digest. Registry-advertised integrity is still verified separately. Unsupported,
+malformed, or mismatching lockfile evidence leaves the package unassessed and
+blocks the aggregate decision.
+
+Approval records use strict JSON schema version 1 and bind purl, algorithm,
+digest, capability, reason, and `expiresAt`. Duplicate, empty, malformed, or
+expired records fail operationally. Only a complete set of approval-scoped
+capabilities can change aggregate `allow-with-approval` to `allow`; package
+reports preserve their original findings and decision as audit evidence.
 
 ## Finding identity and delta
 

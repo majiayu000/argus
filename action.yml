@@ -18,6 +18,18 @@ inputs:
     description: Fail on block, or on block and approval.
     required: false
     default: block
+  base:
+    description: Optional workspace-relative base lockfile for dependency delta admission.
+    required: false
+  baseLockfileFormat:
+    description: Explicit format for an ambiguously named base lockfile.
+    required: false
+  maliciousDb:
+    description: Optional workspace-relative pinned malicious-package snapshot.
+    required: false
+  approvalLedger:
+    description: Optional workspace-relative digest- and capability-bound approval ledger.
+    required: false
 outputs:
   decision:
     description: Validated Argus decision; blank on operational failure.

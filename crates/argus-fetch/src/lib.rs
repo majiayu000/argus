@@ -107,6 +107,7 @@ pub struct FetchOptions {
     /// fresh private temp dir (mode 0700 on Unix), eliminating the multi-user
     /// race the review called out (M-3). Cache reuse arrives in M2.
     pub cache_dir: Option<PathBuf>,
+    pub expected_integrity: Vec<argus_pipeline::ExpectedIntegrity>,
     /// Opt in to bounded npm metadata anomaly evaluation. Disabled by
     /// default, so ordinary fetches make no npm search request.
     pub metadata_anomaly: bool,
@@ -146,6 +147,7 @@ impl Default for FetchOptions {
         Self {
             registry: "https://registry.npmjs.org".to_string(),
             cache_dir: None,
+            expected_integrity: Vec::new(),
             metadata_anomaly: false,
             metadata_cache_dir: None,
             max_tarball_bytes: 100 * 1024 * 1024,
@@ -280,6 +282,8 @@ pub fn fetch_and_scan_with_rules_and_context(
             tarball_bytes.len()
         )
     })?;
+    argus_pipeline::verify_expected_integrity(&tarball_bytes, &opts.expected_integrity)
+        .context("verify downloaded npm tarball against lockfile integrity")?;
 
     // 6. Extract into a fresh scratch dir. When `cache_dir` is set we honour
     //    it (for power users / persistent caches); otherwise we use a private
@@ -643,6 +647,7 @@ impl argus_pipeline::EcosystemFetcher for NpmFetcher {
         let opts = FetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
+            expected_integrity: opts.expected_integrity.clone(),
             ..FetchOptions::default()
         };
         fetch_and_scan_with_rules_and_context(&pkg, &opts, transport, rules, execution)

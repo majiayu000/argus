@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use argus_core::{Decision, Ecosystem, ExecutionContext, Finding, ScanReport, Severity};
 use argus_lockfile::FormatHint;
 use argus_lockfile::{LockfileScanTarget, LockfileScanTargetChange, LockfileScanTargetKind};
-use argus_pipeline::{CommonFetchOptions, EcosystemFetcher};
+use argus_pipeline::{CommonFetchOptions, EcosystemFetcher, ExpectedIntegrity};
 use argus_rules::RuleSession;
 use argus_transport::Transport;
 use chrono::Utc;
@@ -120,6 +120,8 @@ pub(crate) struct LockfileScanOutcome {
     pub(crate) comparisons_total: usize,
     pub(crate) version_changes: Vec<VersionChangeAssessment>,
     pub(crate) comparison_failed: Vec<ComparisonFailure>,
+    /// Digest- and capability-bound approvals applied to approval-only findings.
+    pub(crate) approvals: Vec<crate::approvals::ApprovalAssessment>,
 }
 
 impl LockfileScanOutcome {
@@ -149,6 +151,7 @@ impl LockfileScanOutcome {
             comparisons_total,
             version_changes,
             comparison_failed,
+            approvals: Vec::new(),
         };
         outcome.refresh_decision();
         outcome
@@ -158,7 +161,7 @@ impl LockfileScanOutcome {
         self.decision = if self.failed.is_empty() && self.comparison_failed.is_empty() {
             self.reports
                 .iter()
-                .map(|report| report.decision)
+                .map(|report| crate::approvals::effective_decision(report, &self.approvals))
                 .fold(Decision::Allow, worst_decision)
         } else {
             Decision::Block
@@ -196,6 +199,7 @@ struct FetchJob {
     locator: String,
     ecosystem: Ecosystem,
     spec: String,
+    expected_integrity: Vec<ExpectedIntegrity>,
 }
 
 /// Classify every target into a fetch job or an explicit skip.
@@ -246,6 +250,16 @@ fn plan(targets: &[LockfileScanTarget]) -> (Vec<FetchJob>, Vec<SkippedTarget>) {
             locator,
             ecosystem,
             spec: spec_for(ecosystem, name, version),
+            expected_integrity: target
+                .expected_integrity
+                .iter()
+                .filter_map(|evidence| {
+                    Some(ExpectedIntegrity {
+                        algorithm: evidence.algorithm.clone()?,
+                        value: evidence.value.clone()?,
+                    })
+                })
+                .collect(),
         });
     }
     (jobs, skipped)
@@ -416,6 +430,7 @@ pub(crate) fn scan_targets(
     lockfile: &Path,
     targets: &[LockfileScanTarget],
     cache_dir: Option<&Path>,
+    registry: Option<&str>,
     transport: &(dyn Transport + Sync),
     rules: &RuleSession,
     execution: &ExecutionContext,
@@ -433,10 +448,24 @@ pub(crate) fn scan_targets(
         &jobs,
         None,
         |_index, job| -> Result<Outcome> {
+            if matches!(
+                job.ecosystem,
+                Ecosystem::Npm | Ecosystem::PyPi | Ecosystem::CratesIo
+            ) && job.expected_integrity.is_empty()
+            {
+                return Ok(Outcome::Failed(FailedTarget {
+                    locator: job.locator.clone(),
+                    ecosystem: job.ecosystem,
+                    error: "lockfile admission requires a supported artifact digest".to_string(),
+                }));
+            }
             let fetcher = fetcher_for(job.ecosystem).context("planned job must have a fetcher")?;
             let opts = CommonFetchOptions {
-                registry: fetcher.default_registry().to_string(),
+                registry: registry
+                    .unwrap_or_else(|| fetcher.default_registry())
+                    .to_string(),
                 cache_dir: cache_dir.map(Path::to_path_buf),
+                expected_integrity: job.expected_integrity.clone(),
             };
             match fetcher.fetch_and_scan_with_context(&job.spec, &opts, transport, rules, execution)
             {
@@ -490,6 +519,15 @@ pub(crate) struct LockfileScanArgs {
     /// Persistent scratch parent reused across every dependency fetch.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
+    /// Registry base URL for the lockfile's package ecosystem.
+    #[arg(long)]
+    pub(crate) registry: Option<String>,
+    /// Write a bound manifest for isolated dynamic observation and CI controls.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) export_observation: Option<PathBuf>,
+    /// Apply explicit purl, digest, capability, reason, and expiry-bound approvals.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) approval_ledger: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = crate::Format::Text)]
     pub(crate) format: crate::Format,
     #[command(flatten)]
@@ -538,6 +576,7 @@ pub(crate) fn run(args: LockfileScanArgs) -> Result<ExitCode> {
         path,
         &current_targets,
         args.cache_dir.as_deref(),
+        args.registry.as_deref(),
         &transport,
         &rules,
         &execution,
@@ -563,6 +602,7 @@ pub(crate) fn run(args: LockfileScanArgs) -> Result<ExitCode> {
             base_path,
             &base_targets,
             args.cache_dir.as_deref(),
+            args.registry.as_deref(),
             &transport,
             &rules,
             &execution,
@@ -573,7 +613,18 @@ pub(crate) fn run(args: LockfileScanArgs) -> Result<ExitCode> {
         outcome.version_changes = version_changes;
         outcome.comparison_failed = comparison_failed;
     }
+    if let Some(ledger_path) = args.approval_ledger.as_deref() {
+        outcome.approvals = crate::approvals::load_and_assess(
+            ledger_path,
+            &outcome.reports,
+            &current_targets,
+            scan_started_at,
+        )?;
+    }
     outcome.refresh_decision();
+    if let Some(export_path) = args.export_observation.as_deref() {
+        crate::observation::export(export_path, &outcome, &current_targets, scan_started_at)?;
+    }
     emit(&outcome, args.format)
 }
 

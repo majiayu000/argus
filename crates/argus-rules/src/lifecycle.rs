@@ -46,6 +46,31 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
     let mut remote_shell = None;
     let mut legacy_script_blob = String::new();
 
+    let has_explicit_install = ctx
+        .package
+        .scripts
+        .get("preinstall")
+        .or_else(|| ctx.package.scripts.get("install"))
+        .is_some_and(|body| !body.trim().is_empty());
+    if !has_explicit_install {
+        let binding = ctx.root.join("binding.gyp");
+        match std::fs::symlink_metadata(&binding) {
+            Ok(metadata) if metadata.file_type().is_file() => findings.push(
+                Finding::new(
+                    "implicit-node-gyp-build",
+                    Severity::Medium,
+                    "binding.gyp triggers npm's implicit `node-gyp rebuild` install step",
+                )
+                .at("binding.gyp"),
+            ),
+            Ok(_) => anyhow::bail!("binding.gyp is not a regular file at {}", binding.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", binding.display()))
+            }
+        }
+    }
+
     // Lifecycle bodies are executable shell surfaces even though package.json
     // has no file extension. Analyze them explicitly as Bash. Non-lifecycle
     // script keys keep their previous lexical coverage, but are selected

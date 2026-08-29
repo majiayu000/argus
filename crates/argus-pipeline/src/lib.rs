@@ -9,11 +9,29 @@
 //!
 //! Mirrors the pattern proven by `argus-lockfile`'s `LockfileParser`.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use argus_core::{Ecosystem, ExecutionContext, ScanReport};
 use argus_rules::RuleSession;
 use argus_transport::Transport;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedIntegrity {
+    pub algorithm: String,
+    pub value: String,
+}
+
+pub fn verify_expected_integrity(bytes: &[u8], expected: &[ExpectedIntegrity]) -> Result<()> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+    if expected.iter().any(|candidate| {
+        argus_core::url::verify_named_digest(bytes, &candidate.algorithm, &candidate.value).is_ok()
+    }) {
+        return Ok(());
+    }
+    bail!("downloaded artifact did not match any digest retained from the lockfile")
+}
 
 /// Options shared by every ecosystem fetch. Ecosystem-specific knobs (npm
 /// Sigstore verification, PyPI artifact preference, ...) stay on the
@@ -26,6 +44,10 @@ pub struct CommonFetchOptions {
     /// Parent directory for the extraction scratch dir; `None` uses a
     /// private temp dir.
     pub cache_dir: Option<PathBuf>,
+    /// Digests retained from the selected lockfile entry. Empty for direct
+    /// package inspection; lockfile admission requires the downloaded bytes
+    /// to match at least one entry.
+    pub expected_integrity: Vec<ExpectedIntegrity>,
 }
 
 /// One package ecosystem's fetch-verify-extract-scan pipeline.
@@ -129,6 +151,7 @@ mod tests {
         let options = CommonFetchOptions {
             registry: probe.default_registry().to_string(),
             cache_dir: None,
+            expected_integrity: Vec::new(),
         };
         let rules = RuleSession::builtin().unwrap();
         let execution = ExecutionContext::new(ScanConcurrency::new(64).unwrap()).unwrap();

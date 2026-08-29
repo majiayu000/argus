@@ -376,7 +376,11 @@ fn merge_group(records: Vec<&NormalizedDependency>) -> Result<LockfileScanTarget
         record
             .sources
             .iter()
-            .all(|source| source.kind == SourceKind::Registry)
+            .any(|source| source.kind == SourceKind::Registry)
+            && record
+                .sources
+                .iter()
+                .all(|source| matches!(source.kind, SourceKind::Registry | SourceKind::Url))
     }) {
         LockfileScanTargetKind::RegistryFetchable
     } else {

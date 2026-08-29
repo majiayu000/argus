@@ -302,6 +302,8 @@ statically scanning every dependency the lockfile resolves.
 argus lockfile-scan package-lock.json --cache-dir .argus-cache
 argus lockfile-scan package-lock.json --base origin-main-lock.json   # delta only
 argus lockfile-scan package-lock.json --malicious-db malicious-packages.json
+argus lockfile-scan package-lock.json --approval-ledger approvals.json
+argus lockfile-scan package-lock.json --export-observation observation.json
 argus lockfile-scan package-lock.json --format sarif > argus.sarif
 ```
 
@@ -315,11 +317,31 @@ base artifact that cannot be assessed blocks the aggregate result; it is never
 presented as an empty or clean comparison. Base findings remain comparison
 evidence and never replace or downgrade the current report.
 
+For npm, PyPI, and crates.io lockfiles, Argus also verifies the downloaded
+artifact against the digest retained by the lockfile, independently of the
+registry response. A mismatch is an explicit unassessed failure and blocks the
+aggregate result.
+
 `--malicious-db` applies the same pinned, verified OpenSSF snapshot used by the
 single-package fetch commands to every current package report. The snapshot is
 loaded once per lockfile scan. Missing or corrupt intelligence remains an
 operational error, including when the lockfile has no registry-fetchable
 targets.
+
+`--approval-ledger` accepts only explicit approvals bound to the exact purl,
+lockfile digest, capability, reason, and future expiry. A complete binding can
+turn an `allow-with-approval` aggregate into `allow`; it can never downgrade a
+blocking finding or an incomplete assessment. `--export-observation` writes a
+digest-bound manifest for approval-bearing or blocking artifacts together with
+suggested deny-network, no-secret, read-only filesystem, and isolated-process
+controls. Argus does not execute that observation or embed a sandbox.
+
+The repository-root Action uses this same admission path for
+`scanType: lockfile`. Its optional `base`, `baseLockfileFormat`, `maliciousDb`,
+and `approvalLedger` inputs are workspace-relative regular files; SARIF and the
+native decision/exit-code contract remain available through the existing
+outputs. Until the protected Action branch is promoted, use the committed
+Action only in this repository's explicit dogfood flow.
 
 The aggregate decision is the worst package decision, and coverage is stated
 before findings. Two categories are reported rather than dropped:

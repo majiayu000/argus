@@ -90,6 +90,7 @@ impl PypiPackageRef {
 pub struct PypiFetchOptions {
     pub registry: String,
     pub cache_dir: Option<PathBuf>,
+    pub expected_integrity: Vec<argus_pipeline::ExpectedIntegrity>,
     pub max_artifact_bytes: u64,
     pub max_extracted_bytes: u64,
     pub prefer: PreferredFormat,
@@ -100,6 +101,7 @@ impl Default for PypiFetchOptions {
         Self {
             registry: "https://pypi.org".to_string(),
             cache_dir: None,
+            expected_integrity: Vec::new(),
             max_artifact_bytes: 200 * 1024 * 1024,
             max_extracted_bytes: 1024 * 1024 * 1024,
             prefer: PreferredFormat::Both,
@@ -245,6 +247,8 @@ pub fn fetch_and_scan_pypi_with_rules_and_context(
         verify_sha256_hex(&bytes, &art.digests.sha256).with_context(|| {
             format!("verify SHA-256 of {} ({} bytes)", art.filename, bytes.len())
         })?;
+        argus_pipeline::verify_expected_integrity(&bytes, &opts.expected_integrity)
+            .context("verify downloaded PyPI artifact against lockfile integrity")?;
 
         let art_dir = extract_root
             .path()
@@ -404,6 +408,7 @@ impl argus_pipeline::EcosystemFetcher for PypiFetcher {
         let opts = PypiFetchOptions {
             registry: opts.registry.clone(),
             cache_dir: opts.cache_dir.clone(),
+            expected_integrity: opts.expected_integrity.clone(),
             ..PypiFetchOptions::default()
         };
         fetch_and_scan_pypi_with_rules_and_context(&pkg, &opts, transport, rules, execution)

@@ -158,7 +158,6 @@ dependencies = [
  "argus-pypi",
  "argus-rubygems",
  "argus-rules",
- "argus-test-support",
  "argus-transport",
  "base64",
  "chrono",

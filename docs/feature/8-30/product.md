@@ -11,11 +11,16 @@ The first product workflow is the existing lockfile scan:
 ```sh
 argus lockfile-scan package-lock.json \
   --base package-lock.main.json \
-  --malicious-db malicious-packages.json
+  --malicious-db malicious-packages.json \
+  --approval-ledger approvals.json \
+  --export-observation observation.json
 ```
 
 Single-package inspection and agent-baseline inspection remain important, but
-this feature does not introduce a new top-level command or approval store.
+the product stays intentionally small: project admission is `lockfile-scan`,
+single-package inspection uses the ecosystem fetch commands, and agent drift
+uses `agent scan`. No aliases, hosted approval service, or compatibility layer
+is introduced.
 
 ## Trust boundaries
 
@@ -24,7 +29,8 @@ Argus trusts only inputs it has validated at their boundary:
 - the supported lockfile parser establishes package coordinates;
 - the registry transport and ecosystem fetcher establish the retrieved bytes;
 - integrity verification establishes equality with the registry-selected
-  digest when that ecosystem supplies one;
+  digest and, for npm/PyPI/crates lockfile admission, independently with at
+  least one digest retained by the lockfile;
 - the local malicious-package database establishes only that an exact
   coordinate is or is not present in one pinned snapshot;
 - the base lockfile establishes the comparison coordinate, not an assertion
@@ -60,10 +66,15 @@ finding merely because it also existed in the base artifact.
 - `block`: a current package blocks, a fetch/scan failed, or a required base
   comparison could not be completed.
 
-An approval should eventually bind coordinate, version, artifact digest,
-capability, reason, and expiry. That ledger is intentionally outside this P0;
-adding it before the comparison evidence exists would create a broad bypass
-surface without a stable object to approve.
+An approval binds the exact purl, one verified lockfile digest, capability,
+reason, and future expiry. It is evaluated only for `allow-with-approval`
+reports in npm, PyPI, and crates.io, where Argus has verified lockfile bytes.
+It never changes a `block`, fetch failure, scan failure, or comparison failure.
+
+Artifacts that still require runtime evidence can be exported to an observation
+manifest. The manifest contains the coordinate, lockfile integrity, findings,
+and suggested CI restrictions. Running a sandbox, firewall, or EDR remains the
+responsibility of a separate control.
 
 ## Product constraints
 
@@ -72,6 +83,8 @@ surface without a stable object to approve.
 - No provenance signal downgrades malicious or high-risk content evidence.
 - No skipped, failed, or unavailable comparison is summarized as clean.
 - No new ecosystem is added in this feature.
+- Local HTTP is accepted only for an exact same-origin loopback registry used
+  by isolated E2E; public artifact transport remains HTTPS-only.
 - JSON and text expose the delta. SARIF remains current-findings-only so base
   findings are not presented as newly active alerts.
 

@@ -28,16 +28,27 @@ async function main(env = process.env, dependencies = {}) {
     const inputs = readInputs(env, releaseConfig);
     outputs.argusVersion = inputs.version;
     const scanPath = resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.inputPath, inputs.scanType);
+    const basePath = inputs.base ? resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.base, "lockfile") : "";
+    const maliciousDbPath = inputs.maliciousDb ? resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.maliciousDb, "lockfile") : "";
+    const approvalLedgerPath = inputs.approvalLedger ? resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.approvalLedger, "lockfile") : "";
     const target = selectTarget();
     tempDir = fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), "argus-action-"));
     const binary = await materialize(inputs.version, target, tempDir, validateManifest);
     const versionResult = await run(binary, ["--version"], { timeoutMs: 30_000, stdoutLimit: 1024, stderrLimit: 1024 });
     if (versionResult.code !== 0 || versionResult.stdout !== `argus ${inputs.version}\n` || versionResult.stderr !== "") throw new Error("downloaded binary failed exact version self-check");
-    const args = inputs.scanType === "agent" ? ["agent", "scan", scanPath, "--format", inputs.format] : ["scan", scanPath, "--format", inputs.format];
+    const args = inputs.scanType === "agent"
+      ? ["agent", "scan", scanPath, "--format", inputs.format]
+      : inputs.scanType === "package"
+        ? ["scan", scanPath, "--format", inputs.format]
+        : ["lockfile-scan", scanPath, "--format", inputs.format];
+    if (basePath) args.push("--base", basePath);
+    if (inputs.baseLockfileFormat) args.push("--base-lockfile-format", inputs.baseLockfileFormat);
+    if (maliciousDbPath) args.push("--malicious-db", maliciousDbPath);
+    if (approvalLedgerPath) args.push("--approval-ledger", approvalLedgerPath);
     const result = await run(binary, args, { timeoutMs: 180_000 });
     outputs.exitCode = String(result.code);
     if (result.stderr !== "") throw new Error("argus wrote stderr while producing a report");
-    const decision = validateReport(inputs.format, result.stdout, result.code, inputs.version);
+    const decision = validateReport(inputs.format, result.stdout, result.code, inputs.version, inputs.scanType);
     const extension = inputs.format === "sarif" ? "sarif" : inputs.format === "json" ? "json" : "txt";
     const reportPath = path.join(tempDir, `argus-report.${extension}`);
     const pendingPath = `${reportPath}.tmp`;

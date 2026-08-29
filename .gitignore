@@ -1,4 +1,5 @@
 target/
+action/node_modules/
 .audit/
 *.swp
 .DS_Store

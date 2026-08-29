@@ -9,9 +9,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use subtle::ConstantTimeEq;
-use url::{Position, Url};
+use url::{Host, Position, Url};
 
 /// Extract the lowercased host from an `http(s)` URL.
 ///
@@ -123,7 +123,8 @@ fn normalize_registry_host(raw: &str) -> Result<String> {
 /// allowlist of additional acceptable hosts (typically CDN hosts).
 ///
 /// Rules:
-/// - URL must be `https://`.
+/// - URL must be `https://`, except exact same-origin loopback registries may
+///   use `http://` for isolated local end-to-end verification.
 /// - Host must equal `registry_host`, OR
 /// - Host must equal an `allowed` entry (exact match, case-insensitive), OR
 /// - An `allowed` entry beginning with `.` is a strict subdomain-suffix
@@ -136,12 +137,16 @@ pub fn validate_artifact_url<S: AsRef<str>>(
     allowed: &[S],
 ) -> Result<()> {
     let parsed = parse_http_url(url)?;
-    if parsed.scheme() != "https" {
-        bail!("refusing non-HTTPS artifact URL `{url}`");
-    }
     let host = canonical_authority(&parsed, url)?;
     let registry_host = normalize_registry_host(registry_host)
         .with_context(|| format!("invalid registry host `{registry_host}`"))?;
+    if parsed.scheme() != "https"
+        && !(parsed.scheme() == "http"
+            && host == registry_host
+            && is_loopback_authority(&registry_host))
+    {
+        bail!("refusing non-HTTPS artifact URL `{url}`");
+    }
     let allowed = allowed
         .iter()
         .map(|entry| {
@@ -168,6 +173,18 @@ pub fn validate_artifact_url<S: AsRef<str>>(
     );
 }
 
+fn is_loopback_authority(authority: &str) -> bool {
+    let Ok(parsed) = Url::parse(&format!("http://{authority}/")) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 /// Verify the SHA-256 digest of `bytes` matches `expected_hex` in
 /// constant time. An empty `expected_hex` is treated as a hard error so
 /// callers cannot silently accept "no digest advertised".
@@ -186,6 +203,34 @@ pub fn verify_sha256_hex(bytes: &[u8], expected_hex: &str) -> Result<()> {
             bytes.len()
         ))
     }
+}
+
+/// Verify one named digest from a lockfile against the downloaded bytes.
+///
+/// Lockfile parsers retain registry-native hex or base64 encodings. The
+/// algorithm fixes the byte length, so accepting either encoding is
+/// unambiguous and the comparison remains constant-time.
+pub fn verify_named_digest(bytes: &[u8], algorithm: &str, expected: &str) -> Result<()> {
+    let actual = match algorithm {
+        "sha1" => Sha1::digest(bytes).to_vec(),
+        "sha256" => Sha256::digest(bytes).to_vec(),
+        "sha384" => Sha384::digest(bytes).to_vec(),
+        "sha512" => Sha512::digest(bytes).to_vec(),
+        other => bail!("unsupported lockfile digest algorithm `{other}`"),
+    };
+    let decoded = if expected.len() == actual.len() * 2
+        && expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        hex::decode(expected).context("decode lockfile hex digest")?
+    } else {
+        STANDARD
+            .decode(expected)
+            .context("decode lockfile base64 digest")?
+    };
+    if decoded.len() != actual.len() || !bool::from(actual.ct_eq(&decoded)) {
+        bail!("downloaded artifact does not match the lockfile digest");
+    }
+    Ok(())
 }
 
 /// Verify the SHA-1 digest of `bytes` matches `expected_hex` in constant time.

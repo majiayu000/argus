@@ -34,12 +34,19 @@ function readInputs(env, config) {
   const format = (env.INPUT_FORMAT || "text").trim();
   const version = (env.INPUT_ARGUSVERSION || config.defaultBinaryVersion || "").trim();
   const failOn = (env.INPUT_FAILON || "block").trim();
+  const base = (env.INPUT_BASE || "").trim();
+  const baseLockfileFormat = (env.INPUT_BASELOCKFILEFORMAT || "").trim();
+  const maliciousDb = (env.INPUT_MALICIOUSDB || "").trim();
+  const approvalLedger = (env.INPUT_APPROVALLEDGER || "").trim();
   if (!["package", "lockfile", "agent"].includes(scanType)) throw new Error("scanType must be package, lockfile, or agent");
   if (!inputPath) throw new Error("path is required");
   if (!["text", "json", "sarif"].includes(format)) throw new Error("format must be text, json, or sarif");
   if (!["block", "approval"].includes(failOn)) throw new Error("failOn must be block or approval");
+  if (scanType !== "lockfile" && [base, baseLockfileFormat, maliciousDb, approvalLedger].some(Boolean)) throw new Error("lockfile admission inputs require scanType=lockfile");
+  if (baseLockfileFormat && !base) throw new Error("baseLockfileFormat requires base");
+  if (baseLockfileFormat && !["package-lock", "yarn", "pnpm", "poetry", "uv", "cargo", "go-sum", "bundler", "composer"].includes(baseLockfileFormat)) throw new Error("baseLockfileFormat is unsupported");
   if (!inCompatibilityRange(version, config)) throw new Error(`argusVersion ${version} is outside the tested compatibility range`);
-  return { scanType, inputPath, format, version, failOn };
+  return { scanType, inputPath, format, version, failOn, base, baseLockfileFormat, maliciousDb, approvalLedger };
 }
 
 function targetFor(platform = process.platform, arch = process.arch) {
@@ -104,15 +111,24 @@ function decisionForExit(code) {
   throw new Error(`argus returned unsupported exit code ${code}`);
 }
 
-function validateReport(format, text, code, version) {
+function validateReport(format, text, code, version, scanType) {
   const decision = decisionForExit(code);
   if (!text || Buffer.byteLength(text) > 64 * 1024 * 1024) throw new Error("argus report is empty or oversized");
   if (format === "text") {
-    const match = /^decision: (allow|block|allow-with-approval)  package: .+\npath: .+\n(?:[\s\S]*\n)?findings:(?: none|\n[\s\S]+)\n$/u.exec(text);
+    const expression = scanType === "lockfile"
+      ? /^decision: (allow|block|allow-with-approval)  lockfile: .+\ncoverage: scanned \d+ of \d+ resolved targets \(\d+ skipped, \d+ failed\)\n[\s\S]*$/u
+      : /^decision: (allow|block|allow-with-approval)  package: .+\npath: .+\n(?:[\s\S]*\n)?findings:(?: none|\n[\s\S]+)\n$/u;
+    const match = expression.exec(text);
     if (!match || match[1] !== decision) throw new Error("text report contract does not match exit code");
   } else if (format === "json") {
     let report;
     try { report = JSON.parse(text); } catch (error) { throw new Error("JSON report is malformed", { cause: error }); }
+    if (scanType === "lockfile") {
+      const required = ["lockfile", "decision", "targets_total", "scanned", "reports", "skipped", "failed", "comparisons_total", "version_changes", "comparison_failed", "approvals"];
+      const keys = report && typeof report === "object" && !Array.isArray(report) ? Object.keys(report) : [];
+      if (required.some((key) => !keys.includes(key)) || report.decision !== decision || typeof report.lockfile !== "string" || ![report.targets_total, report.scanned, report.comparisons_total].every(Number.isSafeInteger) || ![report.reports, report.skipped, report.failed, report.version_changes, report.comparison_failed, report.approvals].every(Array.isArray) || report.reports.some((item) => !item || typeof item !== "object" || Array.isArray(item))) throw new Error("lockfile JSON report contract does not match exit code");
+      return decision;
+    }
     const required = ["artifact", "decision", "findings", "package_name", "package_version", "path"];
     const keys = report && typeof report === "object" && !Array.isArray(report) ? Object.keys(report) : [];
     const optionalObject = (key) => report[key] === undefined || report[key] === null || (typeof report[key] === "object" && !Array.isArray(report[key]));
@@ -121,11 +137,18 @@ function validateReport(format, text, code, version) {
   } else {
     let report;
     try { report = JSON.parse(text); } catch (error) { throw new Error("SARIF report is malformed", { cause: error }); }
-    const run = report?.version === "2.1.0" && Array.isArray(report.runs) && report.runs.length === 1 ? report.runs[0] : null;
-    if (!run || run.tool?.driver?.name !== "argus" || run.tool.driver.version !== version || run.invocations?.[0]?.executionSuccessful !== true || !Array.isArray(run.results)) throw new Error("SARIF report contract is incomplete");
-    if (decision === "allow" && run.results.length !== 0) throw new Error("clean SARIF contains findings");
-    if (decision !== "allow" && run.results.length === 0) throw new Error("non-clean SARIF contains no findings");
-    if (run.results.some((result) => result?.properties?.decision !== decision)) throw new Error("SARIF result decision does not match exit code");
+    const runs = report?.version === "2.1.0" && Array.isArray(report.runs) ? report.runs : null;
+    if (!runs || runs.some((run) => run.tool?.driver?.name !== "argus" || run.tool.driver.version !== version || run.invocations?.[0]?.executionSuccessful !== true || !Array.isArray(run.results))) throw new Error("SARIF report contract is incomplete");
+    if (scanType === "lockfile") {
+      const valid = new Set(["allow", "block", "allow-with-approval"]);
+      if (runs.some((run) => run.results.some((result) => !valid.has(result?.properties?.decision)))) throw new Error("lockfile SARIF result decision is invalid");
+    } else {
+      if (runs.length !== 1) throw new Error("SARIF report contract is incomplete");
+      const run = runs[0];
+      if (decision === "allow" && run.results.length !== 0) throw new Error("clean SARIF contains findings");
+      if (decision !== "allow" && run.results.length === 0) throw new Error("non-clean SARIF contains no findings");
+      if (run.results.some((result) => result?.properties?.decision !== decision)) throw new Error("SARIF result decision does not match exit code");
+    }
   }
   return decision;
 }
