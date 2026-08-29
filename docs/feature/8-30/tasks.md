@@ -14,9 +14,14 @@
 
 ## P1 — next 30–60 days
 
-- Build synthetic event replay packets around clean/malicious version pairs,
-  starting with install-hook injection, `binding.gyp` execution, setup/build
-  subprocess plus download, and agent hook/baseline drift.
+- [x] Add the first synthetic npm clean-to-malicious replay. It builds real
+  tarballs and SHA-512 integrity values in memory, runs both versions through
+  the fetch/verify/extract/static-scan pipeline, and proves that a newly added
+  `preinstall` remote-download pipeline is introduced and blocks without being
+  executed.
+- [ ] Extend paired replay coverage to `binding.gyp` execution, PyPI
+  setup/build subprocess plus download, crates.io `build.rs`, and agent
+  hook/baseline drift.
 - Maintain separate benign-popular, benign-dangerous, malware, paired-delta,
   and agent-baseline evaluation sets. New default-block behavior requires zero
   benign-popular false blocks and no regression in supported event replay.
@@ -60,7 +65,7 @@ cargo test --workspace --all-targets                           PASS
 cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (32/32)
 ```
 
-Focused contracts also passed: 12 `lockfile_scan` unit tests, 9
+Focused contracts also passed: 13 `lockfile_scan` unit tests, 9
 `lockfile_scan_cli` tests, and the 36-test intelligence CLI suite inside the
 full workspace run. All package artifacts used by the new tests are synthetic;
 the implementation does not execute package code.
