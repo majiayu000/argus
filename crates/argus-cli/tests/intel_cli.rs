@@ -109,6 +109,50 @@ fn matching_snapshot_blocks_with_complete_evidence() {
 }
 
 #[test]
+fn batch_snapshot_application_matches_each_current_coordinate() {
+    let directory = local_tempdir();
+    let database = write_snapshot(directory.path(), "active.json", ACTIVE_SNAPSHOT);
+    let mut reports = vec![
+        synthetic_report(Ecosystem::Npm, "demo", "1.0.0"),
+        synthetic_report(Ecosystem::Npm, "demo", "1.0.1"),
+    ];
+
+    intel::apply_malicious_snapshot_to_reports(&mut reports, Some(&database), scan_started_at())
+        .expect("apply one snapshot to report batch");
+
+    assert_eq!(reports[0].decision, Decision::Block);
+    assert_eq!(reports[0].findings[0].rule_id, "known-malicious-package");
+    assert_eq!(reports[1].decision, Decision::Allow);
+    assert!(reports[1].findings.is_empty());
+    assert_eq!(
+        reports[1]
+            .intelligence
+            .as_ref()
+            .expect("no-match status")
+            .status,
+        IntelMatchStatus::NoMatch
+    );
+}
+
+#[test]
+fn empty_batch_still_rejects_a_future_snapshot() {
+    let directory = local_tempdir();
+    let database = write_snapshot(directory.path(), "future.json", FUTURE_SNAPSHOT);
+    let mut reports = Vec::new();
+
+    let error = intel::apply_malicious_snapshot_to_reports(
+        &mut reports,
+        Some(&database),
+        scan_started_at(),
+    )
+    .expect_err("future snapshot must fail even when there are no package reports");
+
+    assert!(error
+        .to_string()
+        .contains("derive malicious-package snapshot status"));
+}
+
+#[test]
 fn no_match_scope() {
     let directory = local_tempdir();
     let database = write_snapshot(directory.path(), "active.json", ACTIVE_SNAPSHOT);
@@ -496,6 +540,7 @@ fn cli_exposes_frozen_intel_syntax_and_validates_status_offline() {
         "maven-fetch",
         "gems-fetch",
         "composer-fetch",
+        "lockfile-scan",
     ] {
         let help = argus(&[command, "--help"]);
         assert!(help.status.success(), "command={command}");

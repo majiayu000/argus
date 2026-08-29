@@ -301,14 +301,25 @@ statically scanning every dependency the lockfile resolves.
 ```sh
 argus lockfile-scan package-lock.json --cache-dir .argus-cache
 argus lockfile-scan package-lock.json --base origin-main-lock.json   # delta only
+argus lockfile-scan package-lock.json --malicious-db malicious-packages.json
 argus lockfile-scan package-lock.json --format sarif > argus.sarif
 ```
 
 Each registry-fetchable coordinate is dispatched to its ecosystem's fetch
 pipeline, so every package gets the same integrity verification and static
 rules as the single-package commands. `--jobs` bounds concurrency, `--cache-dir`
-is reused across every fetch, and `--base` restricts the sweep to dependencies
-this change added or altered.
+is reused across every fetch, and `--base` restricts the active sweep to
+dependencies this change added or altered. For an altered coordinate, Argus
+also scans the base artifact and reports introduced and resolved findings. A
+base artifact that cannot be assessed blocks the aggregate result; it is never
+presented as an empty or clean comparison. Base findings remain comparison
+evidence and never replace or downgrade the current report.
+
+`--malicious-db` applies the same pinned, verified OpenSSF snapshot used by the
+single-package fetch commands to every current package report. The snapshot is
+loaded once per lockfile scan. Missing or corrupt intelligence remains an
+operational error, including when the lockfile has no registry-fetchable
+targets.
 
 The aggregate decision is the worst package decision, and coverage is stated
 before findings. Two categories are reported rather than dropped:
@@ -320,7 +331,8 @@ before findings. Two categories are reported rather than dropped:
   evidence, not evidence of safety, so an unreachable registry never yields a
   clean tree.
 
-SARIF emits one run per package.
+JSON and text include base/current version changes. SARIF emits one run per
+current package so historical base findings are not reported as active alerts.
 
 ### Weighted risk scoring (opt-in)
 

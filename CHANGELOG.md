@@ -71,7 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit code. Dependencies that were skipped or could not be assessed are
   reported explicitly, and an unassessed dependency escalates the aggregate
   decision to `block` rather than contributing nothing. `--base` restricts the
-  sweep to added/changed dependencies; SARIF emits one run per package.
+  sweep to added/changed dependencies and now scans both artifact versions,
+  reporting introduced and resolved findings. An unavailable required base
+  artifact blocks the aggregate result rather than producing an incomplete
+  comparison. `--malicious-db` applies one verified local intelligence
+  snapshot across all current package reports. JSON and text retain version
+  comparisons; SARIF emits one run per current package.
 - Add the approval-only `encoded-dynamic-execution` rule for direct JavaScript
   `eval`/`Function(atob(...))` and Python
   `exec`/`eval(base64.b64decode(...))` chains. Statistical obfuscation

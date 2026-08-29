@@ -1,5 +1,5 @@
 use super::*;
-use argus_core::{ArtifactKind, Finding, Severity};
+use argus_core::{ArtifactKind, Finding, PackageCoordinate, Severity};
 use argus_lockfile::{IntegrityState, LockfileScanTarget};
 
 fn target(
@@ -40,6 +40,39 @@ fn report(path: &str, decision: Decision, findings: Vec<Finding>) -> ScanReport 
     }
 }
 
+fn versioned_report(
+    name: &str,
+    version: &str,
+    decision: Decision,
+    findings: Vec<Finding>,
+) -> ScanReport {
+    let coordinate = PackageCoordinate::new(Ecosystem::Npm, name, version).unwrap();
+    ScanReport {
+        artifact: ArtifactKind::PackageDir,
+        path: coordinate.purl.clone().into(),
+        package_name: Some(name.to_string()),
+        package_version: Some(version.to_string()),
+        decision,
+        findings,
+        coordinate: Some(coordinate),
+        intelligence: None,
+        rules: None,
+        vulnerability: None,
+        risk: None,
+    }
+}
+
+fn versioned_target(name: &str, version: &str) -> LockfileScanTarget {
+    let mut target = target(
+        LockfileScanTargetKind::RegistryFetchable,
+        Some(Ecosystem::Npm),
+        Some(name),
+        Some(version),
+    );
+    target.coordinate = Some(PackageCoordinate::new(Ecosystem::Npm, name, version).unwrap());
+    target
+}
+
 fn outcome(reports: Vec<ScanReport>, failed: Vec<FailedTarget>) -> LockfileScanOutcome {
     LockfileScanOutcome::derive(
         "package-lock.json".into(),
@@ -48,6 +81,9 @@ fn outcome(reports: Vec<ScanReport>, failed: Vec<FailedTarget>) -> LockfileScanO
             reports,
             skipped: Vec::new(),
             failed,
+            comparisons_total: 0,
+            version_changes: Vec::new(),
+            comparison_failed: Vec::new(),
         },
     )
 }
@@ -199,6 +235,123 @@ fn empty_lockfile_allows() {
     let result = outcome(Vec::new(), Vec::new());
     assert_eq!(result.decision, Decision::Allow);
     assert_eq!(result.scanned, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Version comparison: stable finding identity and fail-closed base evidence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn finding_delta_ignores_explanation_churn_but_retains_new_capabilities() {
+    let base = vec![
+        Finding::new("lifecycle-script", Severity::Medium, "old wording")
+            .at("package.json#scripts.preinstall")
+            .with_capability("process_exec", vec!["package.json:4".to_string()], None),
+    ];
+    let current = vec![
+        Finding::new("lifecycle-script", Severity::Medium, "new wording")
+            .at("package.json#scripts.preinstall")
+            .with_capability("process_exec", vec!["package.json:8".to_string()], None),
+        Finding::new("remote-download", Severity::High, "downloads a payload")
+            .at("setup.mjs")
+            .with_capability(
+                "net_egress",
+                vec!["setup.mjs:12".to_string()],
+                Some("payload.example.invalid".to_string()),
+            ),
+    ];
+
+    let (introduced, resolved) = finding_delta(&base, &current);
+    assert_eq!(
+        introduced
+            .iter()
+            .map(|finding| finding.rule_id.as_str())
+            .collect::<Vec<_>>(),
+        ["remote-download"]
+    );
+    assert!(resolved.is_empty());
+}
+
+#[test]
+fn changed_coordinate_reports_introduced_and_resolved_findings() {
+    let change = LockfileScanTargetChange {
+        base: versioned_target("demo", "1.0.0"),
+        current: versioned_target("demo", "2.0.0"),
+    };
+    let base = outcome(
+        vec![versioned_report(
+            "demo",
+            "1.0.0",
+            Decision::AllowWithApproval,
+            vec![Finding::new(
+                "version-shape-anomaly",
+                Severity::Medium,
+                "old anomaly",
+            )],
+        )],
+        Vec::new(),
+    );
+    let current = outcome(
+        vec![versioned_report(
+            "demo",
+            "2.0.0",
+            Decision::Block,
+            vec![Finding::new(
+                "remote-download",
+                Severity::High,
+                "new execution surface",
+            )],
+        )],
+        Vec::new(),
+    );
+
+    let (assessed, failed) = assess_version_changes(&[change], &current, &base);
+    assert!(failed.is_empty());
+    assert_eq!(assessed.len(), 1);
+    assert_eq!(assessed[0].base.purl, "pkg:npm/demo@1.0.0");
+    assert_eq!(assessed[0].current.purl, "pkg:npm/demo@2.0.0");
+    assert_eq!(assessed[0].introduced[0].rule_id, "remote-download");
+    assert_eq!(assessed[0].resolved[0].rule_id, "version-shape-anomaly");
+}
+
+#[test]
+fn unavailable_base_comparison_blocks_the_current_outcome() {
+    let change = LockfileScanTargetChange {
+        base: versioned_target("demo", "1.0.0"),
+        current: versioned_target("demo", "2.0.0"),
+    };
+    let mut current = outcome(
+        vec![versioned_report(
+            "demo",
+            "2.0.0",
+            Decision::Allow,
+            Vec::new(),
+        )],
+        Vec::new(),
+    );
+    let base = outcome(
+        Vec::new(),
+        vec![FailedTarget {
+            locator: "demo".to_string(),
+            ecosystem: Ecosystem::Npm,
+            error: "synthetic registry failure".to_string(),
+        }],
+    );
+
+    let (assessed, failed) = assess_version_changes(&[change], &current, &base);
+    current.comparisons_total = 1;
+    current.version_changes = assessed;
+    current.comparison_failed = failed;
+    current.refresh_decision();
+
+    assert_eq!(current.decision, Decision::Block);
+    assert_eq!(current.comparison_failed.len(), 1);
+    assert!(current.comparison_failed[0]
+        .error
+        .contains("synthetic registry failure"));
+    let text = render_text(&current);
+    assert!(text.contains("comparison: assessed 0 of 1 changed targets"));
+    assert!(text.contains("comparison unavailable:"));
 }
 
 // ---------------------------------------------------------------------------

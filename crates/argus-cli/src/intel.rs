@@ -108,33 +108,58 @@ pub(crate) fn apply_malicious_snapshot(
     database_path: Option<&Path>,
     scan_started_at: DateTime<Utc>,
 ) -> Result<()> {
+    apply_malicious_snapshot_to_reports(
+        std::slice::from_mut(report),
+        database_path,
+        scan_started_at,
+    )
+}
+
+/// Apply one verified snapshot to a batch of package reports.
+///
+/// Whole-lockfile scans can contain hundreds of packages. Loading and
+/// validating the same snapshot for every coordinate would multiply both I/O
+/// and verification work, so the batch boundary validates it exactly once.
+pub(crate) fn apply_malicious_snapshot_to_reports(
+    reports: &mut [ScanReport],
+    database_path: Option<&Path>,
+    scan_started_at: DateTime<Utc>,
+) -> Result<()> {
     let Some(database_path) = database_path else {
         return Ok(());
     };
-    let coordinate = report.coordinate.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--malicious-db requires a trusted resolved package coordinate; this scan produced none"
-        )
-    })?;
     let database = IntelDatabase::load(database_path).with_context(|| {
         format!(
             "load malicious-package database {}",
             database_path.display()
         )
     })?;
-    let MatchResult {
-        mut findings,
-        status,
-    } = database
-        .match_coordinate(coordinate)
-        .with_context(|| format!("match malicious-package coordinate {}", coordinate.purl))?;
-    let intelligence = database
-        .status(scan_started_at, status)
+    // Validate scan-time properties even for an empty report batch. A caller
+    // that explicitly configured a future-dated snapshot must not receive a
+    // clean result merely because the current lockfile delta is empty.
+    database
+        .status(scan_started_at, IntelMatchStatus::NoMatch)
         .context("derive malicious-package snapshot status")?;
+    for report in reports {
+        let coordinate = report.coordinate.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--malicious-db requires a trusted resolved package coordinate; this scan produced none"
+            )
+        })?;
+        let MatchResult {
+            mut findings,
+            status,
+        } = database
+            .match_coordinate(coordinate)
+            .with_context(|| format!("match malicious-package coordinate {}", coordinate.purl))?;
+        let intelligence = database
+            .status(scan_started_at, status)
+            .context("derive malicious-package snapshot status")?;
 
-    report.findings.append(&mut findings);
-    report.intelligence = Some(intelligence);
-    report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+        report.findings.append(&mut findings);
+        report.intelligence = Some(intelligence);
+        report.decision = argus_rules::derive_decision_from_findings(&report.findings);
+    }
     Ok(())
 }
 
