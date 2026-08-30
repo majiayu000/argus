@@ -7,7 +7,7 @@ fn version_is_exact_for_action_self_check() {
         .output()
         .expect("run argus --version");
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"argus 0.1.0\n");
+    assert_eq!(output.stdout, b"argus 0.2.0\n");
     assert!(output.stderr.is_empty());
 }
 

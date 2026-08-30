@@ -20,7 +20,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_VERSION: "0.1.0"
+  RELEASE_VERSION: "0.2.0"
 
 jobs:
   preflight:

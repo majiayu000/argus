@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
 - Make lockfile admission artifact-bound for npm, PyPI, and crates.io by
   checking downloaded bytes against lockfile-retained digests. Add exact
   purl/digest/capability/reason/expiry approvals that cannot downgrade blocks,
@@ -188,5 +190,6 @@ section.
 - See [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md) for the
   attack-catalog argus is designed against.
 
-[Unreleased]: https://github.com/majiayu000/argus/compare/v0.1.0...main
+[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.0...main
+[0.2.0]: https://github.com/majiayu000/argus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/majiayu000/argus/releases/tag/v0.1.0

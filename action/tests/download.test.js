@@ -59,12 +59,12 @@ test("bounded GitHub request rejects origins, status, and declared oversize", as
 });
 
 test("release and asset metadata stay immutable and digest-bound", async () => {
-  const release = { draft: false, prerelease: false, immutable: true, tag_name: "v0.1.0", target_commitish: "main", assets: [] };
+  const release = { draft: false, prerelease: false, immutable: true, tag_name: "v0.2.0", target_commitish: "main", assets: [] };
   let restore = mockGet([{ status: 200, headers: { "content-type": "application/json; charset=utf-8" }, body: Buffer.from(JSON.stringify(release)) }]);
-  try { assert.deepEqual(await fetchRelease("0.1.0"), release); } finally { restore(); }
+  try { assert.deepEqual(await fetchRelease("0.2.0"), release); } finally { restore(); }
   await assert.rejects((async () => {
     restore = mockGet([{ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ...release, immutable: false })) }]);
-    try { await fetchRelease("0.1.0"); } finally { restore(); }
+    try { await fetchRelease("0.2.0"); } finally { restore(); }
   })(), /not immutable/);
   const body = Buffer.from("asset");
   const asset = { name: "asset", digest: `sha256:${sha256(body)}`, url: "https://api.github.com/repos/majiayu000/argus/releases/assets/1", size: body.length };
@@ -78,14 +78,14 @@ test("release and asset metadata stay immutable and digest-bound", async () => {
 
 test("release metadata requires JSON and tag refs resolve to commit identity", async () => {
   let restore = mockGet([{ status: 200, headers: { "content-type": "text/plain" }, body: Buffer.from("{}") }]);
-  try { await assert.rejects(fetchRelease("0.1.0"), /content type/); } finally { restore(); }
-  restore = mockGet([{ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.1.0", object: { type: "commit", sha: "a".repeat(40) } })) }]);
-  try { assert.equal(await fetchTagCommit("0.1.0"), "a".repeat(40)); } finally { restore(); }
+  try { await assert.rejects(fetchRelease("0.2.0"), /content type/); } finally { restore(); }
+  restore = mockGet([{ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.2.0", object: { type: "commit", sha: "a".repeat(40) } })) }]);
+  try { assert.equal(await fetchTagCommit("0.2.0"), "a".repeat(40)); } finally { restore(); }
   restore = mockGet([
-    { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.1.0", object: { type: "tag", sha: "b".repeat(40) } })) },
+    { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ ref: "refs/tags/v0.2.0", object: { type: "tag", sha: "b".repeat(40) } })) },
     { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ sha: "b".repeat(40), object: { type: "commit", sha: "c".repeat(40) } })) },
   ]);
-  try { assert.equal(await fetchTagCommit("0.1.0"), "c".repeat(40)); } finally { restore(); }
+  try { assert.equal(await fetchTagCommit("0.2.0"), "c".repeat(40)); } finally { restore(); }
 });
 
 test("attestation verifier requires flags and strict provenance JSON", async () => {
@@ -94,17 +94,17 @@ test("attestation verifier requires flags and strict provenance JSON", async () 
   const subject = path.join(os.tmpdir(), `argus-attestation-${process.pid}`);
   fs.writeFileSync(subject, "subject");
   const commit = "a".repeat(40);
-  const ref = "refs/tags/v0.1.0";
+  const ref = "refs/tags/v0.2.0";
   const workflowUri = `https://github.com/majiayu000/argus/.github/workflows/release.yml@${ref}`;
   const verified = [{ verificationResult: { signature: { certificate: { issuer: "https://token.actions.githubusercontent.com", runnerEnvironment: "github-hosted", sourceRepositoryURI: "https://github.com/majiayu000/argus", sourceRepositoryDigest: commit, sourceRepositoryRef: ref, buildConfigURI: workflowUri, buildSignerURI: workflowUri } }, verifiedTimestamps: [{ type: "Tlog" }], statement: { predicateType: "https://slsa.dev/provenance/v1", subject: [{ name: "subject", digest: { sha256: sha256(Buffer.from("subject")) } }] } } }];
   const runner = async (_exe, args) => { calls.push(args); return calls.length === 1 ? { code: 0, stdout: flags, stderr: "" } : { code: 0, stdout: JSON.stringify(verified), stderr: "" }; };
-  await verifyAttestation(subject, "bundle", "0.1.0", commit, runner);
+  await verifyAttestation(subject, "bundle", "0.2.0", commit, runner);
   assert.equal(calls.length, 2);
   const badIdentity = structuredClone(verified);
   badIdentity[0].verificationResult.signature.certificate.runnerEnvironment = "self-hosted";
   let invocation = 0;
-  await assert.rejects(verifyAttestation(subject, "bundle", "0.1.0", commit, async () => (++invocation === 1 ? { code: 0, stdout: flags, stderr: "" } : { code: 0, stdout: JSON.stringify(badIdentity), stderr: "" })), /certificate identity/);
-  await assert.rejects(verifyAttestation(subject, "bundle", "0.1.0", commit, async () => ({ code: 0, stdout: "--bundle", stderr: "" })), /lacks required/);
+  await assert.rejects(verifyAttestation(subject, "bundle", "0.2.0", commit, async () => (++invocation === 1 ? { code: 0, stdout: flags, stderr: "" } : { code: 0, stdout: JSON.stringify(badIdentity), stderr: "" })), /certificate identity/);
+  await assert.rejects(verifyAttestation(subject, "bundle", "0.2.0", commit, async () => ({ code: 0, stdout: "--bundle", stderr: "" })), /lacks required/);
   fs.unlinkSync(subject);
 });
 
@@ -129,13 +129,13 @@ test("materialize verifies manifest before selecting and writing a binary", asyn
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "argus-materialize-"));
   const commit = "a".repeat(40);
   const target = "x86_64-unknown-linux-gnu";
-  const binaryName = `argus-v0.1.0-${target}`;
+  const binaryName = `argus-v0.2.0-${target}`;
   const binary = Buffer.from("binary");
   const manifest = { assets: [{ name: binaryName, target, kind: "binary", size: binary.length, sha256: sha256(binary) }] };
   const payloads = { "release_manifest.json": Buffer.from(JSON.stringify(manifest)), "release_manifest.sigstore.json": Buffer.from("{}"), [binaryName]: binary, [`${target}.sigstore.json`]: Buffer.from("{}") };
   const verified = [];
-  const result = await materializeRelease("0.1.0", target, root, (value, version, actualCommit) => {
-    assert.equal(version, "0.1.0");
+  const result = await materializeRelease("0.2.0", target, root, (value, version, actualCommit) => {
+    assert.equal(version, "0.2.0");
     assert.equal(actualCommit, commit);
     return value;
   }, {

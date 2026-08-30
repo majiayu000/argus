@@ -27,7 +27,7 @@ members = [
 exclude = ["third_party/sigstore-verify"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/majiayu000/argus"
@@ -57,27 +57,27 @@ walkdir = "2"
 toml = "0.8.23"
 yaml-rust2 = { version = "0.8.1", default-features = false }
 
-argus-core = { path = "crates/argus-core", version = "0.1.0" }
-argus-transport = { path = "crates/argus-transport", version = "0.1.0" }
-argus-archive = { path = "crates/argus-archive", version = "0.1.0" }
-argus-pipeline = { path = "crates/argus-pipeline", version = "0.1.0" }
-argus-osv-schema = { path = "crates/argus-osv-schema", version = "0.1.0" }
-argus-agent = { path = "crates/argus-agent", version = "0.1.0" }
-argus-rules = { path = "crates/argus-rules", version = "0.1.0" }
-argus-fetch = { path = "crates/argus-fetch", version = "0.1.0" }
-argus-pypi = { path = "crates/argus-pypi", version = "0.1.0" }
-argus-rubygems = { path = "crates/argus-rubygems", version = "0.1.0" }
-argus-crates = { path = "crates/argus-crates", version = "0.1.0" }
-argus-composer = { path = "crates/argus-composer", version = "0.1.0" }
-argus-maven = { path = "crates/argus-maven", version = "0.1.0" }
-argus-nuget = { path = "crates/argus-nuget", version = "0.1.0" }
-argus-go = { path = "crates/argus-go", version = "0.1.0" }
-argus-intel = { path = "crates/argus-intel", version = "0.1.0" }
-argus-lockfile = { path = "crates/argus-lockfile", version = "0.1.0" }
-argus-osv = { path = "crates/argus-osv", version = "0.1.0" }
-argus-syntax = { path = "crates/argus-syntax", version = "0.1.0" }
-argus-test-support = { path = "crates/argus-test-support", version = "0.1.0" }
-argus-verify = { path = "crates/argus-verify", version = "0.1.0" }
+argus-core = { path = "crates/argus-core", version = "0.2.0" }
+argus-transport = { path = "crates/argus-transport", version = "0.2.0" }
+argus-archive = { path = "crates/argus-archive", version = "0.2.0" }
+argus-pipeline = { path = "crates/argus-pipeline", version = "0.2.0" }
+argus-osv-schema = { path = "crates/argus-osv-schema", version = "0.2.0" }
+argus-agent = { path = "crates/argus-agent", version = "0.2.0" }
+argus-rules = { path = "crates/argus-rules", version = "0.2.0" }
+argus-fetch = { path = "crates/argus-fetch", version = "0.2.0" }
+argus-pypi = { path = "crates/argus-pypi", version = "0.2.0" }
+argus-rubygems = { path = "crates/argus-rubygems", version = "0.2.0" }
+argus-crates = { path = "crates/argus-crates", version = "0.2.0" }
+argus-composer = { path = "crates/argus-composer", version = "0.2.0" }
+argus-maven = { path = "crates/argus-maven", version = "0.2.0" }
+argus-nuget = { path = "crates/argus-nuget", version = "0.2.0" }
+argus-go = { path = "crates/argus-go", version = "0.2.0" }
+argus-intel = { path = "crates/argus-intel", version = "0.2.0" }
+argus-lockfile = { path = "crates/argus-lockfile", version = "0.2.0" }
+argus-osv = { path = "crates/argus-osv", version = "0.2.0" }
+argus-syntax = { path = "crates/argus-syntax", version = "0.2.0" }
+argus-test-support = { path = "crates/argus-test-support", version = "0.2.0" }
+argus-verify = { path = "crates/argus-verify", version = "0.2.0" }
 
 # fetch-only deps (HTTP + crypto + archive) live in argus-fetch / argus-pypi.
 ureq = { version = "2", default-features = false, features = ["tls"] }
