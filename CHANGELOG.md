@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add deterministic package capability correlation for npm and PyPI. Findings
+  now retain capability, source-line evidence, and resolved network hosts;
+  same-file credential-exfiltration and download-to-execution chains block
+  previously unknown coordinates without executing package code. Existing
+  standalone rule decisions are preserved, while syntax-proven file reads are
+  the only credential observations eligible for chain correlation.
+
 ## [0.2.1] - 2026-08-30
 
 - Require an explicit GitHub token for Action release downloads and

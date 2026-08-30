@@ -97,7 +97,12 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
                     Severity::High,
                     format!("package.json declares `{name}` script: {body}"),
                 )
-                .at("package.json"),
+                .at("package.json")
+                .with_capability(
+                    "install_trigger",
+                    vec![format!("package.json:scripts/{name}")],
+                    None,
+                ),
             );
         }
     }
@@ -118,7 +123,12 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
                 Severity::High,
                 format!("script downloads remote payload: {matched}"),
             )
-            .at("package.json:scripts"),
+            .at("package.json:scripts")
+            .with_capability(
+                "remote_download",
+                vec!["package.json:scripts".into()],
+                None,
+            ),
         );
         findings.push(
             Finding::new(
@@ -126,7 +136,8 @@ pub fn run(ctx: &PackageContext, findings: &mut Vec<Finding>) -> Result<()> {
                 Severity::High,
                 "script pipes downloaded content into a shell",
             )
-            .at("package.json:scripts"),
+            .at("package.json:scripts")
+            .with_capability("exec_eval", vec!["package.json:scripts".into()], None),
         );
     }
 

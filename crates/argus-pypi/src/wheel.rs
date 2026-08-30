@@ -124,6 +124,8 @@ pub(crate) fn scan_wheel_zip_with_rules_budget_and_context(
         findings.append(&mut per_file);
     }
 
+    argus_rules::correlate_package_findings(&mut findings);
+
     rules
         .scan_directory_with_budget_and_context(
             dest_root,

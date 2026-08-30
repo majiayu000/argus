@@ -608,6 +608,14 @@ send(base + "/second");
         .map(|finding| finding.location.as_deref().expect("source location"))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(locations.len(), files.len(), "got: {locations:?}");
+    assert!(findings.iter().all(|finding| {
+        finding.capability.as_deref() == Some("net_egress")
+            && finding
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.is_empty())
+            && finding.resolved_host.as_deref() == Some("collector.example.invalid")
+    }));
     assert_eq!(report.decision, Decision::Block);
     Ok(())
 }

@@ -30,7 +30,7 @@ fn assert_catalog_error(source: &str, origin: CatalogOrigin, expected: &str) {
 fn embedded_catalog_is_the_complete_deterministic_registry() {
     let catalog = builtin_catalog().unwrap();
     assert_eq!(catalog.schema_version(), 1);
-    assert_eq!(catalog.rules().len(), 122);
+    assert_eq!(catalog.rules().len(), 124);
     let mut ids = BTreeSet::new();
     let mut prior = None;
     for rule in catalog.rules() {
@@ -59,7 +59,7 @@ fn embedded_catalog_is_the_complete_deterministic_registry() {
         }
         prior = Some(rule.id.as_str());
     }
-    assert_eq!(all_rules().len(), 122);
+    assert_eq!(all_rules().len(), 124);
 }
 
 #[test]
@@ -529,7 +529,7 @@ fn catalogs_merge_deterministically_without_shadowing() {
     assert_eq!(merged.rules()[1].id.as_str(), "external-z");
     assert!(first.merged_with(&first).is_err());
     let complete = builtin_catalog().unwrap().merged_with(&merged).unwrap();
-    assert_eq!(complete.rules().len(), 124);
+    assert_eq!(complete.rules().len(), 126);
 }
 
 #[test]

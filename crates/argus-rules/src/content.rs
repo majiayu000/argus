@@ -11,6 +11,9 @@ use argus_syntax::{Fact, FactKind, ScriptLanguage};
 use regex::Regex;
 use std::sync::OnceLock;
 
+mod capability;
+use capability::{credential_path_offset, syntax_sensitive_read};
+
 pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     let language = ScriptLanguage::from_source(&file.rel, &file.content);
@@ -22,9 +25,21 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
             .with_context(|| format!("parse npm source `{}`", file.rel))?;
         let encoded = argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
             .with_context(|| format!("analyze npm source `{}`", file.rel))?;
-        scan_file(file, &mut findings, NetworkScan::Syntax(&facts), encoded);
+        scan_file(
+            file,
+            &mut findings,
+            NetworkScan::Syntax(&facts),
+            CredentialScan::Syntax(&facts),
+            encoded,
+        );
     } else {
-        scan_file(file, &mut findings, NetworkScan::Disabled, false);
+        scan_file(
+            file,
+            &mut findings,
+            NetworkScan::Disabled,
+            CredentialScan::Legacy,
+            false,
+        );
     }
     Ok(findings)
 }
@@ -39,7 +54,13 @@ pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
 /// or Rust file they extract — none of these rules are npm-specific in
 /// behaviour, only in the regex literals they look for (e.g. `.npmrc`).
 pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
-    scan_file(file, findings, NetworkScan::Legacy, false);
+    scan_file(
+        file,
+        findings,
+        NetworkScan::Legacy,
+        CredentialScan::Legacy,
+        false,
+    );
 }
 
 /// Checked variant for package extractors whose source language is known.
@@ -47,13 +68,25 @@ pub fn scan_text_file(file: &TextFile, findings: &mut Vec<Finding>) {
 /// silently bypass encoded dynamic execution detection.
 pub fn scan_text_file_checked(file: &TextFile, findings: &mut Vec<Finding>) -> Result<()> {
     let language = ScriptLanguage::from_source(&file.rel, &file.content);
-    let encoded = if language == ScriptLanguage::Python {
-        argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content)
-            .with_context(|| format!("parse source `{}`", file.rel))?
-    } else {
-        false
-    };
-    scan_file(file, findings, NetworkScan::Legacy, encoded);
+    let facts = (language == ScriptLanguage::Python)
+        .then(|| argus_syntax::analyze(&file.rel, &file.content))
+        .transpose()
+        .with_context(|| format!("parse source `{}`", file.rel))?;
+    let encoded = (language == ScriptLanguage::Python)
+        .then(|| argus_syntax::analyze_encoded_dynamic_execution(&file.rel, &file.content))
+        .transpose()
+        .with_context(|| format!("analyze source `{}`", file.rel))?
+        .unwrap_or(false);
+    let credential_scan = facts
+        .as_deref()
+        .map_or(CredentialScan::Legacy, CredentialScan::Syntax);
+    scan_file(
+        file,
+        findings,
+        NetworkScan::Legacy,
+        credential_scan,
+        encoded,
+    );
     Ok(())
 }
 
@@ -61,6 +94,11 @@ enum NetworkScan<'a> {
     Syntax(&'a [Fact]),
     Legacy,
     Disabled,
+}
+
+enum CredentialScan<'a> {
+    Syntax(&'a [Fact]),
+    Legacy,
 }
 
 /// Documentation extensions whose prose is not an executable surface.
@@ -108,6 +146,7 @@ fn scan_file(
     file: &TextFile,
     findings: &mut Vec<Finding>,
     network_scan: NetworkScan<'_>,
+    credential_scan: CredentialScan<'_>,
     encoded_dynamic_execution: bool,
 ) {
     let body = &file.content;
@@ -119,14 +158,26 @@ fn scan_file(
     // skill census measured (GH-184). Agent instruction files stay in scope —
     // a shipped `CLAUDE.md` naming a credential path is read by the user's
     // agent, so there it is a payload rather than documentation.
-    if is_credential_scan_surface(&file.rel) && cred_paths_regex().is_match(body) {
+    if let Some(offset) = is_credential_scan_surface(&file.rel)
+        .then(|| credential_path_offset(body))
+        .flatten()
+    {
+        let lexical_line = line_number(body, offset);
+        let read_line = match credential_scan {
+            CredentialScan::Syntax(facts) => syntax_sensitive_read(facts),
+            CredentialScan::Legacy => None,
+        };
+        let (capability, line) = read_line
+            .map(|line| ("sensitive_read", line))
+            .unwrap_or(("sensitive_reference", lexical_line));
         findings.push(
             Finding::new(
                 "credential-access",
                 Severity::High,
                 "references host secret files (.npmrc/.env/.ssh/.aws)",
             )
-            .at(&file.rel),
+            .at(&file.rel)
+            .with_capability(capability, vec![format!("{}:{line}", file.rel)], None),
         );
     }
 
@@ -183,7 +234,8 @@ fn scan_file(
                 Severity::High,
                 "executes a bundled native binary at install time",
             )
-            .at(&file.rel),
+            .at(&file.rel)
+            .with_capability("process_spawn", vec![file.rel.clone()], None),
         );
     }
 
@@ -217,14 +269,19 @@ fn scan_file(
         NetworkScan::Legacy => external_fetch(body),
         NetworkScan::Disabled => None,
     };
-    if let Some(host) = external_host {
+    if let Some((host, line)) = external_host {
         findings.push(
             Finding::new(
                 "network-exfiltration",
                 Severity::High,
-                format!("sends data to external host `{host}` at install/load time"),
+                format!("performs statically resolved network egress to `{host}`"),
             )
-            .at(&file.rel),
+            .at(&file.rel)
+            .with_capability(
+                "net_egress",
+                vec![format!("{}:{line}", file.rel)],
+                Some(host),
+            ),
         );
     }
 
@@ -267,36 +324,21 @@ fn scan_file(
                 Severity::Medium,
                 "decodes an encoded payload directly into dynamic execution",
             )
-            .at(&file.rel),
+            .at(&file.rel)
+            .with_capability("exec_eval", vec![file.rel.clone()], None),
         );
     }
 }
 
-// ---------- regex helpers (compiled once via OnceLock; scans touch every file) ----------
-
-/// Quoted string that mentions a host credential path anywhere inside.
-///
-/// The earlier strict shape `["']<path>["']` required the path to be the
-/// entire quoted content. That misses real attack code that builds the
-/// path with `format!("{}/.aws/credentials", home)` — the literal sits
-/// inside a string with extra characters on either side.
-///
-/// The intra-string scan stops at the next quote OR newline. Without the
-/// newline bound, the regex would happily match an opening `"` on one
-/// statement, eat through whitespace and unrelated code across multiple
-/// lines, and close on a far-away `"` that happens to be on the right
-/// side of a `.npmrc` token. JavaScript template literals (backticks)
-/// are not in the class, so paths inside template literals fall through
-/// to the npmrc-read regex instead.
-fn cred_paths_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r#"[\"'][^\"'\n]*(\.npmrc|\.env|\.ssh/[^\"'\n]+|\.aws/credentials)[^\"'\n]*[\"']"#,
-        )
-        .unwrap()
-    })
+fn line_number(body: &str, byte_offset: usize) -> usize {
+    body.as_bytes()[..byte_offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
 }
+
+// ---------- regex helpers (compiled once via OnceLock; scans touch every file) ----------
 
 /// AI-agent context files. A package that writes here is impersonating a
 /// maintainer-authored instruction file and will be loaded by the user's
@@ -479,7 +521,7 @@ fn wallet_regex() -> &'static Regex {
 /// inside docstring examples, which produces unmanageable false-positive
 /// rates. PyPI install-time network calls are caught by argus-pypi's
 /// `setup-remote-download` rule instead.
-fn external_fetch(body: &str) -> Option<String> {
+fn external_fetch(body: &str) -> Option<(String, usize)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(
@@ -496,12 +538,12 @@ fn external_fetch(body: &str) -> Option<String> {
             // covered by github-write-api
             continue;
         }
-        return Some(host);
+        return Some((host, line_number(body, cap.get(0)?.start())));
     }
     None
 }
 
-fn syntax_external_fetch(facts: &[Fact]) -> Option<String> {
+fn syntax_external_fetch(facts: &[Fact]) -> Option<(String, usize)> {
     facts.iter().find_map(|fact| {
         if fact.kind != FactKind::Call || !is_network_callee(fact.callee.as_deref()?) {
             return None;
@@ -511,6 +553,7 @@ fn syntax_external_fetch(facts: &[Fact]) -> Option<String> {
                 .into_iter()
                 .flatten()
                 .find_map(external_url_host)
+                .map(|host| (host, fact.line))
         })
     })
 }
@@ -720,98 +763,5 @@ mod tests {
 }
 
 #[cfg(test)]
-mod surface_tests {
-    use super::*;
-
-    #[test]
-    fn prose_documentation_is_not_a_credential_surface() {
-        for rel in [
-            "README.md",
-            "docs/publishing.md",
-            "CHANGELOG.markdown",
-            "guide.rst",
-            "NOTES.txt",
-            "manual.adoc",
-        ] {
-            assert!(!is_credential_scan_surface(rel), "{rel}");
-        }
-    }
-
-    #[test]
-    fn agent_instruction_files_stay_in_scope() {
-        // A shipped CLAUDE.md naming a credential path is read by the user's
-        // agent. There the path is a payload, not documentation.
-        for rel in [
-            "CLAUDE.md",
-            "sub/CLAUDE.md",
-            "AGENTS.md",
-            ".cursorrules",
-            ".windsurfrules",
-            ".claude/commands/deploy.md",
-            "pkg/.claude/skills/x.md",
-        ] {
-            assert!(is_credential_scan_surface(rel), "{rel}");
-        }
-    }
-
-    #[test]
-    fn executable_and_unknown_surfaces_stay_in_scope() {
-        // Nothing escapes by choosing an unusual name: only prose is excluded.
-        for rel in [
-            "index.js",
-            "setup.py",
-            "build.rs",
-            "install.sh",
-            "hooks/pre-commit",
-            "config.json",
-            "data.yaml",
-            "weird.qqq",
-        ] {
-            assert!(is_credential_scan_surface(rel), "{rel}");
-        }
-    }
-
-    #[test]
-    fn documented_credential_path_no_longer_fires_but_source_still_does() {
-        let quoted = r#"It mounts "~/.ssh/id_ed25519" too."#;
-
-        let mut docs = Vec::new();
-        scan_text_file(
-            &TextFile {
-                rel: "README.md".to_string(),
-                content: quoted.to_string(),
-            },
-            &mut docs,
-        );
-        assert!(
-            !docs.iter().any(|f| f.rule_id == "credential-access"),
-            "documentation must not fire: {docs:?}"
-        );
-
-        let mut source = Vec::new();
-        scan_text_file(
-            &TextFile {
-                rel: "index.js".to_string(),
-                content: quoted.to_string(),
-            },
-            &mut source,
-        );
-        assert!(
-            source.iter().any(|f| f.rule_id == "credential-access"),
-            "source must still fire: {source:?}"
-        );
-
-        let mut agent = Vec::new();
-        scan_text_file(
-            &TextFile {
-                rel: "CLAUDE.md".to_string(),
-                content: quoted.to_string(),
-            },
-            &mut agent,
-        );
-        assert!(
-            agent.iter().any(|f| f.rule_id == "credential-access"),
-            "agent instruction file must still fire: {agent:?}"
-        );
-    }
-}
+#[path = "content/surface_tests.rs"]
+mod surface_tests;

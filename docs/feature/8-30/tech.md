@@ -128,6 +128,50 @@ so the report proves that both sides were assessed.
 6. A finding present in both versions remains in the current report even though
    it is absent from `introduced`.
 
+## Capability correlation contract
+
+Package findings use the existing `Finding.capability`, `evidence`, and
+`resolved_host` fields as the single machine-readable fact carrier. No second
+report model or risk score is introduced. The first correlated capability set
+is deliberately small:
+
+```text
+install_trigger, sensitive_reference, sensitive_read, net_egress, remote_download,
+process_spawn, exec_eval
+```
+
+Detectors still emit the individual observations. A deterministic correlation
+pass then adds one blocking attack-chain finding when the required facts share
+one executable location:
+
+- `credential-exfiltration-chain`: `sensitive_read` plus `net_egress` or
+  `remote_download`;
+- `download-execution-chain`: `remote_download` plus `process_spawn` or
+  `exec_eval`.
+
+Standalone `credential-access` and `network-exfiltration` observations preserve
+their existing blocking policy. Correlation adds stronger intent-bearing
+evidence without weakening package ecosystems that do not yet emit the full
+capability set. It never combines unrelated locations, treats provenance as
+safety, or executes the package to fill missing facts.
+
+A sensitive path mentioned in executable source remains visible as
+`sensitive_reference`, but it cannot enter a blocking chain. Only a supported
+syntax fact proving a file-reading call or command becomes `sensitive_read`.
+
+For npm, supported JavaScript and TypeScript sources and lifecycle scripts
+retain AST-backed evidence. For PyPI, `setup.py` supplies install-time network,
+process, and dynamic-execution facts, while the shared Python content scan
+supplies sensitive-read evidence. Syntax failure remains an operational error.
+
+The process-level acceptance test must serve inert npm and PyPI archives from a
+local TCP registry, invoke the production CLI, and prove both sides:
+
+- a previously unknown coordinate with a same-file credential-exfiltration
+  chain blocks without a malicious-database match;
+- standalone or split network and sensitive-read capabilities remain visible,
+  preserve their existing decision, and do not become a fabricated chain.
+
 ## Verification
 
 Focused:

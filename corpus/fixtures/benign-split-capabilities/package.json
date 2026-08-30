@@ -1,0 +1,6 @@
+{
+  "name": "benign-split-capabilities",
+  "version": "1.0.0",
+  "description": "Inert fixture with unrelated sensitive-read and network capabilities.",
+  "main": "read-config.js"
+}

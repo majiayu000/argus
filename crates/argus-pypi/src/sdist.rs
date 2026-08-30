@@ -179,6 +179,8 @@ pub fn scan_extracted_sdist_with_rules_and_context(
         ));
     }
 
+    argus_rules::correlate_package_findings(&mut findings);
+
     rules
         .scan_directory_with_context(pkg_dir, &mut findings, execution)
         .context("run configured rules on extracted PyPI sdist")?;
@@ -195,46 +197,84 @@ pub fn scan_extracted_sdist_with_rules_and_context(
 fn scan_setup_py(content: &str, rel: &str, findings: &mut Vec<Finding>) -> Result<()> {
     let facts = argus_syntax::analyze_with_language(rel, content, ScriptLanguage::Python)
         .with_context(|| format!("parse PyPI setup source `{rel}`"))?;
-    let mut subprocess = false;
-    let mut remote_download = false;
-    let mut eval = false;
+    let mut subprocess = None;
+    let mut remote_download = None;
+    let mut eval = None;
     for fact in facts.iter().filter(|fact| fact.kind == FactKind::Call) {
         let Some(callee) = fact.callee.as_deref() else {
             continue;
         };
         let callee = callee.to_ascii_lowercase();
-        subprocess |= is_setup_subprocess(&callee);
-        remote_download |= is_setup_remote_download(&callee);
-        eval |= is_setup_eval(&callee) && !fact.arguments.is_empty();
+        if subprocess.is_none() && is_setup_subprocess(&callee) {
+            subprocess = Some(fact);
+        }
+        if remote_download.is_none() && is_setup_remote_download(&callee) {
+            remote_download = Some(fact);
+        }
+        if eval.is_none() && is_setup_eval(&callee) && !fact.arguments.is_empty() {
+            eval = Some(fact);
+        }
     }
 
-    if subprocess {
-        findings.push(finding(
-            "setup-subprocess",
-            Severity::Critical,
-            format!("`{rel}` invokes subprocess/os.system/os.popen at install time"),
-        ));
+    if let Some(fact) = subprocess {
+        findings.push(
+            finding(
+                "setup-subprocess",
+                Severity::Critical,
+                format!("`{rel}` invokes subprocess/os.system/os.popen at install time"),
+            )
+            .at(rel)
+            .with_capability(
+                "process_spawn",
+                vec![format!("{rel}:{}", fact.line)],
+                None,
+            ),
+        );
     }
-    if remote_download {
-        findings.push(finding(
-            "setup-remote-download",
-            Severity::Critical,
-            format!("`{rel}` fetches a remote URL via urllib/requests/httpx at install time"),
-        ));
+    if let Some(fact) = remote_download {
+        findings.push(
+            finding(
+                "setup-remote-download",
+                Severity::Critical,
+                format!("`{rel}` fetches a remote URL via urllib/requests/httpx at install time"),
+            )
+            .at(rel)
+            .with_capability(
+                "remote_download",
+                vec![format!("{rel}:{}", fact.line)],
+                None,
+            ),
+        );
     }
-    if eval {
-        findings.push(finding(
-            "setup-eval",
-            Severity::Critical,
-            format!("`{rel}` calls exec() or eval() on a runtime value — classic payload decryption pattern"),
-        ));
+    if let Some(fact) = eval {
+        findings.push(
+            finding(
+                "setup-eval",
+                Severity::Critical,
+                format!("`{rel}` calls exec() or eval() on a runtime value — classic payload decryption pattern"),
+            )
+            .at(rel)
+            .with_capability("exec_eval", vec![format!("{rel}:{}", fact.line)], None),
+        );
     }
-    if subprocess || remote_download || eval {
-        findings.push(finding(
-            "setup-py-execution",
-            Severity::High,
-            format!("`{rel}` runs imperative code at `pip install` time; argus refuses to run setup.py to verify"),
-        ));
+    if let Some(line) = subprocess
+        .or(remote_download)
+        .or(eval)
+        .map(|fact| fact.line)
+    {
+        findings.push(
+            finding(
+                "setup-py-execution",
+                Severity::High,
+                format!("`{rel}` runs imperative code at `pip install` time; argus refuses to run setup.py to verify"),
+            )
+            .at(rel)
+            .with_capability(
+                "install_trigger",
+                vec![format!("{rel}:{line}")],
+                None,
+            ),
+        );
     }
     Ok(())
 }

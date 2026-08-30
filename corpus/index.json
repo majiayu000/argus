@@ -22,7 +22,8 @@
       "rules": [
         "lifecycle-script",
         "remote-download",
-        "shell-pipe-execution"
+        "shell-pipe-execution",
+        "download-execution-chain"
       ],
       "notes": "Models curl | sh postinstall execution."
     },
@@ -35,7 +36,8 @@
       "rules": [
         "lifecycle-script",
         "credential-access",
-        "network-exfiltration"
+        "network-exfiltration",
+        "credential-exfiltration-chain"
       ],
       "notes": "Models .npmrc/.env collection followed by network exfiltration."
     },
@@ -136,6 +138,18 @@
       "notes": "Decode-only and string/comment lookalikes must remain clean."
     },
     {
+      "id": "benign-split-capabilities",
+      "kind": "fixture",
+      "path": "fixtures/benign-split-capabilities",
+      "packageName": "benign-split-capabilities",
+      "expectedDecision": "block",
+      "rules": [
+        "credential-access",
+        "network-exfiltration"
+      ],
+      "notes": "Credential configuration and network client capabilities live in different files; both retain their existing policy but must not be correlated into an exfiltration claim."
+    },
+    {
       "id": "benign-esbuild-like",
       "kind": "fixture",
       "path": "fixtures/benign-esbuild-like",
@@ -171,7 +185,8 @@
         "lifecycle-script",
         "ai-context-poisoning",
         "credential-access",
-        "network-exfiltration"
+        "network-exfiltration",
+        "credential-exfiltration-chain"
       ],
       "notes": "Models the TrapDoor campaign (Socket.dev 2026-05-24): postinstall dropper poisons .cursorrules / CLAUDE.md, harvests SSH + AWS creds, exfils to attacker GitHub Pages. The ai-context-poisoning rule is novel here."
     },

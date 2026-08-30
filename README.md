@@ -557,7 +557,7 @@ A successful SARIF report retains the normal decision exit codes:
 | Family   | Rules |
 |----------|-------|
 | lifecycle | `lifecycle-script`, `pre-scan-execution-marker` |
-| content   | `remote-download`, `shell-pipe-execution`, `credential-access`, `network-exfiltration`, `binary-execution`, `runtime-hook`, `wallet-interception`, `token-harvest`, `github-write-api`, `npm-publish` |
+| content   | `remote-download`, `shell-pipe-execution`, `credential-access`, `network-exfiltration`, `credential-exfiltration-chain`, `download-execution-chain`, `binary-execution`, `runtime-hook`, `wallet-interception`, `token-harvest`, `github-write-api`, `npm-publish` |
 | binary    | `binary-file` |
 | name      | `typosquatting`, `low-reputation`, `dependency-confusion`, `public-registry-internal-name`, `known-native-build-pattern` |
 | lockfile  | `lockfile-http-resolved`, `untrusted-registry-host`, `lockfile-mutable-vcs-ref`, `lockfile-integrity-missing`, `lockfile-integrity-invalid`, `lockfile-integrity-weak`, `lockfile-integrity-unavailable` |

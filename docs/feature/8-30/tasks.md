@@ -46,6 +46,18 @@
   proven. The existing commands are the three surfaces; no aliases or
   compatibility layers were added.
 
+## P3 — capability correlation
+
+- [x] Attach machine-readable capability and evidence fields to npm/PyPI
+  package findings without adding a parallel fact/report model.
+- [x] Correlate same-location credential-exfiltration and
+  download-to-execution chains into explicit blocking findings.
+- [x] Preserve standalone credential/network policy so ecosystems without full
+  correlation are not weakened.
+- [x] Add inert malicious and benign npm/PyPI corpus coverage and production
+  CLI/TCP-registry E2E proving unknown-coordinate detection without execution.
+- [x] Update the public rule contract and run every repository-native gate.
+
 ## Paused directions
 
 - New package ecosystems and broad platform coverage.
@@ -64,7 +76,8 @@ Fresh verification on 2026-08-30:
 cargo fmt --all -- --check                                      PASS
 cargo clippy --workspace --all-targets -- -D warnings          PASS
 cargo test --workspace --all-targets                           PASS
-cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (32/32)
+cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (33/33)
+cargo test -p argus-cli --test admission_e2e                  PASS (local TCP registry)
 cargo test -p argus-cli --test public_registry_e2e -- --ignored PASS (npm/PyPI/crates)
 python3 -m unittest discover -s scripts/tests -p 'test_release_*.py' PASS (12/12)
 npm test --prefix action                                       PASS (16/16)

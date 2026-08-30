@@ -362,6 +362,16 @@ fn pypi_sdist_setup_subprocess_blocks() {
         rule_ids.contains(&"setup-py-execution"),
         "got: {rule_ids:?}"
     );
+    let subprocess = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "setup-subprocess")
+        .expect("setup subprocess finding");
+    assert_eq!(subprocess.capability.as_deref(), Some("process_spawn"));
+    assert!(subprocess
+        .evidence
+        .as_ref()
+        .is_some_and(|evidence| !evidence.is_empty()));
     assert_eq!(report.decision, Decision::Block);
     // The report path is the registry coordinate, never the extraction TempDir.
     assert_eq!(

@@ -65,7 +65,7 @@ pub struct Finding {
     /// Path the finding was sourced from (relative to artifact root).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
-    /// Declarative capability manifest entry for agent-surface scans.
+    /// Machine-readable capability observed on this package or agent surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
     /// Machine-readable evidence locations, usually `file:line`.
