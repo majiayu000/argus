@@ -64,11 +64,14 @@
   claiming that the candidate is already published.
 - [x] Put the verified GitHub Action and immutable local-binary path before the
   developer-oriented Cargo examples.
-- [ ] Run the no-mutation five-target release candidate workflow from the
-  final release-prep commit.
-- [ ] After explicit release authorization, publish the immutable `v0.2.2`
-  assets, fast-forward the protected `v1` branch, and pass Action dogfood on
-  Linux, macOS, and Windows.
+- [x] Run the no-mutation five-target release candidate workflow from the
+  final release-prep commit ([run](https://github.com/majiayu000/argus/actions/runs/33309818650)).
+- [x] After explicit release authorization, publish the immutable `v0.2.2`
+  assets ([release run](https://github.com/majiayu000/argus/actions/runs/33313613384))
+  and pass Action dogfood on Linux, macOS, and Windows
+  ([dogfood run](https://github.com/majiayu000/argus/actions/runs/33314633370)).
+- [x] Keep the protected `v1` branch on `v0.2.1` until the product reaches its
+  explicitly approved `v1.0` stability boundary.
 
 ## Paused directions
 

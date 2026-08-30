@@ -1,7 +1,7 @@
 # Argus 发布操作手册
 
 本手册描述 GH-92 的管理员边界。仓库内 workflow 可以构建、验证和发布，但不能替代
-管理员对 repository settings、tag、release 和 `v1` promotion 的独立授权。
+管理员对 repository settings、tag、release 和可选 `v1` promotion 的独立授权。
 
 ## 1. 首次发布前的管理员门禁
 
@@ -43,8 +43,10 @@
    archive 共用一个 `{target}.sigstore.json`，manifest 与 checksum 各有独立 bundle。
    `LICENSE`/`README.md` 的摘要由已 attested manifest 绑定。完整复验后才
    publish immutable Release。
-5. workflow 只输出 `v1` 的 old/new SHA 与 ancestor proof。受限 maintainer 在新的人工
-   授权下手工创建或 fast-forward `v1`；workflow 不持有 ref mutation 能力。
+5. 发布负责人单独决定本次版本是否进入 `v1` 渠道。未达到产品 `v1.0` 稳定边界时，
+   保持 `v1` 不变；需要晋升时，workflow 只输出 old/new SHA 与 ancestor proof，受限
+   maintainer 再凭新的人工授权手工创建或 fast-forward `v1`。
+   workflow 不持有 ref mutation 能力。
 6. 手工运行 `action-dogfood`，在 fresh Linux/macOS/Windows runner 上验证 package、
    lockfile、agent 与 SARIF；fork PR 的 SARIF upload 必须保持权限安全。
 7. 最后只读审计 tag、Release assets/digests/attestations、`v1` ref 和 workflow checks。
@@ -57,8 +59,9 @@ asset 必须停止并调查，不能覆盖。确定性资产必须 byte-for-byte
 
 ## 4. Action 使用与 pin
 
-Release 真正完成前，根 Action 仅是未发布实现。发布后普通使用者可 pin 受保护 major
-branch；高保障环境应 pin immutable SemVer tag 或完整 commit。输入闭集是 `scanType`、
+Release 真正完成前，根 Action 仅是未发布实现。发布后使用者应 pin immutable SemVer
+tag 或完整 commit；只有项目明确启用稳定 major 渠道后才使用受保护 major branch。
+输入闭集是 `scanType`、
 `path`、必填的 `githubToken`、`format`、`argusVersion`、`failOn`，以及仅供
 lockfile admission 使用的 `base`、`baseLockfileFormat`、`maliciousDb`、
 `approvalLedger`；没有任意 args。
@@ -77,5 +80,6 @@ operational error。`failOn=block` 保留 approval output 但不失败，`failOn
 ## 5. 撤回
 
 不得重写或删除 immutable release/tag，不得把 `v1` 回退或指向普通修复 commit。先发布
-security advisory，再发布通过完整流程的新 patch；新的人工授权之后才能 fast-forward
-`v1`。通知所有 immutable version/commit pin 用户受影响范围与替代版本。
+security advisory，再发布通过完整流程的新 patch；仅当 `v1` 渠道已经启用时，新的人工
+授权之后才能 fast-forward `v1`。通知所有 immutable version/commit pin 用户受影响范围
+与替代版本。
