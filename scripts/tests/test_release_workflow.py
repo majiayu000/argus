@@ -56,6 +56,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotRegex(text, r"--clobber|force.push|delete.*tag|update-ref")
         promotion = text.split("Emit read-only v1 promotion plan", 1)[1]
         self.assertNotRegex(promotion, r"gh api.*--method|git push")
+        self.assertIn("git ls-remote --exit-code --heads origin refs/heads/v1", promotion)
+        self.assertIn('test "$status" -eq 2', promotion)
 
     def test_dogfood_is_manual_only(self) -> None:
         text = (ROOT / ".github/workflows/action_dogfood.yml").read_text()

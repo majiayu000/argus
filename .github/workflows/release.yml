@@ -307,7 +307,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          old=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/v1" --jq .object.sha 2>/dev/null || true)
+          set -euo pipefail
+          if old=$(git ls-remote --exit-code --heads origin refs/heads/v1 | awk '{print $1}'); then
+            test -n "$old"
+          else
+            status=$?
+            test "$status" -eq 2
+            old=
+          fi
           new='${{ needs.preflight.outputs.commit }}'
           if [[ -n "$old" ]]; then git merge-base --is-ancestor "$old" "$new"; fi
           printf 'v1 promotion requires a separate maintainer action: old=%s new=%s\n' "$old" "$new"
