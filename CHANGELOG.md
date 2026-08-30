@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-30
+
+- Require an explicit GitHub token for Action release downloads and
+  attestation verification. Authenticate only `api.github.com` requests,
+  remove authorization on the release-asset redirect, and fail instead of
+  falling back to anonymous API access.
+- Keep the post-publish `v1` promotion plan read-only while correctly treating
+  a missing `v1` ref as the empty initial-promotion state.
+
 ## [0.2.0] - 2026-08-30
 
 - Make lockfile admission artifact-bound for npm, PyPI, and crates.io by
@@ -190,6 +199,7 @@ section.
 - See [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md) for the
   attack-catalog argus is designed against.
 
-[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.0...main
+[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.1...main
+[0.2.1]: https://github.com/majiayu000/argus/releases/tag/v0.2.1
 [0.2.0]: https://github.com/majiayu000/argus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/majiayu000/argus/releases/tag/v0.1.0

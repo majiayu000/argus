@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "argus-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "argus-archive"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "argus-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-agent",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "argus-composer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "argus-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-syntax",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "argus-crates"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "argus-fetch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "argus-go"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "argus-intel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "argus-lockfile"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "argus-core",
  "argus-rules",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "argus-maven"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "argus-nuget"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "argus-osv"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "argus-osv-schema"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "argus-pipeline"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "argus-pypi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "argus-rubygems"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-archive",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "argus-rules"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-core",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "argus-syntax"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "tree-sitter",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "argus-test-support"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argus-transport",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "argus-transport"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "rustls",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "argus-verify"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",

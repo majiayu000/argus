@@ -28,6 +28,7 @@ jobs:
         with:
           scanType: package
           path: corpus/fixtures/benign-esbuild-like
+          githubToken: ${{ github.token }}
           format: json
           argusVersion: ${{ inputs.version }}
           failOn: block
@@ -41,6 +42,7 @@ jobs:
         with:
           scanType: lockfile
           path: corpus/lockfiles/http-resolved/package-lock.json
+          githubToken: ${{ github.token }}
           format: text
           argusVersion: ${{ inputs.version }}
           failOn: block
@@ -56,6 +58,7 @@ jobs:
         with:
           scanType: agent
           path: corpus/agent/fixtures/skill-benign-installer
+          githubToken: ${{ github.token }}
           format: sarif
           argusVersion: ${{ inputs.version }}
           failOn: block

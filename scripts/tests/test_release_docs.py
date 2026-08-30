@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ReleaseDocsTest(unittest.TestCase):
     def test_readme_uses_release_metadata_and_unpromoted_action_state(self) -> None:
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("workspace release contract targets `v0.2.0`", readme)
+        self.assertIn("workspace release contract targets `v0.2.1`", readme)
         self.assertIn("GitHub Release metadata is authoritative", readme)
         self.assertIn("do not reference `majiayu000/argus@v1`", readme)
 

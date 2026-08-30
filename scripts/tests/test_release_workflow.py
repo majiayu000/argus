@@ -66,6 +66,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotRegex(text, r"\npush:")
         for scan_type in ["package", "lockfile", "agent"]:
             self.assertIn(f"scanType: {scan_type}", text)
+        self.assertEqual(text.count("githubToken: ${{ github.token }}"), 3)
         self.assertIn("format: sarif", text)
 
 

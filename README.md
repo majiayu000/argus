@@ -12,8 +12,8 @@ with ecosystem-specific static rules; neither a matching digest nor a clean
 static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
-[`v0.1.0`](https://github.com/majiayu000/argus/releases/tag/v0.1.0) is the first
-immutable binary release, and the workspace release contract targets `v0.2.0`.
+[`v0.2.0`](https://github.com/majiayu000/argus/releases/tag/v0.2.0) is the current
+immutable binary release, and the workspace release contract targets `v0.2.1`.
 GitHub Release metadata is authoritative for publication status, dates, and
 assets. The repository-root GitHub Action is implemented, but the protected
 `v1` branch has not been promoted, so do not reference
@@ -24,9 +24,10 @@ documented in [`docs/releasing.md`](docs/releasing.md).
 
 All rows describe current code on `main`. Each immutable release tag and its
 release manifest commit define that release's binary contents. The
-[`[0.2.0]`](CHANGELOG.md#020---2026-08-30) section describes the release contract
-configured in this source tree; GitHub Release metadata is authoritative for
-whether it has been published.
+[`[0.2.0]`](CHANGELOG.md#020---2026-08-30) section describes the current binary
+release, while [`[0.2.1]`](CHANGELOG.md#021---2026-08-30) describes the release
+contract configured in this source tree. GitHub Release metadata is
+authoritative for whether it has been published.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
@@ -340,8 +341,11 @@ The repository-root Action uses this same admission path for
 `scanType: lockfile`. Its optional `base`, `baseLockfileFormat`, `maliciousDb`,
 and `approvalLedger` inputs are workspace-relative regular files; SARIF and the
 native decision/exit-code contract remain available through the existing
-outputs. Until the protected Action branch is promoted, use the committed
-Action only in this repository's explicit dogfood flow.
+outputs. Every invocation must pass `githubToken: ${{ github.token }}` for the
+authenticated release download and attestation verification path; Argus does
+not fall back to anonymous GitHub API requests. Until the protected Action
+branch is promoted, use the committed Action only in this repository's explicit
+dogfood flow.
 
 The aggregate decision is the worst package decision, and coverage is stated
 before findings. Two categories are reported rather than dropped:
@@ -798,16 +802,16 @@ local set anytime with `pre-commit run --all-files`.
 
 ## Status
 
-Argus `v0.1.0` was published on 2026-08-10 as an immutable GitHub Release with
+Argus `v0.2.0` was published on 2026-08-30 as an immutable GitHub Release with
 21 assets: raw binaries and archives for five native targets, checksums,
 documentation, and Sigstore attestations. Pin the exact release and select the
 asset for your target; for example:
 
 ```sh
-gh release download v0.1.0 --repo majiayu000/argus \
-  --pattern 'argus-v0.1.0-aarch64-apple-darwin.tar.gz'
-gh release verify-asset v0.1.0 \
-  argus-v0.1.0-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
+gh release download v0.2.0 --repo majiayu000/argus \
+  --pattern 'argus-v0.2.0-aarch64-apple-darwin.tar.gz'
+gh release verify-asset v0.2.0 \
+  argus-v0.2.0-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
 ```
 
 There is no package-registry distribution. The protected `v1` Action branch
@@ -824,7 +828,7 @@ work):
 
 These entries mean implemented and covered by repository tests on `main`; they
 are not a claim that every item is present in the currently published
-`v0.1.0` binary.
+`v0.2.0` binary.
 
 Detection coverage is intentionally **not** claimed in headline numbers without
 benchmark evidence — see [`corpus/`](corpus/) for the regression set the

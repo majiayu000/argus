@@ -31,6 +31,7 @@ function inCompatibilityRange(value, config) {
 function readInputs(env, config) {
   const scanType = (env.INPUT_SCANTYPE || "").trim();
   const inputPath = (env.INPUT_PATH || "").trim();
+  const githubToken = (env.INPUT_GITHUBTOKEN || "").trim();
   const format = (env.INPUT_FORMAT || "text").trim();
   const version = (env.INPUT_ARGUSVERSION || config.defaultBinaryVersion || "").trim();
   const failOn = (env.INPUT_FAILON || "block").trim();
@@ -40,13 +41,14 @@ function readInputs(env, config) {
   const approvalLedger = (env.INPUT_APPROVALLEDGER || "").trim();
   if (!["package", "lockfile", "agent"].includes(scanType)) throw new Error("scanType must be package, lockfile, or agent");
   if (!inputPath) throw new Error("path is required");
+  if (!githubToken) throw new Error("githubToken is required");
   if (!["text", "json", "sarif"].includes(format)) throw new Error("format must be text, json, or sarif");
   if (!["block", "approval"].includes(failOn)) throw new Error("failOn must be block or approval");
   if (scanType !== "lockfile" && [base, baseLockfileFormat, maliciousDb, approvalLedger].some(Boolean)) throw new Error("lockfile admission inputs require scanType=lockfile");
   if (baseLockfileFormat && !base) throw new Error("baseLockfileFormat requires base");
   if (baseLockfileFormat && !["package-lock", "yarn", "pnpm", "poetry", "uv", "cargo", "go-sum", "bundler", "composer"].includes(baseLockfileFormat)) throw new Error("baseLockfileFormat is unsupported");
   if (!inCompatibilityRange(version, config)) throw new Error(`argusVersion ${version} is outside the tested compatibility range`);
-  return { scanType, inputPath, format, version, failOn, base, baseLockfileFormat, maliciousDb, approvalLedger };
+  return { scanType, inputPath, githubToken, format, version, failOn, base, baseLockfileFormat, maliciousDb, approvalLedger };
 }
 
 function targetFor(platform = process.platform, arch = process.arch) {

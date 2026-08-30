@@ -59,8 +59,9 @@ asset 必须停止并调查，不能覆盖。确定性资产必须 byte-for-byte
 
 Release 真正完成前，根 Action 仅是未发布实现。发布后普通使用者可 pin 受保护 major
 branch；高保障环境应 pin immutable SemVer tag 或完整 commit。输入闭集是 `scanType`、
-`path`、`format`、`argusVersion`、`failOn`，以及仅供 lockfile admission 使用的
-`base`、`baseLockfileFormat`、`maliciousDb`、`approvalLedger`；没有任意 args。
+`path`、必填的 `githubToken`、`format`、`argusVersion`、`failOn`，以及仅供
+lockfile admission 使用的 `base`、`baseLockfileFormat`、`maliciousDb`、
+`approvalLedger`；没有任意 args。
 
 GitHub-hosted runner 提供 `gh`。self-hosted runner 必须预装支持 `--bundle`、
 `--cert-oidc-issuer`、

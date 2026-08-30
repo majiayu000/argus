@@ -33,7 +33,7 @@ async function main(env = process.env, dependencies = {}) {
     const approvalLedgerPath = inputs.approvalLedger ? resolveWorkspacePath(env.GITHUB_WORKSPACE, inputs.approvalLedger, "lockfile") : "";
     const target = selectTarget();
     tempDir = fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), "argus-action-"));
-    const binary = await materialize(inputs.version, target, tempDir, validateManifest);
+    const binary = await materialize(inputs.version, target, tempDir, validateManifest, { githubToken: inputs.githubToken });
     const versionResult = await run(binary, ["--version"], { timeoutMs: 30_000, stdoutLimit: 1024, stderrLimit: 1024 });
     if (versionResult.code !== 0 || versionResult.stdout !== `argus ${inputs.version}\n` || versionResult.stderr !== "") throw new Error("downloaded binary failed exact version self-check");
     const args = inputs.scanType === "agent"

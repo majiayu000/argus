@@ -7,6 +7,9 @@ inputs:
   path:
     description: Workspace-relative package directory, lockfile, or agent surface.
     required: true
+  githubToken:
+    description: GitHub token used only for authenticated release download and attestation verification.
+    required: true
   format:
     description: One of text, json, or sarif.
     required: false
