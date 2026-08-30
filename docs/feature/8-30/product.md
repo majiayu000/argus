@@ -18,9 +18,9 @@ argus lockfile-scan package-lock.json \
 
 Single-package inspection and agent-baseline inspection remain important, but
 the product stays intentionally small: project admission is `lockfile-scan`,
-single-package inspection uses the ecosystem fetch commands, and agent drift
-uses `agent scan`. No aliases, hosted approval service, or compatibility layer
-is introduced.
+single-package inspection uses the ecosystem fetch commands, and agent or
+repository-workflow admission uses `agent scan`. No aliases, hosted approval
+service, or compatibility layer is introduced.
 
 ## Trust boundaries
 
@@ -51,6 +51,8 @@ the malicious snapshot never upgrades a decision to allow.
 | Runtime downloader or dynamic C2 activates | Static rules can expose the loader but cannot prove runtime behavior | Isolated detonation and egress denial |
 | Native binary hides behavior | Inventory/static evidence only | Signature policy and sandbox analysis |
 | Agent hook or MCP capability drifts | Existing agent baseline path | Runtime least privilege and secret isolation |
+| Workflow uses a mutable Action tag | AGT-06 requires explicit approval | Pin the reviewed full commit SHA and review upstream ownership |
+| Privileged workflow evaluates untrusted PR data as code | AGT-06 blocks direct script interpolation and untrusted checkout | GitHub environment protection, least-privilege token, and secret isolation |
 | Scan, fetch, intelligence, or comparison fails | No clean result; operational error or block | Repair evidence source and rerun |
 
 ## Decision and approval semantics
@@ -101,6 +103,7 @@ P0 is successful when:
 - `--malicious-db` works on whole-lockfile current reports and corrupt or
   missing snapshots fail before any clean report is emitted;
 - all existing native checks and the synthetic corpus pass.
+- the pinned public-workflow benchmark completes with zero false blocks.
 
 Precision work is a release gate, not a marketing target. Default-block rules
 must prove zero false blocks on a maintained benign-popular set and replay all

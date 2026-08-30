@@ -50,6 +50,9 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+      - name: Public workflow precision gate
+        run: cargo test -p argus-cli --test public_workflow_e2e -- --ignored --exact pinned_benign_public_workflows_have_zero_false_blocks
+
       - name: Sigstore feature integration tests
         run: cargo test -p argus-fetch --features sigstore --test sigstore_integration
 

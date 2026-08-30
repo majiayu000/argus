@@ -384,9 +384,14 @@ direct-catch claim.
 - Likely upstream cause: compromise of `reviewdog/action-setup@v1` (CVE-2025-30154).
 - Patched in v46.0.1.
 
-**argus coverage**: argus does not scan GitHub Actions workflows. **Full gap.**
+**argus coverage**: AGT-06 now surfaces every mutable consumer reference for
+explicit approval. Direct untrusted-context injection and privileged-trigger
+checkout rules cover adjacent pwn-request shapes, but an already compromised
+full SHA still needs external exact-revision intelligence.
 
-**Detection idea**: a "mutable-tag action" rule on consumer projects — `uses: tj-actions/changed-files@v46` (mutable) is high-risk; `@<commit-sha>` is fine. Out of scope for argus npm scanner but worth a sibling tool.
+**Implemented boundary**: `uses: tj-actions/changed-files@v46` requires review;
+`@<full-commit-sha>` removes tag-retargeting risk without claiming the pinned
+code is benign.
 
 ---
 
@@ -537,7 +542,7 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 | chalk/debug (2025-09) | maintainer phishing | wallet rewriter | runtime-hook + wallet-interception | ✅ corpus fixture `runtime-wallet-hook` |
 | s1ngularity / Nx (2025-08) | maintainer phishing | cred harvest | lifecycle-script + credential-access | ✅ |
 | eslint-config-prettier (2025-07) | phishing via npnjs.com | RAT via rundll32 | lifecycle-script + binary-file + binary-execution | ✅ corpus fixture `binary-dropper` |
-| tj-actions (2025-03) | PAT compromise | GA secret exfil | — | ⛔ GitHub Actions out of scope |
+| tj-actions (2025-03) | PAT compromise | GA secret exfil | AGT-06 mutable Action reference | ⚠️ exposes tag mutability for approval; cannot prove a pinned upstream SHA is benign |
 | xz-utils (2024-03) | long-game maintainer | build-script smuggling | — | ⛔ ecosystem out of scope; long-game social engineering not detectable statically |
 | @solana/web3.js (2024-12) | maintainer compromise | wallet hook | runtime-hook + wallet-interception | ✅ |
 | ua-parser/coa/rc (2021-10) | maintainer compromise | DanaBot | lifecycle-script + remote-download + binary-execution | ✅ corpus fixture `lifecycle-curl-sh` |
@@ -545,8 +550,8 @@ Mapping every incident above to argus's current detection rules. ⛔ = full gap,
 
 **Summary** (the 17 rows dated 2025–2026 above):
 - ✅ Direct catch: 8 / 17 incidents
-- ⚠️ Partial / bypassable or not event-fixture-validated: 8 / 17 incidents
-- ⛔ Architecture gap: 1 / 17 incidents (GitHub Actions consumer workflow scanning)
+- ⚠️ Partial / bypassable or not event-fixture-validated: 9 / 17 incidents
+- ⛔ Architecture gap: 0 / 17 incidents in this table; residual limits remain below
 
 ---
 
@@ -570,9 +575,16 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 
 ### Current scanner gaps
 
-1. **GitHub Actions consumer-side scanning.** tj-actions-style attacks require scanning workflow YAML for mutable tags and unsafe `pull_request_target` patterns. Different surface; outside the current package-registry commands.
+1. **Compromised immutable GitHub Action commits.** AGT-06 now scans workflow
+   YAML for mutable dependencies, direct untrusted-context script injection,
+   and unsafe privileged-trigger checkout. A reviewed full SHA removes tag
+   retargeting but does not prove the upstream Action code is benign; exact-SHA
+   intelligence remains a feed problem.
 
-2. **CI provenance pwn-request defense.** TanStack proves provenance attestation alone is insufficient. Mitigation lives in maintainer-side workflow design, not consumer-side scanning.
+2. **Advanced CI trust flows.** AGT-06 blocks the highest-confidence
+   pwn-request shapes, but cache topology, permission necessity, environment
+   protection, runner isolation, and secret reachability still require GitHub
+   policy and runtime controls.
 
 3. **Long-game maintainer trust attacks.** xz-utils-class incidents need social-graph / commit-pattern anomaly detection. Open research problem; not for argus.
 

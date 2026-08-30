@@ -98,6 +98,7 @@ pub(super) fn collect_surface_files(
             root.display()
         );
     }
+    let rooted_at_workflows = is_github_workflows_root(root, root_metadata.is_file())?;
     let mut candidates = Vec::new();
 
     if root_metadata.is_file() {
@@ -167,7 +168,22 @@ pub(super) fn collect_surface_files(
         );
     }
 
-    classify_candidates(candidates)
+    classify_candidates(candidates, rooted_at_workflows)
+}
+
+fn is_github_workflows_root(root: &Path, is_file: bool) -> Result<bool> {
+    let canonical = std::fs::canonicalize(root)
+        .with_context(|| format!("canonicalize agent scan root {}", root.display()))?;
+    let directory = if is_file {
+        canonical.parent().unwrap_or(canonical.as_path())
+    } else {
+        canonical.as_path()
+    };
+    Ok(
+        directory.file_name() == Some(std::ffi::OsStr::new("workflows"))
+            && directory.parent().and_then(Path::file_name)
+                == Some(std::ffi::OsStr::new(".github")),
+    )
 }
 
 fn collect_candidate(path: &Path, rel: String, metadata_len: u64) -> Candidate {
@@ -190,7 +206,10 @@ fn collect_candidate(path: &Path, rel: String, metadata_len: u64) -> Candidate {
     Candidate { rel, state }
 }
 
-fn classify_candidates(candidates: Vec<Candidate>) -> Result<CollectedSurface> {
+fn classify_candidates(
+    candidates: Vec<Candidate>,
+    rooted_at_workflows: bool,
+) -> Result<CollectedSurface> {
     let skill_dirs: Vec<String> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -208,7 +227,16 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<CollectedSurface> {
     let mut files = Vec::new();
     let mut findings = Vec::new();
     for Candidate { rel, state } in candidates {
-        let kind = classify(CoordinatePolicy::LegacyRootRelative, &rel, &skill_dirs);
+        let classification_path = if rooted_at_workflows {
+            format!(".github/workflows/{rel}")
+        } else {
+            rel.clone()
+        };
+        let kind = classify(
+            CoordinatePolicy::LegacyRootRelative,
+            &classification_path,
+            &skill_dirs,
+        );
         if matches!(&state, CandidateState::SymlinkTargetError(_))
             && is_protected_tree_path(&rel, &skill_dirs)
         {
@@ -225,7 +253,7 @@ fn classify_candidates(candidates: Vec<Candidate>) -> Result<CollectedSurface> {
         if kind == SurfaceKind::InventoryOnly {
             if is_native_executable_candidate(
                 CoordinatePolicy::LegacyRootRelative,
-                &rel,
+                &classification_path,
                 &skill_dirs,
             ) {
                 if let Some(finding) = materialize_native_candidate(Candidate { rel, state })? {

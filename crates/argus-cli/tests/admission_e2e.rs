@@ -29,6 +29,122 @@ struct RegistryServer {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+#[test]
+fn github_workflow_admission_is_fail_closed_end_to_end() {
+    let workspace = tempfile::tempdir().expect("workflow E2E workspace");
+    let workflow_dir = workspace.path().join(".github/workflows");
+    fs::create_dir_all(&workflow_dir).expect("workflow directory");
+    let workflow = workflow_dir.join("review.yml");
+
+    write_fixture(
+        &workflow,
+        "name: Review\non: pull_request_target\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n      - run: echo \"${{ github.event.pull_request.title }}\"\n",
+    );
+    let blocked = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workspace.path().to_str().expect("workspace path"),
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    let ids: BTreeSet<_> = blocked["findings"]
+        .as_array()
+        .expect("workflow findings")
+        .iter()
+        .map(|finding| finding["rule_id"].as_str().expect("workflow rule id"))
+        .collect();
+    for expected in [
+        "AGT-06-workflow-context-injection",
+        "AGT-06-workflow-mutable-action",
+        "AGT-06-workflow-untrusted-checkout",
+    ] {
+        assert!(ids.contains(expected), "workflow findings: {ids:?}");
+    }
+    let direct_file = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workflow.to_str().expect("workflow path"),
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    assert_eq!(direct_file["decision"], "block");
+    assert!(direct_file["findings"]
+        .as_array()
+        .expect("direct workflow findings")
+        .iter()
+        .any(|finding| finding["rule_id"] == "AGT-06-workflow-context-injection"));
+    let direct_directory = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workflow_dir.to_str().expect("workflow directory path"),
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    assert_eq!(direct_directory["decision"], "block");
+    let sarif = argus(&[
+        "agent",
+        "scan",
+        workspace.path().to_str().expect("workspace path"),
+        "--format",
+        "sarif",
+    ]);
+    assert_eq!(sarif.status.code(), Some(1));
+    assert!(sarif.stderr.is_empty());
+    let sarif: Value = serde_json::from_slice(&sarif.stdout).expect("parse workflow SARIF");
+    let sarif_ids: BTreeSet<_> = sarif["runs"][0]["results"]
+        .as_array()
+        .expect("workflow SARIF results")
+        .iter()
+        .map(|finding| finding["ruleId"].as_str().expect("workflow SARIF rule id"))
+        .collect();
+    assert!(
+        sarif_ids.contains("AGT-06-workflow-context-injection"),
+        "workflow SARIF findings: {sarif_ids:?}"
+    );
+
+    write_fixture(
+        &workflow,
+        "name: CI\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TITLE: ${{ github.event.pull_request.title }}\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n      - run: printf '%s\\n' \"$TITLE\"\n",
+    );
+    let allowed = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workspace.path().to_str().expect("workspace path"),
+            "--format",
+            "json",
+        ]),
+        0,
+    );
+    assert_eq!(allowed["decision"], "allow");
+    assert_eq!(allowed["findings"].as_array().map(Vec::len), Some(0));
+
+    write_fixture(&workflow, "name: one\nname: two\njobs: {}\n");
+    let malformed = argus(&[
+        "agent",
+        "scan",
+        workspace.path().to_str().expect("workspace path"),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr).contains("duplicated key in mapping"),
+        "stderr: {}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+}
+
 impl RegistryServer {
     fn start(build_routes: impl FnOnce(&str) -> BTreeMap<String, Vec<u8>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind synthetic registry");

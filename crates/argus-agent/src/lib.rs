@@ -24,6 +24,7 @@ mod judge;
 mod rule_runtime;
 mod snapshot;
 mod surface;
+mod workflow;
 
 use collection::{collect_surface_files, path_identity, project_semantic};
 pub use judge::{LlmJudge, LlmJudgeRequest, LlmJudgeResponse};
@@ -176,6 +177,7 @@ fn scan_agent_surface_inner(
     injection::run(&files, &mut findings);
     capability::run(&files, &mut findings)?;
     config::run(path, &files, &mut findings);
+    workflow::run(&files, &mut findings)?;
 
     match mode {
         BaselineMode::None => {}
@@ -258,6 +260,7 @@ fn scan_snapshot_mode(
         injection::run(&files, &mut semantic_findings);
         capability::run(&files, &mut semantic_findings)?;
         config::run(path, &files, &mut semantic_findings);
+        workflow::run(&files, &mut semantic_findings)?;
         apply_baseline(baseline_mode, &files, &mut semantic_findings)?;
         if let Some(judge) = judge {
             let report = rule_runtime::report(

@@ -73,6 +73,22 @@
 - [x] Keep the protected `v1` branch on `v0.2.1` until the product reaches its
   explicitly approved `v1.0` stability boundary.
 
+## P5 — GitHub Actions admission
+
+- [x] Reuse `agent scan`, the root Action, report formats, SARIF, and decision
+  semantics instead of adding a fourth command or compatibility layer.
+- [x] Discover immediate `.github/workflows/*.{yml,yaml}` files and parse YAML
+  structurally; malformed or duplicate-key workflows are operational errors.
+- [x] Require review for mutable remote Action/reusable-workflow references and
+  block direct attacker-controlled context interpolation in `run` scripts.
+- [x] Block privileged `pull_request_target` / `workflow_run` flows that
+  explicitly check out attacker-controlled refs.
+- [x] Add process-level hostile/benign/malformed E2E and three inert synthetic
+  corpus cases without executing workflow code.
+- [x] Add a CI precision gate that downloads five popular public workflows
+  from immutable commits, verifies their SHA-256 digests, runs the production
+  CLI, and requires zero false blocks.
+
 ## Paused directions
 
 - New package ecosystems and broad platform coverage.
@@ -91,9 +107,10 @@ Fresh verification on 2026-08-30:
 cargo fmt --all -- --check                                      PASS
 cargo clippy --workspace --all-targets -- -D warnings          PASS
 cargo test --workspace --all-targets                           PASS
-cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (33/33)
+cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (36/36)
 cargo test -p argus-cli --test admission_e2e                  PASS (local TCP registry)
 cargo test -p argus-cli --test public_registry_e2e -- --ignored PASS (npm/PyPI/crates)
+cargo test -p argus-cli --test public_workflow_e2e -- --ignored PASS (5/5 public workflows, zero false blocks)
 python3 -m unittest discover -s scripts/tests -p 'test_release_*.py' PASS (12/12)
 npm test --prefix action                                       PASS (16/16)
 npm run package --prefix action                                PASS

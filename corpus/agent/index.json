@@ -89,6 +89,33 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. SKILL.md uses generic 'override system' phrases for UI themes, gestures, game records, and tenant branding without attempting to supersede agent instructions or policy."
+    },
+    {
+      "id": "workflow-dangerous",
+      "kind": "fixture",
+      "path": "fixtures/workflow-dangerous",
+      "packageName": "workflow-dangerous",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection", "workflow-mutable-action", "workflow-untrusted-checkout"],
+      "notes": "A privileged pull_request_target workflow checks out attacker-controlled pull-request code and directly interpolates an attacker-controlled title into a shell script."
+    },
+    {
+      "id": "workflow-mutable-action",
+      "kind": "fixture",
+      "path": "fixtures/workflow-mutable-action",
+      "packageName": "workflow-mutable-action",
+      "expectedDecision": "allow-with-approval",
+      "rules": ["workflow-mutable-action"],
+      "notes": "A normal CI workflow references actions/checkout by mutable major tag, requiring explicit approval without claiming compromise."
+    },
+    {
+      "id": "workflow-pinned-benign",
+      "kind": "fixture",
+      "path": "fixtures/workflow-pinned-benign",
+      "packageName": "workflow-pinned-benign",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. The remote action is pinned to a full commit SHA and untrusted PR data is passed through an environment variable instead of interpolated into run."
     }
   ]
 }

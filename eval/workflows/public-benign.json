@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "labelSource": "Curated popular public GitHub Actions workflows pinned on 2026-08-30; every sample is labeled benign for the false-block gate and must never produce a block decision.",
+  "samples": [
+    {
+      "id": "rust-ci",
+      "repository": "rust-lang/rust",
+      "commit": "93635a5d547dd8a0c51553a15376012346f17261",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "6641005efe02d3bbe8f6b2f881dab57fa6d91f14297f001927912314a2d37f32"
+    },
+    {
+      "id": "tokio-ci",
+      "repository": "tokio-rs/tokio",
+      "commit": "ea91b33ca57ff0581b38e735cc108f831bccbdaa",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "17482c261dfb9098799b4320048fb3fa7d8535e8cbbb12cc96e408a8728d172a"
+    },
+    {
+      "id": "serde-ci",
+      "repository": "serde-rs/serde",
+      "commit": "a874a1b1bb1cc16cf5ee3b1b7b527af5705742bb",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "2dbe2b645b9ba7f3545dfea2b08ba6d0ff0fb596878d84cd860743985c337338"
+    },
+    {
+      "id": "requests-tests",
+      "repository": "psf/requests",
+      "commit": "5460f467b02e49471c0fd6cfc9ca0adab6351f98",
+      "path": ".github/workflows/run-tests.yml",
+      "sha256": "881865cff186f47787598b2a3d7e6e7eb4d56a3fe4c015414c3cd4d90d9cbb90"
+    },
+    {
+      "id": "flask-tests",
+      "repository": "pallets/flask",
+      "commit": "d318b683471101618febed18996405ad26462110",
+      "path": ".github/workflows/tests.yaml",
+      "sha256": "cb7190944c48625e6516ddf86d37118ffca12d7ab53c6f43b94e5cecbe176704"
+    }
+  ]
+}

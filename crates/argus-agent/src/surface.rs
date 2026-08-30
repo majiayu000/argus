@@ -13,6 +13,8 @@ pub enum SurfaceKind {
     McpConfig,
     /// Hook and skill scripts with existing semantic checks.
     Script,
+    /// A GitHub Actions workflow with supply-chain checks.
+    Workflow,
     /// A high-context member tracked by AGT-04 but not semantically scanned.
     InventoryOnly,
 }
@@ -45,10 +47,17 @@ impl ScanRootContext {
             })
             .collect();
 
-        let prefix_components = components
-            .iter()
-            .rposition(|component| *component == OsStr::new(".claude"))
+        let workflow_prefix = components.windows(2).rposition(|pair| {
+            pair[0] == OsStr::new(".github") && pair[1] == OsStr::new("workflows")
+        });
+        let prefix_components = workflow_prefix
             .map(|index| &components[index..])
+            .or_else(|| {
+                components
+                    .iter()
+                    .rposition(|component| *component == OsStr::new(".claude"))
+                    .map(|index| &components[index..])
+            })
             .or_else(|| {
                 components
                     .iter()
@@ -191,6 +200,8 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
                 .any(|directory| path.starts_with(directory.as_str())))
     {
         Some(SurfaceKind::Script)
+    } else if is_github_workflow(path, &lower) {
+        Some(SurfaceKind::Workflow)
     } else {
         None
     };
@@ -226,6 +237,16 @@ fn in_agent_hooks_dir(path: &str) -> bool {
     })
 }
 
+fn is_github_workflow(path: &str, lower_file_name: &str) -> bool {
+    matches!(
+        lower_file_name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension),
+        Some("yml" | "yaml")
+    ) && path.starts_with(".github/workflows/")
+        && !path[".github/workflows/".len()..].contains('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +275,11 @@ mod tests {
         assert_eq!(legacy("hooks/pre.sh", &[]), Some(SurfaceKind::Script));
         assert_eq!(legacy("hooks/guard", &[]), Some(SurfaceKind::Script));
         assert_eq!(legacy("hooks/guard.ps1", &[]), Some(SurfaceKind::Script));
+        assert_eq!(
+            legacy(".github/workflows/ci.yml", &[]),
+            Some(SurfaceKind::Workflow)
+        );
+        assert_eq!(legacy(".github/workflows/nested/ci.yml", &[]), None);
         let skill_dirs = vec!["myskill/".to_string()];
         assert_eq!(
             legacy("myskill/run.py", &skill_dirs),
@@ -370,6 +396,20 @@ mod tests {
                 &[],
             ),
             Some(SurfaceKind::Script)
+        );
+
+        let workflows = sandbox.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).expect("workflows");
+        let workflow_context =
+            ScanRootContext::from_canonical_scan_root(&workflows, ScanRootEntryType::Directory)
+                .expect("workflow context");
+        assert_eq!(
+            classify(
+                CoordinatePolicy::SnapshotRootAware(&workflow_context),
+                "ci.yaml",
+                &[],
+            ),
+            Some(SurfaceKind::Workflow)
         );
     }
 

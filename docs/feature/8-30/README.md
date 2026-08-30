@@ -8,9 +8,10 @@ question before a dependency or agent configuration is applied:
 > May this exact artifact and this exact change enter this machine or CI run?
 
 Argus remains static and pre-execution. It verifies the resolved artifact,
-scans it without running package code, consumes pinned malicious-package
-intelligence, compares upgrades with their base artifacts, and emits an
-auditable `allow`, `allow-with-approval`, or `block` decision.
+scans it without running package or workflow code, consumes pinned
+malicious-package intelligence, compares upgrades with their base artifacts,
+inspects repository workflow trust boundaries, and emits an auditable `allow`,
+`allow-with-approval`, or `block` decision.
 
 Argus is not a general SCA platform, EDR, dynamic malware sandbox, SIEM, or a
 hosted multi-tenant security product. Provenance proves how bytes were built;
@@ -50,6 +51,9 @@ also “did this upgrade introduce that construct?”
    result rather than presenting an incomplete comparison as clean.
 7. Send remaining uncertainty to sibling controls: isolated detonation for
    runtime behavior and CI egress/secret enforcement for execution-time harm.
+8. Before repository workflow changes merge, scan the repository root for
+   mutable Action dependencies, direct untrusted-context script injection, and
+   privileged workflows that check out attacker-controlled code.
 
 ## What the report must answer
 
@@ -71,6 +75,10 @@ also “did this upgrade introduce that construct?”
   <https://github.com/ossf/malicious-packages>
 - npm lifecycle script configuration:
   <https://docs.npmjs.com/cli/v11/using-npm/config/#ignore-scripts>
+- GitHub Actions security hardening:
+  <https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions>
+- OpenSSF Scorecard workflow checks:
+  <https://github.com/ossf/scorecard/blob/main/docs/checks.md>
 
 These incident reports are evidence for the threat model, not malware fixtures.
 Argus tests continue to use synthetic packages and `.example.invalid` only.

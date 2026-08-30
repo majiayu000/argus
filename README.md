@@ -41,7 +41,7 @@ jobs:
   argus:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: majiayu000/argus@v0.2.2
         with:
           scanType: lockfile
@@ -183,11 +183,15 @@ cargo run -p argus-cli -- vulns package \
 cargo run -p argus-cli -- vulns lockfile Cargo.lock \
   --cache-dir ~/.cache/argus/osv --offline --format json
 
-# Scan agent surfaces: MCP configs, skills, hooks, AGENTS.md / CLAUDE.md.
+# Scan agent and repository automation surfaces: MCP configs, skills, hooks,
+# AGENTS.md / CLAUDE.md, and .github/workflows/*.{yml,yaml}.
 # Detects injection/override language (AGT-01), dangerous script
 # capabilities like curl|sh or secret-read + network-egress (AGT-03),
-# and high-risk config flags such as alwaysLoad: true (AGT-05).
+# high-risk config flags such as alwaysLoad: true (AGT-05), and GitHub
+# Actions supply-chain hazards (AGT-06). Scan the repository root, the
+# .github/workflows directory, or one workflow file.
 cargo run -p argus-cli -- agent scan ~/.claude
+cargo run -p argus-cli -- agent scan . --format sarif
 cargo run -p argus-cli -- agent scan path/to/skill .mcp.json --format json
 
 # Recompute the explicitly synthetic GH-58 fixture metrics.
@@ -626,9 +630,11 @@ A successful SARIF report retains the normal decision exit codes:
 
 ## Agent-surface rule coverage (GH-57)
 
-`argus agent scan` statically scans agent supply-chain surfaces — MCP
-configs, skill definitions, hook scripts, and instruction files — without
-executing anything.
+`argus agent scan` statically scans agent and repository automation surfaces —
+MCP configs, skill definitions, hook scripts, instruction files, and immediate
+`.github/workflows/*.{yml,yaml}` files — without executing anything. AGT-06 is
+currently available from source on `main`; the immutable `v0.2.2` binary does
+not contain it.
 
 | Rule | Severity | Detects |
 |------|----------|---------|
@@ -646,6 +652,9 @@ executing anything.
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |
 | `AGT-05-posttooluse-output-rewrite` | medium → approval | `PostToolUse` hook rewriting `updatedToolOutput` for non-MCP tools |
 | `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
+| `AGT-06-workflow-mutable-action` | medium → approval | a remote Action, reusable workflow, or Docker action is not pinned to a full commit SHA or image digest |
+| `AGT-06-workflow-context-injection` | critical → block | attacker-controlled GitHub event data is interpolated directly into an inline `run` script instead of crossing an environment-variable boundary |
+| `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref |
 | `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
 | `AGT-02-baseline-entry-missing` | info | a baselined description is no longer present on the scanned surface |
 | `AGT-02-baseline-unreadable` | info | `--baseline` file could not be read/parsed (scan continues; not treated as "no drift") |
@@ -682,7 +691,7 @@ All five AGT-04 changes are Medium and therefore
 `allow-with-approval` unless another rule blocks. Check mode never records
 approval. Update mode records approval only after discovery, semantic rules,
 optional judge, and atomic persistence all succeed; it does not erase existing
-AGT-01/02/03/05/judge findings or force their exit code to zero. The normal
+AGT-01/02/03/05/06/judge findings or force their exit code to zero. The normal
 report and `snapshot written: N entries` message are emitted only after the
 snapshot has been persisted.
 
