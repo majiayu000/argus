@@ -15,10 +15,11 @@ static scan proves that an artifact is safe. See the matrix below and the
 [`v0.2.1`](https://github.com/majiayu000/argus/releases/tag/v0.2.1) is the current
 immutable binary release, and the workspace release contract targets `v0.2.1`.
 GitHub Release metadata is authoritative for publication status, dates, and
-assets. The repository-root GitHub Action is implemented, but the protected
-`v1` branch has not been promoted, so do not reference
-`majiayu000/argus@v1` yet. The operator sequence and verification boundary are
-documented in [`docs/releasing.md`](docs/releasing.md).
+assets. The repository-root GitHub Action is implemented, and the protected
+`v1` branch is promoted to the verified `v0.2.1` release commit. Normal Action
+consumers can use `majiayu000/argus@v1`; high-assurance environments should pin
+the immutable SemVer tag or full commit. The operator sequence and verification
+boundary are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Ecosystem capability matrix
 
@@ -342,9 +343,10 @@ and `approvalLedger` inputs are workspace-relative regular files; SARIF and the
 native decision/exit-code contract remain available through the existing
 outputs. Every invocation must pass `githubToken: ${{ github.token }}` for the
 authenticated release download and attestation verification path; Argus does
-not fall back to anonymous GitHub API requests. Until the protected Action
-branch is promoted, use the committed Action only in this repository's explicit
-dogfood flow.
+not fall back to anonymous GitHub API requests. Use
+`uses: majiayu000/argus@v1` for the protected major-version reference, or pin
+`majiayu000/argus@474d6019dce325fa29474bbabbb65e8ca3439699` when an immutable
+Action source reference is required.
 
 The aggregate decision is the worst package decision, and coverage is stated
 before findings. Two categories are reported rather than dropped:
@@ -814,9 +816,9 @@ gh release verify-asset v0.2.1 \
 ```
 
 There is no package-registry distribution. The protected `v1` Action branch
-has not been promoted, so do not reference `majiayu000/argus@v1` yet. Build
-from source against `main` only when you intentionally want the source-tree
-state recorded in the [`CHANGELOG`](CHANGELOG.md).
+points to the verified `v0.2.1` release commit. Build from source against `main`
+only when you intentionally want the source-tree state recorded in the
+[`CHANGELOG`](CHANGELOG.md).
 
 Baseline capability snapshot (as of 2026-07-18; see `[0.2.0]` for subsequent
 work):
