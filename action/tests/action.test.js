@@ -8,14 +8,14 @@ const test = require("node:test");
 const { decisionForExit, readInputs, resolveWorkspacePath, shouldFail, targetFor, validateManifest, validateReport } = require("../src/contract");
 const { main } = require("../src/main");
 
-const config = { schemaVersion: 1, defaultBinaryVersion: "0.2.1", compatibilityRange: ">=0.2.1,<0.3.0" };
+const config = { schemaVersion: 1, defaultBinaryVersion: "0.2.2", compatibilityRange: ">=0.2.2,<0.3.0" };
 
 test("input contract rejects empty and open-ended values", () => {
   assert.throws(() => readInputs({}, config), /scanType/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: "." }, config), /githubToken/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_GITHUBTOKEN: "token", INPUT_ARGUSVERSION: "latest" }, config), /canonical/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_GITHUBTOKEN: "token", INPUT_ARGUSVERSION: "0.1.0" }, config), /outside/);
-  assert.deepEqual(readInputs({ INPUT_SCANTYPE: "agent", INPUT_PATH: ".", INPUT_GITHUBTOKEN: "token" }, config), { scanType: "agent", inputPath: ".", githubToken: "token", format: "text", version: "0.2.1", failOn: "block", base: "", baseLockfileFormat: "", maliciousDb: "", approvalLedger: "" });
+  assert.deepEqual(readInputs({ INPUT_SCANTYPE: "agent", INPUT_PATH: ".", INPUT_GITHUBTOKEN: "token" }, config), { scanType: "agent", inputPath: ".", githubToken: "token", format: "text", version: "0.2.2", failOn: "block", base: "", baseLockfileFormat: "", maliciousDb: "", approvalLedger: "" });
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "package", INPUT_PATH: ".", INPUT_GITHUBTOKEN: "token", INPUT_BASE: "base.lock" }, config), /scanType=lockfile/);
   assert.throws(() => readInputs({ INPUT_SCANTYPE: "lockfile", INPUT_PATH: "Cargo.lock", INPUT_GITHUBTOKEN: "token", INPUT_BASELOCKFILEFORMAT: "cargo" }, config), /requires base/);
 });
@@ -42,27 +42,27 @@ test("workspace paths cannot escape through traversal or symlink", () => {
 
 test("manifest validates identity and complete asset matrix", () => {
   const runners = { "x86_64-unknown-linux-gnu": "ubuntu-24.04", "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm", "x86_64-apple-darwin": "macos-15-intel", "aarch64-apple-darwin": "macos-15", "x86_64-pc-windows-msvc": "windows-2025" };
-  const assets = Object.entries(runners).flatMap(([target, runner]) => ["binary", "archive"].map((kind) => ({ name: kind === "binary" ? `argus-v0.2.1-${target}${target.endsWith("windows-msvc") ? ".exe" : ""}` : `argus-v0.2.1-${target}.${target.endsWith("windows-msvc") ? "zip" : "tar.gz"}`, target, runner, kind, size: 1, sha256: "b".repeat(64) })));
+  const assets = Object.entries(runners).flatMap(([target, runner]) => ["binary", "archive"].map((kind) => ({ name: kind === "binary" ? `argus-v0.2.2-${target}${target.endsWith("windows-msvc") ? ".exe" : ""}` : `argus-v0.2.2-${target}.${target.endsWith("windows-msvc") ? "zip" : "tar.gz"}`, target, runner, kind, size: 1, sha256: "b".repeat(64) })));
   assets.push({ name: "LICENSE", target: null, runner: null, kind: "documentation", size: 1, sha256: "c".repeat(64) });
   assets.push({ name: "README.md", target: null, runner: null, kind: "documentation", size: 1, sha256: "d".repeat(64) });
-  const value = { schemaVersion: 1, binaryVersion: "0.2.1", tag: "v0.2.1", commit: "a".repeat(40), assets };
-  assert.equal(validateManifest(value, "0.2.1", "a".repeat(40)), value);
-  assert.throws(() => validateManifest({ ...value, extra: true }, "0.2.1", "a".repeat(40)), /keys/);
-  assert.throws(() => validateManifest({ ...value, assets: assets.slice(1) }, "0.2.1", "a".repeat(40)), /incomplete/);
+  const value = { schemaVersion: 1, binaryVersion: "0.2.2", tag: "v0.2.2", commit: "a".repeat(40), assets };
+  assert.equal(validateManifest(value, "0.2.2", "a".repeat(40)), value);
+  assert.throws(() => validateManifest({ ...value, extra: true }, "0.2.2", "a".repeat(40)), /keys/);
+  assert.throws(() => validateManifest({ ...value, assets: assets.slice(1) }, "0.2.2", "a".repeat(40)), /incomplete/);
 });
 
 test("reports bind decision to exit code and format", () => {
-  assert.equal(validateReport("text", "decision: allow  package: x\npath: .\nfindings: none\n", 0, "0.2.1", "package"), "allow");
+  assert.equal(validateReport("text", "decision: allow  package: x\npath: .\nfindings: none\n", 0, "0.2.2", "package"), "allow");
   const blocked = JSON.stringify({ artifact: "package-dir", path: ".", package_name: "x", package_version: "1.0.0", decision: "block", findings: [{}] });
-  assert.equal(validateReport("json", blocked, 1, "0.2.1", "package"), "block");
-  assert.equal(validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: { version: 1 }, future_additive_field: true }), 1, "0.2.1", "package"), "block");
-  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: [] }), 1, "0.2.1", "package"), /contract/);
+  assert.equal(validateReport("json", blocked, 1, "0.2.2", "package"), "block");
+  assert.equal(validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: { version: 1 }, future_additive_field: true }), 1, "0.2.2", "package"), "block");
+  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), vulnerability: [] }), 1, "0.2.2", "package"), /contract/);
   const lockfile = JSON.stringify({ lockfile: "Cargo.lock", decision: "block", targets_total: 1, scanned: 0, reports: [], skipped: [], failed: [{}], comparisons_total: 0, version_changes: [], comparison_failed: [], approvals: [] });
-  assert.equal(validateReport("json", lockfile, 1, "0.2.1", "lockfile"), "block");
-  const sarif = JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "argus", version: "0.2.1" } }, invocations: [{ executionSuccessful: true }], results: [] }] });
-  assert.equal(validateReport("sarif", sarif, 0, "0.2.1", "agent"), "allow");
-  assert.equal(validateReport("sarif", JSON.stringify({ version: "2.1.0", runs: [] }), 1, "0.2.1", "lockfile"), "block");
-  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), decision: "allow" }), 1, "0.2.1", "package"), /contract/);
+  assert.equal(validateReport("json", lockfile, 1, "0.2.2", "lockfile"), "block");
+  const sarif = JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "argus", version: "0.2.2" } }, invocations: [{ executionSuccessful: true }], results: [] }] });
+  assert.equal(validateReport("sarif", sarif, 0, "0.2.2", "agent"), "allow");
+  assert.equal(validateReport("sarif", JSON.stringify({ version: "2.1.0", runs: [] }), 1, "0.2.2", "lockfile"), "block");
+  assert.throws(() => validateReport("json", JSON.stringify({ ...JSON.parse(blocked), decision: "allow" }), 1, "0.2.2", "package"), /contract/);
   assert.throws(() => decisionForExit(3), /unsupported/);
 });
 
@@ -74,12 +74,12 @@ test("main preserves blank outputs on early failure and only exitCode on invalid
   process.exitCode = 0;
   await main(env, { targetFor: () => "x86_64-unknown-linux-gnu", materializeRelease: async () => { throw new Error("download failed"); } });
   let values = Object.fromEntries(fs.readFileSync(output, "utf8").trimEnd().split("\n").map((line) => line.split("=", 2)));
-  assert.deepEqual(values, { decision: "", exitCode: "", reportPath: "", sarifFile: "", argusVersion: "0.2.1" });
+  assert.deepEqual(values, { decision: "", exitCode: "", reportPath: "", sarifFile: "", argusVersion: "0.2.2" });
   fs.writeFileSync(output, "");
   let calls = 0;
-  await main(env, { targetFor: () => "x86_64-unknown-linux-gnu", materializeRelease: async () => "/tmp/argus", runBounded: async () => (++calls === 1 ? { code: 0, stdout: "argus 0.2.1\n", stderr: "" } : { code: 1, stdout: "{}", stderr: "" }) });
+  await main(env, { targetFor: () => "x86_64-unknown-linux-gnu", materializeRelease: async () => "/tmp/argus", runBounded: async () => (++calls === 1 ? { code: 0, stdout: "argus 0.2.2\n", stderr: "" } : { code: 1, stdout: "{}", stderr: "" }) });
   values = Object.fromEntries(fs.readFileSync(output, "utf8").trimEnd().split("\n").map((line) => line.split("=", 2)));
-  assert.deepEqual(values, { decision: "", exitCode: "1", reportPath: "", sarifFile: "", argusVersion: "0.2.1" });
+  assert.deepEqual(values, { decision: "", exitCode: "1", reportPath: "", sarifFile: "", argusVersion: "0.2.2" });
   process.exitCode = originalExitCode;
 });
 

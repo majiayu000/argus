@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-30
+
 - Add deterministic package capability correlation for npm and PyPI. Findings
   now retain capability, source-line evidence, and resolved network hosts;
   same-file credential-exfiltration and download-to-execution chains block
@@ -206,7 +208,8 @@ section.
 - See [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md) for the
   attack-catalog argus is designed against.
 
-[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.1...main
+[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.2...main
+[0.2.2]: https://github.com/majiayu000/argus/releases/tag/v0.2.2
 [0.2.1]: https://github.com/majiayu000/argus/releases/tag/v0.2.1
 [0.2.0]: https://github.com/majiayu000/argus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/majiayu000/argus/releases/tag/v0.1.0

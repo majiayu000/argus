@@ -13,21 +13,77 @@ static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
 [`v0.2.1`](https://github.com/majiayu000/argus/releases/tag/v0.2.1) is the current
-immutable binary release, and the workspace release contract targets `v0.2.1`.
-GitHub Release metadata is authoritative for publication status, dates, and
-assets. The repository-root GitHub Action is implemented, and the protected
-`v1` branch is promoted to the verified `v0.2.1` release commit. Normal Action
-consumers can use `majiayu000/argus@v1`; high-assurance environments should pin
-the immutable SemVer tag or full commit. The operator sequence and verification
-boundary are documented in [`docs/releasing.md`](docs/releasing.md).
+immutable binary release. The workspace release contract targets `v0.2.2`.
+This source tree remains a release candidate until GitHub publishes an
+immutable Release. GitHub Release metadata is authoritative for publication
+status, dates, and assets. The protected `v1` branch still points to the verified
+`v0.2.1` release commit. Normal Action consumers can use
+`majiayu000/argus@v1`; high-assurance environments should pin the immutable
+SemVer tag or full commit. The operator sequence and verification boundary are
+documented in [`docs/releasing.md`](docs/releasing.md).
+
+## Ten-minute CI quickstart
+
+The primary product path is a pull-request admission gate over a supported
+lockfile. The Action downloads and verifies an immutable Argus release before
+scanning the resolved dependency tree; it never runs package lifecycle, build,
+or install hooks.
+
+```yaml
+name: Argus dependency admission
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  argus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: majiayu000/argus@v1
+        with:
+          scanType: lockfile
+          path: package-lock.json
+          githubToken: ${{ github.token }}
+          format: json
+          failOn: approval
+```
+
+Replace `package-lock.json` with another supported lockfile. `failOn: approval`
+fails the job for both `block` and `allow-with-approval`; operational errors
+always fail. Use the optional `base` input when the workflow has materialized
+the base revision's lockfile and only changed dependencies should be fetched.
+The three report decisions mean:
+
+- `allow`: assessment completed and no active rule requires review; this is
+  not proof that the artifact is safe.
+- `allow-with-approval`: stop and review the reported evidence before granting
+  an exact, digest-bound approval.
+- `block`: reject the change. Fetch, scan, integrity, intelligence, or required
+  comparison failures never become a clean report.
+
+For local investigation, download the asset for the exact platform, verify its
+GitHub attestation, and extract the archive:
+
+```sh
+gh release download v0.2.1 --repo majiayu000/argus \
+  --pattern 'argus-v0.2.1-aarch64-apple-darwin.tar.gz'
+gh release verify-asset v0.2.1 \
+  argus-v0.2.1-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
+tar -xzf argus-v0.2.1-aarch64-apple-darwin.tar.gz
+./argus lockfile-scan package-lock.json --format json
+```
 
 ## Ecosystem capability matrix
 
 All rows describe current code on `main`. Each immutable release tag and its
 release manifest commit define that release's binary contents. The
-[`[0.2.1]`](CHANGELOG.md#021---2026-08-30) section describes the current binary
-release and the release contract configured in this source tree. GitHub Release
-metadata is authoritative for whether it has been published.
+[`[0.2.2]`](CHANGELOG.md#022---2026-08-30) section describes the current release
+candidate. GitHub Release metadata is authoritative for whether a version has
+been published.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
@@ -48,7 +104,10 @@ metadata is authoritative for whether it has been published.
   integrity fired; require explicit approval.
 - **allow** — no rule fired.
 
-## Usage
+## Developer and advanced CLI reference
+
+The examples below run the source workspace. End users should start with the
+verified Action or immutable release quickstart above.
 
 ```bash
 # Scan one local package directory

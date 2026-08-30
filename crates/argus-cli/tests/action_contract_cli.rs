@@ -7,7 +7,8 @@ fn version_is_exact_for_action_self_check() {
         .output()
         .expect("run argus --version");
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"argus 0.2.1\n");
+    let expected = format!("argus {}\n", env!("CARGO_PKG_VERSION"));
+    assert_eq!(output.stdout, expected.as_bytes());
     assert!(output.stderr.is_empty());
 }
 

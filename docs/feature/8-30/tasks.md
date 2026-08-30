@@ -58,6 +58,18 @@
   CLI/TCP-registry E2E proving unknown-coordinate detection without execution.
 - [x] Update the public rule contract and run every repository-native gate.
 
+## P4 — user delivery
+
+- [x] Freeze the source and Action binary contract at `v0.2.2` without
+  claiming that the candidate is already published.
+- [x] Put the verified GitHub Action and immutable local-binary path before the
+  developer-oriented Cargo examples.
+- [ ] Run the no-mutation five-target release candidate workflow from the
+  final release-prep commit.
+- [ ] After explicit release authorization, publish the immutable `v0.2.2`
+  assets, fast-forward the protected `v1` branch, and pass Action dogfood on
+  Linux, macOS, and Windows.
+
 ## Paused directions
 
 - New package ecosystems and broad platform coverage.
