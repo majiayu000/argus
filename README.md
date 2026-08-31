@@ -628,6 +628,11 @@ A successful SARIF report retains the normal decision exit codes:
 | npm metadata | `version-shape-anomaly`, `rapid-publish-window` (approval); `npm-version-shape-unassessed`, `npm-rapid-publish-unassessed` (info) |
 | ai-context | `ai-context-poisoning` — writes to `.cursorrules`, `CLAUDE.md`, `.claude/*`, `AGENTS.md`, `.aider.conf.yml`, `.continuerules`, `.codexrules`, `.windsurfrules`. Pioneered at scale by the TrapDoor campaign (Socket.dev 2026-05-24). |
 
+`runtime-hook` recognizes direct, computed-property, and
+`Object.defineProperty` rewrites of `globalThis`, `window`, or `global` from
+parsed JavaScript/TypeScript facts. Comments and string examples do not count
+as executable rewrites.
+
 ## Agent-surface rule coverage (GH-57)
 
 `argus agent scan` statically scans agent and repository automation surfaces —

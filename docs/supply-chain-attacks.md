@@ -591,7 +591,9 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 ### New corpus fixtures worth adding (M1.x)
 
 - `crypto-key-stealer/` — implemented synthetic regression fixture; typosquats a crypto library, hooks `Base58.decode`, and POSTs a key to Telegram. Maps to galedonovan, but is not a preserved copy of the real malicious packages.
-- `obfuscated-runtime-bundle/` — large minified single-file bundle with hidden `globalThis.fetch` rewrite. Maps to node-ipc.
+- `computed-runtime-hook/` — implemented synthetic regression fixture for a
+  compact payload that hides a `globalThis.fetch` rewrite behind a computed
+  property. It maps to the runtime-interception shape while remaining inert.
 - `version-shape-anomaly/` (synthetic corpus form) — the implemented rule already
   has offline packument/search integration fixtures; a named corpus artifact
   could make the same scenario visible to corpus reporting.

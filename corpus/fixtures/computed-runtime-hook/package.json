@@ -1,0 +1,6 @@
+{
+  "name": "computed-runtime-hook",
+  "version": "1.0.0",
+  "description": "Harmless fixture for computed-property runtime interception.",
+  "main": "bundle.js"
+}

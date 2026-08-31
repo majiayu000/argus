@@ -12,6 +12,7 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 mod capability;
+mod runtime_hook;
 use capability::{credential_path_offset, syntax_sensitive_read};
 
 pub(crate) fn scan_npm_text_file(file: &TextFile) -> Result<Vec<Finding>> {
@@ -240,7 +241,11 @@ fn scan_file(
     }
 
     // runtime-hook: monkey-patches a global at module load.
-    if runtime_hook_regex().is_match(body) {
+    let syntax_facts = match &network_scan {
+        NetworkScan::Syntax(facts) => Some(*facts),
+        NetworkScan::Legacy | NetworkScan::Disabled => None,
+    };
+    if runtime_hook::matches_runtime_hook(body, syntax_facts) {
         findings.push(
             Finding::new(
                 "runtime-hook",
@@ -478,23 +483,6 @@ fn binary_exec_regex() -> &'static Regex {
     })
 }
 
-fn runtime_hook_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // No lookarounds: forbid `==` / `===` by requiring a non-`=` byte after the
-        // assignment operator.
-        Regex::new(
-            r#"(?x)
-            (?:globalThis|window|global)
-            \s*\.\s* [A-Za-z_$][A-Za-z0-9_$]*
-            (?:\s*\.\s* [A-Za-z_$][A-Za-z0-9_$]* )?
-            \s*=\s* [^=]
-            "#,
-        )
-        .unwrap()
-    })
-}
-
 fn wallet_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -697,6 +685,32 @@ mod tests {
             "// eval(atob('fake'))\nconst docs = \"eval(atob('fake'))\";",
         ));
         assert!(!ids.iter().any(|id| id == "encoded-dynamic-execution"));
+    }
+
+    #[test]
+    fn computed_global_property_rewrites_are_runtime_hooks() {
+        for source in [
+            r#"globalThis["fetch"] = wrapped;"#,
+            r#"window['ethereum']['request'] = wrapped;"#,
+            r#"global["fetch"] = wrapped;"#,
+            r#"Object.defineProperty(globalThis, "fetch", { value: wrapped });"#,
+        ] {
+            assert!(
+                npm_ids(source).iter().any(|id| id == "runtime-hook"),
+                "expected runtime hook: {source}"
+            );
+        }
+        for source in [
+            r#"client["fetch"] = wrapped;"#,
+            r#"Object.defineProperty(client, "fetch", { value: wrapped });"#,
+            r#"const example = 'globalThis[\"fetch\"] = wrapped';"#,
+            r#"// globalThis["fetch"] = wrapped"#,
+        ] {
+            assert!(
+                !npm_ids(source).iter().any(|id| id == "runtime-hook"),
+                "unexpected runtime hook: {source}"
+            );
+        }
     }
 
     #[test]
