@@ -82,6 +82,18 @@
       "notes": "Models runtime-only browser wallet/network interception."
     },
     {
+      "id": "computed-runtime-hook",
+      "kind": "fixture",
+      "path": "fixtures/computed-runtime-hook",
+      "packageName": "computed-runtime-hook",
+      "expectedDecision": "block",
+      "rules": [
+        "runtime-hook",
+        "network-exfiltration"
+      ],
+      "notes": "Models a compact browser payload that replaces global fetch through a computed property, a shape hidden from the former dot-assignment matcher."
+    },
+    {
       "id": "typosquat-react-domm",
       "kind": "fixture",
       "path": "fixtures/typosquat-react-domm",

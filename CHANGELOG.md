@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Detect computed-property and `Object.defineProperty` rewrites of
+  `globalThis`, `window`, or `global` as runtime hooks using parsed JavaScript
+  facts, without matching inert comments or strings.
 - Extend `agent scan` to GitHub Actions workflow files. Remote actions pinned
   only to mutable tags require approval, while direct attacker-controlled
   context interpolation and privileged-trigger checkout of untrusted pull
