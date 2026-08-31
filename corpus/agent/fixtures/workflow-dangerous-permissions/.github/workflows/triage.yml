@@ -1,0 +1,10 @@
+name: Triage pull request
+on: pull_request_target
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    permissions: write-all
+    runs-on: ubuntu-latest
+    steps: []

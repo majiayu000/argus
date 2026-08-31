@@ -384,6 +384,12 @@ fn corpus_rule_ids(report: &ScanReport, surface: Option<&str>) -> BTreeSet<Strin
             "AGT-06-workflow-untrusted-checkout" => {
                 rules.insert("workflow-untrusted-checkout".to_string());
             }
+            "AGT-06-workflow-write-all" => {
+                rules.insert("workflow-write-all".to_string());
+            }
+            "AGT-06-workflow-privileged-write" => {
+                rules.insert("workflow-privileged-write".to_string());
+            }
             id if !id.starts_with("AGT-") => {
                 rules.insert(id.to_string());
             }

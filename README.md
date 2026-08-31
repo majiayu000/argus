@@ -664,6 +664,8 @@ immutable `v0.2.2` binary does not contain it.
 | `AGT-06-workflow-mutable-action` | medium → approval | a workflow or local composite Action uses a remote Action, reusable workflow, or Docker action that is not pinned to a full commit SHA or image digest |
 | `AGT-06-workflow-context-injection` | critical → block | a workflow or local composite Action interpolates attacker-controlled GitHub event data directly into an inline `run` script instead of crossing an environment-variable boundary |
 | `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref |
+| `AGT-06-workflow-write-all` | high → block | workflow-level or job-level `permissions: write-all` grants every available `GITHUB_TOKEN` permission write access |
+| `AGT-06-workflow-privileged-write` | medium → approval | `pull_request_target` or `workflow_run` explicitly grants a scoped `GITHUB_TOKEN` permission write access |
 | `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
 | `AGT-02-baseline-entry-missing` | info | a baselined description is no longer present on the scanned surface |
 | `AGT-02-baseline-unreadable` | info | `--baseline` file could not be read/parsed (scan continues; not treated as "no drift") |
