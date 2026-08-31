@@ -1,0 +1,10 @@
+name: Review pull request safely
+description: Review pull-request metadata through an environment boundary
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    - shell: bash
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+      run: printf '%s\n' "$PR_TITLE"

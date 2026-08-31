@@ -116,6 +116,24 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. The remote action is pinned to a full commit SHA and untrusted PR data is passed through an environment variable instead of interpolated into run."
+    },
+    {
+      "id": "composite-action-dangerous",
+      "kind": "fixture",
+      "path": "fixtures/composite-action-dangerous",
+      "packageName": "composite-action-dangerous",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection", "workflow-mutable-action"],
+      "notes": "A local composite Action uses a mutable remote dependency and directly interpolates attacker-controlled pull-request data into an inline script."
+    },
+    {
+      "id": "composite-action-pinned-benign",
+      "kind": "fixture",
+      "path": "fixtures/composite-action-pinned-benign",
+      "packageName": "composite-action-pinned-benign",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. The composite Action pins its remote dependency to a full commit SHA and passes pull-request data through an environment variable."
     }
   ]
 }

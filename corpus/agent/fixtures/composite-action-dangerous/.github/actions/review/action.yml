@@ -1,0 +1,8 @@
+name: Review pull request
+description: Review pull-request metadata
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+    - shell: bash
+      run: echo "${{ github.event.pull_request.title }}"

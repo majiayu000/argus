@@ -172,11 +172,11 @@ fn agent_fixture_eval_reports_scoped_confusion_matrix() -> Result<()> {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["dataset_type"], "synthetic-fixtures");
-    assert_eq!(report["sample_count"], 12);
-    assert_eq!(report["true_positives"], 7);
+    assert_eq!(report["sample_count"], 14);
+    assert_eq!(report["true_positives"], 8);
     assert_eq!(report["false_positives"], 0);
     assert_eq!(report["false_negatives"], 0);
-    assert_eq!(report["true_negatives"], 5);
+    assert_eq!(report["true_negatives"], 6);
     assert_eq!(report["precision"], 1.0);
     assert_eq!(report["recall"], 1.0);
     Ok(())

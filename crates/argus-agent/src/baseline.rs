@@ -92,6 +92,7 @@ pub fn extract_entries(files: &[SurfaceFile]) -> Vec<DescEntry> {
             }
             SurfaceKind::Script => {}
             SurfaceKind::Workflow => {}
+            SurfaceKind::ActionMetadata => {}
             SurfaceKind::InventoryOnly => {}
         }
     }

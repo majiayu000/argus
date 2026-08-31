@@ -1,8 +1,8 @@
-//! AGT-06 — GitHub Actions workflow supply-chain checks.
+//! AGT-06 — GitHub Actions workflow and local composite Action checks.
 //!
-//! Workflows are parsed as YAML and inspected statically. Parse failures are
-//! operational errors: an invalid or unassessed protected workflow must never
-//! collapse into a clean decision.
+//! Workflows and Action metadata are parsed as YAML and inspected statically.
+//! Parse failures are operational errors: an invalid or unassessed protected
+//! surface must never collapse into a clean decision.
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
@@ -15,11 +15,13 @@ const RULE_UNTRUSTED_CHECKOUT: &str = "AGT-06-workflow-untrusted-checkout";
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     for file in files {
-        if file.kind != SurfaceKind::Workflow {
-            continue;
+        match file.kind {
+            SurfaceKind::Workflow => scan_workflow(file, findings)
+                .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?,
+            SurfaceKind::ActionMetadata => scan_action_metadata(file, findings)
+                .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?,
+            _ => {}
         }
-        scan_workflow(file, findings)
-            .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?;
     }
     Ok(())
 }
@@ -50,23 +52,60 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
             continue;
         };
         for step in steps.iter().filter_map(Yaml::as_hash) {
-            if let Some(action) = get_string(step, "uses") {
-                check_action_ref(action, &file.rel, findings);
-                if privileged_trigger && is_checkout(action) && has_untrusted_checkout_ref(step) {
-                    findings.push(
-                        Finding::new(
-                            RULE_UNTRUSTED_CHECKOUT,
-                            Severity::Critical,
-                            "privileged workflow trigger checks out an attacker-controlled pull request ref",
-                        )
-                        .at(&file.rel),
-                    );
-                }
-            }
-            if let Some(script) = get_string(step, "run") {
-                check_inline_script(script, &file.rel, findings)?;
-            }
+            scan_step(step, &file.rel, privileged_trigger, findings)?;
         }
+    }
+    Ok(())
+}
+
+fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> {
+    let documents = YamlLoader::load_from_str(&file.content)
+        .with_context(|| format!("parse `{}` as YAML", file.rel))?;
+    if documents.len() != 1 {
+        bail!(
+            "Action metadata `{}` must contain exactly one YAML document",
+            file.rel
+        );
+    }
+    let root = documents[0]
+        .as_hash()
+        .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
+    let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
+        return Ok(());
+    };
+    if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
+        return Ok(());
+    }
+    let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
+        return Ok(());
+    };
+    for step in steps.iter().filter_map(Yaml::as_hash) {
+        scan_step(step, &file.rel, false, findings)?;
+    }
+    Ok(())
+}
+
+fn scan_step(
+    step: &Hash,
+    rel: &str,
+    privileged_trigger: bool,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    if let Some(action) = get_string(step, "uses") {
+        check_action_ref(action, rel, findings);
+        if privileged_trigger && is_checkout(action) && has_untrusted_checkout_ref(step) {
+            findings.push(
+                Finding::new(
+                    RULE_UNTRUSTED_CHECKOUT,
+                    Severity::Critical,
+                    "privileged workflow trigger checks out an attacker-controlled pull request ref",
+                )
+                .at(rel),
+            );
+        }
+    }
+    if let Some(script) = get_string(step, "run") {
+        check_inline_script(script, rel, findings)?;
     }
     Ok(())
 }
@@ -80,7 +119,7 @@ fn check_action_ref(action: &str, rel: &str, findings: &mut Vec<Finding>) {
             RULE_MUTABLE_ACTION,
             Severity::Medium,
             format!(
-                "workflow dependency `{}` is not pinned to an immutable digest",
+                "GitHub Actions dependency `{}` is not pinned to an immutable digest",
                 bounded(action)
             ),
         )
@@ -107,7 +146,7 @@ fn check_inline_script(script: &str, rel: &str, findings: &mut Vec<Finding>) -> 
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
         let Some(end) = after_start.find("}}") else {
-            bail!("workflow `{rel}` contains an unterminated expression in `run`");
+            bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `run`");
         };
         let expression = after_start[..end].trim();
         if is_untrusted_context(expression) {

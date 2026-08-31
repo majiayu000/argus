@@ -45,6 +45,7 @@ pub fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) {
             }
             SurfaceKind::Script => {}
             SurfaceKind::Workflow => {}
+            SurfaceKind::ActionMetadata => {}
             SurfaceKind::InventoryOnly => {}
         }
     }
