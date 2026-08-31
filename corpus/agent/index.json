@@ -100,6 +100,15 @@
       "notes": "A privileged pull_request_target workflow checks out attacker-controlled pull-request code and directly interpolates an attacker-controlled title into a shell script."
     },
     {
+      "id": "workflow-dangerous-permissions",
+      "kind": "fixture",
+      "path": "fixtures/workflow-dangerous-permissions",
+      "packageName": "workflow-dangerous-permissions",
+      "expectedDecision": "block",
+      "rules": ["workflow-privileged-write", "workflow-write-all"],
+      "notes": "A pull_request_target workflow grants a scoped workflow write permission and gives one job write access to every GITHUB_TOKEN permission."
+    },
+    {
       "id": "workflow-mutable-action",
       "kind": "fixture",
       "path": "fixtures/workflow-mutable-action",

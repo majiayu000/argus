@@ -12,6 +12,8 @@ use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
 const RULE_CONTEXT_INJECTION: &str = "AGT-06-workflow-context-injection";
 const RULE_UNTRUSTED_CHECKOUT: &str = "AGT-06-workflow-untrusted-checkout";
+const RULE_WRITE_ALL: &str = "AGT-06-workflow-write-all";
+const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     for file in files {
@@ -40,11 +42,13 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
         .with_context(|| format!("workflow `{}` root must be a mapping", file.rel))?;
     let privileged_trigger =
         has_trigger(root, "pull_request_target") || has_trigger(root, "workflow_run");
+    check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
 
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
         return Ok(());
     };
     for job in jobs.values().filter_map(Yaml::as_hash) {
+        check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         if let Some(action) = get_string(job, "uses") {
             check_action_ref(action, &file.rel, findings);
         }
@@ -108,6 +112,44 @@ fn scan_step(
         check_inline_script(script, rel, findings)?;
     }
     Ok(())
+}
+
+fn check_permissions(
+    owner: &Hash,
+    scope: &str,
+    privileged_trigger: bool,
+    rel: &str,
+    findings: &mut Vec<Finding>,
+) {
+    match get(owner, "permissions") {
+        Some(Yaml::String(value)) if value == "write-all" => findings.push(
+            Finding::new(
+                RULE_WRITE_ALL,
+                Severity::High,
+                format!("{scope} grants write access to every GITHUB_TOKEN permission"),
+            )
+            .at(rel),
+        ),
+        Some(Yaml::Hash(permissions)) if privileged_trigger => {
+            for (name, access) in permissions {
+                let (Some(name), Some("write")) = (name.as_str(), access.as_str()) else {
+                    continue;
+                };
+                findings.push(
+                    Finding::new(
+                        RULE_PRIVILEGED_WRITE,
+                        Severity::Medium,
+                        format!(
+                            "{scope} grants `{}` write access under a privileged workflow trigger",
+                            bounded(name)
+                        ),
+                    )
+                    .at(rel),
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn check_action_ref(action: &str, rel: &str, findings: &mut Vec<Finding>) {
@@ -278,5 +320,135 @@ fn bounded(value: &str) -> String {
         format!("{prefix}…")
     } else {
         prefix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_core::Decision;
+
+    fn findings_for(content: &str) -> Vec<Finding> {
+        let file = SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: content.to_string(),
+            kind: SurfaceKind::Workflow,
+        };
+        let mut findings = Vec::new();
+        scan_workflow(&file, &mut findings).expect("scan workflow fixture");
+        findings
+    }
+
+    #[test]
+    fn write_all_blocks_at_workflow_and_job_scope() {
+        let findings = findings_for(
+            r#"
+name: Release
+on: push
+permissions: write-all
+jobs:
+  publish:
+    permissions: write-all
+    runs-on: ubuntu-latest
+    steps: []
+"#,
+        );
+
+        let matches: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.rule_id == "AGT-06-workflow-write-all")
+            .collect();
+        assert_eq!(matches.len(), 2);
+        assert!(matches
+            .iter()
+            .all(|finding| finding.severity == Severity::High));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_trigger_with_explicit_write_requires_approval() {
+        let findings = findings_for(
+            r#"
+name: Triage
+on: pull_request_target
+permissions:
+  issues: write
+jobs:
+  label:
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps: []
+"#,
+        );
+
+        let matches: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.rule_id == "AGT-06-workflow-privileged-write")
+            .collect();
+        assert_eq!(matches.len(), 2);
+        assert!(matches
+            .iter()
+            .all(|finding| finding.severity == Severity::Medium));
+        assert_eq!(
+            crate::decision::derive(&findings),
+            Decision::AllowWithApproval
+        );
+
+        let workflow_run_findings = findings_for(
+            r#"
+name: Publish follow-up
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  publish:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps: []
+"#,
+        );
+        assert!(workflow_run_findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-privileged-write"
+                && finding.severity == Severity::Medium
+        }));
+        assert_eq!(
+            crate::decision::derive(&workflow_run_findings),
+            Decision::AllowWithApproval
+        );
+    }
+
+    #[test]
+    fn scoped_write_on_trusted_trigger_and_privileged_read_only_are_allowed() {
+        let trusted_findings = findings_for(
+            r#"
+name: Release
+on: push
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps: []
+"#,
+        );
+        let privileged_findings = findings_for(
+            r#"
+name: Inspect
+on: workflow_run
+permissions: read-all
+jobs:
+  inspect:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps: []
+"#,
+        );
+
+        assert!(trusted_findings.is_empty());
+        assert!(privileged_findings.is_empty());
     }
 }

@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovered local composite Action metadata. Remote actions pinned only to
   mutable tags require approval, while direct attacker-controlled context
   interpolation and privileged-trigger checkout of untrusted pull request code
-  block. YAML parse failures remain operational errors.
+  block. Explicit `permissions: write-all` blocks; scoped write
+  permissions on `pull_request_target` and `workflow_run` require approval.
+  YAML parse failures remain operational errors.
 - Add a five-repository public precision gate over immutable upstream workflow
   bytes; every sample must complete scanning with zero false blocks.
 
