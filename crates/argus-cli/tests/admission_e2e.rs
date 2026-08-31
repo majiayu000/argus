@@ -145,6 +145,110 @@ fn github_workflow_admission_is_fail_closed_end_to_end() {
     );
 }
 
+#[test]
+fn local_composite_action_admission_is_fail_closed_end_to_end() {
+    let workspace = tempfile::tempdir().expect("composite Action E2E workspace");
+    let action_dir = workspace.path().join(".github/actions/review");
+    fs::create_dir_all(&action_dir).expect("composite Action directory");
+    let action = action_dir.join("action.yaml");
+
+    write_fixture(
+        &action,
+        "name: Review\ndescription: Review a pull request\nruns:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n    - shell: bash\n      run: echo \"${{ github.event.pull_request.title }}\"\n",
+    );
+    let blocked = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workspace.path().to_str().expect("workspace path"),
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    let ids: BTreeSet<_> = blocked["findings"]
+        .as_array()
+        .expect("composite Action findings")
+        .iter()
+        .map(|finding| finding["rule_id"].as_str().expect("rule id"))
+        .collect();
+    assert!(
+        ids.contains("AGT-06-workflow-mutable-action"),
+        "composite Action findings: {ids:?}"
+    );
+    assert!(
+        ids.contains("AGT-06-workflow-context-injection"),
+        "composite Action findings: {ids:?}"
+    );
+
+    let direct = json(
+        &argus(&[
+            "agent",
+            "scan",
+            action.to_str().expect("action path"),
+            "--format",
+            "json",
+        ]),
+        1,
+    );
+    assert_eq!(direct["decision"], "block");
+
+    write_fixture(
+        &action,
+        "name: Review\ndescription: Review a pull request\nruns:\n  using: composite\n  steps:\n    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n    - shell: bash\n      env:\n        PR_TITLE: ${{ github.event.pull_request.title }}\n      run: printf '%s\\n' \"$PR_TITLE\"\n",
+    );
+    let allowed = json(
+        &argus(&[
+            "agent",
+            "scan",
+            workspace.path().to_str().expect("workspace path"),
+            "--format",
+            "json",
+        ]),
+        0,
+    );
+    assert_eq!(allowed["decision"], "allow");
+    assert_eq!(allowed["findings"].as_array().map(Vec::len), Some(0));
+
+    write_fixture(
+        &action,
+        "name: invalid\ndescription: invalid\nruns:\n  using: composite\n  steps: [\n",
+    );
+    let invalid_yaml = argus(&[
+        "agent",
+        "scan",
+        workspace.path().to_str().expect("workspace path"),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(invalid_yaml.status.code(), Some(2));
+    assert!(invalid_yaml.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&invalid_yaml.stderr).contains("assess GitHub Action metadata"),
+        "stderr: {}",
+        String::from_utf8_lossy(&invalid_yaml.stderr)
+    );
+
+    write_fixture(
+        &action,
+        "name: one\nname: two\ndescription: invalid\nruns:\n  using: composite\n  steps: []\n",
+    );
+    let malformed = argus(&[
+        "agent",
+        "scan",
+        workspace.path().to_str().expect("workspace path"),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(malformed.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr).contains("duplicated key in mapping"),
+        "stderr: {}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+}
+
 impl RegistryServer {
     fn start(build_routes: impl FnOnce(&str) -> BTreeMap<String, Vec<u8>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind synthetic registry");

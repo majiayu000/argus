@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Detect computed-property and `Object.defineProperty` rewrites of
   `globalThis`, `window`, or `global` as runtime hooks using parsed JavaScript
   facts, without matching inert comments or strings.
-- Extend `agent scan` to GitHub Actions workflow files. Remote actions pinned
-  only to mutable tags require approval, while direct attacker-controlled
-  context interpolation and privileged-trigger checkout of untrusted pull
-  request code block. YAML parse failures remain operational errors.
+- Extend `agent scan` to GitHub Actions workflow files and recursively
+  discovered local composite Action metadata. Remote actions pinned only to
+  mutable tags require approval, while direct attacker-controlled context
+  interpolation and privileged-trigger checkout of untrusted pull request code
+  block. YAML parse failures remain operational errors.
 - Add a five-repository public precision gate over immutable upstream workflow
   bytes; every sample must complete scanning with zero false blocks.
 

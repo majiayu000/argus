@@ -15,6 +15,8 @@ pub enum SurfaceKind {
     Script,
     /// A GitHub Actions workflow with supply-chain checks.
     Workflow,
+    /// A local GitHub Action metadata file.
+    ActionMetadata,
     /// A high-context member tracked by AGT-04 but not semantically scanned.
     InventoryOnly,
 }
@@ -202,6 +204,8 @@ fn classify_rules(path: &str, skill_dirs: &[String]) -> Option<SurfaceKind> {
         Some(SurfaceKind::Script)
     } else if is_github_workflow(path, &lower) {
         Some(SurfaceKind::Workflow)
+    } else if matches!(file_name, "action.yml" | "action.yaml") {
+        Some(SurfaceKind::ActionMetadata)
     } else {
         None
     };
@@ -280,6 +284,14 @@ mod tests {
             Some(SurfaceKind::Workflow)
         );
         assert_eq!(legacy(".github/workflows/nested/ci.yml", &[]), None);
+        assert_eq!(
+            legacy(".github/actions/review/action.yml", &[]),
+            Some(SurfaceKind::ActionMetadata)
+        );
+        assert_eq!(
+            legacy("tools/review/action.yaml", &[]),
+            Some(SurfaceKind::ActionMetadata)
+        );
         let skill_dirs = vec!["myskill/".to_string()];
         assert_eq!(
             legacy("myskill/run.py", &skill_dirs),

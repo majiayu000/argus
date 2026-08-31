@@ -184,12 +184,13 @@ cargo run -p argus-cli -- vulns lockfile Cargo.lock \
   --cache-dir ~/.cache/argus/osv --offline --format json
 
 # Scan agent and repository automation surfaces: MCP configs, skills, hooks,
-# AGENTS.md / CLAUDE.md, and .github/workflows/*.{yml,yaml}.
+# AGENTS.md / CLAUDE.md, .github/workflows/*.{yml,yaml}, and recursively
+# discovered local action.yml/action.yaml metadata.
 # Detects injection/override language (AGT-01), dangerous script
 # capabilities like curl|sh or secret-read + network-egress (AGT-03),
 # high-risk config flags such as alwaysLoad: true (AGT-05), and GitHub
 # Actions supply-chain hazards (AGT-06). Scan the repository root, the
-# .github/workflows directory, or one workflow file.
+# .github/workflows directory, one workflow file, or one Action metadata file.
 cargo run -p argus-cli -- agent scan ~/.claude
 cargo run -p argus-cli -- agent scan . --format sarif
 cargo run -p argus-cli -- agent scan path/to/skill .mcp.json --format json
@@ -636,10 +637,13 @@ as executable rewrites.
 ## Agent-surface rule coverage (GH-57)
 
 `argus agent scan` statically scans agent and repository automation surfaces —
-MCP configs, skill definitions, hook scripts, instruction files, and immediate
-`.github/workflows/*.{yml,yaml}` files — without executing anything. AGT-06 is
-currently available from source on `main`; the immutable `v0.2.2` binary does
-not contain it.
+MCP configs, skill definitions, hook scripts, instruction files, immediate
+`.github/workflows/*.{yml,yaml}` files, and recursively discovered local
+`action.yml` / `action.yaml` metadata — without executing anything. For local
+Action metadata, only `runs.using: composite` steps receive AGT-06 dependency
+and inline-script checks. Invalid or duplicate-key protected YAML is an
+operational error. AGT-06 is currently available from source on `main`; the
+immutable `v0.2.2` binary does not contain it.
 
 | Rule | Severity | Detects |
 |------|----------|---------|
@@ -657,8 +661,8 @@ not contain it.
 | `AGT-05-enabled-mcpjson-servers` | medium → approval | non-empty `enabledMcpjsonServers` allowlist |
 | `AGT-05-posttooluse-output-rewrite` | medium → approval | `PostToolUse` hook rewriting `updatedToolOutput` for non-MCP tools |
 | `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
-| `AGT-06-workflow-mutable-action` | medium → approval | a remote Action, reusable workflow, or Docker action is not pinned to a full commit SHA or image digest |
-| `AGT-06-workflow-context-injection` | critical → block | attacker-controlled GitHub event data is interpolated directly into an inline `run` script instead of crossing an environment-variable boundary |
+| `AGT-06-workflow-mutable-action` | medium → approval | a workflow or local composite Action uses a remote Action, reusable workflow, or Docker action that is not pinned to a full commit SHA or image digest |
+| `AGT-06-workflow-context-injection` | critical → block | a workflow or local composite Action interpolates attacker-controlled GitHub event data directly into an inline `run` script instead of crossing an environment-variable boundary |
 | `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref |
 | `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
 | `AGT-02-baseline-entry-missing` | info | a baselined description is no longer present on the scanned surface |
