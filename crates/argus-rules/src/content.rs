@@ -714,6 +714,20 @@ mod tests {
     }
 
     #[test]
+    fn python_object_define_property_is_not_a_runtime_hook() {
+        let ids = scan_npm_text_file(&TextFile {
+            rel: "module.py".into(),
+            content: r#"Object.defineProperty(globalThis, "fetch", {"value": wrapped})"#.into(),
+        })
+        .expect("scan Python")
+        .into_iter()
+        .map(|finding| finding.rule_id)
+        .collect::<Vec<_>>();
+
+        assert!(!ids.iter().any(|id| id == "runtime-hook"));
+    }
+
+    #[test]
     fn python_direct_decode_execution_fires_and_is_approval_only() {
         let findings = python_findings("exec(base64.b64decode('Y29uc29sZS5sb2coMSk='))");
         let encoded = findings
