@@ -1,4 +1,4 @@
-use argus_syntax::{Fact, FactKind};
+use argus_syntax::{Fact, FactKind, ScriptLanguage};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -10,6 +10,13 @@ pub(super) fn matches_runtime_hook(body: &str, syntax_facts: Option<&[Fact]>) ->
 }
 
 fn is_runtime_hook_fact(fact: &Fact) -> bool {
+    if !matches!(
+        fact.language,
+        ScriptLanguage::JavaScript | ScriptLanguage::TypeScript
+    ) {
+        return false;
+    }
+
     match fact.kind {
         FactKind::Assignment => assignment_regex().is_match(&fact.text),
         FactKind::Call if fact.callee.as_deref() == Some("Object.defineProperty") => {
