@@ -19,6 +19,7 @@ class ReleaseDocsTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("prevent self-review", docs)
         self.assertIn("operational error 永远失败", docs)
+        self.assertIn("固定 SHA、可变标签、危险 workflow 与 malformed YAML", docs)
         self.assertIn("byte-for-byte", docs)
         self.assertIn("gh release verify", docs)
         self.assertIn("SHA256SUMS", docs)

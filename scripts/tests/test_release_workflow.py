@@ -66,8 +66,29 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotRegex(text, r"\npush:")
         for scan_type in ["package", "lockfile", "agent"]:
             self.assertIn(f"scanType: {scan_type}", text)
-        self.assertEqual(text.count("githubToken: ${{ github.token }}"), 3)
+        self.assertEqual(text.count("githubToken: ${{ github.token }}"), 7)
         self.assertIn("format: sarif", text)
+
+    def test_dogfood_covers_workflow_supply_chain_contract(self) -> None:
+        text = (ROOT / ".github/workflows/action_dogfood.yml").read_text()
+        for fixture in [
+            "workflow-pinned-benign",
+            "workflow-mutable-action",
+            "workflow-dangerous",
+            "workflow-malformed",
+        ]:
+            self.assertIn(fixture, text)
+        for decision in ["allow", "allow-with-approval", "block"]:
+            self.assertIn(f"= {decision}", text)
+        self.assertIn("steps.workflow_allow.outputs.exitCode }}' = 0", text)
+        self.assertIn("steps.workflow_approval.outputs.exitCode }}' = 2", text)
+        self.assertIn("steps.workflow_block.outputs.exitCode }}' = 1", text)
+        self.assertIn("steps.workflow_error.outputs.exitCode }}' = 2", text)
+        self.assertIn("steps.workflow_error.outputs.decision }}' = ''", text)
+        self.assertIn("steps.workflow_error.outputs.reportPath }}' = ''", text)
+        self.assertIn("sarif_file: ${{ steps.workflow_block.outputs.sarifFile }}", text)
+        malformed = ROOT / "action/fixtures/workflow-malformed/.github/workflows/ci.yml"
+        self.assertEqual(malformed.read_text(), "name: one\nname: two\njobs: {}\n")
 
 
 if __name__ == "__main__":

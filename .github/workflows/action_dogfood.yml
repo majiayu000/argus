@@ -65,8 +65,75 @@ jobs:
       - name: Confirm agent allow contract
         shell: bash
         run: test '${{ steps.agent.outputs.decision }}' = allow
+      - name: Scan pinned workflow through the committed Action
+        id: workflow_allow
+        uses: ./
+        with:
+          scanType: agent
+          path: corpus/agent/fixtures/workflow-pinned-benign
+          githubToken: ${{ github.token }}
+          format: json
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - name: Confirm pinned workflow allow contract
+        shell: bash
+        run: |
+          test '${{ steps.workflow_allow.outputs.decision }}' = allow
+          test '${{ steps.workflow_allow.outputs.exitCode }}' = 0
+      - name: Scan mutable workflow through the committed Action
+        id: workflow_approval
+        continue-on-error: true
+        uses: ./
+        with:
+          scanType: agent
+          path: corpus/agent/fixtures/workflow-mutable-action
+          githubToken: ${{ github.token }}
+          format: text
+          argusVersion: ${{ inputs.version }}
+          failOn: approval
+      - name: Confirm mutable workflow approval contract
+        shell: bash
+        run: |
+          test '${{ steps.workflow_approval.outcome }}' = failure
+          test '${{ steps.workflow_approval.outputs.decision }}' = allow-with-approval
+          test '${{ steps.workflow_approval.outputs.exitCode }}' = 2
+      - name: Scan dangerous workflow through the committed Action
+        id: workflow_block
+        continue-on-error: true
+        uses: ./
+        with:
+          scanType: agent
+          path: corpus/agent/fixtures/workflow-dangerous
+          githubToken: ${{ github.token }}
+          format: sarif
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - name: Confirm dangerous workflow blocking contract
+        shell: bash
+        run: |
+          test '${{ steps.workflow_block.outcome }}' = failure
+          test '${{ steps.workflow_block.outputs.decision }}' = block
+          test '${{ steps.workflow_block.outputs.exitCode }}' = 1
+      - name: Scan malformed workflow through the committed Action
+        id: workflow_error
+        continue-on-error: true
+        uses: ./
+        with:
+          scanType: agent
+          path: action/fixtures/workflow-malformed
+          githubToken: ${{ github.token }}
+          format: json
+          argusVersion: ${{ inputs.version }}
+          failOn: block
+      - name: Confirm malformed workflow operational error contract
+        shell: bash
+        run: |
+          test '${{ steps.workflow_error.outcome }}' = failure
+          test '${{ steps.workflow_error.outputs.exitCode }}' = 2
+          test '${{ steps.workflow_error.outputs.decision }}' = ''
+          test '${{ steps.workflow_error.outputs.reportPath }}' = ''
       - if: runner.os == 'Linux'
         uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a
         with:
-          sarif_file: ${{ steps.agent.outputs.sarifFile }}
-          category: argus-action-dogfood
+          sarif_file: ${{ steps.workflow_block.outputs.sarifFile }}
+          category: argus-action-dogfood-workflow

@@ -48,7 +48,8 @@
    maintainer 再凭新的人工授权手工创建或 fast-forward `v1`。
    workflow 不持有 ref mutation 能力。
 6. 手工运行 `action-dogfood`，在 fresh Linux/macOS/Windows runner 上验证 package、
-   lockfile、agent 与 SARIF；fork PR 的 SARIF upload 必须保持权限安全。
+   lockfile、agent，以及固定 SHA、可变标签、危险 workflow 与 malformed YAML；上传
+   AGT-06 阻断结果的 SARIF，且 fork PR 的 SARIF upload 必须保持权限安全。
 7. 最后只读审计 tag、Release assets/digests/attestations、`v1` ref 和 workflow checks。
 
 发布窗口中断时，不得跳步。草稿可以在其现有 bytes 完全一致时继续；冲突、缺失或损坏
