@@ -13,13 +13,15 @@ static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
 [`v0.2.2`](https://github.com/majiayu000/argus/releases/tag/v0.2.2) is the current
-immutable binary release, and the workspace release contract targets `v0.2.2`.
-GitHub Release metadata is authoritative for publication status, dates, and
-assets. By product decision, the protected `v1` branch intentionally remains on
-`v0.2.1` until Argus reaches an explicitly approved `v1.0` stability boundary.
-New Action consumers should pin `majiayu000/argus@v0.2.2`; high-assurance
-environments may instead pin the full release commit. The operator sequence and
-verification boundary are documented in [`docs/releasing.md`](docs/releasing.md).
+immutable binary release. The workspace release contract targets `v0.3.0`, but
+this source tree remains a release candidate until GitHub publishes an
+immutable Release. GitHub Release metadata is authoritative for publication
+status, dates, and assets. By product decision, the protected
+`v1` branch intentionally remains on `v0.2.1` until Argus reaches an explicitly
+approved `v1.0` stability boundary. Until `v0.3.0` is published, Action consumers should
+continue to pin `majiayu000/argus@v0.2.2`; high-assurance environments may
+instead pin the full release commit. The operator sequence and verification
+boundary are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Ten-minute CI quickstart
 
@@ -80,9 +82,9 @@ tar -xzf argus-v0.2.2-aarch64-apple-darwin.tar.gz
 
 All rows describe current code on `main`. Each immutable release tag and its
 release manifest commit define that release's binary contents. The
-[`[0.2.2]`](CHANGELOG.md#022---2026-08-30) section describes the current
-published release. GitHub Release metadata is authoritative for whether a
-version has been published.
+[`[0.3.0]`](CHANGELOG.md#030---2026-09-02) section describes the current release
+candidate. GitHub Release metadata is authoritative for whether a version has
+been published.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|

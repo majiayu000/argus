@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "defaultBinaryVersion": "0.2.2",
-  "compatibilityRange": ">=0.2.2,<0.3.0"
+  "defaultBinaryVersion": "0.3.0",
+  "compatibilityRange": ">=0.3.0,<0.4.0"
 }

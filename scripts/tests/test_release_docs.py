@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ReleaseDocsTest(unittest.TestCase):
     def test_readme_uses_release_metadata_and_explicit_action_channel_state(self) -> None:
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("workspace release contract targets `v0.2.2`", readme)
+        self.assertIn("workspace release contract targets `v0.3.0`", readme)
         self.assertIn("GitHub Release metadata is authoritative", readme)
         self.assertIn("uses: majiayu000/argus@v0.2.2", readme)
         self.assertRegex(readme, r"`v1` branch intentionally remains on\s+`v0\.2\.1`")

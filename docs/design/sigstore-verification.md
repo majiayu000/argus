@@ -1,10 +1,10 @@
 # Sigstore Signature Verification — Design (M2, Issue #14)
 
-> Status: draft · Authored: 2026-05-26 · Tracks: [#14](https://github.com/majiayu000/argus/issues/14)
+> Status: implemented · Authored: 2026-05-26 · Completed: 2026-05-28 · Tracks: [#14](https://github.com/majiayu000/argus/issues/14)
 >
 > Owner: @majiayu000
 >
-> Implementation: deferred to a follow-on session. This document fixes scope, trust roots, crate boundary, public API, error taxonomy, and corpus before any code lands.
+> Implementation: shipped behind the optional `sigstore` Cargo feature in [#29](https://github.com/majiayu000/argus/pull/29), [#35](https://github.com/majiayu000/argus/pull/35), and [#36](https://github.com/majiayu000/argus/pull/36), with the npm v0.2 compatibility path hardened in [#151](https://github.com/majiayu000/argus/pull/151) and [#165](https://github.com/majiayu000/argus/pull/165).
 
 ---
 
@@ -139,28 +139,31 @@ Each finding answers a binary question: either we have signature evidence or we 
 
 ## 6. Test corpus
 
-### Real packages (live fetch, gated behind `--features sigstore-online-tests`)
+The shipped tests are deterministic and offline. A captured
+`sigstore@2.3.1` tarball and npm v0.2 SLSA bundle live under
+`crates/argus-verify/src/testdata/`; no test contacts npm, Fulcio, Rekor, or a
+package registry.
 
-| Package | Why |
-|---|---|
-| `sigstore@2.3.1` | Canonical OIDC-published example via slsa-framework. |
-| `@actions/core@1.10.x` | GitHub Actions reusable-workflow publish. |
-| `chalk@5.4.x` | npm-published with provenance but via a custom workflow → exercises the `untrusted-issuer` path. |
+- `crates/argus-verify/tests/sigstore_real_fixture.rs` exercises the complete
+  cryptographic chain and rejects corrupted artifacts, DSSE signatures, SETs,
+  inclusion proofs, Rekor bodies, Fulcio chains, SCT keys, validation times,
+  issuers, and identities.
+- `crates/argus-fetch/tests/sigstore_integration.rs` carries the same evidence
+  through the fetch pipeline with `MockTransport`, including verified,
+  unsupported, corrupt, downgraded, artifact-mismatch, and identity-mismatch
+  outcomes.
+- `crates/argus-fetch/tests/sigstore_feature_off.rs` proves that requesting
+  verification from a build without the optional feature fails explicitly.
 
-These tests are excluded from default CI (the `sigstore-online-tests` feature is off) so a Rekor outage cannot flap the build.
-
-### Synthetic fixtures (offline, default CI)
-
-- **Forged-bundle, valid subject digest, bogus leaf cert** — must produce `provenance-signature-invalid`.
-- **Forged-bundle, leaf cert from real Fulcio but OIDC SAN points to `github.com/attacker/...`** — must produce `provenance-signature-invalid` (chain valid but SAN not in allowlist).
-- **Valid bundle, MockTransport returns 503 for Rekor** — must produce `provenance-signature-unverified` and decision must remain unchanged from M1.
-- **No attestation at all** — must produce existing M1 `missing-provenance` finding (no regression).
-
-Synthetic fixtures live under `crates/argus-verify/tests/fixtures/`. The forged-bundle generator is a small helper binary at `crates/argus-verify/tests/forge/` so the fixtures can be regenerated when Sigstore trust roots rotate.
+The npm-keyring public-key-hint bundle remains an explicit `Unsupported`
+outcome; it never becomes verified or silently clean.
 
 ---
 
-## 7. Estimate
+## 7. Historical estimate
+
+The implementation is complete. The estimate below is retained as design
+history rather than current work.
 
 - Day 1: `argus-verify` crate skeleton, integrate `sigstore` crate, DSSE verification path against synthetic fixtures.
 - Day 2: Fulcio chain + Rekor inclusion proof, wire into `argus-fetch::provenance`, finding plumbing.
@@ -178,26 +181,40 @@ Total: ~3 days of focused work. This is the **honest** estimate; the "tracer bul
 - **Bundle version compatibility** (highest pre-Day-2 risk): a compile-spike using the real `sigstore@2.3.1` npm attestations fixture confirmed that `sigstore_types::Bundle::from_json` parses the npm `mediaType=application/vnd.dev.sigstore.bundle+json;version=0.2` bundle without modification, even though the fork's README emphasises v0.3. v0.2 → v0.3 is additive enough that the parser accepts both.
 - **DSSE signature-verification primitive**: implemented in argus-verify Day 1 *without* the sigstore crate at all (pure RustCrypto). The Day 2 sigstore-verify integration covers the higher layers (Fulcio chain + Rekor + identity policy) and the existing DSSE primitive remains as a backstop / duplicate check.
 
-### Still open going into Day 2
+### Resolved in the shipped implementation
 
-- **Trust-root snapshot**: vendor the Sigstore `trusted_root.json` snapshot in `crates/argus-verify/src/trust/trusted_root.json` vs. rely on `sigstore-trust-root`'s TUF refresh path. **Recommendation**: vendor a snapshot for M2 — gives reproducible builds, keeps argus-verify fully offline at runtime, and avoids pulling the reqwest/hyper TUF client into the default feature set. Root rotation becomes a manual checklist item (rare; documented in §10).
-- **`sigstore-verify` default features**: the crate enables `rustls` by default, which pulls reqwest + hyper-rustls + tokio (~50 transitive crates) — observed during the Day 2 spike. For offline verification we want `default-features = false` plus only what `verify()` needs. **Action**: confirm `default-features = false` builds and still verifies the real fixture during Day 2.
-- **DSSE attestation `artifact` parameter**: `sigstore_verify::verify(artifact, bundle, policy, root)` takes raw artifact bytes. For a DSSE attestation, the signature is over the in-toto payload, not the tarball. **Action**: confirm via a focused integration test whether the crate reads the envelope payload internally or expects the Statement bytes as `artifact`; fail loudly if neither convention works.
-- **`VerificationPolicy` regex vs literal**: docs show `.require_identity("...")` but do not state regex support. The design doc's allowlist (`https://github.com/actions/.+/.github/workflows/.+@refs/tags/.+`) needs regex. **Action**: confirm via integration test; if literal-only, layer a regex check on top of a permissive base policy.
-- **Caching of Rekor responses**: not needed for M2 — verification is offline and uses the bundle's embedded `tlogEntries` with the Rekor public key from `trusted_root.json`. No transparency-log refetch on the hot path. M3 may want an online "Rekor re-check" mode; out of scope here.
-- **Existing `argus-fetch::provenance` API**: should `check_subject_digest`'s return type extend to carry signature-verification results, or should we add a sibling `verify_signature` function? **Recommendation unchanged**: sibling function, keep M1 surface untouched.
+- **Trust-root snapshot**: the repository vendors
+  `crates/argus-verify/src/trust/trusted_root.json`; verification is
+  deterministic and offline.
+- **Verifier dependency boundary**: the optional `sigstore` feature keeps the
+  default build free of the verifier dependency path. Requesting verification
+  from a build without that feature is a hard error.
+- **Artifact binding**: focused fixtures prove that the downloaded artifact
+  bytes are bound to the in-toto subject and that tampering blocks.
+- **Identity policy**: caller-supplied identity expressions are validated as
+  regular expressions and issuer or identity mismatches block.
+- **Rekor behavior**: the verifier consumes embedded transparency-log material;
+  an online Rekor re-check remains outside M2.
+- **Fetch API**: signature verification is a sibling layer after the existing
+  subject-digest check, so M1 behavior remains intact when the feature is off.
 
 ---
 
-## 9. Acceptance (for the future PR)
+## 9. Acceptance (completed)
 
-- [ ] `argus-verify` crate compiles with `cargo check` and is workspace member.
-- [ ] `argus-fetch` builds with **and without** the `sigstore` feature; default build does not pull in any Sigstore dep.
-- [ ] Synthetic offline fixtures: all four scenarios in §6 pass.
-- [ ] Live-fetch corpus (gated): `sigstore@2.3.1` and `@actions/core` produce `provenance-signature-verified`; `chalk@5.4.x` produces `provenance-signature-untrusted-issuer` without blocking.
-- [ ] `argus fetch chalk` (without `--verify-sigstore`) is **bit-identical** to today's M1 output. No latency change, no new dep loaded.
-- [ ] `cargo run -p argus-cli -- corpus test` still 12/12.
-- [ ] PR closes #14.
+- [x] `argus-verify` is a workspace member and compiles in the workspace.
+- [x] `argus-fetch` builds with and without the optional `sigstore` feature;
+  requesting verification without the feature fails explicitly.
+- [x] Offline positive and negative fixtures cover DSSE, Fulcio, SCT, Rekor,
+  artifact binding, issuer, and identity validation.
+- [x] A captured real `sigstore@2.3.1` npm bundle reaches
+  `provenance-signature-verified`; corrupt or policy-mismatched variants block.
+- [x] Disabling `--verify-sigstore` preserves the existing M1 path without
+  signature-layer findings.
+- [x] The repository corpus remains part of the normal workspace gate.
+- [x] [#36](https://github.com/majiayu000/argus/pull/36) closed
+  [#14](https://github.com/majiayu000/argus/issues/14); later hardening is
+  recorded in §10.
 
 ---
 
