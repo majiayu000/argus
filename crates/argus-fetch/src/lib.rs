@@ -312,9 +312,9 @@ pub fn fetch_and_scan_with_rules_and_context(
     //    proved equal to `dist.integrity` in step 5), fetch the attestations
     //    bundle if one is advertised, and verify that an attestation subject
     //    digest agrees with the bytes we hold. This catches a tampered
-    //    packument where attestations point at the wrong artifact. Full
-    //    Sigstore signature verification — catching forged attestations —
-    //    is the M2 follow-up tracked in #10-followup.
+    //    packument where attestations point at the wrong artifact. When
+    //    requested, the optional Sigstore path then verifies the signature,
+    //    Fulcio chain, Rekor material, and operator identity policy.
     let tarball_sha512_hex = hex_sha512(&tarball_bytes);
     let provenance_findings = check_provenance(
         &dist.attestations,
