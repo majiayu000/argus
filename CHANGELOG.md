@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
 - Detect computed-property and `Object.defineProperty` rewrites of
   `globalThis`, `window`, or `global` as runtime hooks using parsed JavaScript
   facts, without matching inert comments or strings.
@@ -221,7 +223,8 @@ section.
 - See [`docs/supply-chain-attacks.md`](docs/supply-chain-attacks.md) for the
   attack-catalog argus is designed against.
 
-[Unreleased]: https://github.com/majiayu000/argus/compare/v0.2.2...main
+[Unreleased]: https://github.com/majiayu000/argus/compare/v0.3.0...main
+[0.3.0]: https://github.com/majiayu000/argus/releases/tag/v0.3.0
 [0.2.2]: https://github.com/majiayu000/argus/releases/tag/v0.2.2
 [0.2.1]: https://github.com/majiayu000/argus/releases/tag/v0.2.1
 [0.2.0]: https://github.com/majiayu000/argus/releases/tag/v0.2.0
