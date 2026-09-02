@@ -12,16 +12,15 @@ with ecosystem-specific static rules; neither a matching digest nor a clean
 static scan proves that an artifact is safe. See the matrix below and the
 "Status" section for the implemented capability snapshot.
 
-[`v0.2.2`](https://github.com/majiayu000/argus/releases/tag/v0.2.2) is the current
-immutable binary release. The workspace release contract targets `v0.3.0`, but
-this source tree remains a release candidate until GitHub publishes an
-immutable Release. GitHub Release metadata is authoritative for publication
-status, dates, and assets. By product decision, the protected
+[`v0.3.0`](https://github.com/majiayu000/argus/releases/tag/v0.3.0) is the current
+immutable binary release, and the workspace release contract targets `v0.3.0`.
+GitHub Release metadata is authoritative for publication status, dates, and
+assets. By product decision, the protected
 `v1` branch intentionally remains on `v0.2.1` until Argus reaches an explicitly
-approved `v1.0` stability boundary. Until `v0.3.0` is published, Action consumers should
-continue to pin `majiayu000/argus@v0.2.2`; high-assurance environments may
-instead pin the full release commit. The operator sequence and verification
-boundary are documented in [`docs/releasing.md`](docs/releasing.md).
+approved `v1.0` stability boundary. Action consumers should pin
+`majiayu000/argus@v0.3.0`; high-assurance environments may instead pin the full
+release commit. The operator sequence and verification boundary are documented
+in [`docs/releasing.md`](docs/releasing.md).
 
 ## Ten-minute CI quickstart
 
@@ -44,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: majiayu000/argus@v0.2.2
+      - uses: majiayu000/argus@v0.3.0
         with:
           scanType: lockfile
           path: package-lock.json
@@ -70,11 +69,11 @@ For local investigation, download the asset for the exact platform, verify its
 GitHub attestation, and extract the archive:
 
 ```sh
-gh release download v0.2.2 --repo majiayu000/argus \
-  --pattern 'argus-v0.2.2-aarch64-apple-darwin.tar.gz'
-gh release verify-asset v0.2.2 \
-  argus-v0.2.2-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
-tar -xzf argus-v0.2.2-aarch64-apple-darwin.tar.gz
+gh release download v0.3.0 --repo majiayu000/argus \
+  --pattern 'argus-v0.3.0-aarch64-apple-darwin.tar.gz'
+gh release verify-asset v0.3.0 \
+  argus-v0.3.0-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
+tar -xzf argus-v0.3.0-aarch64-apple-darwin.tar.gz
 ./argus lockfile-scan package-lock.json --format json
 ```
 
@@ -82,9 +81,9 @@ tar -xzf argus-v0.2.2-aarch64-apple-darwin.tar.gz
 
 All rows describe current code on `main`. Each immutable release tag and its
 release manifest commit define that release's binary contents. The
-[`[0.3.0]`](CHANGELOG.md#030---2026-09-02) section describes the current release
-candidate. GitHub Release metadata is authoritative for whether a version has
-been published.
+[`[0.3.0]`](CHANGELOG.md#030---2026-09-02) section describes the current
+published release. GitHub Release metadata is authoritative for whether a
+version has been published.
 
 | Ecosystem | CLI command | Integrity source | Artifact and inspected surfaces | Explicit limitations |
 |---|---|---|---|---|
@@ -409,8 +408,8 @@ native decision/exit-code contract remain available through the existing
 outputs. Every invocation must pass `githubToken: ${{ github.token }}` for the
 authenticated release download and attestation verification path; Argus does
 not fall back to anonymous GitHub API requests. Pin
-`uses: majiayu000/argus@v0.2.2`, or use
-`majiayu000/argus@26808070817c1eb983304fe261bc90b07ad5a11c` when an immutable
+`uses: majiayu000/argus@v0.3.0`, or use
+`majiayu000/argus@0c991479d909c1246329c9410f39f7291dd7cece` when an immutable
 Action source commit is required. The protected `v1` branch is deliberately not
 the current release channel yet.
 
@@ -644,8 +643,7 @@ MCP configs, skill definitions, hook scripts, instruction files, immediate
 `action.yml` / `action.yaml` metadata — without executing anything. For local
 Action metadata, only `runs.using: composite` steps receive AGT-06 dependency
 and inline-script checks. Invalid or duplicate-key protected YAML is an
-operational error. AGT-06 is currently available from source on `main`; the
-immutable `v0.2.2` binary does not contain it.
+operational error. AGT-06 is included in the immutable `v0.3.0` release.
 
 | Rule | Severity | Detects |
 |------|----------|---------|
@@ -884,21 +882,21 @@ local set anytime with `pre-commit run --all-files`.
 
 ## Status
 
-Argus `v0.2.2` was published on 2026-08-30 as an immutable GitHub Release with
+Argus `v0.3.0` was published on 2026-09-02 as an immutable GitHub Release with
 21 assets: raw binaries and archives for five native targets, checksums,
 documentation, and Sigstore attestations. Pin the exact release and select the
 asset for your target; for example:
 
 ```sh
-gh release download v0.2.2 --repo majiayu000/argus \
-  --pattern 'argus-v0.2.2-aarch64-apple-darwin.tar.gz'
-gh release verify-asset v0.2.2 \
-  argus-v0.2.2-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
+gh release download v0.3.0 --repo majiayu000/argus \
+  --pattern 'argus-v0.3.0-aarch64-apple-darwin.tar.gz'
+gh release verify-asset v0.3.0 \
+  argus-v0.3.0-aarch64-apple-darwin.tar.gz --repo majiayu000/argus
 ```
 
 There is no package-registry distribution. The protected `v1` Action branch
 intentionally remains on the verified `v0.2.1` release commit and is not the
-recommended channel for `v0.2.2`. Build from source against `main` only when you
+recommended channel for `v0.3.0`. Build from source against `main` only when you
 intentionally want the source-tree state recorded in the [`CHANGELOG`](CHANGELOG.md).
 
 Baseline capability snapshot (as of 2026-07-18; see `[0.2.0]` for subsequent
@@ -909,7 +907,7 @@ work):
 - **M2 verification** — the DSSE, Fulcio-chain, SCT, Rekor proof/checkpoint/SET, artifact-subject, and OIDC identity-policy path is opt-in behind the `sigstore` Cargo feature ([#14](https://github.com/majiayu000/argus/issues/14)). Real npm v0.2 `intoto/0.0.2` SLSA bundles are supported through the audited verifier compatibility patch documented in [`docs/design/sigstore-verification.md`](docs/design/sigstore-verification.md) §10. Invalid cryptographic material or policy mismatches remain Critical and block; npm-keyring bundles remain Unsupported. Builds without the `sigstore` feature hard-error when `--verify-sigstore` is requested.
 
 These entries are implemented and covered by repository tests in the published
-`v0.2.2` source snapshot. Later `main` changes are not part of that immutable
+`v0.3.0` source snapshot. Later `main` changes are not part of that immutable
 release until a new version is published.
 
 Detection coverage is intentionally **not** claimed in headline numbers without

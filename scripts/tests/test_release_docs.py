@@ -9,7 +9,7 @@ class ReleaseDocsTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         self.assertIn("workspace release contract targets `v0.3.0`", readme)
         self.assertIn("GitHub Release metadata is authoritative", readme)
-        self.assertIn("uses: majiayu000/argus@v0.2.2", readme)
+        self.assertIn("uses: majiayu000/argus@v0.3.0", readme)
         self.assertRegex(readme, r"`v1` branch intentionally remains on\s+`v0\.2\.1`")
 
     def test_operator_runbook_preserves_order_and_human_gates(self) -> None:
