@@ -43,12 +43,13 @@ Decision: new `argus-verify` crate (decision recorded 2026-05-26 with project ow
 ```
 crates/
   argus-verify/
-    Cargo.toml          # [dependencies] sigstore, x509-parser, p256/p384, ...
+    Cargo.toml          # standalone DSSE + full Sigstore verifier dependencies
     src/
-      lib.rs            # public API
-      trust.rs          # OIDC identity allowlist
-      dsse.rs           # DSSE envelope verification
-      rekor.rs          # transparency-log inclusion proof
+      lib.rs            # public API for both verification layers
+      dsse.rs           # standalone DSSE envelope verification
+      sigstore.rs       # Fulcio/Rekor/SCT/artifact/identity verification
+      trust/
+        trusted_root.json # vendored, digest-pinned Sigstore trust root
 ```
 
 ### Why a separate crate
@@ -61,24 +62,20 @@ crates/
 
 - `argus-core::url` and `argus-core::scan` (just landed in #25 / PR #26): re-used as-is.
 - `argus-fetch::provenance` (M1): the `check_subject_digest` path stays exactly as it is. M2 layers on top, not in place of.
-- The `Transport` trait stays the same — Rekor and Fulcio fetches go through the same trait so they remain mockable in tests.
+- The `Transport` trait stays the same and fetches only the npm attestations document. Full verification is offline against the bundle's inclusion material and the vendored, digest-pinned Sigstore trust root.
 
 ---
 
 ## 3. Trust roots & policy
 
-Decision: GitHub Actions official reusable workflows only (decision recorded 2026-05-26).
+Decision: require the operator to supply the accepted OIDC identity regular
+expressions; the GitHub Actions issuer remains the CLI default.
 
-### Allowlisted OIDC identities (initial set)
+### OIDC identity policy
 
-The leaf cert's `subjectAlternativeName` URI must match one of:
-
-```
-https://github.com/actions/.+/.github/workflows/.+@refs/tags/.+
-https://github.com/slsa-framework/.+/.github/workflows/.+@refs/tags/.+
-```
-
-…with the certificate's OIDC issuer extension equal to:
+`--verify-sigstore` requires at least one `--sigstore-identity <REGEX>`. The leaf
+certificate's `subjectAlternativeName` URI must match one supplied expression,
+and its OIDC issuer must match `--sigstore-issuer` (which defaults to):
 
 ```
 https://token.actions.githubusercontent.com
@@ -86,17 +83,23 @@ https://token.actions.githubusercontent.com
 
 ### Why this scope
 
-- `actions/*` and `slsa-framework/*` cover the canonical SLSA generator reusable workflows that the npm registry currently accepts for `--provenance` publishing.
-- A custom-workflow publisher (`https://github.com/your-org/.../workflows/...`) **falls back to M1 subject-digest verification only** — we emit an `info`-level finding documenting that signature verification was skipped because the OIDC identity is not in the trust allowlist.
-- Operators can extend the allowlist later via a config file. This is **not** part of M2 — keeping config-driven trust roots out of the initial milestone avoids a surface where a typo in a config file silently disables the most important guard.
+- Trust remains an operator decision rather than a built-in list of acceptable
+  repositories or workflows.
+- Missing identity expressions are rejected before network access. Malformed
+  expressions and policy mismatches cannot produce a verified result.
 
-### What this explicitly does NOT cover
+### What policy is not bundled
 
-- GitLab CI OIDC publishing.
-- Self-hosted CI tokens.
-- Manually-signed npm attestations (signed by `cosign sign` outside CI).
+- Argus does not ship built-in trust decisions for GitLab CI, self-hosted CI,
+  custom GitHub workflows, or other publishers. Operators must supply the exact
+  issuer and identity expressions they accept.
+- Bundles that provide only a public-key hint, including the current npm-keyring
+  shape, remain unsupported because they do not carry a Fulcio certificate
+  chain for this verifier.
 
-For all three, M2 produces `provenance-signature-untrusted-issuer` at `info` severity. That makes the gap visible in the report without blocking ingest.
+Supported Fulcio-backed identities verify only when the operator explicitly
+supplies matching issuer and identity policy. A mismatch produces
+`provenance-signature-invalid` at Critical severity and blocks.
 
 ---
 
@@ -105,7 +108,8 @@ For all three, M2 produces `provenance-signature-untrusted-issuer` at `info` sev
 Decision: opt-in via `--verify-sigstore` (decision recorded 2026-05-26).
 
 ```
-argus fetch chalk --verify-sigstore
+argus fetch chalk --verify-sigstore \
+  --sigstore-identity '^https://github\.com/example/project/.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
 ```
 
 ### Why opt-in for M2
@@ -126,10 +130,10 @@ argus fetch chalk --verify-sigstore
 
 | Rule ID | Severity | When | Decision impact |
 |---|---|---|---|
-| `provenance-signature-verified` | Info | All four layers pass (DSSE, Fulcio chain, Rekor inclusion, OIDC identity in allowlist). | none (positive signal only) |
-| `provenance-signature-invalid` | Critical | DSSE signature does not validate against leaf cert, OR Fulcio chain is broken, OR Rekor inclusion proof is invalid. | `block` |
-| `provenance-signature-untrusted-issuer` | Info | DSSE/Fulcio/Rekor all pass but OIDC identity is not in the allowlist (e.g. custom workflow). | none (transparency only — M1 subject-digest remains the gate) |
-| `provenance-signature-unverified` | Info | Network failure fetching Rekor or Fulcio trust roots; signature could not be evaluated. | none (soft-fail) |
+| `provenance-signature-verified` | Info | All required DSSE, Fulcio, SCT, Rekor, artifact, and OIDC identity-policy checks pass. | none (positive signal only) |
+| `provenance-signature-invalid` | Critical | Any required cryptographic, transparency, artifact-binding, or identity-policy check fails. | `block` |
+| `provenance-signature-untrusted-issuer` | Info | Legacy structured verdict retained for API compatibility; the full verifier no longer emits it for policy mismatches. | none |
+| `provenance-signature-unverified` | High | Verification was requested but no attestation completed full verification, or the verifier could not evaluate the supplied material. | `block` |
 
 ### Why no `medium` severity in this set
 

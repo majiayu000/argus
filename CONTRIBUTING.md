@@ -40,7 +40,7 @@ and representative package metadata or attack patterns.
 
 ## Development setup and style
 
-The workspace uses Rust 2021 and declares Rust 1.75 as its minimum supported
+The workspace uses Rust 2021 and declares Rust 1.88 as its minimum supported
 version. CI builds with the stable toolchain and requires `rustfmt` and
 `clippy`. If you use `rustup`, install those components with:
 

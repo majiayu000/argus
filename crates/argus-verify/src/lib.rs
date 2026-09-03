@@ -1,15 +1,15 @@
 //! Sigstore signature verification for argus.
 //!
-//! Milestone progression (see docs/design/sigstore-verification.md):
-//! - **Day 1 (this module set)**: DSSE envelope signature verification against
-//!   the leaf certificate embedded in a bundle's verification material.
-//! - **Later**: Fulcio certificate-chain verification, Rekor transparency-log
-//!   inclusion proofs, and the OIDC builder-identity allowlist.
+//! The crate exposes two verification layers (see
+//! `docs/design/sigstore-verification.md`):
+//! - standalone DSSE envelope signature verification against the leaf
+//!   certificate embedded in a bundle's verification material; and
+//! - full Fulcio certificate-chain, SCT, Rekor transparency-log, artifact, and
+//!   caller-supplied OIDC identity-policy verification.
 //!
-//! Verifying a DSSE signature here proves only that the holder of the leaf
+//! The standalone DSSE result proves only that the holder of the leaf
 //! certificate's private key signed the payload. It is NOT a trust decision:
-//! the certificate chain and OIDC identity must still be checked before an
-//! attestation can be treated as trustworthy.
+//! callers that need a trust decision must use [`verify_bundle_full`].
 
 mod dsse;
 mod sigstore;

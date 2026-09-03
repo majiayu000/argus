@@ -46,7 +46,7 @@ use rule_args::RuleArgs;
 #[command(
     name = "argus",
     version,
-    about = "Supply-chain install guard for npm/JS"
+    about = "Static supply-chain admission guard for packages, lockfiles, and agent surfaces"
 )]
 struct Cli {
     #[command(subcommand)]
