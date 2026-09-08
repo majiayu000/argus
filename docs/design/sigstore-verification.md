@@ -133,7 +133,10 @@ argus fetch chalk --verify-sigstore \
 | `provenance-signature-verified` | Info | All required DSSE, Fulcio, SCT, Rekor, artifact, and OIDC identity-policy checks pass. | none (positive signal only) |
 | `provenance-signature-invalid` | Critical | Any required cryptographic, transparency, artifact-binding, or identity-policy check fails. | `block` |
 | `provenance-signature-untrusted-issuer` | Info | Legacy structured verdict retained for API compatibility; the full verifier no longer emits it for policy mismatches. | none |
-| `provenance-signature-unverified` | High | Verification was requested but no attestation completed full verification, or the verifier could not evaluate the supplied material. | `block` |
+| `provenance-signature-unverified` | Info | A single attestation uses verification material this build cannot handle (for example an npm-keyring public-key hint). Mixed documents that also contain a verified Fulcio bundle emit this per-bundle finding without the High fallback. | none |
+| `provenance-signature-unverified` | High | Verification was requested but no attestation completed full verification, or a hard evaluation failure occurred (invalid identity regex, unparseable attestations document, or verifier hard error). | `block` |
+
+The same rule ID is detector-owned for severity: `verdict_to_finding` maps `SigstoreVerdict::Unsupported` to Info, while the fetch-layer zero-verified fallback and hard-error paths emit High. The checked-in `sigstore@2.3.1` fixture exercises the mixed case—Unsupported keyring bundle at Info plus a verified SLSA bundle—so the report does not block solely because of the unsupported sibling.
 
 ### Why no `medium` severity in this set
 
