@@ -68,7 +68,7 @@ pub enum SigstoreVerdict {
     SignatureInvalid { reason: String },
     /// Legacy structured result retained for API compatibility. Full
     /// verification now treats an identity-policy mismatch as
-    /// [`SignatureInvalid`] so callers fail closed.
+    /// [`SigstoreVerdict::SignatureInvalid`] so callers fail closed.
     UntrustedIssuer {
         actual_identity: String,
         actual_issuer: String,

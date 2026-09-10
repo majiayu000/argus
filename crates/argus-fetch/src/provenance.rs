@@ -18,11 +18,11 @@
 //! - Return a summary the caller can cross-check against the actual tarball
 //!   bytes it just downloaded.
 //!
-//! What this module **does not** do (yet):
+//! What this module **does not** do itself:
 //!
 //! - Verify Sigstore signatures, Fulcio certificate chains, or Rekor
-//!   inclusion proofs. Catching forged attestations needs the `sigstore`
-//!   crate; that work is tracked in the M2 follow-up issue.
+//!   inclusion proofs. When requested, the caller layers the optional
+//!   `argus-verify` full-verification path on top of this digest check.
 
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD;

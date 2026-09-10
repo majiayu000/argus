@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sigstore signature verification for argus: DSSE envelope + (later) Fulcio chain + Rekor inclusion."
+description = "Sigstore verification for argus: DSSE, Fulcio, Rekor, SCT, artifact, and identity policy."
 
 [dependencies]
 anyhow = { workspace = true }

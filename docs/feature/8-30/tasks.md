@@ -1,5 +1,9 @@
 # Implementation and roadmap
 
+> Status: completed delivery packet. The P4 entries preserve the `v0.2.2`
+> release phase they recorded; the current published release is `v0.3.0` and
+> current release status is maintained in the repository README.
+
 ## P0 — implemented in this feature
 
 - [x] Preserve both sides of `LockfileScanTargetChange` in the CLI plan.
@@ -101,20 +105,25 @@
 
 ## Completion evidence
 
-Fresh verification on 2026-08-30:
+Fresh verification on 2026-09-03:
 
 ```text
 cargo fmt --all -- --check                                      PASS
 cargo clippy --workspace --all-targets -- -D warnings          PASS
 cargo test --workspace --all-targets                           PASS
-cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (36/36)
+cargo run -q -p argus-cli -- corpus test --corpus corpus       PASS (40/40)
 cargo test -p argus-cli --test admission_e2e                  PASS (local TCP registry)
-cargo test -p argus-cli --test public_registry_e2e -- --ignored PASS (npm/PyPI/crates)
-cargo test -p argus-cli --test public_workflow_e2e -- --ignored PASS (5/5 public workflows, zero false blocks)
-python3 -m unittest discover -s scripts/tests -p 'test_release_*.py' PASS (12/12)
+python3 -m unittest discover -s scripts/tests -p 'test_release_*.py' PASS (13/13)
 npm test --prefix action                                       PASS (16/16)
 npm run package --prefix action                                PASS
+git diff --exit-code -- action/dist/index.js                   PASS
+cargo test -p argus-fetch --features sigstore --all-targets    PASS
 ```
+
+The live public-workflow precision gate also passed in the latest
+[`main` CI run](https://github.com/majiayu000/argus/actions/runs/33610461298);
+live public-registry tests remain explicit network-dependent checks rather than
+part of the default workspace test invocation.
 
 The primary acceptance tests are process-level E2E tests, not mocks: one uses
 real TCP sockets and the production binary to replay paired npm, PyPI,
