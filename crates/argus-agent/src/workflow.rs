@@ -149,7 +149,11 @@ fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Res
         let Some(value) = value.as_str() else {
             continue;
         };
-        if value_contains_untrusted_context(value, rel)? {
+        // Inherit taint from direct untrusted contexts and from aliases of already
+        // tainted env names (e.g. job TITLE → step ALIAS: ${{ env.TITLE }}).
+        if value_contains_untrusted_context(value, rel)?
+            || value_references_tainted_env(value, tainted, rel)?
+        {
             tainted.insert(name.to_string());
         } else {
             // A same-scope redeclaration without untrusted contexts clears prior taint.
@@ -160,6 +164,22 @@ fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Res
 }
 
 fn value_contains_untrusted_context(value: &str, rel: &str) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(is_untrusted_context(expression))
+    })
+}
+
+fn value_references_tainted_env(value: &str, tainted: &HashSet<String>, rel: &str) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(expression_uses_tainted_env(expression, tainted))
+    })
+}
+
+fn for_each_expression(
+    value: &str,
+    rel: &str,
+    mut predicate: impl FnMut(&str) -> Result<bool>,
+) -> Result<bool> {
     let mut remaining = value;
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
@@ -167,7 +187,7 @@ fn value_contains_untrusted_context(value: &str, rel: &str) -> Result<bool> {
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `env`");
         };
         let expression = after_start[..end].trim();
-        if is_untrusted_context(expression) {
+        if predicate(expression)? {
             return Ok(true);
         }
         remaining = &after_start[end + 2..];
@@ -287,13 +307,37 @@ fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>)
         Regex::new(r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([^'"]+)['"]\s*\])"#)
             .expect("tainted env reference pattern compiles")
     });
+    // Ignore env-looking text inside single-quoted expression literals (e.g.
+    // `${{ 'env.TITLE' }}`) without stripping quotes used by `env['TITLE']`.
     pattern.captures_iter(expression).any(|capture| {
+        let Some(matched) = capture.get(0) else {
+            return false;
+        };
+        if offset_inside_single_quoted_literal(expression, matched.start()) {
+            return false;
+        }
         let name = capture
             .get(1)
             .or_else(|| capture.get(2))
             .map(|matched| matched.as_str());
         name.is_some_and(|name| tainted_envs.contains(name))
     })
+}
+
+fn offset_inside_single_quoted_literal(expression: &str, index: usize) -> bool {
+    let mut quoted = false;
+    let mut chars = expression[..index].chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\'' {
+            continue;
+        }
+        if quoted && chars.peek() == Some(&'\'') {
+            chars.next();
+            continue;
+        }
+        quoted = !quoted;
+    }
+    quoted
 }
 
 fn is_untrusted_context(expression: &str) -> bool {
@@ -617,6 +661,54 @@ jobs:
       - env:
           TITLE: ${{ github.event.issue.title }}
         run: echo "$TITLE"
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn env_alias_from_job_env_blocks_context_injection() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - env:
+          ALIAS: ${{ env.TITLE }}
+        run: echo "${{ env.ALIAS }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.ALIAS")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn env_name_inside_expression_string_literal_is_not_tainted_read() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ 'env.TITLE' }}"
 "#,
         );
 

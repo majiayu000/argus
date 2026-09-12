@@ -145,6 +145,15 @@
       "notes": "Job-level env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in a later run step."
     },
     {
+      "id": "workflow-env-indirection-alias",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-alias",
+      "packageName": "workflow-env-indirection-alias",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Step-level env aliases a tainted job env via ${{ env.TITLE }} and re-interpolates the alias in run."
+    },
+    {
       "id": "composite-action-dangerous",
       "kind": "fixture",
       "path": "fixtures/composite-action-dangerous",
