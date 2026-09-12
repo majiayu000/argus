@@ -13,8 +13,11 @@
 //! such as `ref: ${{ inputs.ref || github.sha }}`, case-variant forms such as
 //! `ref: ${{ inputs.Ref }}`, env aliases such as
 //! `with: ref: ${{ env.PR_REF }}` after `env.PR_REF` was set to an untrusted
-//! github context, or an omitted `with` that relies on an untrusted input
-//! default — cannot bypass Critical→block.
+//! github context, a step-local env alias such as
+//! `env: { TARGET: ${{ inputs.ref }} }` with `with: { ref: ${{ env.TARGET }} }`,
+//! or an omitted `with` that relies on an untrusted input default — cannot
+//! bypass Critical→block. Quoted expression literals such as
+//! `${{ 'inputs.ref' }}` are not treated as input references.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed; source findings on composite bodies are left
@@ -49,6 +52,8 @@ const RULE_WRITE_ALL: &str = "AGT-06-workflow-write-all";
 const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
 /// Workflow → local composite is one hop; one nested local composite is allowed.
 const MAX_LOCAL_COMPOSITE_DEPTH: u32 = 2;
+/// Cap transitive input/env alias rewriting (env → inputs → env …).
+const MAX_CONTEXT_RESOLVE_DEPTH: u32 = 8;
 
 type ActionIndex<'a> = BTreeMap<&'a str, &'a SurfaceFile>;
 
@@ -363,15 +368,28 @@ fn merge_env_bindings(parent: &EnvBindings, child: &EnvBindings) -> EnvBindings 
 }
 
 /// Resolve composite input and env aliases, normalizing bracket property access.
+///
+/// Substitution is applied until a fixed point (or
+/// [`MAX_CONTEXT_RESOLVE_DEPTH`]) so env aliases that expand to
+/// `${{ inputs.* }}` (and the reverse) are fully rewritten before the
+/// untrusted-ref detector runs.
 fn resolve_context_expressions(
     value: &str,
     input_bindings: &InputBindings,
     env_bindings: &EnvBindings,
 ) -> String {
-    resolve_env_expressions(
-        &resolve_input_expressions(value, input_bindings),
-        env_bindings,
-    )
+    let mut resolved = value.to_string();
+    for _ in 0..MAX_CONTEXT_RESOLVE_DEPTH {
+        let next = resolve_env_expressions(
+            &resolve_input_expressions(&resolved, input_bindings),
+            env_bindings,
+        );
+        if next == resolved {
+            return next;
+        }
+        resolved = next;
+    }
+    resolved
 }
 
 /// Substitute composite `inputs.name` references with caller binding values.
@@ -441,7 +459,9 @@ fn normalize_input_name(name: &str) -> String {
 /// Replace `context.name` tokens inside `${{ ... }}` regions only.
 ///
 /// Literal YAML text such as `refs/heads/inputs.ref` is left untouched because
-/// GitHub does not interpolate outside expression delimiters. When
+/// GitHub does not interpolate outside expression delimiters. Quoted expression
+/// string literals such as `${{ 'inputs.ref' }}` are also left untouched —
+/// GitHub treats those as literal branch names, not input references. When
 /// `case_insensitive` is set, matching follows GitHub's `inputs` context;
 /// otherwise the declared spelling must match (env).
 fn replace_context_identifier(
@@ -506,6 +526,11 @@ fn replace_context_identifier_in_region(
     while let Some(rel) = haystack[cursor..].find(&needle) {
         let offset = cursor + rel;
         let end = offset + needle.len();
+        if offset_inside_expression_string_literal(value, offset) {
+            output.push_str(&value[cursor..end]);
+            cursor = end;
+            continue;
+        }
         let precedes_ok = offset == 0
             || value[..offset]
                 .chars()
@@ -526,6 +551,29 @@ fn replace_context_identifier_in_region(
     }
     output.push_str(&value[cursor..]);
     output
+}
+
+/// True when `offset` falls inside a GitHub expression string literal (`'...'`).
+///
+/// Doubled quotes (`''`) are treated as an escaped literal quote, matching
+/// GitHub's expression language and [`remove_expression_string_literals`].
+fn offset_inside_expression_string_literal(value: &str, offset: usize) -> bool {
+    let mut quoted = false;
+    let mut index = 0;
+    let bytes = value.as_bytes();
+    while index < offset && index < bytes.len() {
+        if bytes[index] != b'\'' {
+            index += 1;
+            continue;
+        }
+        if quoted && index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
+            index += 2;
+            continue;
+        }
+        quoted = !quoted;
+        index += 1;
+    }
+    quoted
 }
 
 fn is_expression_ident_char(character: char) -> bool {
@@ -1214,6 +1262,46 @@ jobs:
     }
 
     #[test]
+    fn resolve_input_expressions_ignores_quoted_expression_literals() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let resolved = resolve_input_expressions("${{ 'inputs.ref' }}", &bindings);
+        assert_eq!(resolved, "${{ 'inputs.ref' }}");
+        assert!(!is_untrusted_ref_expression(&resolved));
+        let compound =
+            resolve_input_expressions("${{ 'inputs.ref' || inputs.ref || github.sha }}", &bindings);
+        assert!(
+            compound.contains("'inputs.ref'"),
+            "quoted literal must remain: {compound}"
+        );
+        assert!(
+            compound.contains("github.event.pull_request.head.sha"),
+            "unquoted inputs.ref must still resolve: {compound}"
+        );
+    }
+
+    #[test]
+    fn resolve_context_expressions_resolves_env_then_inputs_transitively() {
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        env.insert("TARGET".to_string(), "${{ inputs.ref }}".to_string());
+        let resolved = resolve_context_expressions("${{ env.TARGET }}", &inputs, &env);
+        assert!(
+            resolved.contains("github.event.pull_request.head.sha"),
+            "env→inputs chain must resolve: {resolved}"
+        );
+        assert!(!resolved.contains("inputs.ref") && !resolved.contains("env.TARGET"));
+        assert!(is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
     fn privileged_local_composite_bracket_github_context_untrusted_checkout_blocks() {
         let findings = findings_for_files(&[
             SurfaceFile {
@@ -1330,6 +1418,95 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: refs/heads/inputs.ref
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT));
+    }
+
+    #[test]
+    fn privileged_local_composite_step_env_alias_of_input_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      env:
+        TARGET: ${{ inputs.ref }}
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_quoted_inputs_literal_is_not_tainted() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ 'inputs.ref' }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
