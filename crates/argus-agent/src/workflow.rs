@@ -9,11 +9,13 @@
 //! bindings (merged over Action metadata `inputs.*.default`) so wrapping an
 //! untrusted checkout — including via `ref: ${{ inputs.ref }}`, bracket forms
 //! such as `ref: ${{ inputs['ref'] }}`, compound forms such as
-//! `ref: ${{ inputs.ref || github.sha }}`, or an omitted `with` that relies on
-//! an untrusted input default — cannot bypass Critical→block.
+//! `ref: ${{ inputs.ref || github.sha }}`, case-variant forms such as
+//! `ref: ${{ inputs.Ref }}`, or an omitted `with` that relies on an untrusted
+//! input default — cannot bypass Critical→block.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
-//! depth-bounded and fail-closed.
+//! depth-bounded and fail-closed; source findings on composite bodies are left
+//! to the ActionMetadata pass so expansion does not duplicate them.
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
@@ -176,8 +178,14 @@ fn scan_step(
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
+    // Expansion (depth > 0) only adds privileged-context findings. Mutable-action
+    // and inline-script findings for composite bodies are emitted once by the
+    // ActionMetadata pass so call-site count does not inflate source findings.
+    let emit_source_findings = ctx.depth == 0;
     if let Some(action) = get_string(step, "uses") {
-        check_action_ref(action, rel, findings);
+        if emit_source_findings {
+            check_action_ref(action, rel, findings);
+        }
         if ctx.privileged_trigger
             && is_checkout(action)
             && has_untrusted_checkout_ref(step, ctx.input_bindings)
@@ -207,8 +215,10 @@ fn scan_step(
             )?;
         }
     }
-    if let Some(script) = get_string(step, "run") {
-        check_inline_script(script, rel, findings)?;
+    if emit_source_findings {
+        if let Some(script) = get_string(step, "run") {
+            check_inline_script(script, rel, findings)?;
+        }
     }
     Ok(())
 }
@@ -261,6 +271,8 @@ fn expand_local_composite(
 ///
 /// Caller-supplied `with` bindings always win. Defaults are taken as literal
 /// strings (the same form GitHub evaluates when the caller omits the input).
+/// Input names are stored ASCII-lowercased to match GitHub's case-insensitive
+/// `inputs` context.
 fn merge_composite_input_defaults(root: &Hash, caller_bindings: &InputBindings) -> InputBindings {
     let mut bindings = InputBindings::new();
     if let Some(inputs) = get(root, "inputs").and_then(Yaml::as_hash) {
@@ -272,12 +284,12 @@ fn merge_composite_input_defaults(root: &Hash, caller_bindings: &InputBindings) 
                 continue;
             };
             if let Some(default) = get_string(spec, "default") {
-                bindings.insert(name.to_string(), default.to_string());
+                bindings.insert(normalize_input_name(name), default.to_string());
             }
         }
     }
     for (name, value) in caller_bindings {
-        bindings.insert(name.clone(), value.clone());
+        bindings.insert(normalize_input_name(name), value.clone());
     }
     bindings
 }
@@ -297,7 +309,7 @@ fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> 
             continue;
         };
         bindings.insert(
-            name.to_string(),
+            normalize_input_name(name),
             resolve_input_expressions(raw, parent_bindings),
         );
     }
@@ -308,9 +320,11 @@ fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> 
 ///
 /// Replaces identifier occurrences inside compound expressions
 /// (`${{ inputs.ref || github.sha }}`) as well as whole-expression forms
-/// (`${{ inputs.ref }}` / `${{ inputs['ref'] }}`). Bracket property access is
-/// normalized to dotted form first. Longer input names are applied first so a
-/// binding named `ref` cannot partially match `referral`.
+/// (`${{ inputs.ref }}` / `${{ inputs['ref'] }}` / `${{ inputs.Ref }}`).
+/// Bracket property access is normalized to dotted form first. Matching is
+/// ASCII case-insensitive, matching GitHub's `inputs` context. Longer input
+/// names are applied first so a binding named `ref` cannot partially match
+/// `referral`.
 fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
     if bindings.is_empty() {
         return value.to_string();
@@ -339,33 +353,41 @@ fn normalize_bracket_property_access(expression: &str) -> String {
     pattern.replace_all(expression, ".$1").into_owned()
 }
 
+/// GitHub Action input names are case-insensitive; store one canonical key.
+fn normalize_input_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
 /// Replace bare `inputs.{name}` tokens that are not part of a longer property
-/// path (for example skip `github.event.inputs.ref`).
+/// path (for example skip `github.event.inputs.ref`). Matching is ASCII
+/// case-insensitive so `${{ inputs.Ref }}` resolves against a `ref` binding.
 fn replace_input_identifier(value: &str, name: &str, replacement: &str) -> String {
-    let needle = format!("inputs.{name}");
+    let needle = format!("inputs.{}", name.to_ascii_lowercase());
+    let lower = value.to_ascii_lowercase();
     let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(offset) = rest.find(&needle) {
+    let mut cursor = 0;
+    while let Some(rel) = lower[cursor..].find(&needle) {
+        let offset = cursor + rel;
         let end = offset + needle.len();
         let precedes_ok = offset == 0
-            || rest[..offset]
+            || value[..offset]
                 .chars()
                 .next_back()
                 .is_some_and(|character| !is_expression_ident_char(character) && character != '.');
-        let follows_ok = rest[end..]
+        let follows_ok = value[end..]
             .chars()
             .next()
             .is_none_or(|character| !is_expression_ident_char(character));
         if precedes_ok && follows_ok {
-            output.push_str(&rest[..offset]);
+            output.push_str(&value[cursor..offset]);
             output.push_str(replacement);
-            rest = &rest[end..];
+            cursor = end;
             continue;
         }
-        output.push_str(&rest[..end]);
-        rest = &rest[end..];
+        output.push_str(&value[cursor..end]);
+        cursor = end;
     }
-    output.push_str(rest);
+    output.push_str(&value[cursor..]);
     output
 }
 
@@ -879,6 +901,91 @@ runs:
     }
 
     #[test]
+    fn privileged_local_composite_case_variant_input_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  Ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.Ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn local_composite_source_findings_are_not_duplicated_by_expansion() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: COMPOSITE_UNTRUSTED_CHECKOUT.to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        let mutable_at_action = findings
+            .iter()
+            .filter(|finding| {
+                finding.rule_id == RULE_MUTABLE_ACTION
+                    && finding.location.as_deref() == Some(".github/actions/checkout-pr/action.yml")
+            })
+            .count();
+        assert_eq!(
+            mutable_at_action, 1,
+            "mutable-action findings must not multiply with each workflow invocation"
+        );
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+    }
+
+    #[test]
     fn resolve_input_expressions_substitutes_inside_compound_forms() {
         let mut bindings = InputBindings::new();
         bindings.insert(
@@ -911,6 +1018,30 @@ runs:
             assert!(
                 !resolved.contains("inputs['ref']") && !resolved.contains(r#"inputs["ref"]"#),
                 "bracket token remained in {expression}: {resolved}"
+            );
+            assert!(
+                is_untrusted_ref_expression(&resolved),
+                "resolved expression was not untrusted: {resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_input_expressions_substitutes_case_variants() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            normalize_input_name("Ref"),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        for expression in [
+            "${{ inputs.Ref }}",
+            "${{ inputs.REF || github.sha }}",
+            "${{ inputs['Ref'] }}",
+        ] {
+            let resolved = resolve_input_expressions(expression, &bindings);
+            assert!(
+                resolved.contains("github.event.pull_request.head.sha"),
+                "failed to substitute in {expression}: {resolved}"
             );
             assert!(
                 is_untrusted_ref_expression(&resolved),
