@@ -5,16 +5,29 @@
 //! surface must never collapse into a clean decision.
 //!
 //! When a workflow step `uses` a same-repo composite (`./...`), that composite
-//! is expanded with the caller's privileged-trigger flag so wrapping an
-//! untrusted checkout cannot bypass Critical→block. Standalone Action metadata
-//! scans still use `privileged_trigger=false` so composites alone do not invent
-//! a privileged trigger. Local expansion is depth-bounded and fail-closed.
+//! is expanded with the caller's privileged-trigger flag and `with` input
+//! bindings so wrapping an untrusted checkout — including via
+//! `ref: ${{ inputs.ref }}` — cannot bypass Critical→block. Standalone Action
+//! metadata scans still use `privileged_trigger=false` so composites alone do
+//! not invent a privileged trigger. Local expansion is depth-bounded and
+//! fail-closed.
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use std::collections::BTreeMap;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
+
+/// Resolved caller `with` bindings for the current local-composite expansion.
+type InputBindings = BTreeMap<String, String>;
+
+struct StepScanCtx<'a> {
+    privileged_trigger: bool,
+    actions: &'a ActionIndex<'a>,
+    depth: u32,
+    expand_local: bool,
+    input_bindings: &'a InputBindings,
+}
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
 const RULE_CONTEXT_INJECTION: &str = "AGT-06-workflow-context-injection";
@@ -74,6 +87,7 @@ fn scan_workflow(
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
         return Ok(());
     };
+    let empty_bindings = InputBindings::new();
     for job in jobs.values().filter_map(Yaml::as_hash) {
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         if let Some(action) = get_string(job, "uses") {
@@ -86,10 +100,13 @@ fn scan_workflow(
             scan_step(
                 step,
                 &file.rel,
-                privileged_trigger,
-                actions,
-                0,
-                true,
+                &StepScanCtx {
+                    privileged_trigger,
+                    actions,
+                    depth: 0,
+                    expand_local: true,
+                    input_bindings: &empty_bindings,
+                },
                 findings,
             )?;
         }
@@ -110,18 +127,27 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         .as_hash()
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
     let empty = ActionIndex::new();
+    let empty_bindings = InputBindings::new();
     // Standalone metadata keeps privileged_trigger=false and does not expand
     // nested local uses; workflow scans own that expansion with caller context.
-    scan_composite_steps(root, &file.rel, false, &empty, 0, false, findings)
+    scan_composite_steps(
+        root,
+        &file.rel,
+        &StepScanCtx {
+            privileged_trigger: false,
+            actions: &empty,
+            depth: 0,
+            expand_local: false,
+            input_bindings: &empty_bindings,
+        },
+        findings,
+    )
 }
 
 fn scan_composite_steps(
     root: &Hash,
     rel: &str,
-    privileged_trigger: bool,
-    actions: &ActionIndex<'_>,
-    depth: u32,
-    expand_local: bool,
+    ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
@@ -134,15 +160,7 @@ fn scan_composite_steps(
         return Ok(());
     };
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        scan_step(
-            step,
-            rel,
-            privileged_trigger,
-            actions,
-            depth,
-            expand_local,
-            findings,
-        )?;
+        scan_step(step, rel, ctx, findings)?;
     }
     Ok(())
 }
@@ -150,15 +168,15 @@ fn scan_composite_steps(
 fn scan_step(
     step: &Hash,
     rel: &str,
-    privileged_trigger: bool,
-    actions: &ActionIndex<'_>,
-    depth: u32,
-    expand_local: bool,
+    ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     if let Some(action) = get_string(step, "uses") {
         check_action_ref(action, rel, findings);
-        if privileged_trigger && is_checkout(action) && has_untrusted_checkout_ref(step) {
+        if ctx.privileged_trigger
+            && is_checkout(action)
+            && has_untrusted_checkout_ref(step, ctx.input_bindings)
+        {
             findings.push(
                 Finding::new(
                     RULE_UNTRUSTED_CHECKOUT,
@@ -168,8 +186,20 @@ fn scan_step(
                 .at(rel),
             );
         }
-        if expand_local && is_local_action_ref(action) {
-            expand_local_composite(action, rel, privileged_trigger, actions, depth, findings)?;
+        if ctx.expand_local && is_local_action_ref(action) {
+            let nested_bindings = resolve_step_input_bindings(step, ctx.input_bindings);
+            expand_local_composite(
+                action,
+                rel,
+                &StepScanCtx {
+                    privileged_trigger: ctx.privileged_trigger,
+                    actions: ctx.actions,
+                    depth: ctx.depth,
+                    expand_local: true,
+                    input_bindings: &nested_bindings,
+                },
+                findings,
+            )?;
         }
     }
     if let Some(script) = get_string(step, "run") {
@@ -181,17 +211,15 @@ fn scan_step(
 fn expand_local_composite(
     action: &str,
     caller_rel: &str,
-    privileged_trigger: bool,
-    actions: &ActionIndex<'_>,
-    depth: u32,
+    ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
-    if depth >= MAX_LOCAL_COMPOSITE_DEPTH {
+    if ctx.depth >= MAX_LOCAL_COMPOSITE_DEPTH {
         bail!(
             "local composite expansion depth exceeded while resolving `{action}` from `{caller_rel}`"
         );
     }
-    let Some(meta) = resolve_local_action(action, actions) else {
+    let Some(meta) = resolve_local_action(action, ctx.actions) else {
         bail!(
             "local Action metadata for `{action}` referenced from `{caller_rel}` is missing or unreadable"
         );
@@ -210,12 +238,53 @@ fn expand_local_composite(
     scan_composite_steps(
         root,
         &meta.rel,
-        privileged_trigger,
-        actions,
-        depth + 1,
-        true,
+        &StepScanCtx {
+            privileged_trigger: ctx.privileged_trigger,
+            actions: ctx.actions,
+            depth: ctx.depth + 1,
+            expand_local: true,
+            input_bindings: ctx.input_bindings,
+        },
         findings,
     )
+}
+
+/// Build nested composite bindings from a step's `with:` map, resolving any
+/// `${{ inputs.* }}` references against the caller's already-resolved bindings.
+fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> InputBindings {
+    let mut bindings = InputBindings::new();
+    let Some(with) = get(step, "with").and_then(Yaml::as_hash) else {
+        return bindings;
+    };
+    for (key, value) in with {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        let Some(raw) = value.as_str() else {
+            continue;
+        };
+        bindings.insert(
+            name.to_string(),
+            resolve_input_expressions(raw, parent_bindings),
+        );
+    }
+    bindings
+}
+
+/// Substitute `${{ inputs.name }}` / `inputs.name` with caller binding values.
+fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
+    if bindings.is_empty() {
+        return value.to_string();
+    }
+    let mut resolved = value.to_string();
+    for (name, bound) in bindings {
+        let braced = format!("${{{{ inputs.{name} }}}}");
+        let braced_tight = format!("${{{{inputs.{name}}}}}");
+        resolved = resolved
+            .replace(&braced, bound)
+            .replace(&braced_tight, bound);
+    }
+    resolved
 }
 
 fn is_local_action_ref(action: &str) -> bool {
@@ -404,16 +473,21 @@ fn has_trigger(root: &Hash, trigger: &str) -> bool {
     }
 }
 
-fn has_untrusted_checkout_ref(step: &Hash) -> bool {
+fn has_untrusted_checkout_ref(step: &Hash, input_bindings: &InputBindings) -> bool {
     get(step, "with")
         .and_then(Yaml::as_hash)
         .and_then(|with| get_string(with, "ref"))
         .is_some_and(|revision| {
-            revision.contains("github.event.pull_request.head.")
-                || revision.contains("github.event.pull_request.merge_commit_sha")
-                || revision.contains("github.event.workflow_run.head_sha")
-                || revision.contains("github.event.workflow_run.head_branch")
+            let resolved = resolve_input_expressions(revision, input_bindings);
+            is_untrusted_ref_expression(&resolved)
         })
+}
+
+fn is_untrusted_ref_expression(revision: &str) -> bool {
+    revision.contains("github.event.pull_request.head.")
+        || revision.contains("github.event.pull_request.merge_commit_sha")
+        || revision.contains("github.event.workflow_run.head_sha")
+        || revision.contains("github.event.workflow_run.head_branch")
 }
 
 fn is_checkout(action: &str) -> bool {
@@ -541,6 +615,50 @@ jobs:
         assert!(findings
             .iter()
             .any(|finding| finding.rule_id == RULE_MUTABLE_ACTION));
+    }
+
+    #[test]
+    fn privileged_local_composite_input_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]

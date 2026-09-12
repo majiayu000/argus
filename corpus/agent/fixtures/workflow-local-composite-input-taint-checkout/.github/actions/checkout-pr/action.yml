@@ -1,0 +1,12 @@
+name: checkout-pr
+description: Check out a caller-supplied ref
+inputs:
+  ref:
+    description: Git ref to check out
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}

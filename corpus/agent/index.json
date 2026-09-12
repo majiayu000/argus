@@ -109,6 +109,15 @@
       "notes": "A pull_request_target workflow invokes a same-repo composite that checks out github.event.pull_request.head.sha. Local uses expansion must propagate privileged_trigger so wrapping cannot bypass Critical→block."
     },
     {
+      "id": "workflow-local-composite-input-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-input-taint-checkout",
+      "packageName": "workflow-local-composite-input-taint-checkout",
+      "expectedDecision": "block",
+      "rules": ["workflow-mutable-action", "workflow-untrusted-checkout"],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite input; expansion must propagate with bindings so ref: ${{ inputs.ref }} still triggers Critical→block."
+    },
+    {
       "id": "workflow-dangerous-permissions",
       "kind": "fixture",
       "path": "fixtures/workflow-dangerous-permissions",
