@@ -15,8 +15,11 @@
 //! `with: ref: ${{ env.PR_REF }}` after `env.PR_REF` was set to an untrusted
 //! github context, a step-local env alias such as
 //! `env: { TARGET: ${{ inputs.ref }} }` with `with: { ref: ${{ env.TARGET }} }`,
+//! a step-output indirection such as writing `${{ inputs.ref }}` to
+//! `$GITHUB_OUTPUT` then checking out `${{ steps.resolve.outputs.ref }}`,
 //! or an omitted `with` that relies on an untrusted input default — cannot
-//! bypass Critical→block. Quoted expression literals such as
+//! bypass Critical→block. Unresolved `steps.*.outputs.*` checkout refs fail
+//! closed under a privileged trigger. Quoted expression literals such as
 //! `${{ 'inputs.ref' }}` are not treated as input references.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
@@ -35,6 +38,8 @@ use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 type InputBindings = BTreeMap<String, String>;
 /// Workflow / job / step `env` map used to resolve `${{ env.NAME }}` aliases.
 type EnvBindings = BTreeMap<String, String>;
+/// Prior-step `$GITHUB_OUTPUT` writes keyed as `{step_id}.{output_name}`.
+type StepOutputBindings = BTreeMap<String, String>;
 
 struct StepScanCtx<'a> {
     privileged_trigger: bool,
@@ -43,6 +48,7 @@ struct StepScanCtx<'a> {
     expand_local: bool,
     input_bindings: &'a InputBindings,
     env_bindings: &'a EnvBindings,
+    step_outputs: &'a StepOutputBindings,
 }
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -116,7 +122,9 @@ fn scan_workflow(
             continue;
         };
         let job_env = merge_env_bindings(&workflow_env, &collect_env_bindings(job));
+        let mut step_outputs = StepOutputBindings::new();
         for step in steps.iter().filter_map(Yaml::as_hash) {
+            let step_env = merge_env_bindings(&job_env, &collect_env_bindings(step));
             scan_step(
                 step,
                 &file.rel,
@@ -127,9 +135,15 @@ fn scan_workflow(
                     expand_local: true,
                     input_bindings: &empty_bindings,
                     env_bindings: &job_env,
+                    step_outputs: &step_outputs,
                 },
                 findings,
             )?;
+            for (key, value) in
+                collect_step_output_bindings(step, &empty_bindings, &step_env, &step_outputs)
+            {
+                step_outputs.insert(key, value);
+            }
         }
     }
     Ok(())
@@ -150,6 +164,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
     let empty = ActionIndex::new();
     let empty_bindings = InputBindings::new();
     let empty_env = EnvBindings::new();
+    let empty_step_outputs = StepOutputBindings::new();
     // Standalone metadata keeps privileged_trigger=false and does not expand
     // nested local uses; workflow scans own that expansion with caller context.
     scan_composite_steps(
@@ -162,6 +177,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
             expand_local: false,
             input_bindings: &empty_bindings,
             env_bindings: &empty_env,
+            step_outputs: &empty_step_outputs,
         },
         findings,
     )
@@ -182,8 +198,28 @@ fn scan_composite_steps(
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
         return Ok(());
     };
+    let mut step_outputs = StepOutputBindings::new();
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        scan_step(step, rel, ctx, findings)?;
+        let step_env = merge_env_bindings(ctx.env_bindings, &collect_env_bindings(step));
+        scan_step(
+            step,
+            rel,
+            &StepScanCtx {
+                privileged_trigger: ctx.privileged_trigger,
+                actions: ctx.actions,
+                depth: ctx.depth,
+                expand_local: ctx.expand_local,
+                input_bindings: ctx.input_bindings,
+                env_bindings: ctx.env_bindings,
+                step_outputs: &step_outputs,
+            },
+            findings,
+        )?;
+        for (key, value) in
+            collect_step_output_bindings(step, ctx.input_bindings, &step_env, &step_outputs)
+        {
+            step_outputs.insert(key, value);
+        }
     }
     Ok(())
 }
@@ -205,7 +241,7 @@ fn scan_step(
         }
         if ctx.privileged_trigger
             && is_checkout(action)
-            && has_untrusted_checkout_ref(step, ctx.input_bindings, &step_env)
+            && has_untrusted_checkout_ref(step, ctx.input_bindings, &step_env, ctx.step_outputs)
         {
             findings.push(
                 Finding::new(
@@ -217,7 +253,9 @@ fn scan_step(
             );
         }
         if ctx.expand_local && is_local_action_ref(action) {
-            let nested_bindings = resolve_step_input_bindings(step, ctx.input_bindings, &step_env);
+            let nested_bindings =
+                resolve_step_input_bindings(step, ctx.input_bindings, &step_env, ctx.step_outputs);
+            let empty_step_outputs = StepOutputBindings::new();
             expand_local_composite(
                 action,
                 rel,
@@ -228,6 +266,7 @@ fn scan_step(
                     expand_local: true,
                     input_bindings: &nested_bindings,
                     env_bindings: &step_env,
+                    step_outputs: &empty_step_outputs,
                 },
                 findings,
             )?;
@@ -271,6 +310,7 @@ fn expand_local_composite(
     // GitHub applies Action input defaults when the caller omits `with` keys;
     // merge those defaults under caller bindings before scanning steps.
     let merged_bindings = merge_composite_input_defaults(root, ctx.input_bindings);
+    let empty_step_outputs = StepOutputBindings::new();
     scan_composite_steps(
         root,
         &meta.rel,
@@ -281,6 +321,7 @@ fn expand_local_composite(
             expand_local: true,
             input_bindings: &merged_bindings,
             env_bindings: ctx.env_bindings,
+            step_outputs: &empty_step_outputs,
         },
         findings,
     )
@@ -314,12 +355,14 @@ fn merge_composite_input_defaults(root: &Hash, caller_bindings: &InputBindings) 
 }
 
 /// Build nested composite bindings from a step's `with:` map, resolving any
-/// `${{ inputs.* }}` and `${{ env.* }}` references against the caller's
-/// already-resolved bindings and the effective workflow/job/step env map.
+/// `${{ inputs.* }}`, `${{ env.* }}`, and `${{ steps.*.outputs.* }}` references
+/// against the caller's already-resolved bindings, the effective
+/// workflow/job/step env map, and prior-step output writes.
 fn resolve_step_input_bindings(
     step: &Hash,
     parent_bindings: &InputBindings,
     env_bindings: &EnvBindings,
+    step_outputs: &StepOutputBindings,
 ) -> InputBindings {
     let mut bindings = InputBindings::new();
     let Some(with) = get(step, "with").and_then(Yaml::as_hash) else {
@@ -334,7 +377,7 @@ fn resolve_step_input_bindings(
         };
         bindings.insert(
             normalize_input_name(name),
-            resolve_context_expressions(raw, parent_bindings, env_bindings),
+            resolve_context_expressions(raw, parent_bindings, env_bindings, step_outputs),
         );
     }
     bindings
@@ -367,22 +410,27 @@ fn merge_env_bindings(parent: &EnvBindings, child: &EnvBindings) -> EnvBindings 
     merged
 }
 
-/// Resolve composite input and env aliases, normalizing bracket property access.
+/// Resolve composite input, env, and step-output aliases, normalizing bracket
+/// property access.
 ///
 /// Substitution is applied until a fixed point (or
 /// [`MAX_CONTEXT_RESOLVE_DEPTH`]) so env aliases that expand to
-/// `${{ inputs.* }}` (and the reverse) are fully rewritten before the
-/// untrusted-ref detector runs.
+/// `${{ inputs.* }}`, step outputs that expand to env/input expressions, and
+/// the reverse are fully rewritten before the untrusted-ref detector runs.
 fn resolve_context_expressions(
     value: &str,
     input_bindings: &InputBindings,
     env_bindings: &EnvBindings,
+    step_outputs: &StepOutputBindings,
 ) -> String {
     let mut resolved = value.to_string();
     for _ in 0..MAX_CONTEXT_RESOLVE_DEPTH {
-        let next = resolve_env_expressions(
-            &resolve_input_expressions(&resolved, input_bindings),
-            env_bindings,
+        let next = resolve_step_output_expressions(
+            &resolve_env_expressions(
+                &resolve_input_expressions(&resolved, input_bindings),
+                env_bindings,
+            ),
+            step_outputs,
         );
         if next == resolved {
             return next;
@@ -437,6 +485,143 @@ fn resolve_env_expressions(value: &str, bindings: &EnvBindings) -> String {
         resolved = replace_context_identifier(&resolved, "env", name, bound, false);
     }
     resolved
+}
+
+/// Substitute `steps.<id>.outputs.<name>` using prior `$GITHUB_OUTPUT` writes.
+///
+/// Keys are stored as `{id}.{name}`. Bracket property access is normalized
+/// first. Step ids and output names are case-sensitive.
+fn resolve_step_output_expressions(value: &str, bindings: &StepOutputBindings) -> String {
+    let mut resolved = normalize_bracket_property_access(value);
+    if bindings.is_empty() {
+        return resolved;
+    }
+    let mut keys: Vec<&String> = bindings.keys().collect();
+    keys.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
+    for key in keys {
+        let Some((step_id, output_name)) = key.split_once('.') else {
+            continue;
+        };
+        let Some(bound) = bindings.get(key) else {
+            continue;
+        };
+        let context = format!("steps.{step_id}.outputs");
+        resolved = replace_context_identifier(&resolved, &context, output_name, bound, false);
+    }
+    resolved
+}
+
+/// Collect `id` + `run` step writes of the form `echo "name=value" >> $GITHUB_OUTPUT`.
+fn collect_step_output_bindings(
+    step: &Hash,
+    input_bindings: &InputBindings,
+    env_bindings: &EnvBindings,
+    step_outputs: &StepOutputBindings,
+) -> StepOutputBindings {
+    let mut collected = StepOutputBindings::new();
+    let Some(step_id) = get_string(step, "id") else {
+        return collected;
+    };
+    if !is_github_ident(step_id) {
+        return collected;
+    }
+    let Some(script) = get_string(step, "run") else {
+        return collected;
+    };
+    for (name, raw_value) in parse_github_output_writes(script) {
+        // Shell expansions outside `${{ }}` are not statically trackable; leave
+        // the step output unresolved so privileged checkout fails closed.
+        if value_contains_untracked_shell_expansion(&raw_value) {
+            continue;
+        }
+        collected.insert(
+            format!("{step_id}.{name}"),
+            resolve_context_expressions(&raw_value, input_bindings, env_bindings, step_outputs),
+        );
+    }
+    collected
+}
+
+/// True when `value` still has `$...` shell expansion outside GitHub expressions.
+fn value_contains_untracked_shell_expansion(value: &str) -> bool {
+    let without_expressions = map_expression_regions(value, |_| " ".to_string());
+    without_expressions.contains('$')
+}
+
+/// Parse simple `echo[ -n] "name=value" >> $GITHUB_OUTPUT` lines from a script.
+fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
+    let mut writes = Vec::new();
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(command) = split_github_output_redirect(trimmed) else {
+            continue;
+        };
+        let Some(payload) = extract_echo_payload(command) else {
+            continue;
+        };
+        let payload = strip_wrapping_shell_quotes(payload.trim());
+        let Some((name, value)) = payload.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !is_github_ident(name) {
+            continue;
+        }
+        writes.push((name.to_string(), value.trim().to_string()));
+    }
+    writes
+}
+
+fn split_github_output_redirect(line: &str) -> Option<&str> {
+    let index = line.find(">>")?;
+    let (before, after) = line.split_at(index);
+    let after = after.trim_start_matches('>').trim();
+    let target = strip_wrapping_shell_quotes(after).trim();
+    if target == "$GITHUB_OUTPUT" || target == "${GITHUB_OUTPUT}" {
+        Some(before.trim())
+    } else {
+        None
+    }
+}
+
+fn extract_echo_payload(command: &str) -> Option<&str> {
+    let trimmed = command.trim();
+    let rest = trimmed.strip_prefix("echo")?.trim_start();
+    let rest = rest
+        .strip_prefix("-n")
+        .map(|value| value.trim_start())
+        .unwrap_or(rest);
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+fn strip_wrapping_shell_quotes(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn is_github_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
 }
 
 /// Rewrite `['id']` / `["id"]` (with optional whitespace) to `.id` so bracket
@@ -770,13 +955,15 @@ fn has_untrusted_checkout_ref(
     step: &Hash,
     input_bindings: &InputBindings,
     env_bindings: &EnvBindings,
+    step_outputs: &StepOutputBindings,
 ) -> bool {
     get(step, "with")
         .and_then(Yaml::as_hash)
         .and_then(|with| get_string(with, "ref"))
         .is_some_and(|revision| {
-            let resolved = resolve_context_expressions(revision, input_bindings, env_bindings);
-            is_untrusted_ref_expression(&resolved)
+            let resolved =
+                resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
+            is_untrusted_ref_expression(&resolved) || has_unresolved_step_output_ref(&resolved)
         })
 }
 
@@ -785,6 +972,28 @@ fn is_untrusted_ref_expression(revision: &str) -> bool {
         || revision.contains("github.event.pull_request.merge_commit_sha")
         || revision.contains("github.event.workflow_run.head_sha")
         || revision.contains("github.event.workflow_run.head_branch")
+}
+
+/// Fail closed when a checkout ref still names `steps.*.outputs.*` after
+/// known `$GITHUB_OUTPUT` rewrites — incomplete step-output tracking must not
+/// collapse into allow under a privileged trigger.
+fn has_unresolved_step_output_ref(revision: &str) -> bool {
+    static STEP_OUTPUT_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = STEP_OUTPUT_REF.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
+            .expect("step output ref pattern compiles")
+    });
+    let normalized = normalize_bracket_property_access(revision);
+    let mut found = false;
+    let _ = map_expression_regions(&normalized, |inner| {
+        let cleaned = remove_expression_string_literals(inner);
+        if pattern.is_match(&cleaned) {
+            found = true;
+        }
+        inner.to_string()
+    });
+    found
 }
 
 fn is_checkout(action: &str) -> bool {
@@ -1292,13 +1501,132 @@ jobs:
         );
         let mut env = EnvBindings::new();
         env.insert("TARGET".to_string(), "${{ inputs.ref }}".to_string());
-        let resolved = resolve_context_expressions("${{ env.TARGET }}", &inputs, &env);
+        let resolved = resolve_context_expressions(
+            "${{ env.TARGET }}",
+            &inputs,
+            &env,
+            &StepOutputBindings::new(),
+        );
         assert!(
             resolved.contains("github.event.pull_request.head.sha"),
             "env→inputs chain must resolve: {resolved}"
         );
         assert!(!resolved.contains("inputs.ref") && !resolved.contains("env.TARGET"));
         assert!(is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
+    fn resolve_context_expressions_resolves_step_output_from_github_output() {
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut step_outputs = StepOutputBindings::new();
+        step_outputs.insert("resolve.ref".to_string(), "${{ inputs.ref }}".to_string());
+        let resolved = resolve_context_expressions(
+            "${{ steps.resolve.outputs.ref }}",
+            &inputs,
+            &EnvBindings::new(),
+            &step_outputs,
+        );
+        assert!(
+            resolved.contains("github.event.pull_request.head.sha"),
+            "step-output→inputs chain must resolve: {resolved}"
+        );
+        assert!(!resolved.contains("steps.resolve.outputs.ref"));
+        assert!(is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
+    fn privileged_local_composite_step_output_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      run: echo "ref=${{ inputs.ref }}" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_unresolved_step_output_checkout_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      run: |
+        REF=$(git rev-parse HEAD)
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
