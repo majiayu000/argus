@@ -7,8 +7,9 @@
 //! When a workflow step `uses` a same-repo composite (`./...`), that composite
 //! is expanded with the caller's privileged-trigger flag and `with` input
 //! bindings so wrapping an untrusted checkout — including via
-//! `ref: ${{ inputs.ref }}` or compound forms such as
-//! `ref: ${{ inputs.ref || github.sha }}` — cannot bypass Critical→block.
+//! `ref: ${{ inputs.ref }}`, bracket forms such as `ref: ${{ inputs['ref'] }}`,
+//! or compound forms such as `ref: ${{ inputs.ref || github.sha }}` — cannot
+//! bypass Critical→block.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed.
@@ -16,7 +17,9 @@
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
+use regex::Regex;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
 /// Resolved caller `with` bindings for the current local-composite expansion.
@@ -276,15 +279,16 @@ fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> 
 ///
 /// Replaces identifier occurrences inside compound expressions
 /// (`${{ inputs.ref || github.sha }}`) as well as whole-expression forms
-/// (`${{ inputs.ref }}`). Longer input names are applied first so a binding
-/// named `ref` cannot partially match `referral`.
+/// (`${{ inputs.ref }}` / `${{ inputs['ref'] }}`). Bracket property access is
+/// normalized to dotted form first. Longer input names are applied first so a
+/// binding named `ref` cannot partially match `referral`.
 fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
     if bindings.is_empty() {
         return value.to_string();
     }
     let mut names: Vec<&String> = bindings.keys().collect();
     names.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
-    let mut resolved = value.to_string();
+    let mut resolved = normalize_bracket_property_access(value);
     for name in names {
         let Some(bound) = bindings.get(name) else {
             continue;
@@ -292,6 +296,18 @@ fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
         resolved = replace_input_identifier(&resolved, name, bound);
     }
     resolved
+}
+
+/// Rewrite `['id']` / `["id"]` (with optional whitespace) to `.id` so bracket
+/// and mixed property access share the dotted-token input replacer.
+fn normalize_bracket_property_access(expression: &str) -> String {
+    static BRACKET_PROPERTY: OnceLock<Regex> = OnceLock::new();
+    let pattern = BRACKET_PROPERTY.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r#"\[\s*['"]([A-Za-z_][A-Za-z0-9_-]*)['"]\s*\]"#)
+            .expect("bracket property access pattern compiles")
+    });
+    pattern.replace_all(expression, ".$1").into_owned()
 }
 
 /// Replace bare `inputs.{name}` tokens that are not part of a longer property
@@ -747,6 +763,50 @@ runs:
     }
 
     #[test]
+    fn privileged_local_composite_bracket_input_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs['ref'] }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
     fn resolve_input_expressions_substitutes_inside_compound_forms() {
         let mut bindings = InputBindings::new();
         bindings.insert(
@@ -757,6 +817,34 @@ runs:
         assert!(resolved.contains("github.event.pull_request.head.sha"));
         assert!(!resolved.contains("inputs.ref"));
         assert!(is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
+    fn resolve_input_expressions_substitutes_bracket_forms() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        for expression in [
+            "${{ inputs['ref'] }}",
+            r#"${{ inputs["ref"] }}"#,
+            "${{ inputs[ 'ref' ] || github.sha }}",
+        ] {
+            let resolved = resolve_input_expressions(expression, &bindings);
+            assert!(
+                resolved.contains("github.event.pull_request.head.sha"),
+                "failed to substitute in {expression}: {resolved}"
+            );
+            assert!(
+                !resolved.contains("inputs['ref']") && !resolved.contains(r#"inputs["ref"]"#),
+                "bracket token remained in {expression}: {resolved}"
+            );
+            assert!(
+                is_untrusted_ref_expression(&resolved),
+                "resolved expression was not untrusted: {resolved}"
+            );
+        }
     }
 
     #[test]
