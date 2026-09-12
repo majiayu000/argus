@@ -7,6 +7,9 @@
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
+use regex::Regex;
+use std::collections::HashSet;
+use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -44,6 +47,11 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
         has_trigger(root, "pull_request_target") || has_trigger(root, "workflow_run");
     check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
 
+    let mut workflow_tainted_envs = HashSet::new();
+    if let Some(env) = get(root, "env").and_then(Yaml::as_hash) {
+        apply_env_taints(&mut workflow_tainted_envs, env, &file.rel)?;
+    }
+
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
         return Ok(());
     };
@@ -52,11 +60,25 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
         if let Some(action) = get_string(job, "uses") {
             check_action_ref(action, &file.rel, findings);
         }
+        let mut job_tainted_envs = workflow_tainted_envs.clone();
+        if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
+            apply_env_taints(&mut job_tainted_envs, env, &file.rel)?;
+        }
         let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
             continue;
         };
         for step in steps.iter().filter_map(Yaml::as_hash) {
-            scan_step(step, &file.rel, privileged_trigger, findings)?;
+            let mut step_tainted_envs = job_tainted_envs.clone();
+            if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
+                apply_env_taints(&mut step_tainted_envs, env, &file.rel)?;
+            }
+            scan_step(
+                step,
+                &file.rel,
+                privileged_trigger,
+                &step_tainted_envs,
+                findings,
+            )?;
         }
     }
     Ok(())
@@ -84,7 +106,11 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         return Ok(());
     };
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        scan_step(step, &file.rel, false, findings)?;
+        let mut step_tainted_envs = HashSet::new();
+        if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
+            apply_env_taints(&mut step_tainted_envs, env, &file.rel)?;
+        }
+        scan_step(step, &file.rel, false, &step_tainted_envs, findings)?;
     }
     Ok(())
 }
@@ -93,6 +119,7 @@ fn scan_step(
     step: &Hash,
     rel: &str,
     privileged_trigger: bool,
+    tainted_envs: &HashSet<String>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     if let Some(action) = get_string(step, "uses") {
@@ -109,9 +136,43 @@ fn scan_step(
         }
     }
     if let Some(script) = get_string(step, "run") {
-        check_inline_script(script, rel, findings)?;
+        check_inline_script(script, rel, tainted_envs, findings)?;
     }
     Ok(())
+}
+
+fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Result<()> {
+    for (key, value) in env {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        if value_contains_untrusted_context(value, rel)? {
+            tainted.insert(name.to_string());
+        } else {
+            // A same-scope redeclaration without untrusted contexts clears prior taint.
+            tainted.remove(name);
+        }
+    }
+    Ok(())
+}
+
+fn value_contains_untrusted_context(value: &str, rel: &str) -> Result<bool> {
+    let mut remaining = value;
+    while let Some(start) = remaining.find("${{") {
+        let after_start = &remaining[start + 3..];
+        let Some(end) = after_start.find("}}") else {
+            bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `env`");
+        };
+        let expression = after_start[..end].trim();
+        if is_untrusted_context(expression) {
+            return Ok(true);
+        }
+        remaining = &after_start[end + 2..];
+    }
+    Ok(false)
 }
 
 fn check_permissions(
@@ -183,7 +244,12 @@ fn is_immutable_action_ref(action: &str) -> bool {
         .is_some_and(|(_, revision)| revision.len() == 40 && revision.bytes().all(is_hex))
 }
 
-fn check_inline_script(script: &str, rel: &str, findings: &mut Vec<Finding>) -> Result<()> {
+fn check_inline_script(
+    script: &str,
+    rel: &str,
+    tainted_envs: &HashSet<String>,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
     let mut remaining = script;
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
@@ -191,7 +257,8 @@ fn check_inline_script(script: &str, rel: &str, findings: &mut Vec<Finding>) -> 
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `run`");
         };
         let expression = after_start[..end].trim();
-        if is_untrusted_context(expression) {
+        if is_untrusted_context(expression) || expression_uses_tainted_env(expression, tainted_envs)
+        {
             findings.push(
                 Finding::new(
                     RULE_CONTEXT_INJECTION,
@@ -207,6 +274,26 @@ fn check_inline_script(script: &str, rel: &str, findings: &mut Vec<Finding>) -> 
         remaining = &after_start[end + 2..];
     }
     Ok(())
+}
+
+/// Detect `${{ env.NAME }}` / `${{ env['NAME'] }}` / `${{ env["NAME"] }}` when
+/// `NAME` was assigned an untrusted GitHub context in an in-scope `env` map.
+fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>) -> bool {
+    if tainted_envs.is_empty() {
+        return false;
+    }
+    static ENV_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = ENV_REF.get_or_init(|| {
+        Regex::new(r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([^'"]+)['"]\s*\])"#)
+            .expect("tainted env reference pattern compiles")
+    });
+    pattern.captures_iter(expression).any(|capture| {
+        let name = capture
+            .get(1)
+            .or_else(|| capture.get(2))
+            .map(|matched| matched.as_str());
+        name.is_some_and(|name| tainted_envs.contains(name))
+    })
 }
 
 fn is_untrusted_context(expression: &str) -> bool {
@@ -450,5 +537,92 @@ jobs:
 
         assert!(trusted_findings.is_empty());
         assert!(privileged_findings.is_empty());
+    }
+
+    #[test]
+    fn env_indirection_same_step_blocks_context_injection() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ github.event.issue.title }}
+        run: echo "${{ env.TITLE }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.TITLE")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn env_indirection_job_env_and_bracket_access_block() {
+        let dotted = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ env.TITLE }}"
+"#,
+        );
+        let bracketed = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ github.event.issue.title }}
+        run: echo "${{ env['TITLE'] }}"
+"#,
+        );
+
+        assert!(dotted.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.detail.contains("env.TITLE")
+        }));
+        assert!(bracketed.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.detail.contains("env['TITLE']")
+        }));
+        assert_eq!(crate::decision::derive(&dotted), Decision::Block);
+        assert_eq!(crate::decision::derive(&bracketed), Decision::Block);
+    }
+
+    #[test]
+    fn env_shell_expansion_without_expression_interpolation_is_allowed() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ github.event.issue.title }}
+        run: echo "$TITLE"
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 }
