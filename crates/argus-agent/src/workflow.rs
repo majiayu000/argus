@@ -7,10 +7,11 @@
 //! When a workflow step `uses` a same-repo composite (`./...`), that composite
 //! is expanded with the caller's privileged-trigger flag and `with` input
 //! bindings so wrapping an untrusted checkout — including via
-//! `ref: ${{ inputs.ref }}` — cannot bypass Critical→block. Standalone Action
-//! metadata scans still use `privileged_trigger=false` so composites alone do
-//! not invent a privileged trigger. Local expansion is depth-bounded and
-//! fail-closed.
+//! `ref: ${{ inputs.ref }}` or compound forms such as
+//! `ref: ${{ inputs.ref || github.sha }}` — cannot bypass Critical→block.
+//! Standalone Action metadata scans still use `privileged_trigger=false` so
+//! composites alone do not invent a privileged trigger. Local expansion is
+//! depth-bounded and fail-closed.
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
@@ -271,20 +272,60 @@ fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> 
     bindings
 }
 
-/// Substitute `${{ inputs.name }}` / `inputs.name` with caller binding values.
+/// Substitute composite `inputs.name` references with caller binding values.
+///
+/// Replaces identifier occurrences inside compound expressions
+/// (`${{ inputs.ref || github.sha }}`) as well as whole-expression forms
+/// (`${{ inputs.ref }}`). Longer input names are applied first so a binding
+/// named `ref` cannot partially match `referral`.
 fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
     if bindings.is_empty() {
         return value.to_string();
     }
+    let mut names: Vec<&String> = bindings.keys().collect();
+    names.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
     let mut resolved = value.to_string();
-    for (name, bound) in bindings {
-        let braced = format!("${{{{ inputs.{name} }}}}");
-        let braced_tight = format!("${{{{inputs.{name}}}}}");
-        resolved = resolved
-            .replace(&braced, bound)
-            .replace(&braced_tight, bound);
+    for name in names {
+        let Some(bound) = bindings.get(name) else {
+            continue;
+        };
+        resolved = replace_input_identifier(&resolved, name, bound);
     }
     resolved
+}
+
+/// Replace bare `inputs.{name}` tokens that are not part of a longer property
+/// path (for example skip `github.event.inputs.ref`).
+fn replace_input_identifier(value: &str, name: &str, replacement: &str) -> String {
+    let needle = format!("inputs.{name}");
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(offset) = rest.find(&needle) {
+        let end = offset + needle.len();
+        let precedes_ok = offset == 0
+            || rest[..offset]
+                .chars()
+                .next_back()
+                .is_some_and(|character| !is_expression_ident_char(character) && character != '.');
+        let follows_ok = rest[end..]
+            .chars()
+            .next()
+            .is_none_or(|character| !is_expression_ident_char(character));
+        if precedes_ok && follows_ok {
+            output.push_str(&rest[..offset]);
+            output.push_str(replacement);
+            rest = &rest[end..];
+            continue;
+        }
+        output.push_str(&rest[..end]);
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn is_expression_ident_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == '-'
 }
 
 fn is_local_action_ref(action: &str) -> bool {
@@ -659,6 +700,63 @@ runs:
             finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_compound_input_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref || github.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn resolve_input_expressions_substitutes_inside_compound_forms() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let resolved = resolve_input_expressions("${{ inputs.ref || github.sha }}", &bindings);
+        assert!(resolved.contains("github.event.pull_request.head.sha"));
+        assert!(!resolved.contains("inputs.ref"));
+        assert!(is_untrusted_ref_expression(&resolved));
     }
 
     #[test]

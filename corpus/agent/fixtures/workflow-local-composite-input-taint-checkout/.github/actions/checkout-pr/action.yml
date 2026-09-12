@@ -3,10 +3,10 @@ description: Check out a caller-supplied ref
 inputs:
   ref:
     description: Git ref to check out
-    required: true
+    required: false
 runs:
   using: composite
   steps:
     - uses: actions/checkout@v4
       with:
-        ref: ${{ inputs.ref }}
+        ref: ${{ inputs.ref || github.sha }}
