@@ -55,7 +55,26 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
             _ => {}
         }
     }
+    dedup_findings(findings);
     Ok(())
+}
+
+/// Local composites are scanned both as standalone ActionMetadata and again
+/// through each local `uses:` caller. Caller-independent findings therefore
+/// repeat at the same path; keep the first occurrence of each identity.
+fn dedup_findings(findings: &mut Vec<Finding>) {
+    let mut seen = HashSet::new();
+    findings.retain(|finding| {
+        seen.insert((
+            finding.rule_id.clone(),
+            finding.severity as u8,
+            finding.detail.clone(),
+            finding.location.clone(),
+            finding.capability.clone(),
+            finding.evidence.clone(),
+            finding.resolved_host.clone(),
+        ))
+    });
 }
 
 fn scan_workflow(
@@ -201,7 +220,7 @@ fn scan_step(
         }
         if let Some(local) = action.strip_prefix("./") {
             if let Some(action_file) = resolve_local_action(local, actions) {
-                let step_tainted_inputs = collect_tainted_with_inputs(step, taint.envs, rel)?;
+                let step_tainted_inputs = collect_tainted_with_inputs(step, taint, rel)?;
                 scan_action_metadata(
                     action_file,
                     TaintScope {
@@ -250,7 +269,7 @@ fn resolve_local_action<'a>(
 
 fn collect_tainted_with_inputs(
     step: &Hash,
-    tainted_envs: &HashSet<String>,
+    taint: TaintScope<'_>,
     rel: &str,
 ) -> Result<HashSet<String>> {
     let mut tainted = HashSet::new();
@@ -265,9 +284,11 @@ fn collect_tainted_with_inputs(
             continue;
         };
         // Caller `with:` bindings are evaluated before the composite runs, so a
-        // tainted env (or direct untrusted context) becomes a tainted input.
+        // tainted env, tainted input forwarded from a parent composite, or a
+        // direct untrusted context becomes a tainted input for the callee.
         if value_contains_untrusted_context(value, rel)?
-            || value_references_tainted_env(value, tainted_envs, rel)?
+            || value_references_tainted_env(value, taint.envs, rel)?
+            || value_references_tainted_input(value, taint.inputs, rel)?
         {
             tainted.insert(name.to_string());
         }
@@ -1276,6 +1297,130 @@ runs:
                     .is_some_and(|path| path.contains("action.yml"))
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn nested_composite_forwards_input_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ./.github/actions/outer
+        with:
+          title: ${{ env.TITLE }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/outer/action.yml".to_string(),
+                content: r#"
+name: Outer
+description: Forward input
+inputs:
+  title:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/inner
+      with:
+        title: ${{ inputs.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+            SurfaceFile {
+                rel: ".github/actions/inner/action.yml".to_string(),
+                content: r#"
+name: Inner
+description: Echo input
+inputs:
+  title:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ inputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("inputs.title")
+                && finding.location.as_deref() == Some(".github/actions/inner/action.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn local_action_findings_are_deduplicated_across_callers() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/one.yml".to_string(),
+                content: r#"
+name: One
+on: push
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/echo
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/two.yml".to_string(),
+                content: r#"
+name: Two
+on: push
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/echo
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/echo/action.yml".to_string(),
+                content: r#"
+name: Echo
+description: Mutable remote action
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+        let mutable = findings
+            .iter()
+            .filter(|finding| {
+                finding.rule_id == "AGT-06-workflow-mutable-action"
+                    && finding.location.as_deref() == Some(".github/actions/echo/action.yml")
+            })
+            .count();
+        assert_eq!(mutable, 1);
     }
 
     #[test]
