@@ -17,6 +17,8 @@
 //! `env: { TARGET: ${{ inputs.ref }} }` with `with: { ref: ${{ env.TARGET }} }`,
 //! a step-output indirection such as writing `${{ inputs.ref }}` to
 //! `$GITHUB_OUTPUT` then checking out `${{ steps.resolve.outputs.ref }}`,
+//! including when a later untracked `$GITHUB_OUTPUT` overwrite or backtick
+//! command substitution would otherwise leave a stale safe binding,
 //! or an omitted `with` that relies on an untrusted input default — cannot
 //! bypass Critical→block. Unresolved `steps.*.outputs.*` checkout refs fail
 //! closed under a privileged trigger. Quoted expression literals such as
@@ -529,23 +531,49 @@ fn collect_step_output_bindings(
         return collected;
     };
     for (name, raw_value) in parse_github_output_writes(script) {
+        let key = format!("{step_id}.{name}");
         // Shell expansions outside `${{ }}` are not statically trackable; leave
         // the step output unresolved so privileged checkout fails closed.
+        // GitHub keeps the last write for a given output name, so an untracked
+        // overwrite must also drop any earlier safe binding for that name.
         if value_contains_untracked_shell_expansion(&raw_value) {
+            collected.remove(&key);
             continue;
         }
         collected.insert(
-            format!("{step_id}.{name}"),
+            key,
             resolve_context_expressions(&raw_value, input_bindings, env_bindings, step_outputs),
         );
     }
     collected
 }
 
-/// True when `value` still has `$...` shell expansion outside GitHub expressions.
+/// True when `value` still has `$...` or backtick command substitution outside
+/// GitHub expressions.
 fn value_contains_untracked_shell_expansion(value: &str) -> bool {
-    let without_expressions = map_expression_regions(value, |_| " ".to_string());
-    without_expressions.contains('$')
+    // Blank entire `${{ ... }}` regions, including the leading `$`, so expression
+    // syntax is not mistaken for shell expansion.
+    let without_expressions = blank_github_expression_regions(value);
+    without_expressions.contains('$') || without_expressions.contains('`')
+}
+
+/// Replace each `${{ ... }}` span with a single space (unclosed tails blanked).
+fn blank_github_expression_regions(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(rel_start) = value[cursor..].find("${{") {
+        let start = cursor + rel_start;
+        output.push_str(&value[cursor..start]);
+        let after_open = start + 3;
+        let Some(rel_end) = value[after_open..].find("}}") else {
+            output.push(' ');
+            return output;
+        };
+        output.push(' ');
+        cursor = after_open + rel_end + 2;
+    }
+    output.push_str(&value[cursor..]);
+    output
 }
 
 /// Parse simple `echo[ -n] "name=value" >> $GITHUB_OUTPUT` lines from a script.
@@ -1614,6 +1642,167 @@ runs:
       run: |
         REF=$(git rev-parse HEAD)
         echo "ref=$REF" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn value_contains_untracked_shell_expansion_detects_dollar_and_backtick() {
+        assert!(value_contains_untracked_shell_expansion("$TARGET"));
+        assert!(value_contains_untracked_shell_expansion(
+            "`printenv TARGET`"
+        ));
+        assert!(value_contains_untracked_shell_expansion(
+            "prefix`cmd`suffix"
+        ));
+        assert!(!value_contains_untracked_shell_expansion("main"));
+        assert!(!value_contains_untracked_shell_expansion(
+            "${{ inputs.ref }}"
+        ));
+    }
+
+    #[test]
+    fn collect_step_output_bindings_invalidates_untracked_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: |
+  echo "ref=main" >> "$GITHUB_OUTPUT"
+  echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "untracked overwrite must drop the earlier safe binding: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn collect_step_output_bindings_treats_backtick_substitution_as_untracked() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: echo "ref=`printenv TARGET`" >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "backtick command substitution must leave the output unresolved: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_step_output_untracked_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: |
+        echo "ref=main" >> "$GITHUB_OUTPUT"
+        echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_step_output_backtick_substitution_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: echo "ref=`printenv TARGET`" >> "$GITHUB_OUTPUT"
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ steps.resolve.outputs.ref }}
