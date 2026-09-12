@@ -154,6 +154,15 @@
       "notes": "Step-level env aliases a tainted job env via ${{ env.TITLE }} and re-interpolates the alias in run."
     },
     {
+      "id": "workflow-env-indirection-composite",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-composite",
+      "packageName": "workflow-env-indirection-composite",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Caller job env taints TITLE and a local composite action re-interpolates ${{ env.TITLE }} in run, which inherits the caller environment."
+    },
+    {
       "id": "composite-action-dangerous",
       "kind": "fixture",
       "path": "fixtures/composite-action-dangerous",

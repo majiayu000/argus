@@ -8,7 +8,7 @@ use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
@@ -19,19 +19,35 @@ const RULE_WRITE_ALL: &str = "AGT-06-workflow-write-all";
 const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
+    let actions: HashMap<&str, &SurfaceFile> = files
+        .iter()
+        .filter(|file| file.kind == SurfaceKind::ActionMetadata)
+        .map(|file| (file.rel.as_str(), file))
+        .collect();
     for file in files {
         match file.kind {
-            SurfaceKind::Workflow => scan_workflow(file, findings)
-                .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?,
-            SurfaceKind::ActionMetadata => scan_action_metadata(file, findings)
-                .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?,
+            SurfaceKind::Workflow => {
+                let mut visiting = HashSet::new();
+                scan_workflow(file, &actions, &mut visiting, findings)
+                    .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?;
+            }
+            SurfaceKind::ActionMetadata => {
+                let mut visiting = HashSet::new();
+                scan_action_metadata(file, &HashSet::new(), &actions, &mut visiting, findings)
+                    .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?;
+            }
             _ => {}
         }
     }
     Ok(())
 }
 
-fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> {
+fn scan_workflow(
+    file: &SurfaceFile,
+    actions: &HashMap<&str, &SurfaceFile>,
+    visiting: &mut HashSet<String>,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
     if documents.len() != 1 {
@@ -77,6 +93,8 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
                 &file.rel,
                 privileged_trigger,
                 &step_tainted_envs,
+                actions,
+                visiting,
                 findings,
             )?;
         }
@@ -84,7 +102,16 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
     Ok(())
 }
 
-fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> {
+fn scan_action_metadata(
+    file: &SurfaceFile,
+    caller_tainted_envs: &HashSet<String>,
+    actions: &HashMap<&str, &SurfaceFile>,
+    visiting: &mut HashSet<String>,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    if !visiting.insert(file.rel.clone()) {
+        return Ok(());
+    }
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
     if documents.len() != 1 {
@@ -97,21 +124,34 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         .as_hash()
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
+        visiting.remove(&file.rel);
         return Ok(());
     };
     if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
+        visiting.remove(&file.rel);
         return Ok(());
     }
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
+        visiting.remove(&file.rel);
         return Ok(());
     };
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        let mut step_tainted_envs = HashSet::new();
+        // Caller env remains visible inside local composite steps at runtime.
+        let mut step_tainted_envs = caller_tainted_envs.clone();
         if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
             apply_env_taints(&mut step_tainted_envs, env, &file.rel)?;
         }
-        scan_step(step, &file.rel, false, &step_tainted_envs, findings)?;
+        scan_step(
+            step,
+            &file.rel,
+            false,
+            &step_tainted_envs,
+            actions,
+            visiting,
+            findings,
+        )?;
     }
+    visiting.remove(&file.rel);
     Ok(())
 }
 
@@ -120,6 +160,8 @@ fn scan_step(
     rel: &str,
     privileged_trigger: bool,
     tainted_envs: &HashSet<String>,
+    actions: &HashMap<&str, &SurfaceFile>,
+    visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     if let Some(action) = get_string(step, "uses") {
@@ -134,11 +176,33 @@ fn scan_step(
                 .at(rel),
             );
         }
+        if let Some(local) = action.strip_prefix("./") {
+            if let Some(action_file) = resolve_local_action(local, actions) {
+                scan_action_metadata(action_file, tainted_envs, actions, visiting, findings)?;
+            }
+        }
     }
     if let Some(script) = get_string(step, "run") {
         check_inline_script(script, rel, tainted_envs, findings)?;
     }
     Ok(())
+}
+
+fn resolve_local_action<'a>(
+    local_ref: &str,
+    actions: &HashMap<&str, &'a SurfaceFile>,
+) -> Option<&'a SurfaceFile> {
+    let path = local_ref.trim_end_matches('/');
+    if let Some(file) = actions.get(path) {
+        return Some(*file);
+    }
+    for name in ["action.yml", "action.yaml"] {
+        let candidate = format!("{path}/{name}");
+        if let Some(file) = actions.get(candidate.as_str()) {
+            return Some(*file);
+        }
+    }
+    None
 }
 
 fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Result<()> {
@@ -193,7 +257,7 @@ fn for_each_expression(
     let mut matched = false;
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
-        let Some(end) = after_start.find("}}") else {
+        let Some(end) = find_expression_close(after_start) else {
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `env`");
         };
         let expression = after_start[..end].trim();
@@ -205,6 +269,27 @@ fn for_each_expression(
         remaining = &after_start[end + 2..];
     }
     Ok(matched)
+}
+
+/// Locate the closing `}}` while treating `}}` inside single-quoted literals as
+/// data. GitHub Actions expressions use `''` to escape a literal quote.
+fn find_expression_close(after_start: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut chars = after_start.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character == '\'' {
+            if quoted && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            quoted = !quoted;
+            continue;
+        }
+        if !quoted && character == '}' && chars.peek().is_some_and(|(_, next)| *next == '}') {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn check_permissions(
@@ -285,7 +370,7 @@ fn check_inline_script(
     let mut remaining = script;
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
-        let Some(end) = after_start.find("}}") else {
+        let Some(end) = find_expression_close(after_start) else {
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `run`");
         };
         let expression = after_start[..end].trim();
@@ -332,9 +417,10 @@ fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>)
         let Some(matched) = capture.get(0) else {
             return false;
         };
-        // Reject nested properties such as `obj.env.TITLE` (`.` is a word
-        // boundary, so `\benv` alone is not enough).
-        if matched.start() > 0 && expression[..matched.start()].ends_with('.') {
+        // Reject nested properties such as `obj.env.TITLE` or spaced
+        // `obj . env.TITLE` (`.` is a word boundary, so `\benv` alone is not
+        // enough; ignore whitespace between the property dot and `env`).
+        if matched.start() > 0 && expression[..matched.start()].trim_end().ends_with('.') {
             return false;
         }
         if offset_inside_single_quoted_literal(expression, matched.start()) {
@@ -494,7 +580,16 @@ mod tests {
             kind: SurfaceKind::Workflow,
         };
         let mut findings = Vec::new();
-        scan_workflow(&file, &mut findings).expect("scan workflow fixture");
+        let actions = HashMap::new();
+        let mut visiting = HashSet::new();
+        scan_workflow(&file, &actions, &mut visiting, &mut findings)
+            .expect("scan workflow fixture");
+        findings
+    }
+
+    fn findings_for_files(files: &[SurfaceFile]) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        run(files, &mut findings).expect("scan workflow surfaces");
         findings
     }
 
@@ -772,7 +867,10 @@ jobs:
             kind: SurfaceKind::Workflow,
         };
         let mut findings = Vec::new();
-        let error = scan_workflow(&file, &mut findings).expect_err("unterminated env expression");
+        let actions = HashMap::new();
+        let mut visiting = HashSet::new();
+        let error = scan_workflow(&file, &actions, &mut visiting, &mut findings)
+            .expect_err("unterminated env expression");
         assert!(
             error
                 .to_string()
@@ -848,5 +946,99 @@ jobs:
             .iter()
             .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn spaced_nested_env_property_is_not_treated_as_actions_env_context() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ fromJSON('{\"env\":{\"TITLE\":\"fixed\"}}') . env.TITLE }}"
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn quoted_braces_inside_env_expression_still_detect_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ format('}}{0}', github.event.issue.title) }}
+        run: echo "${{ env.TITLE }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.TITLE")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn local_composite_inherits_caller_env_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ./.github/actions/echo
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/echo/action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Echo inherited env
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ env.TITLE }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.TITLE")
+                && finding
+                    .location
+                    .as_deref()
+                    .is_some_and(|path| path.contains("action.yml"))
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 }
