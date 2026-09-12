@@ -171,6 +171,28 @@
       "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite with casing that differs from the declared input (with.ref vs inputs.Ref); expansion must resolve case-insensitively so Critical\u2192block still applies for a pinned checkout."
     },
     {
+      "id": "workflow-local-composite-env-alias-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-env-alias-taint-checkout",
+      "packageName": "workflow-local-composite-env-alias-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow stores the PR head SHA in env.PR_REF and passes with.ref: ${{ env.PR_REF }} into a local composite; expansion must resolve env aliases so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-bracket-github-context-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-bracket-github-context-checkout",
+      "packageName": "workflow-local-composite-bracket-github-context-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow invokes a same-repo composite that checks out github['event']['pull_request']['head']['sha']; bracket normalization must run even with empty input bindings so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
       "id": "workflow-dangerous-permissions",
       "kind": "fixture",
       "path": "fixtures/workflow-dangerous-permissions",

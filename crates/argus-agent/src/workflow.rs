@@ -8,10 +8,13 @@
 //! is expanded with the caller's privileged-trigger flag and `with` input
 //! bindings (merged over Action metadata `inputs.*.default`) so wrapping an
 //! untrusted checkout — including via `ref: ${{ inputs.ref }}`, bracket forms
-//! such as `ref: ${{ inputs['ref'] }}`, compound forms such as
-//! `ref: ${{ inputs.ref || github.sha }}`, case-variant forms such as
-//! `ref: ${{ inputs.Ref }}`, or an omitted `with` that relies on an untrusted
-//! input default — cannot bypass Critical→block.
+//! such as `ref: ${{ inputs['ref'] }}` or
+//! `ref: ${{ github['event']['pull_request']['head']['sha'] }}`, compound forms
+//! such as `ref: ${{ inputs.ref || github.sha }}`, case-variant forms such as
+//! `ref: ${{ inputs.Ref }}`, env aliases such as
+//! `with: ref: ${{ env.PR_REF }}` after `env.PR_REF` was set to an untrusted
+//! github context, or an omitted `with` that relies on an untrusted input
+//! default — cannot bypass Critical→block.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed; source findings on composite bodies are left
@@ -27,6 +30,8 @@ use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
 /// Resolved caller `with` bindings for the current local-composite expansion.
 type InputBindings = BTreeMap<String, String>;
+/// Workflow / job / step `env` map used to resolve `${{ env.NAME }}` aliases.
+type EnvBindings = BTreeMap<String, String>;
 
 struct StepScanCtx<'a> {
     privileged_trigger: bool,
@@ -34,6 +39,7 @@ struct StepScanCtx<'a> {
     depth: u32,
     expand_local: bool,
     input_bindings: &'a InputBindings,
+    env_bindings: &'a EnvBindings,
 }
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -95,6 +101,7 @@ fn scan_workflow(
         return Ok(());
     };
     let empty_bindings = InputBindings::new();
+    let workflow_env = collect_env_bindings(root);
     for job in jobs.values().filter_map(Yaml::as_hash) {
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         if let Some(action) = get_string(job, "uses") {
@@ -103,6 +110,7 @@ fn scan_workflow(
         let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
             continue;
         };
+        let job_env = merge_env_bindings(&workflow_env, &collect_env_bindings(job));
         for step in steps.iter().filter_map(Yaml::as_hash) {
             scan_step(
                 step,
@@ -113,6 +121,7 @@ fn scan_workflow(
                     depth: 0,
                     expand_local: true,
                     input_bindings: &empty_bindings,
+                    env_bindings: &job_env,
                 },
                 findings,
             )?;
@@ -135,6 +144,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
     let empty = ActionIndex::new();
     let empty_bindings = InputBindings::new();
+    let empty_env = EnvBindings::new();
     // Standalone metadata keeps privileged_trigger=false and does not expand
     // nested local uses; workflow scans own that expansion with caller context.
     scan_composite_steps(
@@ -146,6 +156,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
             depth: 0,
             expand_local: false,
             input_bindings: &empty_bindings,
+            env_bindings: &empty_env,
         },
         findings,
     )
@@ -182,13 +193,14 @@ fn scan_step(
     // and inline-script findings for composite bodies are emitted once by the
     // ActionMetadata pass so call-site count does not inflate source findings.
     let emit_source_findings = ctx.depth == 0;
+    let step_env = merge_env_bindings(ctx.env_bindings, &collect_env_bindings(step));
     if let Some(action) = get_string(step, "uses") {
         if emit_source_findings {
             check_action_ref(action, rel, findings);
         }
         if ctx.privileged_trigger
             && is_checkout(action)
-            && has_untrusted_checkout_ref(step, ctx.input_bindings)
+            && has_untrusted_checkout_ref(step, ctx.input_bindings, &step_env)
         {
             findings.push(
                 Finding::new(
@@ -200,7 +212,7 @@ fn scan_step(
             );
         }
         if ctx.expand_local && is_local_action_ref(action) {
-            let nested_bindings = resolve_step_input_bindings(step, ctx.input_bindings);
+            let nested_bindings = resolve_step_input_bindings(step, ctx.input_bindings, &step_env);
             expand_local_composite(
                 action,
                 rel,
@@ -210,6 +222,7 @@ fn scan_step(
                     depth: ctx.depth,
                     expand_local: true,
                     input_bindings: &nested_bindings,
+                    env_bindings: &step_env,
                 },
                 findings,
             )?;
@@ -262,6 +275,7 @@ fn expand_local_composite(
             depth: ctx.depth + 1,
             expand_local: true,
             input_bindings: &merged_bindings,
+            env_bindings: ctx.env_bindings,
         },
         findings,
     )
@@ -295,8 +309,13 @@ fn merge_composite_input_defaults(root: &Hash, caller_bindings: &InputBindings) 
 }
 
 /// Build nested composite bindings from a step's `with:` map, resolving any
-/// `${{ inputs.* }}` references against the caller's already-resolved bindings.
-fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> InputBindings {
+/// `${{ inputs.* }}` and `${{ env.* }}` references against the caller's
+/// already-resolved bindings and the effective workflow/job/step env map.
+fn resolve_step_input_bindings(
+    step: &Hash,
+    parent_bindings: &InputBindings,
+    env_bindings: &EnvBindings,
+) -> InputBindings {
     let mut bindings = InputBindings::new();
     let Some(with) = get(step, "with").and_then(Yaml::as_hash) else {
         return bindings;
@@ -310,33 +329,94 @@ fn resolve_step_input_bindings(step: &Hash, parent_bindings: &InputBindings) -> 
         };
         bindings.insert(
             normalize_input_name(name),
-            resolve_input_expressions(raw, parent_bindings),
+            resolve_context_expressions(raw, parent_bindings, env_bindings),
         );
     }
     bindings
 }
 
+/// Collect literal `env:` key/value pairs from a workflow, job, or step mapping.
+fn collect_env_bindings(owner: &Hash) -> EnvBindings {
+    let mut bindings = EnvBindings::new();
+    let Some(env) = get(owner, "env").and_then(Yaml::as_hash) else {
+        return bindings;
+    };
+    for (key, value) in env {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        let Some(raw) = value.as_str() else {
+            continue;
+        };
+        bindings.insert(name.to_string(), raw.to_string());
+    }
+    bindings
+}
+
+/// Child `env` keys override parent keys (workflow → job → step).
+fn merge_env_bindings(parent: &EnvBindings, child: &EnvBindings) -> EnvBindings {
+    let mut merged = parent.clone();
+    for (name, value) in child {
+        merged.insert(name.clone(), value.clone());
+    }
+    merged
+}
+
+/// Resolve composite input and env aliases, normalizing bracket property access.
+fn resolve_context_expressions(
+    value: &str,
+    input_bindings: &InputBindings,
+    env_bindings: &EnvBindings,
+) -> String {
+    resolve_env_expressions(
+        &resolve_input_expressions(value, input_bindings),
+        env_bindings,
+    )
+}
+
 /// Substitute composite `inputs.name` references with caller binding values.
 ///
-/// Replaces identifier occurrences inside compound expressions
-/// (`${{ inputs.ref || github.sha }}`) as well as whole-expression forms
-/// (`${{ inputs.ref }}` / `${{ inputs['ref'] }}` / `${{ inputs.Ref }}`).
-/// Bracket property access is normalized to dotted form first. Matching is
-/// ASCII case-insensitive, matching GitHub's `inputs` context. Longer input
-/// names are applied first so a binding named `ref` cannot partially match
-/// `referral`.
+/// Replaces identifier occurrences inside `${{ ... }}` expression regions only,
+/// including compound forms (`${{ inputs.ref || github.sha }}`) as well as
+/// whole-expression forms (`${{ inputs.ref }}` / `${{ inputs['ref'] }}` /
+/// `${{ inputs.Ref }}`). Bracket property access is normalized to dotted form
+/// first so empty binding maps still convert
+/// `github['event']['pull_request']['head']['sha']` into the dotted detector
+/// shape. Matching is ASCII case-insensitive, matching GitHub's `inputs`
+/// context. Longer input names are applied first so a binding named `ref`
+/// cannot partially match `referral`.
 fn resolve_input_expressions(value: &str, bindings: &InputBindings) -> String {
+    let mut resolved = normalize_bracket_property_access(value);
+    if bindings.is_empty() {
+        return resolved;
+    }
+    let mut names: Vec<&String> = bindings.keys().collect();
+    names.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
+    for name in names {
+        let Some(bound) = bindings.get(name) else {
+            continue;
+        };
+        resolved = replace_context_identifier(&resolved, "inputs", name, bound, true);
+    }
+    resolved
+}
+
+/// Substitute `env.NAME` references using the effective workflow/job/step env.
+///
+/// Replacement is limited to `${{ ... }}` regions. Env names keep their
+/// declared case (GitHub env is case-sensitive on Linux runners).
+fn resolve_env_expressions(value: &str, bindings: &EnvBindings) -> String {
     if bindings.is_empty() {
         return value.to_string();
     }
     let mut names: Vec<&String> = bindings.keys().collect();
     names.sort_by(|left, right| right.len().cmp(&left.len()).then(left.cmp(right)));
-    let mut resolved = normalize_bracket_property_access(value);
+    let mut resolved = value.to_string();
     for name in names {
         let Some(bound) = bindings.get(name) else {
             continue;
         };
-        resolved = replace_input_identifier(&resolved, name, bound);
+        resolved = replace_context_identifier(&resolved, "env", name, bound, false);
     }
     resolved
 }
@@ -358,15 +438,72 @@ fn normalize_input_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-/// Replace bare `inputs.{name}` tokens that are not part of a longer property
-/// path (for example skip `github.event.inputs.ref`). Matching is ASCII
-/// case-insensitive so `${{ inputs.Ref }}` resolves against a `ref` binding.
-fn replace_input_identifier(value: &str, name: &str, replacement: &str) -> String {
-    let needle = format!("inputs.{}", name.to_ascii_lowercase());
-    let lower = value.to_ascii_lowercase();
+/// Replace `context.name` tokens inside `${{ ... }}` regions only.
+///
+/// Literal YAML text such as `refs/heads/inputs.ref` is left untouched because
+/// GitHub does not interpolate outside expression delimiters. When
+/// `case_insensitive` is set, matching follows GitHub's `inputs` context;
+/// otherwise the declared spelling must match (env).
+fn replace_context_identifier(
+    value: &str,
+    context: &str,
+    name: &str,
+    replacement: &str,
+    case_insensitive: bool,
+) -> String {
+    map_expression_regions(value, |inner| {
+        replace_context_identifier_in_region(inner, context, name, replacement, case_insensitive)
+    })
+}
+
+/// Apply `f` to each `${{ ... }}` inner region; copy surrounding text unchanged.
+fn map_expression_regions(value: &str, mut transform: impl FnMut(&str) -> String) -> String {
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
-    while let Some(rel) = lower[cursor..].find(&needle) {
+    while let Some(rel_start) = value[cursor..].find("${{") {
+        let start = cursor + rel_start;
+        output.push_str(&value[cursor..start]);
+        let after_open = start + 3;
+        let Some(rel_end) = value[after_open..].find("}}") else {
+            output.push_str(&value[start..]);
+            return output;
+        };
+        let end = after_open + rel_end;
+        output.push_str("${{");
+        output.push_str(&transform(&value[after_open..end]));
+        output.push_str("}}");
+        cursor = end + 2;
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+/// Replace bare `{context}.{name}` tokens that are not part of a longer property
+/// path (for example skip `github.event.inputs.ref`).
+fn replace_context_identifier_in_region(
+    value: &str,
+    context: &str,
+    name: &str,
+    replacement: &str,
+    case_insensitive: bool,
+) -> String {
+    let needle = if case_insensitive {
+        format!(
+            "{}.{}",
+            context.to_ascii_lowercase(),
+            name.to_ascii_lowercase()
+        )
+    } else {
+        format!("{context}.{name}")
+    };
+    let haystack = if case_insensitive {
+        value.to_ascii_lowercase()
+    } else {
+        value.to_string()
+    };
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(rel) = haystack[cursor..].find(&needle) {
         let offset = cursor + rel;
         let end = offset + needle.len();
         let precedes_ok = offset == 0
@@ -581,12 +718,16 @@ fn has_trigger(root: &Hash, trigger: &str) -> bool {
     }
 }
 
-fn has_untrusted_checkout_ref(step: &Hash, input_bindings: &InputBindings) -> bool {
+fn has_untrusted_checkout_ref(
+    step: &Hash,
+    input_bindings: &InputBindings,
+    env_bindings: &EnvBindings,
+) -> bool {
     get(step, "with")
         .and_then(Yaml::as_hash)
         .and_then(|with| get_string(with, "ref"))
         .is_some_and(|revision| {
-            let resolved = resolve_input_expressions(revision, input_bindings);
+            let resolved = resolve_context_expressions(revision, input_bindings, env_bindings);
             is_untrusted_ref_expression(&resolved)
         })
 }
@@ -1048,6 +1189,156 @@ jobs:
                 "resolved expression was not untrusted: {resolved}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_input_expressions_normalizes_bracket_github_paths_without_bindings() {
+        let resolved = resolve_input_expressions(
+            "${{ github['event']['pull_request']['head']['sha'] }}",
+            &InputBindings::new(),
+        );
+        assert_eq!(resolved, "${{ github.event.pull_request.head.sha }}");
+        assert!(is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
+    fn resolve_input_expressions_ignores_literal_inputs_outside_expressions() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let resolved = resolve_input_expressions("refs/heads/inputs.ref", &bindings);
+        assert_eq!(resolved, "refs/heads/inputs.ref");
+        assert!(!is_untrusted_ref_expression(&resolved));
+    }
+
+    #[test]
+    fn privileged_local_composite_bracket_github_context_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ github['event']['pull_request']['head']['sha'] }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_env_alias_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+env:
+  PR_REF: ${{ github.event.pull_request.head.sha }}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ env.PR_REF }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_literal_inputs_path_is_not_tainted() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: refs/heads/inputs.ref
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT));
     }
 
     #[test]
