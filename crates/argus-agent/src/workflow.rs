@@ -17,7 +17,8 @@
 //! `env: { TARGET: ${{ inputs.ref }} }` with `with: { ref: ${{ env.TARGET }} }`,
 //! a step-output indirection such as writing `${{ inputs.ref }}` to
 //! `$GITHUB_OUTPUT` then checking out `${{ steps.resolve.outputs.ref }}`,
-//! including when a later untracked `$GITHUB_OUTPUT` overwrite or backtick
+//! including when a later untracked `$GITHUB_OUTPUT` overwrite (with optional
+//! trailing shell comments / operators after the redirect) or backtick
 //! command substitution would otherwise leave a stale safe binding,
 //! or an omitted `with` that relies on an untrusted input default — cannot
 //! bypass Critical→block. Unresolved `steps.*.outputs.*` checkout refs fail
@@ -607,11 +608,72 @@ fn split_github_output_redirect(line: &str) -> Option<&str> {
     let index = line.find(">>")?;
     let (before, after) = line.split_at(index);
     let after = after.trim_start_matches('>').trim();
-    let target = strip_wrapping_shell_quotes(after).trim();
+    // Trailing `# ...` comments and operators after the redirect target are
+    // valid Bash; exact-matching the whole suffix would drop the write and
+    // retain an earlier safe binding (fail-open for AGT-06).
+    let after = strip_trailing_shell_comment(after).trim();
+    let target_token = first_shell_token(after)?;
+    let target = strip_wrapping_shell_quotes(target_token).trim();
     if target == "$GITHUB_OUTPUT" || target == "${GITHUB_OUTPUT}" {
         Some(before.trim())
     } else {
         None
+    }
+}
+
+/// Drop an unquoted trailing `# ...` shell comment.
+fn strip_trailing_shell_comment(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single && !in_double => return value[..index].trim_end(),
+            _ => {}
+        }
+        index += 1;
+    }
+    value
+}
+
+/// First shell word: a quoted span or an unquoted run until whitespace.
+fn first_shell_token(value: &str) -> Option<&str> {
+    let trimmed = value.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    match bytes[0] {
+        b'"' | b'\'' => {
+            let quote = bytes[0];
+            let mut index = 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' && quote == b'"' && index + 1 < bytes.len() {
+                    index += 2;
+                    continue;
+                }
+                if bytes[index] == quote {
+                    return Some(&trimmed[..=index]);
+                }
+                index += 1;
+            }
+            // Unclosed quote: treat the remainder as the token.
+            Some(trimmed)
+        }
+        _ => {
+            let end = trimmed
+                .find(|character: char| character.is_ascii_whitespace())
+                .unwrap_or(trimmed.len());
+            Some(&trimmed[..end])
+        }
     }
 }
 
@@ -1719,6 +1781,42 @@ run: echo "ref=`printenv TARGET`" >> "$GITHUB_OUTPUT"
     }
 
     #[test]
+    fn collect_step_output_bindings_invalidates_untracked_overwrite_with_trailing_comment() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: |
+  echo "ref=main" >> "$GITHUB_OUTPUT"
+  echo "ref=$TARGET" >> "$GITHUB_OUTPUT" # final value
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "trailing comment on redirect must not retain the earlier safe binding: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn split_github_output_redirect_accepts_trailing_comment() {
+        assert_eq!(
+            split_github_output_redirect(r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" # final value"#),
+            Some(r#"echo "ref=$TARGET""#)
+        );
+        assert_eq!(
+            split_github_output_redirect(r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" && true"#),
+            Some(r#"echo "ref=$TARGET""#)
+        );
+    }
+
+    #[test]
     fn privileged_local_composite_step_output_untracked_overwrite_fails_closed() {
         let findings = findings_for_files(&[
             SurfaceFile {
@@ -1803,6 +1901,57 @@ runs:
       env:
         TARGET: ${{ inputs.ref }}
       run: echo "ref=`printenv TARGET`" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_step_output_trailing_comment_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: |
+        echo "ref=main" >> "$GITHUB_OUTPUT"
+        echo "ref=$TARGET" >> "$GITHUB_OUTPUT" # final value
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ steps.resolve.outputs.ref }}
