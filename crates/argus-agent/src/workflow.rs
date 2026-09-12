@@ -298,14 +298,21 @@ fn check_inline_script(
 
 /// Detect `${{ env.NAME }}` / `${{ env['NAME'] }}` / `${{ env["NAME"] }}` when
 /// `NAME` was assigned an untrusted GitHub context in an in-scope `env` map.
+///
+/// Computed indexes such as `env[matrix.key]` are treated conservatively as a
+/// tainted read whenever any in-scope env is tainted. Nested property paths
+/// like `fromJSON(...).env.TITLE` are ignored so only the root `env` context
+/// counts.
 fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
         return false;
     }
     static ENV_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = ENV_REF.get_or_init(|| {
-        Regex::new(r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([^'"]+)['"]\s*\])"#)
-            .expect("tainted env reference pattern compiles")
+        Regex::new(
+            r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+        )
+        .expect("tainted env reference pattern compiles")
     });
     // Ignore env-looking text inside single-quoted expression literals (e.g.
     // `${{ 'env.TITLE' }}`) without stripping quotes used by `env['TITLE']`.
@@ -313,8 +320,17 @@ fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>)
         let Some(matched) = capture.get(0) else {
             return false;
         };
+        // Reject nested properties such as `obj.env.TITLE` (`.` is a word
+        // boundary, so `\benv` alone is not enough).
+        if matched.start() > 0 && expression[..matched.start()].ends_with('.') {
+            return false;
+        }
         if offset_inside_single_quoted_literal(expression, matched.start()) {
             return false;
+        }
+        if capture.get(3).is_some() {
+            // Computed index: cannot resolve the name statically.
+            return true;
         }
         let name = capture
             .get(1)
@@ -709,6 +725,52 @@ jobs:
       TITLE: ${{ github.event.issue.title }}
     steps:
       - run: echo "${{ 'env.TITLE' }}"
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn computed_env_index_blocks_when_any_tainted_env_in_scope() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ env[format('TI{0}', 'TLE')] }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env[format('TI{0}', 'TLE')]")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn nested_env_property_is_not_treated_as_actions_env_context() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ fromJSON('{\"env\":{\"TITLE\":\"fixed\"}}').env.TITLE }}"
 "#,
         );
 
