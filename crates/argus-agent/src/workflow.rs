@@ -18,6 +18,12 @@ const RULE_UNTRUSTED_CHECKOUT: &str = "AGT-06-workflow-untrusted-checkout";
 const RULE_WRITE_ALL: &str = "AGT-06-workflow-write-all";
 const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
 
+#[derive(Clone, Copy)]
+struct TaintScope<'a> {
+    envs: &'a HashSet<String>,
+    inputs: &'a HashSet<String>,
+}
+
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     let actions: HashMap<&str, &SurfaceFile> = files
         .iter()
@@ -33,8 +39,18 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
             }
             SurfaceKind::ActionMetadata => {
                 let mut visiting = HashSet::new();
-                scan_action_metadata(file, &HashSet::new(), &actions, &mut visiting, findings)
-                    .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?;
+                let empty = HashSet::new();
+                scan_action_metadata(
+                    file,
+                    TaintScope {
+                        envs: &empty,
+                        inputs: &empty,
+                    },
+                    &actions,
+                    &mut visiting,
+                    findings,
+                )
+                .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?;
             }
             _ => {}
         }
@@ -64,8 +80,9 @@ fn scan_workflow(
     check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
 
     let mut workflow_tainted_envs = HashSet::new();
+    let no_inputs = HashSet::new();
     if let Some(env) = get(root, "env").and_then(Yaml::as_hash) {
-        apply_env_taints(&mut workflow_tainted_envs, env, &file.rel)?;
+        apply_env_taints(&mut workflow_tainted_envs, env, &no_inputs, &file.rel)?;
     }
 
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
@@ -78,7 +95,7 @@ fn scan_workflow(
         }
         let mut job_tainted_envs = workflow_tainted_envs.clone();
         if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(&mut job_tainted_envs, env, &file.rel)?;
+            apply_env_taints(&mut job_tainted_envs, env, &no_inputs, &file.rel)?;
         }
         let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
             continue;
@@ -86,13 +103,16 @@ fn scan_workflow(
         for step in steps.iter().filter_map(Yaml::as_hash) {
             let mut step_tainted_envs = job_tainted_envs.clone();
             if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
-                apply_env_taints(&mut step_tainted_envs, env, &file.rel)?;
+                apply_env_taints(&mut step_tainted_envs, env, &no_inputs, &file.rel)?;
             }
             scan_step(
                 step,
                 &file.rel,
                 privileged_trigger,
-                &step_tainted_envs,
+                TaintScope {
+                    envs: &step_tainted_envs,
+                    inputs: &no_inputs,
+                },
                 actions,
                 visiting,
                 findings,
@@ -104,7 +124,7 @@ fn scan_workflow(
 
 fn scan_action_metadata(
     file: &SurfaceFile,
-    caller_tainted_envs: &HashSet<String>,
+    caller_taint: TaintScope<'_>,
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
@@ -137,15 +157,18 @@ fn scan_action_metadata(
     };
     for step in steps.iter().filter_map(Yaml::as_hash) {
         // Caller env remains visible inside local composite steps at runtime.
-        let mut step_tainted_envs = caller_tainted_envs.clone();
+        let mut step_tainted_envs = caller_taint.envs.clone();
         if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(&mut step_tainted_envs, env, &file.rel)?;
+            apply_env_taints(&mut step_tainted_envs, env, caller_taint.inputs, &file.rel)?;
         }
         scan_step(
             step,
             &file.rel,
             false,
-            &step_tainted_envs,
+            TaintScope {
+                envs: &step_tainted_envs,
+                inputs: caller_taint.inputs,
+            },
             actions,
             visiting,
             findings,
@@ -159,7 +182,7 @@ fn scan_step(
     step: &Hash,
     rel: &str,
     privileged_trigger: bool,
-    tainted_envs: &HashSet<String>,
+    taint: TaintScope<'_>,
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
@@ -178,12 +201,22 @@ fn scan_step(
         }
         if let Some(local) = action.strip_prefix("./") {
             if let Some(action_file) = resolve_local_action(local, actions) {
-                scan_action_metadata(action_file, tainted_envs, actions, visiting, findings)?;
+                let step_tainted_inputs = collect_tainted_with_inputs(step, taint.envs, rel)?;
+                scan_action_metadata(
+                    action_file,
+                    TaintScope {
+                        envs: taint.envs,
+                        inputs: &step_tainted_inputs,
+                    },
+                    actions,
+                    visiting,
+                    findings,
+                )?;
             }
         }
     }
     if let Some(script) = get_string(step, "run") {
-        check_inline_script(script, rel, tainted_envs, findings)?;
+        check_inline_script(script, rel, taint, findings)?;
     }
     Ok(())
 }
@@ -193,6 +226,16 @@ fn resolve_local_action<'a>(
     actions: &HashMap<&str, &'a SurfaceFile>,
 ) -> Option<&'a SurfaceFile> {
     let path = local_ref.trim_end_matches('/');
+    // `uses: ./` resolves to the repository-root action metadata. An empty path
+    // must look up `action.yml` directly; joining would invent `/action.yml`.
+    if path.is_empty() {
+        for name in ["action.yml", "action.yaml"] {
+            if let Some(file) = actions.get(name) {
+                return Some(*file);
+            }
+        }
+        return None;
+    }
     if let Some(file) = actions.get(path) {
         return Some(*file);
     }
@@ -205,7 +248,39 @@ fn resolve_local_action<'a>(
     None
 }
 
-fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Result<()> {
+fn collect_tainted_with_inputs(
+    step: &Hash,
+    tainted_envs: &HashSet<String>,
+    rel: &str,
+) -> Result<HashSet<String>> {
+    let mut tainted = HashSet::new();
+    let Some(with_map) = get(step, "with").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    for (key, value) in with_map {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        // Caller `with:` bindings are evaluated before the composite runs, so a
+        // tainted env (or direct untrusted context) becomes a tainted input.
+        if value_contains_untrusted_context(value, rel)?
+            || value_references_tainted_env(value, tainted_envs, rel)?
+        {
+            tainted.insert(name.to_string());
+        }
+    }
+    Ok(tainted)
+}
+
+fn apply_env_taints(
+    tainted: &mut HashSet<String>,
+    env: &Hash,
+    tainted_inputs: &HashSet<String>,
+    rel: &str,
+) -> Result<()> {
     // GitHub Actions resolves each map entry against the parent scope, not
     // sibling keys in the same map. Snapshot the inherited set before applying
     // overrides so an earlier TITLE: fixed cannot clear taint for a later
@@ -216,14 +291,23 @@ fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Res
         let Some(name) = key.as_str() else {
             continue;
         };
-        let Some(value) = value.as_str() else {
-            continue;
-        };
-        // Inherit taint from direct untrusted contexts and from aliases of already
-        // tainted env names (e.g. job TITLE → step ALIAS: ${{ env.TITLE }}).
-        let is_tainted = value_contains_untrusted_context(value, rel)?
-            || value_references_tainted_env(value, &inherited, rel)?;
-        updates.push((name.to_string(), is_tainted));
+        match value {
+            Yaml::String(value) => {
+                // Inherit taint from direct untrusted contexts, tainted env
+                // aliases, and composite `inputs.*` when those are in scope.
+                let is_tainted = value_contains_untrusted_context(value, rel)?
+                    || value_references_tainted_env(value, &inherited, rel)?
+                    || value_references_tainted_input(value, tainted_inputs, rel)?;
+                updates.push((name.to_string(), is_tainted));
+            }
+            // Non-string YAML scalars are constant overrides and clear taint.
+            Yaml::Integer(_) | Yaml::Real(_) | Yaml::Boolean(_) | Yaml::Null => {
+                updates.push((name.to_string(), false));
+            }
+            // Mapping/sequence env values are not valid Actions scalars; leave
+            // inherited taint rather than inventing a clean allow path.
+            _ => {}
+        }
     }
     for (name, is_tainted) in updates {
         if is_tainted {
@@ -245,6 +329,16 @@ fn value_contains_untrusted_context(value: &str, rel: &str) -> Result<bool> {
 fn value_references_tainted_env(value: &str, tainted: &HashSet<String>, rel: &str) -> Result<bool> {
     for_each_expression(value, rel, |expression| {
         Ok(expression_uses_tainted_env(expression, tainted))
+    })
+}
+
+fn value_references_tainted_input(
+    value: &str,
+    tainted: &HashSet<String>,
+    rel: &str,
+) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(expression_uses_tainted_input(expression, tainted))
     })
 }
 
@@ -364,7 +458,7 @@ fn is_immutable_action_ref(action: &str) -> bool {
 fn check_inline_script(
     script: &str,
     rel: &str,
-    tainted_envs: &HashSet<String>,
+    taint: TaintScope<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     let mut remaining = script;
@@ -374,7 +468,9 @@ fn check_inline_script(
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `run`");
         };
         let expression = after_start[..end].trim();
-        if is_untrusted_context(expression) || expression_uses_tainted_env(expression, tainted_envs)
+        if is_untrusted_context(expression)
+            || expression_uses_tainted_env(expression, taint.envs)
+            || expression_uses_tainted_input(expression, taint.inputs)
         {
             findings.push(
                 Finding::new(
@@ -396,30 +492,93 @@ fn check_inline_script(
 /// Detect `${{ env.NAME }}` / `${{ env['NAME'] }}` / `${{ env["NAME"] }}` when
 /// `NAME` was assigned an untrusted GitHub context in an in-scope `env` map.
 ///
-/// Computed indexes such as `env[matrix.key]` are treated conservatively as a
-/// tainted read whenever any in-scope env is tainted. Nested property paths
-/// like `fromJSON(...).env.TITLE` are ignored so only the root `env` context
-/// counts.
+/// Whole-context reads such as `toJSON(env)` or bare `env` are treated as
+/// tainted whenever any in-scope env is tainted. Computed indexes such as
+/// `env[matrix.key]` are likewise conservative. Nested property paths like
+/// `fromJSON(...).env.TITLE` are ignored so only the root `env` context counts.
 fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
         return false;
     }
+    if expression_reads_whole_context(expression, "env") {
+        return true;
+    }
+    expression_uses_tainted_context_property(expression, "env", tainted_envs)
+}
+
+/// Detect `${{ inputs.NAME }}` (and index forms) when a local composite caller
+/// bound that input to an untrusted value via `with:`.
+fn expression_uses_tainted_input(expression: &str, tainted_inputs: &HashSet<String>) -> bool {
+    if tainted_inputs.is_empty() {
+        return false;
+    }
+    if expression_reads_whole_context(expression, "inputs") {
+        return true;
+    }
+    expression_uses_tainted_context_property(expression, "inputs", tainted_inputs)
+}
+
+fn expression_reads_whole_context(expression: &str, context: &str) -> bool {
+    let without_literals = remove_expression_string_literals(expression);
+    let compact: String = without_literals
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let context = context.to_ascii_lowercase();
+    if compact == context {
+        return true;
+    }
+    // Match `toJSON(env)` / `toJSON(inputs)` but not `toJSON(env.TITLE)`.
+    let needle = format!("tojson({context})");
+    let mut rest = compact.as_str();
+    while let Some(index) = rest.find(&needle) {
+        let after = index + needle.len();
+        let next = rest.as_bytes().get(after).copied();
+        if next.is_none_or(|byte| {
+            !matches!(
+                byte,
+                b'.' | b'[' | b'_' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            )
+        }) {
+            return true;
+        }
+        rest = &rest[index + 1..];
+    }
+    false
+}
+
+fn expression_uses_tainted_context_property(
+    expression: &str,
+    context: &str,
+    tainted_names: &HashSet<String>,
+) -> bool {
     static ENV_REF: OnceLock<Regex> = OnceLock::new();
-    let pattern = ENV_REF.get_or_init(|| {
-        Regex::new(
-            r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
-        )
-        .expect("tainted env reference pattern compiles")
-    });
-    // Ignore env-looking text inside single-quoted expression literals (e.g.
-    // `${{ 'env.TITLE' }}`) without stripping quotes used by `env['TITLE']`.
+    static INPUTS_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = match context {
+        "env" => ENV_REF.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+            )
+            .expect("tainted env reference pattern compiles")
+        }),
+        "inputs" => INPUTS_REF.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\binputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+            )
+            .expect("tainted inputs reference pattern compiles")
+        }),
+        _ => return false,
+    };
+    // Ignore context-looking text inside single-quoted expression literals
+    // without stripping quotes used by `env['TITLE']` / `inputs['title']`.
     pattern.captures_iter(expression).any(|capture| {
         let Some(matched) = capture.get(0) else {
             return false;
         };
         // Reject nested properties such as `obj.env.TITLE` or spaced
         // `obj . env.TITLE` (`.` is a word boundary, so `\benv` alone is not
-        // enough; ignore whitespace between the property dot and `env`).
+        // enough; ignore whitespace between the property dot and the context).
         if matched.start() > 0 && expression[..matched.start()].trim_end().ends_with('.') {
             return false;
         }
@@ -434,7 +593,7 @@ fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>)
             .get(1)
             .or_else(|| capture.get(2))
             .map(|matched| matched.as_str());
-        name.is_some_and(|name| tainted_envs.contains(name))
+        name.is_some_and(|name| tainted_names.contains(name))
     })
 }
 
@@ -1040,5 +1199,151 @@ runs:
                     .is_some_and(|path| path.contains("action.yml"))
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn tojson_whole_env_context_blocks_when_tainted_env_in_scope() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo '${{ toJSON(env) }}'
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("toJSON(env)")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn composite_with_input_carries_caller_env_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ./.github/actions/echo
+        with:
+          title: ${{ env.TITLE }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/echo/action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Echo input
+inputs:
+  title:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ inputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("inputs.title")
+                && finding
+                    .location
+                    .as_deref()
+                    .is_some_and(|path| path.contains("action.yml"))
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn root_local_action_ref_inherits_caller_env_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ./
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: "action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Root composite
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ env.TITLE }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.TITLE")
+                && finding.location.as_deref() == Some("action.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn non_string_scalar_env_override_clears_inherited_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - env:
+          TITLE: 123
+        run: echo "${{ env.TITLE }}"
+"#,
+        );
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 }
