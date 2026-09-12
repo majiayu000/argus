@@ -3,10 +3,17 @@
 //! Workflows and Action metadata are parsed as YAML and inspected statically.
 //! Parse failures are operational errors: an invalid or unassessed protected
 //! surface must never collapse into a clean decision.
+//!
+//! When a workflow step `uses` a same-repo composite (`./...`), that composite
+//! is expanded with the caller's privileged-trigger flag so wrapping an
+//! untrusted checkout cannot bypass Critical→block. Standalone Action metadata
+//! scans still use `privileged_trigger=false` so composites alone do not invent
+//! a privileged trigger. Local expansion is depth-bounded and fail-closed.
 
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
+use std::collections::BTreeMap;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -14,11 +21,16 @@ const RULE_CONTEXT_INJECTION: &str = "AGT-06-workflow-context-injection";
 const RULE_UNTRUSTED_CHECKOUT: &str = "AGT-06-workflow-untrusted-checkout";
 const RULE_WRITE_ALL: &str = "AGT-06-workflow-write-all";
 const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
+/// Workflow → local composite is one hop; one nested local composite is allowed.
+const MAX_LOCAL_COMPOSITE_DEPTH: u32 = 2;
+
+type ActionIndex<'a> = BTreeMap<&'a str, &'a SurfaceFile>;
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
+    let actions = index_action_metadata(files);
     for file in files {
         match file.kind {
-            SurfaceKind::Workflow => scan_workflow(file, findings)
+            SurfaceKind::Workflow => scan_workflow(file, &actions, findings)
                 .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?,
             SurfaceKind::ActionMetadata => scan_action_metadata(file, findings)
                 .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?,
@@ -28,7 +40,22 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
     Ok(())
 }
 
-fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> {
+fn index_action_metadata(files: &[SurfaceFile]) -> ActionIndex<'_> {
+    let mut actions = ActionIndex::new();
+    for file in files
+        .iter()
+        .filter(|file| file.kind == SurfaceKind::ActionMetadata)
+    {
+        actions.insert(file.rel.as_str(), file);
+    }
+    actions
+}
+
+fn scan_workflow(
+    file: &SurfaceFile,
+    actions: &ActionIndex<'_>,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
     if documents.len() != 1 {
@@ -56,7 +83,15 @@ fn scan_workflow(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> 
             continue;
         };
         for step in steps.iter().filter_map(Yaml::as_hash) {
-            scan_step(step, &file.rel, privileged_trigger, findings)?;
+            scan_step(
+                step,
+                &file.rel,
+                privileged_trigger,
+                actions,
+                0,
+                true,
+                findings,
+            )?;
         }
     }
     Ok(())
@@ -74,6 +109,21 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
     let root = documents[0]
         .as_hash()
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
+    let empty = ActionIndex::new();
+    // Standalone metadata keeps privileged_trigger=false and does not expand
+    // nested local uses; workflow scans own that expansion with caller context.
+    scan_composite_steps(root, &file.rel, false, &empty, 0, false, findings)
+}
+
+fn scan_composite_steps(
+    root: &Hash,
+    rel: &str,
+    privileged_trigger: bool,
+    actions: &ActionIndex<'_>,
+    depth: u32,
+    expand_local: bool,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
         return Ok(());
     };
@@ -84,7 +134,15 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         return Ok(());
     };
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        scan_step(step, &file.rel, false, findings)?;
+        scan_step(
+            step,
+            rel,
+            privileged_trigger,
+            actions,
+            depth,
+            expand_local,
+            findings,
+        )?;
     }
     Ok(())
 }
@@ -93,6 +151,9 @@ fn scan_step(
     step: &Hash,
     rel: &str,
     privileged_trigger: bool,
+    actions: &ActionIndex<'_>,
+    depth: u32,
+    expand_local: bool,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
     if let Some(action) = get_string(step, "uses") {
@@ -107,11 +168,73 @@ fn scan_step(
                 .at(rel),
             );
         }
+        if expand_local && is_local_action_ref(action) {
+            expand_local_composite(action, rel, privileged_trigger, actions, depth, findings)?;
+        }
     }
     if let Some(script) = get_string(step, "run") {
         check_inline_script(script, rel, findings)?;
     }
     Ok(())
+}
+
+fn expand_local_composite(
+    action: &str,
+    caller_rel: &str,
+    privileged_trigger: bool,
+    actions: &ActionIndex<'_>,
+    depth: u32,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    if depth >= MAX_LOCAL_COMPOSITE_DEPTH {
+        bail!(
+            "local composite expansion depth exceeded while resolving `{action}` from `{caller_rel}`"
+        );
+    }
+    let Some(meta) = resolve_local_action(action, actions) else {
+        bail!(
+            "local Action metadata for `{action}` referenced from `{caller_rel}` is missing or unreadable"
+        );
+    };
+    let documents = YamlLoader::load_from_str(&meta.content)
+        .with_context(|| format!("parse `{}` as YAML", meta.rel))?;
+    if documents.len() != 1 {
+        bail!(
+            "Action metadata `{}` must contain exactly one YAML document",
+            meta.rel
+        );
+    }
+    let root = documents[0]
+        .as_hash()
+        .with_context(|| format!("Action metadata `{}` root must be a mapping", meta.rel))?;
+    scan_composite_steps(
+        root,
+        &meta.rel,
+        privileged_trigger,
+        actions,
+        depth + 1,
+        true,
+        findings,
+    )
+}
+
+fn is_local_action_ref(action: &str) -> bool {
+    action.starts_with("./") || action.starts_with(".github/")
+}
+
+fn resolve_local_action<'a>(action: &str, actions: &ActionIndex<'a>) -> Option<&'a SurfaceFile> {
+    let normalized = action
+        .strip_prefix("./")
+        .unwrap_or(action)
+        .trim_end_matches('/');
+    let candidates = [
+        format!("{normalized}/action.yml"),
+        format!("{normalized}/action.yaml"),
+        normalized.to_string(),
+    ];
+    candidates
+        .iter()
+        .find_map(|candidate| actions.get(candidate.as_str()).copied())
 }
 
 fn check_permissions(
@@ -170,7 +293,7 @@ fn check_action_ref(action: &str, rel: &str, findings: &mut Vec<Finding>) {
 }
 
 fn is_immutable_action_ref(action: &str) -> bool {
-    if action.starts_with("./") {
+    if is_local_action_ref(action) {
         return true;
     }
     if let Some(image) = action.strip_prefix("docker://") {
@@ -329,14 +452,132 @@ mod tests {
     use argus_core::Decision;
 
     fn findings_for(content: &str) -> Vec<Finding> {
-        let file = SurfaceFile {
+        findings_for_files(&[SurfaceFile {
             rel: ".github/workflows/test.yml".to_string(),
             content: content.to_string(),
             kind: SurfaceKind::Workflow,
-        };
+        }])
+    }
+
+    fn findings_for_files(files: &[SurfaceFile]) -> Vec<Finding> {
         let mut findings = Vec::new();
-        scan_workflow(&file, &mut findings).expect("scan workflow fixture");
+        run(files, &mut findings).expect("scan workflow fixture");
         findings
+    }
+
+    fn try_scan(files: &[SurfaceFile]) -> Result<Vec<Finding>> {
+        let mut findings = Vec::new();
+        run(files, &mut findings)?;
+        Ok(findings)
+    }
+
+    const COMPOSITE_UNTRUSTED_CHECKOUT: &str = r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+"#;
+
+    #[test]
+    fn privileged_local_composite_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: COMPOSITE_UNTRUSTED_CHECKOUT.to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn non_privileged_local_composite_untrusted_checkout_skips_untrusted_rule() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/ci.yml".to_string(),
+                content: r#"
+name: CI
+on: pull_request
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: COMPOSITE_UNTRUSTED_CHECKOUT.to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.rule_id == RULE_MUTABLE_ACTION));
+    }
+
+    #[test]
+    fn missing_local_composite_fails_closed() {
+        let error = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/triage.yml".to_string(),
+            content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing-action
+"#
+            .to_string(),
+            kind: SurfaceKind::Workflow,
+        }])
+        .expect_err("missing local composite must fail closed");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("missing or unreadable"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn standalone_composite_does_not_invent_privileged_trigger() {
+        let findings = findings_for_files(&[SurfaceFile {
+            rel: ".github/actions/checkout-pr/action.yml".to_string(),
+            content: COMPOSITE_UNTRUSTED_CHECKOUT.to_string(),
+            kind: SurfaceKind::ActionMetadata,
+        }]);
+
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT));
     }
 
     #[test]

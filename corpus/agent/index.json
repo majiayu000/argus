@@ -100,6 +100,15 @@
       "notes": "A privileged pull_request_target workflow checks out attacker-controlled pull-request code and directly interpolates an attacker-controlled title into a shell script."
     },
     {
+      "id": "workflow-local-composite-untrusted-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-untrusted-checkout",
+      "packageName": "workflow-local-composite-untrusted-checkout",
+      "expectedDecision": "block",
+      "rules": ["workflow-mutable-action", "workflow-untrusted-checkout"],
+      "notes": "A pull_request_target workflow invokes a same-repo composite that checks out github.event.pull_request.head.sha. Local uses expansion must propagate privileged_trigger so wrapping cannot bypass Critical→block."
+    },
+    {
       "id": "workflow-dangerous-permissions",
       "kind": "fixture",
       "path": "fixtures/workflow-dangerous-permissions",

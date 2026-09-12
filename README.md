@@ -642,8 +642,14 @@ MCP configs, skill definitions, hook scripts, instruction files, immediate
 `.github/workflows/*.{yml,yaml}` files, and recursively discovered local
 `action.yml` / `action.yaml` metadata — without executing anything. For local
 Action metadata, only `runs.using: composite` steps receive AGT-06 dependency
-and inline-script checks. Invalid or duplicate-key protected YAML is an
-operational error. AGT-06 is included in the immutable `v0.3.0` release.
+and inline-script checks. When a workflow step `uses` a same-repo composite
+(`./...`), argus expands that composite with the caller's privileged-trigger
+flag so an untrusted checkout cannot be hidden behind a local Action wrapper;
+missing or invalid local Action metadata remains an operational error.
+Standalone composite scans still use `privileged_trigger=false` so metadata
+alone does not invent a privileged trigger. Invalid or duplicate-key protected
+YAML is an operational error. AGT-06 is included in the immutable `v0.3.0`
+release.
 
 | Rule | Severity | Detects |
 |------|----------|---------|
@@ -663,7 +669,7 @@ operational error. AGT-06 is included in the immutable `v0.3.0` release.
 | `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
 | `AGT-06-workflow-mutable-action` | medium → approval | a workflow or local composite Action uses a remote Action, reusable workflow, or Docker action that is not pinned to a full commit SHA or image digest |
 | `AGT-06-workflow-context-injection` | critical → block | a workflow or local composite Action interpolates attacker-controlled GitHub event data directly into an inline `run` script instead of crossing an environment-variable boundary |
-| `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref |
+| `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref, including when the checkout is wrapped in a same-repo local composite Action (`uses: ./...`) |
 | `AGT-06-workflow-write-all` | high → block | workflow-level or job-level `permissions: write-all` grants every available `GITHUB_TOKEN` permission write access |
 | `AGT-06-workflow-privileged-write` | medium → approval | `pull_request_target` or `workflow_run` explicitly grants a scoped `GITHUB_TOKEN` permission write access |
 | `AGT-02` | medium → approval | an **already-approved** MCP/skill description drifted from its recorded baseline hash (rug-pull detection; see below) |
