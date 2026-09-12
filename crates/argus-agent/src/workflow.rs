@@ -30,16 +30,31 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
         .filter(|file| file.kind == SurfaceKind::ActionMetadata)
         .map(|file| (file.rel.as_str(), file))
         .collect();
+    let workflows: HashMap<&str, &SurfaceFile> = files
+        .iter()
+        .filter(|file| file.kind == SurfaceKind::Workflow)
+        .map(|file| (file.rel.as_str(), file))
+        .collect();
+    let empty = HashSet::new();
     for file in files {
         match file.kind {
             SurfaceKind::Workflow => {
                 let mut visiting = HashSet::new();
-                scan_workflow(file, &actions, &mut visiting, findings)
-                    .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?;
+                scan_workflow(
+                    file,
+                    TaintScope {
+                        envs: &empty,
+                        inputs: &empty,
+                    },
+                    &actions,
+                    &workflows,
+                    &mut visiting,
+                    findings,
+                )
+                .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?;
             }
             SurfaceKind::ActionMetadata => {
                 let mut visiting = HashSet::new();
-                let empty = HashSet::new();
                 scan_action_metadata(
                     file,
                     TaintScope {
@@ -79,7 +94,25 @@ fn dedup_findings(findings: &mut Vec<Finding>) {
 
 fn scan_workflow(
     file: &SurfaceFile,
+    caller_taint: TaintScope<'_>,
     actions: &HashMap<&str, &SurfaceFile>,
+    workflows: &HashMap<&str, &SurfaceFile>,
+    visiting: &mut HashSet<String>,
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    if !visiting.insert(file.rel.clone()) {
+        return Ok(());
+    }
+    let result = scan_workflow_inner(file, caller_taint, actions, workflows, visiting, findings);
+    visiting.remove(&file.rel);
+    result
+}
+
+fn scan_workflow_inner(
+    file: &SurfaceFile,
+    caller_taint: TaintScope<'_>,
+    actions: &HashMap<&str, &SurfaceFile>,
+    workflows: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
@@ -99,9 +132,13 @@ fn scan_workflow(
     check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
 
     let mut workflow_tainted_envs = HashSet::new();
-    let no_inputs = HashSet::new();
     if let Some(env) = get(root, "env").and_then(Yaml::as_hash) {
-        apply_env_taints(&mut workflow_tainted_envs, env, &no_inputs, &file.rel)?;
+        apply_env_taints(
+            &mut workflow_tainted_envs,
+            env,
+            caller_taint.inputs,
+            &file.rel,
+        )?;
     }
 
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
@@ -109,12 +146,36 @@ fn scan_workflow(
     };
     for job in jobs.values().filter_map(Yaml::as_hash) {
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
-        if let Some(action) = get_string(job, "uses") {
-            check_action_ref(action, &file.rel, findings);
-        }
         let mut job_tainted_envs = workflow_tainted_envs.clone();
         if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(&mut job_tainted_envs, env, &no_inputs, &file.rel)?;
+            apply_env_taints(&mut job_tainted_envs, env, caller_taint.inputs, &file.rel)?;
+        }
+        if let Some(action) = get_string(job, "uses") {
+            check_action_ref(action, &file.rel, findings);
+            // Local reusable workflows receive caller `with:` as `inputs.*` and
+            // do not inherit the caller's environment across the workflow boundary.
+            if let Some(local) = action.strip_prefix("./") {
+                if let Some(workflow_file) = resolve_local_workflow(local, workflows) {
+                    let job_scope = TaintScope {
+                        envs: &job_tainted_envs,
+                        inputs: caller_taint.inputs,
+                    };
+                    let job_tainted_inputs =
+                        collect_tainted_with_inputs(job, job_scope, &file.rel)?;
+                    let empty_envs = HashSet::new();
+                    scan_workflow(
+                        workflow_file,
+                        TaintScope {
+                            envs: &empty_envs,
+                            inputs: &job_tainted_inputs,
+                        },
+                        actions,
+                        workflows,
+                        visiting,
+                        findings,
+                    )?;
+                }
+            }
         }
         let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
             continue;
@@ -122,7 +183,7 @@ fn scan_workflow(
         for step in steps.iter().filter_map(Yaml::as_hash) {
             let mut step_tainted_envs = job_tainted_envs.clone();
             if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
-                apply_env_taints(&mut step_tainted_envs, env, &no_inputs, &file.rel)?;
+                apply_env_taints(&mut step_tainted_envs, env, caller_taint.inputs, &file.rel)?;
             }
             scan_step(
                 step,
@@ -130,7 +191,7 @@ fn scan_workflow(
                 privileged_trigger,
                 TaintScope {
                     envs: &step_tainted_envs,
-                    inputs: &no_inputs,
+                    inputs: caller_taint.inputs,
                 },
                 actions,
                 visiting,
@@ -267,13 +328,24 @@ fn resolve_local_action<'a>(
     None
 }
 
+fn resolve_local_workflow<'a>(
+    local_ref: &str,
+    workflows: &HashMap<&str, &'a SurfaceFile>,
+) -> Option<&'a SurfaceFile> {
+    let path = local_ref.trim_end_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    workflows.get(path).copied()
+}
+
 fn collect_tainted_with_inputs(
-    step: &Hash,
+    binding: &Hash,
     taint: TaintScope<'_>,
     rel: &str,
 ) -> Result<HashSet<String>> {
     let mut tainted = HashSet::new();
-    let Some(with_map) = get(step, "with").and_then(Yaml::as_hash) else {
+    let Some(with_map) = get(binding, "with").and_then(Yaml::as_hash) else {
         return Ok(tainted);
     };
     for (key, value) in with_map {
@@ -283,9 +355,10 @@ fn collect_tainted_with_inputs(
         let Some(value) = value.as_str() else {
             continue;
         };
-        // Caller `with:` bindings are evaluated before the composite runs, so a
-        // tainted env, tainted input forwarded from a parent composite, or a
-        // direct untrusted context becomes a tainted input for the callee.
+        // Caller `with:` bindings are evaluated before the composite or
+        // reusable workflow runs, so a tainted env, tainted input forwarded
+        // from a parent, or a direct untrusted context becomes a tainted
+        // input for the callee.
         if value_contains_untrusted_context(value, rel)?
             || value_references_tainted_env(value, taint.envs, rel)?
             || value_references_tainted_input(value, taint.inputs, rel)?
@@ -527,8 +600,8 @@ fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>)
     expression_uses_tainted_context_property(expression, "env", tainted_envs)
 }
 
-/// Detect `${{ inputs.NAME }}` (and index forms) when a local composite caller
-/// bound that input to an untrusted value via `with:`.
+/// Detect `${{ inputs.NAME }}` (and index forms) when a local composite or
+/// reusable-workflow caller bound that input to an untrusted value via `with:`.
 fn expression_uses_tainted_input(expression: &str, tainted_inputs: &HashSet<String>) -> bool {
     if tainted_inputs.is_empty() {
         return false;
@@ -579,7 +652,7 @@ fn expression_uses_tainted_context_property(
     let pattern = match context {
         "env" => ENV_REF.get_or_init(|| {
             Regex::new(
-                r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+                r#"(?i)\benv\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
             )
             .expect("tainted env reference pattern compiles")
         }),
@@ -759,12 +832,7 @@ mod tests {
             content: content.to_string(),
             kind: SurfaceKind::Workflow,
         };
-        let mut findings = Vec::new();
-        let actions = HashMap::new();
-        let mut visiting = HashSet::new();
-        scan_workflow(&file, &actions, &mut visiting, &mut findings)
-            .expect("scan workflow fixture");
-        findings
+        findings_for_files(&[file])
     }
 
     fn findings_for_files(files: &[SurfaceFile]) -> Vec<Finding> {
@@ -1048,9 +1116,21 @@ jobs:
         };
         let mut findings = Vec::new();
         let actions = HashMap::new();
+        let workflows = HashMap::new();
+        let empty = HashSet::new();
         let mut visiting = HashSet::new();
-        let error = scan_workflow(&file, &actions, &mut visiting, &mut findings)
-            .expect_err("unterminated env expression");
+        let error = scan_workflow(
+            &file,
+            TaintScope {
+                envs: &empty,
+                inputs: &empty,
+            },
+            &actions,
+            &workflows,
+            &mut visiting,
+            &mut findings,
+        )
+        .expect_err("unterminated env expression");
         assert!(
             error
                 .to_string()
@@ -1490,5 +1570,77 @@ jobs:
             .iter()
             .all(|finding| finding.rule_id != "AGT-06-workflow-context-injection"));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn hyphenated_env_property_reference_blocks() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      ISSUE-TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ env.ISSUE-TITLE }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.ISSUE-TITLE")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn local_reusable_workflow_with_input_propagates_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ github.event.issue.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("inputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 }

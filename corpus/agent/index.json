@@ -163,6 +163,24 @@
       "notes": "Caller job env taints TITLE and a local composite action re-interpolates ${{ env.TITLE }} in run, which inherits the caller environment."
     },
     {
+      "id": "workflow-env-indirection-hyphenated",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-hyphenated",
+      "packageName": "workflow-env-indirection-hyphenated",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Hyphenated env name ISSUE-TITLE is re-interpolated via ${{ env.ISSUE-TITLE }} in run."
+    },
+    {
+      "id": "workflow-env-indirection-reusable",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-reusable",
+      "packageName": "workflow-env-indirection-reusable",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Caller passes github.event.issue.title through with: into a local reusable workflow that interpolates ${{ inputs.title }} in run."
+    },
+    {
       "id": "composite-action-dangerous",
       "kind": "fixture",
       "path": "fixtures/composite-action-dangerous",
