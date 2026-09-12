@@ -142,6 +142,12 @@ fn scan_step(
 }
 
 fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Result<()> {
+    // GitHub Actions resolves each map entry against the parent scope, not
+    // sibling keys in the same map. Snapshot the inherited set before applying
+    // overrides so an earlier TITLE: fixed cannot clear taint for a later
+    // ALIAS: ${{ env.TITLE }} that still reads the parent value.
+    let inherited = tainted.clone();
+    let mut updates = Vec::new();
     for (key, value) in env {
         let Some(name) = key.as_str() else {
             continue;
@@ -151,13 +157,16 @@ fn apply_env_taints(tainted: &mut HashSet<String>, env: &Hash, rel: &str) -> Res
         };
         // Inherit taint from direct untrusted contexts and from aliases of already
         // tainted env names (e.g. job TITLE → step ALIAS: ${{ env.TITLE }}).
-        if value_contains_untrusted_context(value, rel)?
-            || value_references_tainted_env(value, tainted, rel)?
-        {
-            tainted.insert(name.to_string());
+        let is_tainted = value_contains_untrusted_context(value, rel)?
+            || value_references_tainted_env(value, &inherited, rel)?;
+        updates.push((name.to_string(), is_tainted));
+    }
+    for (name, is_tainted) in updates {
+        if is_tainted {
+            tainted.insert(name);
         } else {
             // A same-scope redeclaration without untrusted contexts clears prior taint.
-            tainted.remove(name);
+            tainted.remove(&name);
         }
     }
     Ok(())
@@ -181,18 +190,21 @@ fn for_each_expression(
     mut predicate: impl FnMut(&str) -> Result<bool>,
 ) -> Result<bool> {
     let mut remaining = value;
+    let mut matched = false;
     while let Some(start) = remaining.find("${{") {
         let after_start = &remaining[start + 3..];
         let Some(end) = after_start.find("}}") else {
             bail!("GitHub Actions surface `{rel}` contains an unterminated expression in `env`");
         };
         let expression = after_start[..end].trim();
+        // Keep scanning after a positive hit so an unterminated trailing `${{`
+        // still surfaces as an incomplete-scan error instead of a clean allow.
         if predicate(expression)? {
-            return Ok(true);
+            matched = true;
         }
         remaining = &after_start[end + 2..];
     }
-    Ok(false)
+    Ok(matched)
 }
 
 fn check_permissions(
@@ -710,6 +722,64 @@ jobs:
                 && finding.detail.contains("env.ALIAS")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn env_alias_reads_parent_scope_despite_sibling_override() {
+        // Step env cannot reference sibling keys: TITLE: fixed clears the local
+        // binding, but ALIAS: ${{ env.TITLE }} still resolves the tainted job value.
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - env:
+          TITLE: fixed
+          ALIAS: ${{ env.TITLE }}
+        run: echo "${{ env.ALIAS }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.ALIAS")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn tainted_env_value_with_trailing_unterminated_expression_errors() {
+        let file = SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TITLE: ${{ github.event.issue.title }} ${{
+        run: echo "safe"
+"#
+            .to_string(),
+            kind: SurfaceKind::Workflow,
+        };
+        let mut findings = Vec::new();
+        let error = scan_workflow(&file, &mut findings).expect_err("unterminated env expression");
+        assert!(
+            error
+                .to_string()
+                .contains("unterminated expression in `env`"),
+            "unexpected error: {error:#}"
+        );
+        assert!(findings.is_empty());
     }
 
     #[test]
