@@ -305,9 +305,10 @@ fn resolve_local_action<'a>(
     local_ref: &str,
     actions: &HashMap<&str, &'a SurfaceFile>,
 ) -> Option<&'a SurfaceFile> {
-    let path = local_ref.trim_end_matches('/');
-    // `uses: ./` resolves to the repository-root action metadata. An empty path
-    // must look up `action.yml` directly; joining would invent `/action.yml`.
+    let path = normalize_local_ref(local_ref);
+    // `uses: ./` and filesystem-equivalent forms such as `uses: ././` resolve to
+    // the repository-root action metadata. An empty path must look up
+    // `action.yml` directly; joining would invent `/action.yml`.
     if path.is_empty() {
         for name in ["action.yml", "action.yaml"] {
             if let Some(file) = actions.get(name) {
@@ -316,7 +317,7 @@ fn resolve_local_action<'a>(
         }
         return None;
     }
-    if let Some(file) = actions.get(path) {
+    if let Some(file) = actions.get(path.as_str()) {
         return Some(*file);
     }
     for name in ["action.yml", "action.yaml"] {
@@ -332,11 +333,28 @@ fn resolve_local_workflow<'a>(
     local_ref: &str,
     workflows: &HashMap<&str, &'a SurfaceFile>,
 ) -> Option<&'a SurfaceFile> {
-    let path = local_ref.trim_end_matches('/');
+    let path = normalize_local_ref(local_ref);
     if path.is_empty() {
         return None;
     }
-    workflows.get(path).copied()
+    workflows.get(path.as_str()).copied()
+}
+
+/// Collapse `.` / `..` segments and trailing slashes so local `uses:` refs match
+/// collected surface keys the way the filesystem would resolve them.
+fn normalize_local_ref(local_ref: &str) -> String {
+    let trimmed = local_ref.trim_end_matches('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for component in trimmed.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                let _ = parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
 }
 
 fn collect_tainted_with_inputs(
@@ -586,10 +604,11 @@ fn check_inline_script(
 /// Detect `${{ env.NAME }}` / `${{ env['NAME'] }}` / `${{ env["NAME"] }}` when
 /// `NAME` was assigned an untrusted GitHub context in an in-scope `env` map.
 ///
-/// Whole-context reads such as `toJSON(env)` or bare `env` are treated as
-/// tainted whenever any in-scope env is tainted. Computed indexes such as
-/// `env[matrix.key]` are likewise conservative. Nested property paths like
-/// `fromJSON(...).env.TITLE` are ignored so only the root `env` context counts.
+/// Whole-context reads such as `toJSON(env)`, bare `env`, or object-filter
+/// wildcards such as `env.*` are treated as tainted whenever any in-scope env
+/// is tainted. Computed indexes such as `env[matrix.key]` are likewise
+/// conservative. Nested property paths like `fromJSON(...).env.TITLE` are
+/// ignored so only the root `env` context counts.
 fn expression_uses_tainted_env(expression: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
         return false;
@@ -622,6 +641,21 @@ fn expression_reads_whole_context(expression: &str, context: &str) -> bool {
     let context = context.to_ascii_lowercase();
     if compact == context {
         return true;
+    }
+    // Match object-filter wildcards such as `env.*` / `inputs.*` (e.g. in
+    // `join(env.*, ',')`) whenever any named binding in that context is tainted.
+    let wildcard = format!("{context}.*");
+    let mut rest = compact.as_str();
+    while let Some(index) = rest.find(&wildcard) {
+        let before_ok = index == 0
+            || !matches!(
+                rest.as_bytes()[index - 1],
+                b'_' | b'.' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            );
+        if before_ok {
+            return true;
+        }
+        rest = &rest[index + 1..];
     }
     // Match `toJSON(env)` / `toJSON(inputs)` but not `toJSON(env.TITLE)`.
     let needle = format!("tojson({context})");
@@ -1544,6 +1578,75 @@ runs:
                 && finding.severity == Severity::Critical
                 && finding.detail.contains("env.TITLE")
                 && finding.location.as_deref() == Some("action.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn normalized_root_local_action_ref_inherits_caller_env_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ././
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: "action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Root composite
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ env.TITLE }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.TITLE")
+                && finding.location.as_deref() == Some("action.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn env_wildcard_filter_is_tainted_when_any_env_is_tainted() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ join(env.*, ',') }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
