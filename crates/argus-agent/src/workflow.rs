@@ -7,6 +7,8 @@
 use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
+use regex::Regex;
+use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -210,7 +212,10 @@ fn check_inline_script(script: &str, rel: &str, findings: &mut Vec<Finding>) -> 
 }
 
 fn is_untrusted_context(expression: &str) -> bool {
-    let without_literals = remove_expression_string_literals(expression);
+    // Normalize bracket property access before stripping string literals so
+    // `['id']` / `["id"]` identifiers are not erased by literal removal.
+    let normalized = normalize_bracket_property_access(expression);
+    let without_literals = remove_expression_string_literals(&normalized);
     let compact: String = without_literals
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -252,6 +257,17 @@ fn is_untrusted_context(expression: &str) -> bool {
                 || compact.contains(".author.name")))
 }
 
+/// Rewrite `['id']` / `["id"]` (with optional whitespace) to `.id` so bracket
+/// and mixed property access match the same dotted-substring detectors.
+fn normalize_bracket_property_access(expression: &str) -> String {
+    static BRACKET_PROPERTY: OnceLock<Regex> = OnceLock::new();
+    let pattern = BRACKET_PROPERTY.get_or_init(|| {
+        Regex::new(r#"\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"#)
+            .expect("bracket property access pattern compiles")
+    });
+    pattern.replace_all(expression, ".$1").into_owned()
+}
+
 fn remove_expression_string_literals(expression: &str) -> String {
     let mut output = String::with_capacity(expression.len());
     let mut chars = expression.chars().peekable();
@@ -286,10 +302,16 @@ fn has_untrusted_checkout_ref(step: &Hash) -> bool {
         .and_then(Yaml::as_hash)
         .and_then(|with| get_string(with, "ref"))
         .is_some_and(|revision| {
-            revision.contains("github.event.pull_request.head.")
-                || revision.contains("github.event.pull_request.merge_commit_sha")
-                || revision.contains("github.event.workflow_run.head_sha")
-                || revision.contains("github.event.workflow_run.head_branch")
+            let normalized = normalize_bracket_property_access(revision);
+            let compact: String = normalized
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect();
+            compact.contains("github.event.pull_request.head.")
+                || compact.contains("github.event.pull_request.merge_commit_sha")
+                || compact.contains("github.event.workflow_run.head_sha")
+                || compact.contains("github.event.workflow_run.head_branch")
         })
 }
 
@@ -450,5 +472,115 @@ jobs:
 
         assert!(trusted_findings.is_empty());
         assert!(privileged_findings.is_empty());
+    }
+
+    #[test]
+    fn bracket_and_mixed_context_paths_block_as_critical() {
+        let cases = [
+            r#"run: echo "${{ github.event['issue']['title'] }}""#,
+            r#"run: echo "${{ github.event.issue['title'] }}""#,
+            r#"run: echo "${{ github.event['issue']['body'] }}""#,
+            r#"run: echo "${{ github.event['pull_request']['title'] }}""#,
+            r#"run: echo "${{ github.event['pull_request']['body'] }}""#,
+            r#"run: echo "${{ github.event.pull_request['body'] }}""#,
+            r#"run: echo "${{ github['head_ref'] }}""#,
+            r#"run: echo "${{ toJSON(github['event']) }}""#,
+            r#"run: echo "${{ toJSON(github.event) }}""#,
+        ];
+
+        for step in cases {
+            let findings = findings_for(&format!(
+                r#"
+name: Review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - {step}
+"#
+            ));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule_id == RULE_CONTEXT_INJECTION
+                        && finding.severity == Severity::Critical
+                }),
+                "expected context injection for step: {step}; findings={findings:?}"
+            );
+            assert_eq!(
+                crate::decision::derive(&findings),
+                Decision::Block,
+                "expected block for step: {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn bracket_untrusted_checkout_refs_block_under_privileged_triggers() {
+        let pull_request_target = findings_for(
+            r#"
+name: Review
+on: pull_request_target
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event['pull_request']['head']['sha'] }}
+"#,
+        );
+        assert!(pull_request_target.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(
+            crate::decision::derive(&pull_request_target),
+            Decision::Block
+        );
+
+        let workflow_run = findings_for(
+            r#"
+name: Follow-up
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event['workflow_run']['head_branch'] }}
+"#,
+        );
+        assert!(workflow_run.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&workflow_run), Decision::Block);
+    }
+
+    #[test]
+    fn normalize_bracket_property_access_rewrites_segments() {
+        assert_eq!(
+            normalize_bracket_property_access("github.event['issue']['title']"),
+            "github.event.issue.title"
+        );
+        assert_eq!(
+            normalize_bracket_property_access(r#"github.event["pull_request"]["body"]"#),
+            "github.event.pull_request.body"
+        );
+        assert_eq!(
+            normalize_bracket_property_access("github.event.issue['title']"),
+            "github.event.issue.title"
+        );
+        assert_eq!(
+            normalize_bracket_property_access("github[ 'head_ref' ]"),
+            "github.head_ref"
+        );
+        assert_eq!(
+            normalize_bracket_property_access("toJSON(github['event'])"),
+            "toJSON(github.event)"
+        );
     }
 }
