@@ -6,10 +6,11 @@
 //!
 //! When a workflow step `uses` a same-repo composite (`./...`), that composite
 //! is expanded with the caller's privileged-trigger flag and `with` input
-//! bindings so wrapping an untrusted checkout — including via
-//! `ref: ${{ inputs.ref }}`, bracket forms such as `ref: ${{ inputs['ref'] }}`,
-//! or compound forms such as `ref: ${{ inputs.ref || github.sha }}` — cannot
-//! bypass Critical→block.
+//! bindings (merged over Action metadata `inputs.*.default`) so wrapping an
+//! untrusted checkout — including via `ref: ${{ inputs.ref }}`, bracket forms
+//! such as `ref: ${{ inputs['ref'] }}`, compound forms such as
+//! `ref: ${{ inputs.ref || github.sha }}`, or an omitted `with` that relies on
+//! an untrusted input default — cannot bypass Critical→block.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed.
@@ -239,6 +240,9 @@ fn expand_local_composite(
     let root = documents[0]
         .as_hash()
         .with_context(|| format!("Action metadata `{}` root must be a mapping", meta.rel))?;
+    // GitHub applies Action input defaults when the caller omits `with` keys;
+    // merge those defaults under caller bindings before scanning steps.
+    let merged_bindings = merge_composite_input_defaults(root, ctx.input_bindings);
     scan_composite_steps(
         root,
         &meta.rel,
@@ -247,10 +251,35 @@ fn expand_local_composite(
             actions: ctx.actions,
             depth: ctx.depth + 1,
             expand_local: true,
-            input_bindings: ctx.input_bindings,
+            input_bindings: &merged_bindings,
         },
         findings,
     )
+}
+
+/// Fill omitted composite inputs from Action metadata `inputs.*.default`.
+///
+/// Caller-supplied `with` bindings always win. Defaults are taken as literal
+/// strings (the same form GitHub evaluates when the caller omits the input).
+fn merge_composite_input_defaults(root: &Hash, caller_bindings: &InputBindings) -> InputBindings {
+    let mut bindings = InputBindings::new();
+    if let Some(inputs) = get(root, "inputs").and_then(Yaml::as_hash) {
+        for (key, value) in inputs {
+            let Some(name) = key.as_str() else {
+                continue;
+            };
+            let Some(spec) = value.as_hash() else {
+                continue;
+            };
+            if let Some(default) = get_string(spec, "default") {
+                bindings.insert(name.to_string(), default.to_string());
+            }
+        }
+    }
+    for (name, value) in caller_bindings {
+        bindings.insert(name.clone(), value.clone());
+    }
+    bindings
 }
 
 /// Build nested composite bindings from a step's `with:` map, resolving any
@@ -794,6 +823,49 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ inputs['ref'] }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_default_input_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: false
+    default: ${{ github.event.pull_request.head.sha }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
