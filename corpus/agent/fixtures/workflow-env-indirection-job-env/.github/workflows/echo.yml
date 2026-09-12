@@ -1,0 +1,10 @@
+name: Echo issue
+on: issues
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ env.TITLE }}"

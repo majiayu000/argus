@@ -127,6 +127,24 @@
       "notes": "NEGATIVE / FP-trap. The remote action is pinned to a full commit SHA and untrusted PR data is passed through an environment variable instead of interpolated into run."
     },
     {
+      "id": "workflow-env-indirection-dangerous",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-dangerous",
+      "packageName": "workflow-env-indirection-dangerous",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Same-step env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in run, which expands before the shell parses the script."
+    },
+    {
+      "id": "workflow-env-indirection-job-env",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-job-env",
+      "packageName": "workflow-env-indirection-job-env",
+      "expectedDecision": "block",
+      "rules": ["workflow-context-injection"],
+      "notes": "Job-level env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in a later run step."
+    },
+    {
       "id": "composite-action-dangerous",
       "kind": "fixture",
       "path": "fixtures/composite-action-dangerous",

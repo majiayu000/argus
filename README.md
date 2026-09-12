@@ -662,7 +662,7 @@ operational error. AGT-06 is included in the immutable `v0.3.0` release.
 | `AGT-05-posttooluse-output-rewrite` | medium → approval | `PostToolUse` hook rewriting `updatedToolOutput` for non-MCP tools |
 | `AGT-05-config-unparseable` | info | agent config file is not valid JSON |
 | `AGT-06-workflow-mutable-action` | medium → approval | a workflow or local composite Action uses a remote Action, reusable workflow, or Docker action that is not pinned to a full commit SHA or image digest |
-| `AGT-06-workflow-context-injection` | critical → block | a workflow or local composite Action interpolates attacker-controlled GitHub event data directly into an inline `run` script instead of crossing an environment-variable boundary |
+| `AGT-06-workflow-context-injection` | critical → block | a workflow or local composite Action interpolates attacker-controlled GitHub event data directly into an inline `run` script (including via `${{ env.* }}` re-interpolation of a previously tainted env assignment); safe remediation passes data through the shell via `$ENV` without `${{ }}` in `run` |
 | `AGT-06-workflow-untrusted-checkout` | critical → block | `pull_request_target` or `workflow_run` checks out an attacker-controlled pull-request/workflow-run ref |
 | `AGT-06-workflow-write-all` | high → block | workflow-level or job-level `permissions: write-all` grants every available `GITHUB_TOKEN` permission write access |
 | `AGT-06-workflow-privileged-write` | medium → approval | `pull_request_target` or `workflow_run` explicitly grants a scoped `GITHUB_TOKEN` permission write access |
