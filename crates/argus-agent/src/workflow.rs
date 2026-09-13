@@ -63,7 +63,8 @@
 //! unquoted `#` comments, including `;#` after a control operator), later
 //! stdout redirections override an earlier
 //! `>> $GITHUB_ENV`/`$GITHUB_OUTPUT` in the same command while descriptor-
-//! prefixed redirects such as `2>>` are not treated as stdout env writes,
+//! prefixed redirects such as `2>>` / a trailing `2>/dev/null` are not treated
+//! as stdout env writes or stdout overrides,
 //! unconditional `exit`/`return` is recognized only in shell command position
 //! (not inside quoted arguments, command substitutions, or subshells), heredoc
 //! payload lines — including every payload from multi-heredoc openers such as
@@ -71,6 +72,7 @@
 //! `cat <<\EOF`, and after concatenating adjacent quoted/unquoted delimiter
 //! fragments such as `cat <<'E'OF` — are not parsed as `$GITHUB_ENV`/
 //! `$GITHUB_OUTPUT` commands,
+//! arithmetic left-shifts such as `: $((1 << 1))` do not open heredoc state,
 //! heredoc-looking tokens inside inline shell comments (`echo noop # <<EOF`)
 //! do not open heredoc state,
 //! single `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes guarded by `&&`/`||`/branching
@@ -959,14 +961,18 @@ fn apply_github_env_writes(
     (written, false)
 }
 
-/// True when the step sets `continue-on-error` to a statically true value.
+/// True when the step may continue after a failing command.
+///
+/// Only a statically false value disables this. Dynamic expressions such as
+/// `${{ true || false }}` are treated as potentially enabled so errexit
+/// reachability still applies to `$GITHUB_ENV` writes.
 fn step_continues_on_error(step: &Hash) -> bool {
     match get(step, "continue-on-error") {
+        None | Some(Yaml::Boolean(false)) => false,
         Some(Yaml::Boolean(true)) => true,
-        Some(value) => value.as_str().is_some_and(|condition| {
-            expression_condition_atom(condition).eq_ignore_ascii_case("true")
-        }),
-        None => false,
+        Some(value) => value
+            .as_str()
+            .is_none_or(|condition| !is_always_false_condition(condition)),
     }
 }
 
@@ -1677,13 +1683,16 @@ fn is_heredoc_terminator(line: &str, delimiter: &HeredocDelimiter) -> bool {
 
 /// Find every unquoted `<<[-]?` heredoc opener on a command line.
 /// Inline shell comments (`# …`, including after `;#`) are not scanned, so a
-/// token such as `# <<EOF` does not open heredoc state.
+/// token such as `# <<EOF` does not open heredoc state. Arithmetic expansions
+/// such as `$((1 << 1))` are tracked so left-shift `<<` is not a heredoc.
 fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
     let bytes = line.as_bytes();
     let mut delimiters = Vec::new();
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
+    // Paren depth inside `$((…))` / nested `(…)` while in arithmetic mode.
+    let mut arith_depth: usize = 0;
     while index < bytes.len() {
         let byte = bytes[index];
         match byte {
@@ -1693,8 +1702,26 @@ fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            b'$' if !in_single
+                && !in_double
+                && index + 2 < bytes.len()
+                && bytes[index + 1] == b'('
+                && bytes[index + 2] == b'(' =>
+            {
+                // Enter arithmetic expansion `$((…))`.
+                arith_depth += 2;
+                index += 3;
+                continue;
+            }
+            b'(' if !in_single && !in_double && arith_depth > 0 => {
+                arith_depth += 1;
+            }
+            b')' if !in_single && !in_double && arith_depth > 0 => {
+                arith_depth -= 1;
+            }
             b'#' if !in_single
                 && !in_double
+                && arith_depth == 0
                 && (index == 0
                     || bytes[index - 1].is_ascii_whitespace()
                     || is_shell_comment_boundary(bytes[index - 1])) =>
@@ -1704,6 +1731,7 @@ fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
             }
             b'<' if !in_single
                 && !in_double
+                && arith_depth == 0
                 && index + 1 < bytes.len()
                 && bytes[index + 1] == b'<' =>
             {
@@ -2004,9 +2032,23 @@ fn stdout_append_command_end(bytes: &[u8], index: usize) -> usize {
 
 /// True when the `>>` at `index` appends stdout (`>>`, `1>>`, or `&>>`).
 fn append_redirect_targets_stdout(bytes: &[u8], index: usize) -> bool {
+    redirect_operator_targets_stdout(bytes, index)
+}
+
+/// True when the redirect operator at `index` (`>` or `>>`) overrides stdout.
+///
+/// Recognizes bare `>`/`>>`, `1>`/`1>>`, and `&>`/`&>>`. Descriptor prefixes
+/// such as `2>` and fd duplications such as `2>&1` are not stdout overrides.
+fn redirect_operator_targets_stdout(bytes: &[u8], index: usize) -> bool {
     if index > 0 && bytes[index - 1] == b'&' {
-        // `&>>file` redirects both stdout and stderr.
-        return true;
+        let amp = index - 1;
+        // `&>file` / `&>>file` — `&` begins a new redirect word.
+        let amp_ok = amp == 0
+            || bytes[amp - 1].is_ascii_whitespace()
+            || is_shell_comment_boundary(bytes[amp - 1]);
+        // `2>&1` has a digit before `&` and duplicates an fd; it does not
+        // replace stdout's destination with a file.
+        return amp_ok;
     }
     let mut fd_start = index;
     while fd_start > 0 && bytes[fd_start - 1].is_ascii_digit() {
@@ -2034,7 +2076,10 @@ fn is_shell_comment_boundary(byte: u8) -> bool {
     matches!(byte, b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>')
 }
 
-/// True when unquoted `>` / `>>` appears in `value` (another stdout redirect).
+/// True when unquoted stdout `>` / `>>` / `&>` appears in `value`.
+///
+/// Non-stdout descriptors such as `2>/dev/null` are ignored so a later stderr
+/// redirect does not discard an earlier `>> "$GITHUB_ENV"` write.
 fn stdout_redirect_follows(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -2055,7 +2100,17 @@ fn stdout_redirect_follows(value: &str) -> bool {
             {
                 return false;
             }
-            b'>' if !in_single && !in_double => return true,
+            b'>' if !in_single && !in_double => {
+                if redirect_operator_targets_stdout(bytes, index) {
+                    return true;
+                }
+                if index + 1 < bytes.len() && bytes[index + 1] == b'>' {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
             _ => {}
         }
         index += 1;
@@ -3832,6 +3887,43 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_skips_unreachable_writes_under_dynamic_continue_on_error() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+continue-on-error: ${{ true || false }}
+shell: bash
+run: |
+  false
+  echo TARGET=main >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(
+            written.is_empty(),
+            "dynamic continue-on-error must still apply errexit reachability: written={written:?}"
+        );
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "unreachable safe overwrite under dynamic continue-on-error must not clear attacker TARGET: {env:?}"
+        );
+    }
+
+    #[test]
     fn apply_github_env_writes_keeps_pre_failure_writes_under_continue_on_error() {
         let docs = YamlLoader::load_from_str(
             r#"
@@ -4081,6 +4173,44 @@ run: |
             env.get("TARGET").map(String::as_str),
             Some("${{ github.event.pull_request.head.sha }}"),
             "comment <<EOF must not open heredoc and skip later attacker write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_tracks_after_arithmetic_left_shift() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  : $((1 << 1))
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "arithmetic << must not open heredoc and skip later attacker write: {env:?}"
+        );
+        assert!(
+            extract_heredoc_delimiters(": $((1 << 1))").is_empty(),
+            "arithmetic left-shift must not yield a heredoc delimiter"
         );
     }
 
@@ -4557,6 +4687,52 @@ run: |
             r#"echo "TARGET=main" >> "$GITHUB_ENV" > /dev/null"#,
             "GITHUB_ENV"
         ));
+    }
+
+    #[test]
+    fn split_github_file_redirect_keeps_write_when_later_redirect_is_stderr() {
+        assert_eq!(
+            split_github_file_redirect(
+                r#"echo TARGET=main >> "$GITHUB_ENV" 2>/dev/null"#,
+                "GITHUB_ENV"
+            ),
+            Some("echo TARGET=main"),
+            "later 2>/dev/null must not discard a stdout GITHUB_ENV write"
+        );
+        assert!(!github_file_stdout_redirect_overridden(
+            r#"echo TARGET=main >> "$GITHUB_ENV" 2>/dev/null"#,
+            "GITHUB_ENV"
+        ));
+    }
+
+    #[test]
+    fn apply_github_env_writes_applies_safe_overwrite_with_trailing_stderr_redirect() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: echo TARGET=main >> "$GITHUB_ENV" 2>/dev/null
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("main"),
+            "trailing stderr redirect must still allow safe TARGET overwrite: {env:?}"
+        );
     }
 
     #[test]
