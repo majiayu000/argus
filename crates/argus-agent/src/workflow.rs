@@ -1122,10 +1122,13 @@ fn collect_tainted_github_outputs(
             ShellFileEffect::UnsupportedProducer { command } => {
                 let mut shell_envs = taint.envs.clone();
                 shell_envs.extend(locals.iter().cloned());
-                // Untainted tool stdout redirected into the command file is
-                // treated as an opaque clean write. Fail closed only when the
-                // producer command itself expands tracked taint.
-                if github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)? {
+                // Opaque producers inherit the process environment, so a tool
+                // may emit tracked taint without naming it on the command line.
+                // Fail closed whenever any tracked env/local taint is in scope
+                // (or the producer command itself expands taint / expressions).
+                if !shell_envs.is_empty()
+                    || github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)?
+                {
                     bail!(
                         "GitHub Actions surface `{rel}` contains an unsupported `$GITHUB_OUTPUT` producer that cannot be assessed statically"
                     );
@@ -1178,12 +1181,19 @@ fn apply_shell_local_assignment(
     }
 }
 
-/// Parse `NAME=value` / `export NAME=value` / `$name = value` shell assignments.
+/// Parse `NAME=value` / `export NAME=value` / `$name = value` / `set NAME=value`
+/// shell assignments.
 fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
-    parse_posix_shell_assignment(segment).or_else(|| parse_pwsh_local_assignment(segment))
+    parse_posix_shell_assignment(segment)
+        .or_else(|| parse_pwsh_local_assignment(segment))
+        .or_else(|| parse_cmd_set_assignment(segment))
 }
 
 /// Parse `NAME=value` / `export NAME=value` POSIX shell assignments.
+///
+/// Command-scoped prefixes such as `ALIAS=fixed /bin/true` are temporary for
+/// that command only and must not clear or update the persistent local alias
+/// set.
 fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     let segment = segment.trim();
     let segment = if let Some(rest) = segment.strip_prefix("export") {
@@ -1200,7 +1210,66 @@ fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     if !is_posix_shell_ident(name) {
         return None;
     }
-    Some((name, &segment[eq + 1..]))
+    let (rhs, rest) = take_shell_assignment_rhs(&segment[eq + 1..]);
+    if !rest.trim_start().is_empty() {
+        // `NAME=value cmd` — env applies only to `cmd`, not the shell session.
+        return None;
+    }
+    Some((name, rhs))
+}
+
+/// Split an assignment RHS into one shell word and any trailing command text.
+fn take_shell_assignment_rhs(input: &str) -> (&str, &str) {
+    if input.is_empty() {
+        return ("", "");
+    }
+    let bytes = input.as_bytes();
+    if bytes[0] == b'\'' || bytes[0] == b'"' {
+        let quote = bytes[0];
+        let mut index = 1;
+        while index < bytes.len() {
+            if bytes[index] == quote {
+                return (&input[..=index], &input[index + 1..]);
+            }
+            if bytes[index] == b'\\' && quote == b'"' && index + 1 < bytes.len() {
+                index += 2;
+                continue;
+            }
+            index += 1;
+        }
+        // Unclosed quote: treat the remainder as the value.
+        return (input, "");
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    (&input[..end], &input[end..])
+}
+
+/// Parse cmd.exe `set NAME=value` / `set "NAME=value"` assignments.
+fn parse_cmd_set_assignment(segment: &str) -> Option<(&str, &str)> {
+    let segment = segment.trim();
+    if segment.len() < 3 || !segment[..3].eq_ignore_ascii_case("set") {
+        return None;
+    }
+    let rest = &segment[3..];
+    if !rest.starts_with(char::is_whitespace) {
+        // Reject `setlocal` / `setx` / glued forms.
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.starts_with('/') {
+        // `set /A`, `set /P`, …
+        return None;
+    }
+    let rest = match strip_wrapping_shell_quote_style(rest) {
+        Some((inner, _)) => inner,
+        None => rest,
+    };
+    let eq = rest.find('=')?;
+    let name = rest[..eq].trim();
+    if !is_posix_shell_ident(name) {
+        return None;
+    }
+    Some((name, &rest[eq + 1..]))
 }
 
 /// Parse PowerShell local assignments such as `$alias = $env:TITLE`.
@@ -1298,7 +1367,12 @@ fn apply_github_env_file_taints(
             ShellFileEffect::UnsupportedProducer { command } => {
                 let mut shell_envs = taint.envs.clone();
                 shell_envs.extend(locals.iter().cloned());
-                if github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)? {
+                // Same opaque-producer rule as `$GITHUB_OUTPUT`: inherited
+                // process env can carry tracked taint without a shell expansion
+                // in the redirected command text.
+                if !shell_envs.is_empty()
+                    || github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)?
+                {
                     bail!(
                         "GitHub Actions surface `{rel}` contains an unsupported `$GITHUB_ENV` producer that cannot be assessed statically"
                     );
@@ -1512,7 +1586,7 @@ fn parse_github_file_effects(
             push_assignment_effects_before_producer(&mut effects, command, |c| {
                 extract_echo_multiline_header(c).is_some()
                     || extract_cat_heredoc_header(c).is_some()
-                    || extract_echo_github_output(c).is_some()
+                    || !extract_echo_github_outputs(c).is_empty()
                     || !extract_printf_github_output(c).is_empty()
                     || extract_bare_string_github_output(c).is_some()
             });
@@ -1602,7 +1676,7 @@ fn push_producer_command_effects(effects: &mut Vec<ShellFileEffect>, command: &s
     let mut write_index = None;
     for (index, segment) in segments.iter().enumerate() {
         let trimmed = segment.trim();
-        if extract_echo_github_output(trimmed).is_some()
+        if !extract_echo_github_outputs(trimmed).is_empty()
             || !extract_printf_github_output(trimmed).is_empty()
             || extract_bare_string_github_output(trimmed).is_some()
         {
@@ -1621,12 +1695,15 @@ fn push_producer_command_effects(effects: &mut Vec<ShellFileEffect>, command: &s
         push_assignment_effects(effects, segment);
     }
     let producer = segments[write_index].trim();
-    if let Some((name, value, expands)) = extract_echo_github_output(producer) {
-        effects.push(ShellFileEffect::Write {
-            name,
-            value,
-            expands,
-        });
+    let echo_writes = extract_echo_github_outputs(producer);
+    if !echo_writes.is_empty() {
+        for (name, value, expands) in echo_writes {
+            effects.push(ShellFileEffect::Write {
+                name,
+                value,
+                expands,
+            });
+        }
         for segment in &segments[write_index + 1..] {
             push_assignment_effects(effects, segment);
         }
@@ -1968,17 +2045,7 @@ fn extract_echo_multiline_header(command: &str) -> Option<(String, String)> {
         Some((inner, _)) => (inner, true),
         None => (payload.trim(), true),
     };
-    // Prefer `name=value` over `name<<delim` when both markers appear.
-    if payload.contains('=') {
-        return None;
-    }
-    let (name, delimiter) = payload.split_once("<<")?;
-    let name = name.trim();
-    let delimiter = delimiter.trim();
-    if !is_github_ident(name) || delimiter.is_empty() || !is_multiline_delimiter(delimiter) {
-        return None;
-    }
-    Some((name.to_string(), delimiter.to_string()))
+    parse_github_multiline_record_header(payload)
 }
 
 fn is_multiline_delimiter(value: &str) -> bool {
@@ -2031,19 +2098,36 @@ fn collect_multiline_github_file_body(
     (value, shell_expands)
 }
 
-fn extract_echo_github_output(command: &str) -> Option<(String, String, bool)> {
-    let payload = extract_echo_payload(command)?;
+/// Recognize `echo` / `echo -e` redirects to `$GITHUB_OUTPUT` / `$GITHUB_ENV`.
+///
+/// With `-e`, escaped newlines in the payload emit multiple command-file records
+/// (same as a multi-line printf format), so each `name=value` piece is tracked.
+fn extract_echo_github_outputs(command: &str) -> Vec<(String, String, bool)> {
+    let mut writes = Vec::new();
+    let Some((payload, interpret_escapes)) = extract_echo_payload_ex(command) else {
+        return writes;
+    };
     let (payload, shell_expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
         Some((inner, b'\'')) => (inner, false),
         Some((inner, _)) => (inner, true),
         None => (payload.trim(), true),
     };
-    let (name, value) = payload.split_once('=')?;
-    let name = name.trim();
-    if !is_github_ident(name) {
-        return None;
+    let pieces = if interpret_escapes {
+        split_printf_format_lines(payload)
+    } else {
+        vec![payload]
+    };
+    for piece in pieces {
+        let Some((name, value)) = piece.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !is_github_ident(name) {
+            continue;
+        }
+        writes.push((name.to_string(), value.trim().to_string(), shell_expands));
     }
-    Some((name.to_string(), value.trim().to_string(), shell_expands))
+    writes
 }
 
 /// Recognize PowerShell string redirects such as
@@ -2198,7 +2282,8 @@ fn extract_cat_heredoc_header(command: &str) -> Option<(String, bool)> {
     Some((delimiter, shell_expands))
 }
 
-/// Collect `name=value` records from a `cat` heredoc body until the delimiter.
+/// Collect `name=value` and multiline `name<<DELIM` records from a `cat` heredoc
+/// body until the delimiter.
 fn collect_cat_heredoc_github_file_writes(
     lines: &[&str],
     index: &mut usize,
@@ -2214,6 +2299,25 @@ fn collect_cat_heredoc_github_file_writes(
         if trimmed == delimiter || trimmed.trim_start_matches('\t') == delimiter {
             break;
         }
+        if let Some((name, inner_delim)) = parse_github_multiline_record_header(trimmed) {
+            let mut value = String::new();
+            while *index < lines.len() {
+                let body = lines[*index];
+                *index += 1;
+                let body_line = body.trim_end_matches('\r');
+                if body_line == inner_delim.as_str()
+                    || body_line.trim_start_matches('\t') == inner_delim.as_str()
+                {
+                    break;
+                }
+                if !value.is_empty() {
+                    value.push('\n');
+                }
+                value.push_str(body_line);
+            }
+            writes.push((name, value, shell_expands));
+            continue;
+        }
         let Some((name, value)) = trimmed.split_once('=') else {
             continue;
         };
@@ -2224,6 +2328,22 @@ fn collect_cat_heredoc_github_file_writes(
         writes.push((name.to_string(), value.to_string(), shell_expands));
     }
     writes
+}
+
+/// Parse a GitHub multiline command-file header (`name<<DELIMITER`).
+fn parse_github_multiline_record_header(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    // Prefer `name=value` over `name<<delim` when both markers appear.
+    if trimmed.contains('=') {
+        return None;
+    }
+    let (name, delimiter) = trimmed.split_once("<<")?;
+    let name = name.trim();
+    let delimiter = delimiter.trim();
+    if !is_github_ident(name) || delimiter.is_empty() || !is_multiline_delimiter(delimiter) {
+        return None;
+    }
+    Some((name.to_string(), delimiter.to_string()))
 }
 
 /// Count `printf` conversion specifications in a format string (`%%` is literal).
@@ -2380,13 +2500,22 @@ fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
 }
 
 fn extract_echo_payload(command: &str) -> Option<&str> {
+    extract_echo_payload_ex(command).map(|(payload, _)| payload)
+}
+
+/// Strip `echo` and leading option tokens; report whether `-e` escape
+/// interpretation is active for the payload.
+fn extract_echo_payload_ex(command: &str) -> Option<(&str, bool)> {
     let trimmed = command.trim();
     let mut rest = trimmed.strip_prefix("echo")?.trim_start();
     // Bash `echo` accepts `-n`, `-e`, `-E`, and combinations such as `-ne`.
     // Strip every leading option token so `echo -e "name=value"` still parses.
+    // Within each token, later flags win (`-eE` disables; `-Ee` enables).
+    let mut interpret_escapes = false;
     while let Some(token_end) = rest.find(|c: char| c.is_whitespace()) {
         let token = &rest[..token_end];
         if is_echo_option_token(token) {
+            apply_echo_escape_options(token, &mut interpret_escapes);
             rest = rest[token_end..].trim_start();
             continue;
         }
@@ -2394,12 +2523,23 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
     }
     if !rest.is_empty() && !rest.contains(char::is_whitespace) && is_echo_option_token(rest) {
         // `echo -n` with no payload
+        apply_echo_escape_options(rest, &mut interpret_escapes);
         return None;
     }
     if rest.is_empty() {
         None
     } else {
-        Some(rest)
+        Some((rest, interpret_escapes))
+    }
+}
+
+fn apply_echo_escape_options(token: &str, interpret_escapes: &mut bool) {
+    for character in token.chars().skip(1) {
+        match character {
+            'e' => *interpret_escapes = true,
+            'E' => *interpret_escapes = false,
+            _ => {}
+        }
     }
 }
 
@@ -5576,8 +5716,6 @@ on: push
 jobs:
   calculate_matrix:
     runs-on: ubuntu-latest
-    env:
-      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
     steps:
       - id: jobs
         run: |
@@ -5587,14 +5725,181 @@ jobs:
 "#,
         );
 
-        // Opaque tool stdout without shell expansions of tracked taint in the
-        // producer command is a complete scan; later interpolations stay clean
-        // because no named output was proven tainted.
+        // Opaque tool stdout with no tracked taint in scope is a complete scan;
+        // later interpolations stay clean because no named output was proven tainted.
         assert!(findings.iter().all(|finding| {
             finding.rule_id != "AGT-06-workflow-context-injection"
                 || !finding.detail.contains("steps.jobs.outputs.jobs")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn opaque_github_output_under_tainted_env_is_incomplete_scan_error() {
+        let file = SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: r#"
+name: Matrix
+on: push
+jobs:
+  calculate_matrix:
+    runs-on: ubuntu-latest
+    env:
+      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - id: jobs
+        run: python generate.py >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.jobs.outputs.title }}"
+"#
+            .to_string(),
+            kind: SurfaceKind::Workflow,
+        };
+        let mut findings = Vec::new();
+        let actions = HashMap::new();
+        let workflows = HashMap::new();
+        let empty = HashSet::new();
+        let mut visiting = HashSet::new();
+        let error = scan_workflow(
+            &file,
+            TaintScope {
+                envs: &empty,
+                inputs: &empty,
+                secrets: &empty,
+                step_outputs: &empty,
+                job_outputs: &empty,
+                matrix: &empty,
+            },
+            &actions,
+            &workflows,
+            &mut visiting,
+            &mut findings,
+        )
+        .expect_err("opaque producer under tainted env");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported `$GITHUB_OUTPUT` producer"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn command_scoped_assignment_prefix_does_not_clear_local_alias_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          ALIAS=$TITLE
+          ALIAS=fixed /bin/true
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn cmd_set_alias_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: cmd
+        run: |
+          set ALIAS=%TITLE%
+          echo out=%ALIAS%>>%GITHUB_OUTPUT%
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn echo_dash_e_multi_record_tracks_each_named_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo -e "first=fixed\nsecond=$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.second }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.second")
+        }));
+        assert!(findings.iter().all(|finding| {
+            finding.rule_id != "AGT-06-workflow-context-injection"
+                || !finding.detail.contains("steps.set.outputs.first")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn cat_heredoc_multiline_record_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          cat <<EOF >> "$GITHUB_OUTPUT"
+          title<<END
+          $TITLE
+          END
+          EOF
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
