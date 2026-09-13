@@ -68,11 +68,15 @@
 //! payload lines — including every payload from multi-heredoc openers such as
 //! `cat <<A <<B`, and after quote-removal of backslash-quoted delimiters such
 //! as `cat <<\EOF` — are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands,
+//! heredoc-looking tokens inside inline shell comments (`echo noop # <<EOF`)
+//! do not open heredoc state,
 //! single `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes guarded by `&&`/`||`/branching
 //! stay unresolved even when only one assignment is present,
 //! echo payloads that include an unquoted shell pipeline
 //! (`echo TARGET=main | true >> "$GITHUB_ENV"`) are treated as opaque rather
-//! than literal assignments, and
+//! than literal assignments,
+//! `echo -n` is recognized only when `-n` is a separate option (not glued as
+//! `echo -nTARGET=main`), and
 //! unresolved `needs.*.outputs.*` checkout refs —
 //! including whole-context `fromJSON(toJSON(needs))…` reconstruction — fail
 //! closed. Unresolved `steps.*.outputs.*`, including whole-context
@@ -1358,6 +1362,8 @@ fn is_heredoc_terminator(line: &str, delimiter: &HeredocDelimiter) -> bool {
 }
 
 /// Find every unquoted `<<[-]?` heredoc opener on a command line.
+/// Inline shell comments (`# …`, including after `;#`) are not scanned, so a
+/// token such as `# <<EOF` does not open heredoc state.
 fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
     let bytes = line.as_bytes();
     let mut delimiters = Vec::new();
@@ -1373,6 +1379,15 @@ fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single
+                && !in_double
+                && (index == 0
+                    || bytes[index - 1].is_ascii_whitespace()
+                    || is_shell_comment_boundary(bytes[index - 1])) =>
+            {
+                // Remainder of the line is a comment; stop looking for `<<`.
+                break;
+            }
             b'<' if !in_single
                 && !in_double
                 && index + 1 < bytes.len()
@@ -1865,10 +1880,20 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
         return None;
     }
     let rest = trimmed.strip_prefix("echo")?.trim_start();
-    let rest = rest
-        .strip_prefix("-n")
-        .map(|value| value.trim_start())
-        .unwrap_or(rest);
+    // Bash treats `-n` as the no-newline option only when it is a separate
+    // word. `echo -nTARGET=main` prints the literal `-nTARGET=main`.
+    let rest = match rest.strip_prefix("-n") {
+        Some(after)
+            if after.is_empty()
+                || after
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_whitespace) =>
+        {
+            after.trim_start()
+        }
+        _ => rest,
+    };
     if rest.is_empty() {
         None
     } else {
@@ -3462,6 +3487,76 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_tracks_after_comment_heredoc_lookalike() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  echo noop # <<EOF
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "comment <<EOF must not open heredoc and skip later attacker write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_does_not_treat_glued_echo_n_as_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  echo -nTARGET=main >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(
+            opaque || !env.contains_key("TARGET") || env.get("TARGET").map(String::as_str)
+                != Some("main"),
+            "glued echo -nTARGET must not record a safe TARGET=main overwrite: written={written:?} opaque={opaque} env={env:?}"
+        );
+        assert_ne!(
+            env.get("TARGET").map(String::as_str),
+            Some("main"),
+            "glued echo -nTARGET must not clear attacker TARGET binding: {env:?}"
+        );
+    }
+
+    #[test]
     fn parse_github_file_writes_treats_echo_pipeline_as_opaque() {
         let (writes, opaque) =
             parse_github_file_writes(r#"echo TARGET=main | true >> "$GITHUB_ENV""#, "GITHUB_ENV");
@@ -4709,6 +4804,103 @@ runs:
         cat <<'EOF'
         echo "TARGET=main" >> "$GITHUB_ENV"
         EOF
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_comment_heredoc_lookalike_then_env_write_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=main" >> "$GITHUB_ENV"
+        echo noop # <<EOF
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_glued_echo_n_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+        echo -nTARGET=main >> "$GITHUB_ENV"
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
