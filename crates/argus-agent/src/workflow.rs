@@ -914,6 +914,15 @@ fn apply_github_env_writes(
     let Some(script) = get_string(step, "run") else {
         return (BTreeSet::new(), false);
     };
+    // `continue-on-error` lets later steps observe env even when bash/sh `-e`
+    // aborts mid-script. Only apply writes from the errexit-reachable prefix so
+    // a dead `echo TARGET=main >> "$GITHUB_ENV"` after `false` cannot clear an
+    // inherited attacker-controlled binding.
+    let script = if step_continues_on_error(step) && step_shell_uses_errexit(step) {
+        script_reachable_under_shell_errexit(script)
+    } else {
+        script
+    };
     // Only the reachable prefix before an unconditional exit/return is applied;
     // post-exit writes are dead while pre-exit writes still persist to later steps.
     let (_, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
@@ -940,6 +949,150 @@ fn apply_github_env_writes(
         }
     }
     (written, false)
+}
+
+/// True when the step sets `continue-on-error` to a statically true value.
+fn step_continues_on_error(step: &Hash) -> bool {
+    match get(step, "continue-on-error") {
+        Some(Yaml::Boolean(true)) => true,
+        Some(value) => value.as_str().is_some_and(|condition| {
+            expression_condition_atom(condition).eq_ignore_ascii_case("true")
+        }),
+        None => false,
+    }
+}
+
+/// True when the step's shell runs with GitHub's default errexit (`-e`) semantics.
+///
+/// Absent `shell:` defaults to bash on GitHub-hosted Linux/macOS runners.
+/// `pwsh` / `cmd` are excluded — their failure semantics differ.
+fn step_shell_uses_errexit(step: &Hash) -> bool {
+    match get_string(step, "shell") {
+        None => true,
+        Some(shell) => {
+            let primary = shell.split_whitespace().next().unwrap_or(shell);
+            let base = primary.rsplit('/').next().unwrap_or(primary);
+            base == "bash" || base == "sh"
+        }
+    }
+}
+
+/// Prefix of `script` that still runs under shell `-e` before a command that may
+/// fail. Used when `continue-on-error` tolerates that failure for later steps.
+fn script_reachable_under_shell_errexit(script: &str) -> &str {
+    let blanked = blank_github_expressions_preserving_len(script);
+    let bytes = blanked.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut subshell_depth: usize = 0;
+    let mut at_command_position = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if (in_double || in_backtick) && index + 1 < bytes.len() => {
+                index += 2;
+                at_command_position = false;
+                continue;
+            }
+            b'\'' if !in_double && !in_backtick => {
+                in_single = !in_single;
+                at_command_position = false;
+            }
+            b'"' if !in_single && !in_backtick => {
+                in_double = !in_double;
+                at_command_position = false;
+            }
+            b'`' if !in_single && !in_double => {
+                in_backtick = !in_backtick;
+                at_command_position = in_backtick;
+            }
+            b'$' if !in_single
+                && !in_double
+                && !in_backtick
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'('
+                && !(index + 2 < bytes.len() && bytes[index + 2] == b'(') =>
+            {
+                subshell_depth += 1;
+                index += 2;
+                at_command_position = true;
+                continue;
+            }
+            b'\n' if !in_single && !in_double => {
+                at_command_position = true;
+            }
+            b';' | b'|' | b'&' if !in_single && !in_double => {
+                at_command_position = true;
+            }
+            b'(' if !in_single && !in_double && !in_backtick => {
+                subshell_depth += 1;
+                at_command_position = true;
+            }
+            b')' if !in_single && !in_double && !in_backtick => {
+                subshell_depth = subshell_depth.saturating_sub(1);
+                at_command_position = false;
+            }
+            b'#' if !in_single
+                && !in_double
+                && !in_backtick
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            _ if !in_single && !in_double && at_command_position => {
+                if byte.is_ascii_whitespace() {
+                    index += 1;
+                    continue;
+                }
+                if subshell_depth == 0
+                    && !in_backtick
+                    && !shell_command_always_succeeds_under_errexit(&blanked[index..])
+                {
+                    return script.get(..index).unwrap_or(script);
+                }
+                at_command_position = false;
+            }
+            _ => {
+                if !in_single && !in_double && !byte.is_ascii_whitespace() {
+                    at_command_position = false;
+                }
+            }
+        }
+        index += 1;
+    }
+    script
+}
+
+/// Conservative `-e` success set: only builtins that almost never fail when used
+/// as simple commands. Everything else ends the reachable prefix.
+fn shell_command_always_succeeds_under_errexit(command: &str) -> bool {
+    let mut rest = command.trim_start();
+    // Skip leading `VAR=value` assignments (`TARGET=main true`).
+    loop {
+        let Some(token) = first_shell_token(rest) else {
+            return true;
+        };
+        if token.contains('=')
+            && !token.starts_with('-')
+            && token
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            rest = rest[token.len()..].trim_start();
+            if rest.is_empty() {
+                return true;
+            }
+            continue;
+        }
+        let name = token.trim_matches(|character| character == '"' || character == '\'');
+        return matches!(name, ":" | "true" | "echo" | "printf");
+    }
 }
 
 /// Drop keys a `$GITHUB_ENV` writer would touch without applying resolved
@@ -1271,6 +1424,7 @@ fn blank_github_expression_regions(value: &str) -> String {
 fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, String, bool)>, bool) {
     // Ignore unreachable post-exit writes while still parsing the reachable prefix.
     let script = script_reachable_before_unconditional_exit(script);
+    let echo_redefined = script_redefines_echo(script);
     let mut writes = Vec::new();
     let mut opaque_redirect = false;
     // Bash accepts multiple heredocs on one command (`cat <<A <<B`); each
@@ -1326,6 +1480,21 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
                 }
                 continue;
             };
+            // A shell function such as `echo() { :; }` makes textual `echo …`
+            // redirects untrustworthy — invalidate the name rather than record
+            // a false safe assignment.
+            if echo_redefined {
+                let (payload, _) = unwrap_echo_payload(payload.trim());
+                if let Some((name, _)) = payload.split_once('=') {
+                    let name = name.trim();
+                    if is_github_ident(name) {
+                        writes.push((name.to_string(), "$".to_string(), true));
+                        continue;
+                    }
+                }
+                opaque_redirect = true;
+                continue;
+            }
             let (payload, shell_expands) = unwrap_echo_payload(payload.trim());
             let Some((name, value)) = payload.split_once('=') else {
                 opaque_redirect = true;
@@ -1341,6 +1510,143 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
         heredoc_delimiters.extend(pending_heredocs);
     }
     (writes, opaque_redirect)
+}
+
+/// True when `script` defines a shell function named `echo`, which makes later
+/// textual `echo … >> "$GITHUB_ENV"` writes unreliable.
+fn script_redefines_echo(script: &str) -> bool {
+    let blanked = blank_github_expressions_preserving_len(script);
+    let bytes = blanked.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut subshell_depth: usize = 0;
+    let mut at_command_position = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if (in_double || in_backtick) && index + 1 < bytes.len() => {
+                index += 2;
+                at_command_position = false;
+                continue;
+            }
+            b'\'' if !in_double && !in_backtick => {
+                in_single = !in_single;
+                at_command_position = false;
+            }
+            b'"' if !in_single && !in_backtick => {
+                in_double = !in_double;
+                at_command_position = false;
+            }
+            b'`' if !in_single && !in_double => {
+                in_backtick = !in_backtick;
+                at_command_position = in_backtick;
+            }
+            b'$' if !in_single
+                && !in_double
+                && !in_backtick
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'('
+                && !(index + 2 < bytes.len() && bytes[index + 2] == b'(') =>
+            {
+                subshell_depth += 1;
+                index += 2;
+                at_command_position = true;
+                continue;
+            }
+            b'\n' if !in_single && !in_double => {
+                at_command_position = true;
+            }
+            b';' | b'|' | b'&' if !in_single && !in_double => {
+                at_command_position = true;
+            }
+            b'(' if !in_single && !in_double && !in_backtick => {
+                subshell_depth += 1;
+                at_command_position = true;
+            }
+            b')' if !in_single && !in_double && !in_backtick => {
+                subshell_depth = subshell_depth.saturating_sub(1);
+                at_command_position = false;
+            }
+            b'#' if !in_single
+                && !in_double
+                && !in_backtick
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            _ if !in_single && !in_double && at_command_position => {
+                if byte.is_ascii_whitespace() {
+                    index += 1;
+                    continue;
+                }
+                if subshell_depth == 0
+                    && !in_backtick
+                    && echo_function_definition_at(&blanked[index..])
+                {
+                    return true;
+                }
+                at_command_position = false;
+            }
+            _ => {
+                if !in_single && !in_double && !byte.is_ascii_whitespace() {
+                    at_command_position = false;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+/// `echo() { … }` / `function echo { … }` / `function echo() { … }` at `value`.
+fn echo_function_definition_at(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.starts_with(b"function") && bytes.get(8).is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        let after = value[8..].trim_start();
+        return echo_function_name_at(after);
+    }
+    echo_paren_function_at(value)
+}
+
+fn echo_function_name_at(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("echo") else {
+        return false;
+    };
+    // Complete ident `echo`, not `echoes` / `echo_x`.
+    if rest
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return false;
+    }
+    let rest = rest.trim_start();
+    rest.starts_with('{') || rest.starts_with('(') || rest.is_empty()
+}
+
+fn echo_paren_function_at(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("echo") else {
+        return false;
+    };
+    // `echo` must be a complete ident before `()`.
+    if rest
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return false;
+    }
+    let rest = rest.trim_start();
+    let Some(after_open) = rest.strip_prefix('(') else {
+        return false;
+    };
+    after_open.trim_start().starts_with(')')
 }
 
 /// Heredoc end-marker captured from a `<<` / `<<-` opener.
@@ -3448,6 +3754,190 @@ run: true || echo TARGET=main >> "$GITHUB_ENV"
             !env.contains_key("TARGET"),
             "single control-flow-guarded write must not overwrite inherited taint: {env:?}"
         );
+    }
+
+    #[test]
+    fn apply_github_env_writes_skips_unreachable_writes_under_continue_on_error() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+continue-on-error: true
+shell: bash
+run: |
+  false
+  echo TARGET=main >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(
+            written.is_empty(),
+            "bash -e aborts at false before the echo write: written={written:?}"
+        );
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "unreachable safe overwrite must not clear attacker TARGET: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_keeps_pre_failure_writes_under_continue_on_error() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+continue-on-error: true
+shell: bash
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  false
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "write before tolerated failure must still apply: {env:?}"
+        );
+    }
+
+    #[test]
+    fn parse_github_file_writes_invalidates_echo_after_function_redefinition() {
+        let (writes, opaque) = parse_github_file_writes(
+            r#"
+echo() { :; }
+echo "TARGET=main" >> "$GITHUB_ENV"
+"#,
+            "GITHUB_ENV",
+        );
+        assert!(!opaque);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "TARGET");
+        assert!(
+            writes[0].2,
+            "redefined echo must be an untracked invalidation, not a literal safe write: {writes:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_continue_on_error_unreachable_env_write_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "TARGET=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_ENV"
+      - continue-on-error: true
+        run: |
+          false
+          echo "TARGET=main" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_echo_function_redefinition_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: |
+        echo() { :; }
+        echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
