@@ -51,10 +51,21 @@ struct StepScanEffects {
 }
 
 fn apply_github_env_overlay(envs: &mut HashSet<String>, writes: &HashMap<String, bool>) {
+    apply_github_env_overlay_retaining(envs, writes, false);
+}
+
+/// Apply composite/`$GITHUB_ENV` overlay writes. When `retain_on_clean` is set
+/// (caller step has an Actions `if:`), clean overwrites do not clear prior
+/// taint because the step may be skipped at runtime.
+fn apply_github_env_overlay_retaining(
+    envs: &mut HashSet<String>,
+    writes: &HashMap<String, bool>,
+    retain_on_clean: bool,
+) {
     for (name, tainted) in writes {
         if *tainted {
             envs.insert(name.clone());
-        } else {
+        } else if !retain_on_clean {
             envs.remove(name);
         }
     }
@@ -332,7 +343,11 @@ fn scan_workflow_inner(
                 // `$GITHUB_ENV` writes become env bindings for later steps.
                 apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
                 if let Some(ref env_writes) = effects.env_writes {
-                    apply_github_env_overlay(&mut job_tainted_envs, env_writes);
+                    apply_github_env_overlay_retaining(
+                        &mut job_tainted_envs,
+                        env_writes,
+                        step_has_actions_condition(step),
+                    );
                 }
                 tainted_step_outputs.extend(effects.outputs);
             }
@@ -461,7 +476,11 @@ fn scan_workflow_inner(
             // `$GITHUB_ENV` writes become env bindings for later steps.
             apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
             if let Some(ref env_writes) = from_composite.env_writes {
-                apply_github_env_overlay(&mut job_tainted_envs, env_writes);
+                apply_github_env_overlay_retaining(
+                    &mut job_tainted_envs,
+                    env_writes,
+                    step_has_actions_condition(step),
+                );
             }
             tainted_step_outputs.extend(from_composite.outputs.into_iter().chain(from_run));
         }
@@ -1226,29 +1245,39 @@ fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
 }
 
 /// Split an assignment RHS into one shell word and any trailing command text.
+///
+/// Adjacent quoted/unquoted pieces such as `"$TITLE"-suffix` form a single
+/// shell word and must not be mistaken for a command-scoped suffix.
 fn take_shell_assignment_rhs(input: &str) -> (&str, &str) {
     if input.is_empty() {
         return ("", "");
     }
     let bytes = input.as_bytes();
-    if bytes[0] == b'\'' || bytes[0] == b'"' {
-        let quote = bytes[0];
-        let mut index = 1;
-        while index < bytes.len() {
-            if bytes[index] == quote {
-                return (&input[..=index], &input[index + 1..]);
-            }
-            if bytes[index] == b'\\' && quote == b'"' && index + 1 < bytes.len() {
-                index += 2;
-                continue;
-            }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\'' || byte == b'"' {
+            let quote = byte;
             index += 1;
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    index += 1;
+                    break;
+                }
+                if bytes[index] == b'\\' && quote == b'"' && index + 1 < bytes.len() {
+                    index += 2;
+                    continue;
+                }
+                index += 1;
+            }
+            continue;
         }
-        // Unclosed quote: treat the remainder as the value.
-        return (input, "");
+        if byte.is_ascii_whitespace() {
+            return (&input[..index], &input[index..]);
+        }
+        index += 1;
     }
-    let end = input.find(char::is_whitespace).unwrap_or(input.len());
-    (&input[..end], &input[end..])
+    (input, "")
 }
 
 /// Parse cmd.exe `set NAME=value` / `set "NAME=value"` assignments.
@@ -1426,12 +1455,14 @@ fn script_has_shell_control_flow(script: &str) -> bool {
     static CONTROL_FLOW: OnceLock<Regex> = OnceLock::new();
     let pattern = CONTROL_FLOW.get_or_init(|| {
         Regex::new(
-            r"(?m)(?:(?:^|[^A-Za-z0-9_])(?:if|elif|else|fi|case|esac|for|while|until|done|select)(?:$|[^A-Za-z0-9_])|&&|\|\|)",
+            r"(?m)(?:(?:^|[^A-Za-z0-9_])(?:if|elif|else|fi|case|esac|for|while|until|done|select|function)(?:$|[^A-Za-z0-9_])|(?:^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)|&&|\|\|)",
         )
         .expect("shell control-flow pattern compiles")
     });
     // Blank `${{ }}` regions so expression operators such as
     // `${{ false && inputs.ref }}` are not treated as shell control flow.
+    // Function declarations (`clean() { ... }` / `function clean`) are also
+    // control flow: their bodies are not executed unless invoked.
     pattern.is_match(&blank_github_expression_regions(script))
 }
 
@@ -1614,6 +1645,12 @@ fn parse_github_file_effects(
             continue;
         }
         let Some(command) = split_github_file_redirect(trimmed, file_var) else {
+            // PowerShell `Add-Content` / `Out-File` writers target command files
+            // without a `>>` redirect.
+            if let Some(effect) = extract_pwsh_command_file_writer(trimmed, file_var) {
+                effects.push(effect);
+                continue;
+            }
             // Mention-only lines (`echo 'Use $GITHUB_OUTPUT'`) are not writers.
             push_assignment_effects(&mut effects, trimmed);
             continue;
@@ -2176,6 +2213,149 @@ fn extract_bare_string_github_output(command: &str) -> Option<(String, String, b
         return None;
     }
     let expands = shell_expands != b'\'';
+    Some((name.to_string(), value.trim().to_string(), expands))
+}
+
+/// Recognize PowerShell `Add-Content` / `Out-File` writers that target an
+/// Actions command file without a shell `>>` redirect.
+///
+/// Examples:
+/// - `Add-Content -Path $env:GITHUB_OUTPUT -Value "out=$env:TITLE"`
+/// - `Out-File -FilePath $env:GITHUB_OUTPUT -Append -InputObject "out=$env:TITLE"`
+fn extract_pwsh_command_file_writer(line: &str, file_var: &str) -> Option<ShellFileEffect> {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let (cmd_len, is_add_content) = if lower.starts_with("add-content") {
+        ("add-content".len(), true)
+    } else if lower.starts_with("out-file") {
+        ("out-file".len(), false)
+    } else {
+        return None;
+    };
+    let after_cmd = &trimmed[cmd_len..];
+    if !after_cmd.is_empty()
+        && !after_cmd.starts_with(char::is_whitespace)
+        && !after_cmd.starts_with('-')
+    {
+        return None;
+    }
+    if !pwsh_writer_targets_github_file(trimmed, file_var) {
+        return None;
+    }
+    if let Some(payload) = extract_pwsh_writer_value_payload(trimmed, is_add_content) {
+        if let Some((name, value, expands)) = parse_pwsh_name_equals_payload(&payload) {
+            return Some(ShellFileEffect::Write {
+                name,
+                value,
+                expands,
+            });
+        }
+    }
+    // Recognized producer targeting the command file, but the value payload
+    // could not be classified — fail closed via opaque output taint.
+    Some(ShellFileEffect::UnsupportedProducer {
+        command: trimmed.to_string(),
+    })
+}
+
+/// True when an `Add-Content` / `Out-File` invocation targets `file_var`.
+fn pwsh_writer_targets_github_file(line: &str, file_var: &str) -> bool {
+    if let Some(target) = extract_pwsh_named_arg(line, &["-Path", "-LiteralPath", "-FilePath"]) {
+        return matches_github_file_var_target(
+            strip_wrapping_shell_quotes(target).trim(),
+            file_var,
+        );
+    }
+    // Positional: `Add-Content $env:GITHUB_OUTPUT "out=..."` / `Out-File $env:GITHUB_OUTPUT`.
+    let lower = line.to_ascii_lowercase();
+    let after_cmd = if lower.starts_with("add-content") {
+        line["add-content".len()..].trim_start()
+    } else if lower.starts_with("out-file") {
+        line["out-file".len()..].trim_start()
+    } else {
+        return false;
+    };
+    let Some((first, _, _)) = next_shell_word(after_cmd) else {
+        return false;
+    };
+    if first.starts_with('-') {
+        return false;
+    }
+    matches_github_file_var_target(strip_wrapping_shell_quotes(first).trim(), file_var)
+}
+
+/// Extract `-Value` / `-InputObject` (or Add-Content's second positional) payload.
+fn extract_pwsh_writer_value_payload(line: &str, is_add_content: bool) -> Option<String> {
+    if let Some(value) = extract_pwsh_named_arg(line, &["-Value", "-InputObject"]) {
+        return Some(value.to_string());
+    }
+    if !is_add_content {
+        return None;
+    }
+    // Positional form: Add-Content <path> <value> ...
+    let after_cmd = line.trim()["add-content".len()..].trim_start();
+    let mut rest = after_cmd;
+    let mut positionals = Vec::new();
+    while let Some((word, after, _)) = next_shell_word(rest) {
+        rest = after;
+        if word.starts_with('-') {
+            let takes_value = [
+                "-Path",
+                "-LiteralPath",
+                "-FilePath",
+                "-Value",
+                "-InputObject",
+                "-Encoding",
+                "-Filter",
+                "-Include",
+                "-Exclude",
+                "-Delimiter",
+            ]
+            .iter()
+            .any(|name| word.eq_ignore_ascii_case(name));
+            if takes_value {
+                if let Some((_, after_arg, _)) = next_shell_word(rest) {
+                    rest = after_arg;
+                }
+            }
+            continue;
+        }
+        positionals.push(word);
+        if positionals.len() >= 2 {
+            break;
+        }
+    }
+    positionals.get(1).map(|value| (*value).to_string())
+}
+
+/// Return the argument text for the first matching PowerShell named parameter.
+fn extract_pwsh_named_arg<'a>(line: &'a str, names: &[&str]) -> Option<&'a str> {
+    let mut rest = line.trim();
+    while let Some((word, after, _)) = next_shell_word(rest) {
+        rest = after;
+        let is_match = names.iter().any(|name| word.eq_ignore_ascii_case(name));
+        if !is_match {
+            continue;
+        }
+        let (value, _, _) = next_shell_word(rest)?;
+        return Some(value);
+    }
+    None
+}
+
+/// Parse a `name=value` payload from a PowerShell writer argument.
+fn parse_pwsh_name_equals_payload(payload: &str) -> Option<(String, String, bool)> {
+    let trimmed = payload.trim();
+    let (inner, expands) = match strip_wrapping_shell_quote_style(trimmed) {
+        Some((inner, b'\'')) => (inner, false),
+        Some((inner, _)) => (inner, true),
+        None => (trimmed, true),
+    };
+    let (name, value) = inner.split_once('=')?;
+    let name = name.trim();
+    if !is_github_ident(name) {
+        return None;
+    }
     Some((name.to_string(), value.trim().to_string(), expands))
 }
 
@@ -6009,6 +6189,165 @@ jobs:
         run: |
           $env:ALIAS = $env:TITLE
           "out=$env:ALIAS" >> $env:GITHUB_OUTPUT
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_add_content_github_output_writer_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_OUTPUT -Value "out=$env:TITLE"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_out_file_github_output_writer_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: Out-File -FilePath $env:GITHUB_OUTPUT -Append -InputObject "out=$env:TITLE"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn conditional_composite_clean_env_export_retains_caller_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "ALIAS=$TITLE" >> "$GITHUB_ENV"
+      - if: false
+        uses: ./.github/actions/clean-alias
+      - id: set
+        run: echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/clean-alias/action.yml".to_string(),
+                content: r#"
+name: Clean alias
+description: Overwrite ALIAS with a fixed value
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "ALIAS=fixed" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn uninvoked_shell_function_body_does_not_clear_github_output_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          echo "out=$TITLE" >> "$GITHUB_OUTPUT"
+          clean() { echo "out=fixed" >> "$GITHUB_OUTPUT"; }
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn concatenated_quoted_shell_assignment_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          ALIAS="$TITLE"-suffix
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
       - run: echo "${{ steps.set.outputs.out }}"
 "#,
         );
