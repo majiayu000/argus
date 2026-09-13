@@ -1096,7 +1096,14 @@ fn collect_tainted_github_outputs(
     for effect in parse_github_file_effects(script, "GITHUB_OUTPUT", rel)? {
         match effect {
             ShellFileEffect::Assignment { name, rhs, expands } => {
-                apply_shell_local_assignment(&mut locals, taint.envs, &name, &rhs, expands);
+                apply_shell_local_assignment(
+                    &mut locals,
+                    taint.envs,
+                    &name,
+                    &rhs,
+                    expands,
+                    retain_on_clean,
+                );
             }
             ShellFileEffect::Write {
                 name,
@@ -1110,6 +1117,18 @@ fn collect_tainted_github_outputs(
                     tainted.insert(key);
                 } else if !retain_on_clean {
                     tainted.remove(&key);
+                }
+            }
+            ShellFileEffect::UnsupportedProducer { command } => {
+                let mut shell_envs = taint.envs.clone();
+                shell_envs.extend(locals.iter().cloned());
+                // Untainted tool stdout redirected into the command file is
+                // treated as an opaque clean write. Fail closed only when the
+                // producer command itself expands tracked taint.
+                if github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)? {
+                    bail!(
+                        "GitHub Actions surface `{rel}` contains an unsupported `$GITHUB_OUTPUT` producer that cannot be assessed statically"
+                    );
                 }
             }
         }
@@ -1144,20 +1163,28 @@ fn apply_shell_local_assignment(
     name: &str,
     rhs: &str,
     expands: bool,
+    retain_on_clean: bool,
 ) {
     let key = normalize_env_name(name);
     let mut working = base_envs.clone();
     working.extend(locals.iter().cloned());
     if expands && value_references_tainted_shell_env(rhs, &working) {
         locals.insert(key);
-    } else {
+    } else if !retain_on_clean {
         // Clean reassignment clears a prior local alias; base env taint stays.
+        // Conditional scripts keep prior alias taint because the clean write may
+        // never execute.
         locals.remove(&key);
     }
 }
 
-/// Parse `NAME=value` / `export NAME=value` shell assignments.
+/// Parse `NAME=value` / `export NAME=value` / `$name = value` shell assignments.
 fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
+    parse_posix_shell_assignment(segment).or_else(|| parse_pwsh_local_assignment(segment))
+}
+
+/// Parse `NAME=value` / `export NAME=value` POSIX shell assignments.
+fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     let segment = segment.trim();
     let segment = if let Some(rest) = segment.strip_prefix("export") {
         if rest.starts_with(char::is_whitespace) {
@@ -1174,6 +1201,34 @@ fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, &segment[eq + 1..]))
+}
+
+/// Parse PowerShell local assignments such as `$alias = $env:TITLE`.
+fn parse_pwsh_local_assignment(segment: &str) -> Option<(&str, &str)> {
+    let segment = segment.trim();
+    let rest = segment.strip_prefix('$')?;
+    if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("env:"))
+    {
+        // `$env:NAME = ...` mutates the process environment, not a local alias.
+        return None;
+    }
+    let name_len = rest
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if name_len == 0 {
+        return None;
+    }
+    let name = &rest[..name_len];
+    if !is_posix_shell_ident(name) {
+        return None;
+    }
+    let after_name = rest[name_len..].trim_start();
+    let rhs = after_name.strip_prefix('=')?.trim_start();
+    Some((name, rhs))
 }
 
 fn is_posix_shell_ident(value: &str) -> bool {
@@ -1208,7 +1263,14 @@ fn apply_github_env_file_taints(
     for effect in parse_github_file_effects(script, "GITHUB_ENV", rel)? {
         match effect {
             ShellFileEffect::Assignment { name, rhs, expands } => {
-                apply_shell_local_assignment(&mut locals, taint.envs, &name, &rhs, expands);
+                apply_shell_local_assignment(
+                    &mut locals,
+                    taint.envs,
+                    &name,
+                    &rhs,
+                    expands,
+                    retain_on_clean,
+                );
             }
             ShellFileEffect::Write {
                 name,
@@ -1231,6 +1293,15 @@ fn apply_github_env_file_taints(
                     writes.insert(key, true);
                 } else {
                     writes.insert(key, false);
+                }
+            }
+            ShellFileEffect::UnsupportedProducer { command } => {
+                let mut shell_envs = taint.envs.clone();
+                shell_envs.extend(locals.iter().cloned());
+                if github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)? {
+                    bail!(
+                        "GitHub Actions surface `{rel}` contains an unsupported `$GITHUB_ENV` producer that cannot be assessed statically"
+                    );
                 }
             }
         }
@@ -1400,6 +1471,8 @@ enum ShellFileEffect {
         value: String,
         expands: bool,
     },
+    /// Redirected command that is not an `echo` / `printf` / bare-string writer.
+    UnsupportedProducer { command: String },
 }
 
 /// Parse shell assignments and `echo` / `printf` / `tee` writes to `$GITHUB_*`
@@ -1407,7 +1480,7 @@ enum ShellFileEffect {
 fn parse_github_file_effects(
     script: &str,
     file_var: &str,
-    rel: &str,
+    _rel: &str,
 ) -> Result<Vec<ShellFileEffect>> {
     let mut effects = Vec::new();
     let lines: Vec<&str> = script.lines().collect();
@@ -1431,11 +1504,7 @@ fn parse_github_file_effects(
             continue;
         }
         let Some(command) = split_github_file_redirect(trimmed, file_var) else {
-            if line_references_github_file_var(trimmed, file_var) {
-                bail!(
-                    "GitHub Actions surface `{rel}` contains an unsupported `${file_var}` producer that cannot be assessed statically"
-                );
-            }
+            // Mention-only lines (`echo 'Use $GITHUB_OUTPUT'`) are not writers.
             push_assignment_effects(&mut effects, trimmed);
             continue;
         };
@@ -1541,8 +1610,12 @@ fn push_producer_command_effects(effects: &mut Vec<ShellFileEffect>, command: &s
         }
     }
     let Some(write_index) = write_index else {
-        // Redirected command we cannot classify — fail closed.
-        bail!("unsupported GitHub Actions command-file producer `{command}`");
+        // Redirected command we cannot classify — record for taint-sensitive
+        // fail-closed handling at the collector (untainted tool stdout is ok).
+        effects.push(ShellFileEffect::UnsupportedProducer {
+            command: command.to_string(),
+        });
+        return Ok(());
     };
     for segment in &segments[..write_index] {
         push_assignment_effects(effects, segment);
@@ -1584,7 +1657,10 @@ fn push_producer_command_effects(effects: &mut Vec<ShellFileEffect>, command: &s
         }
         return Ok(());
     }
-    bail!("unsupported GitHub Actions command-file producer `{command}`");
+    effects.push(ShellFileEffect::UnsupportedProducer {
+        command: command.to_string(),
+    });
+    Ok(())
 }
 
 fn push_assignment_effects(effects: &mut Vec<ShellFileEffect>, command: &str) {
@@ -1677,6 +1753,7 @@ fn split_github_file_tee_pipeline<'a>(line: &'a str, file_var: &str) -> Option<&
 }
 
 /// True when a command line mentions an Actions command-file variable.
+#[cfg(test)]
 fn line_references_github_file_var(line: &str, file_var: &str) -> bool {
     let patterns = [
         format!("${file_var}"),
@@ -2180,6 +2257,9 @@ fn count_printf_conversions(format: &str) -> usize {
                             | 'A'
                             | 'c'
                             | 's'
+                            | 'b'
+                            | 'q'
+                            | 'Q'
                             | 'p'
                             | 'n'
                     ) {
@@ -2215,7 +2295,7 @@ fn next_shell_word(input: &str) -> Option<(&str, &str, bool)> {
 }
 
 fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a str> {
-    // Locate `>>` outside shell quotes so a payload such as
+    // Locate `>` / `>>` outside shell quotes so a payload such as
     // `echo "title=prefix >> $TITLE" >> "$GITHUB_OUTPUT"` keeps the content
     // `>>` and uses the real redirect target.
     let mut index = 0;
@@ -2235,9 +2315,14 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
             index += 1;
             continue;
         }
-        if byte == b'>' && bytes.get(index + 1) == Some(&b'>') {
+        if byte == b'>' {
+            let append = bytes.get(index + 1) == Some(&b'>');
             let before = &line[..index];
-            let after = line[index..].trim_start_matches('>').trim();
+            let after = if append {
+                line[index + 2..].trim_start()
+            } else {
+                line[index + 1..].trim_start()
+            };
             let target = strip_wrapping_shell_quotes(after).trim();
             // Drop a trailing shell comment so `>> "$GITHUB_OUTPUT" # note` still matches.
             let target = target
@@ -2248,8 +2333,8 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
             if matches_github_file_var_target(target, file_var) {
                 return Some(before.trim());
             }
-            // Unquoted `>>` that is not the Actions file target: keep scanning.
-            index += 2;
+            // Unquoted redirect that is not the Actions file target: keep scanning.
+            index += if append { 2 } else { 1 };
             continue;
         }
         index += 1;
@@ -5369,6 +5454,147 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn shell_local_alias_conditional_clean_overwrite_retains_prior_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          ALIAS=$TITLE
+          if false; then
+            ALIAS=fixed
+          fi
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_local_alias_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: |
+          $alias = $env:TITLE
+          "out=$alias" >> $env:GITHUB_OUTPUT
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn printf_percent_b_conversion_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: printf 'title=%b\n' "$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn github_output_mention_without_redirect_is_not_incomplete_scan() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Use $GITHUB_OUTPUT for outputs'
+"#,
+        );
+
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+        assert!(!line_references_github_file_var(
+            "CARGO_INCREMENTAL=0 cargo run --locked calculate-job-matrix",
+            "GITHUB_OUTPUT"
+        ));
+        assert!(line_references_github_file_var(
+            r#"echo 'Use $GITHUB_OUTPUT for outputs'"#,
+            "GITHUB_OUTPUT"
+        ));
+    }
+
+    #[test]
+    fn untainted_tool_stdout_github_output_redirect_is_complete_scan() {
+        let findings = findings_for(
+            r#"
+name: Matrix
+on: push
+jobs:
+  calculate_matrix:
+    runs-on: ubuntu-latest
+    env:
+      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - id: jobs
+        run: |
+          cd src/ci/citool
+          CARGO_INCREMENTAL=0 cargo run --locked calculate-job-matrix >> $GITHUB_OUTPUT
+      - run: echo "${{ steps.jobs.outputs.jobs }}"
+"#,
+        );
+
+        // Opaque tool stdout without shell expansions of tracked taint in the
+        // producer command is a complete scan; later interpolations stay clean
+        // because no named output was proven tainted.
+        assert!(findings.iter().all(|finding| {
+            finding.rule_id != "AGT-06-workflow-context-injection"
+                || !finding.detail.contains("steps.jobs.outputs.jobs")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 
     #[test]
