@@ -22,9 +22,15 @@
 //! command substitution would otherwise leave a stale safe binding,
 //! a `$GITHUB_ENV` write such as `echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"`
 //! followed by `ref: ${{ env.TARGET }}`,
+//! including when an untracked `$GITHUB_ENV` write (`echo "TARGET=$VAR"`,
+//! `echo -e`, or `printf`) leaves `${{ env.TARGET }}` unresolved,
+//! computed input access such as `ref: ${{ fromJSON(toJSON(inputs)).ref }}`,
+//! branch-dependent `$GITHUB_OUTPUT` writes under `if`/`else` that cannot be
+//! proven sequential,
 //! or an omitted `with` that relies on an untrusted input default — cannot
-//! bypass Critical→block. Unresolved `steps.*.outputs.*` checkout refs fail
-//! closed under a privileged trigger. Quoted expression literals such as
+//! bypass Critical→block. Unresolved `steps.*.outputs.*`, unresolved
+//! `env.*`, and unresolved `inputs` access in checkout refs fail closed under
+//! a privileged trigger. Quoted expression literals such as
 //! `${{ 'inputs.ref' }}` are not treated as input references. Single-quoted
 //! shell payloads such as `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their
 //! literal value (no shell expansion) and are not marked untracked.
@@ -554,22 +560,22 @@ fn collect_step_output_bindings(
     let Some(script) = get_string(step, "run") else {
         return collected;
     };
-    for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_OUTPUT") {
+    for (name, resolved) in resolve_github_file_write_bindings(
+        script,
+        "GITHUB_OUTPUT",
+        input_bindings,
+        env_bindings,
+        step_outputs,
+    ) {
         let key = format!("{step_id}.{name}");
-        // Shell expansions outside `${{ }}` are not statically trackable; leave
-        // the step output unresolved so privileged checkout fails closed.
-        // GitHub keeps the last write for a given output name, so an untracked
-        // overwrite must also drop any earlier safe binding for that name.
-        // Single-quoted echo payloads are shell literals (`$` / backticks do not
-        // expand), so they remain trackable.
-        if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
-            collected.remove(&key);
-            continue;
+        match resolved {
+            Some(value) => {
+                collected.insert(key, value);
+            }
+            None => {
+                collected.remove(&key);
+            }
         }
-        collected.insert(
-            key,
-            resolve_context_expressions(&raw_value, input_bindings, env_bindings, step_outputs),
-        );
     }
     collected
 }
@@ -578,7 +584,8 @@ fn collect_step_output_bindings(
 ///
 /// GitHub exposes these values to subsequent steps via `${{ env.NAME }}`. Untracked
 /// shell expansions invalidate any earlier binding for the same name (last write
-/// wins, and an untracked last write must not leave a stale safe value).
+/// wins, and an untracked last write must not leave a stale safe value). Writes
+/// under shell control flow that compete for the same name are left unresolved.
 fn apply_github_env_writes(
     step: &Hash,
     input_bindings: &InputBindings,
@@ -589,16 +596,110 @@ fn apply_github_env_writes(
     let Some(script) = get_string(step, "run") else {
         return;
     };
-    for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
+    for (name, resolved) in resolve_github_file_write_bindings(
+        script,
+        "GITHUB_ENV",
+        input_bindings,
+        step_env,
+        step_outputs,
+    ) {
+        match resolved {
+            Some(value) => {
+                env_bindings.insert(name, value);
+            }
+            None => {
+                env_bindings.remove(&name);
+            }
+        }
+    }
+}
+
+/// Resolve `echo … >> $GITHUB_{OUTPUT,ENV}` writes into tracked values or
+/// explicit unresolved markers (`None`).
+///
+/// Linear scripts keep last-write-wins, with untracked shell expansions clearing
+/// any earlier safe binding. Scripts with shell control flow (`if`/`else`/…)
+/// cannot prove which branch runs, so competing or untracked writes for the
+/// same name stay unresolved instead of retaining a later textual binding.
+fn resolve_github_file_write_bindings(
+    script: &str,
+    file_var: &str,
+    input_bindings: &InputBindings,
+    env_bindings: &EnvBindings,
+    step_outputs: &StepOutputBindings,
+) -> Vec<(String, Option<String>)> {
+    let writes = parse_github_file_writes(script, file_var);
+    if writes.is_empty() {
+        return Vec::new();
+    }
+    if script_has_shell_control_flow(script) {
+        let mut grouped: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+        for (name, raw_value, shell_expands) in writes {
+            grouped
+                .entry(name)
+                .or_default()
+                .push((raw_value, shell_expands));
+        }
+        return grouped
+            .into_iter()
+            .map(|(name, entries)| {
+                if entries.len() != 1 {
+                    return (name, None);
+                }
+                let Some((raw_value, shell_expands)) = entries.into_iter().next() else {
+                    return (name, None);
+                };
+                // Single-quoted echo payloads are shell literals (`$` / backticks
+                // do not expand), so they remain trackable.
+                if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
+                    return (name, None);
+                }
+                (
+                    name,
+                    Some(resolve_context_expressions(
+                        &raw_value,
+                        input_bindings,
+                        env_bindings,
+                        step_outputs,
+                    )),
+                )
+            })
+            .collect();
+    }
+
+    let mut collected: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (name, raw_value, shell_expands) in writes {
+        // Shell expansions outside `${{ }}` are not statically trackable; leave
+        // the binding unresolved so privileged checkout fails closed.
+        // GitHub keeps the last write for a given name, so an untracked
+        // overwrite must also drop any earlier safe binding for that name.
         if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
-            env_bindings.remove(&name);
+            collected.insert(name, None);
             continue;
         }
-        env_bindings.insert(
+        collected.insert(
             name,
-            resolve_context_expressions(&raw_value, input_bindings, step_env, step_outputs),
+            Some(resolve_context_expressions(
+                &raw_value,
+                input_bindings,
+                env_bindings,
+                step_outputs,
+            )),
         );
     }
+    collected.into_iter().collect()
+}
+
+/// True when `script` contains shell control-flow keywords that make lexical
+/// last-write-wins unsafe for `$GITHUB_OUTPUT` / `$GITHUB_ENV` tracking.
+fn script_has_shell_control_flow(script: &str) -> bool {
+    static CONTROL_FLOW: OnceLock<Regex> = OnceLock::new();
+    let pattern = CONTROL_FLOW.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?m)(?:^|[^A-Za-z0-9_])(?:if|elif|else|fi|case|esac|for|while|until|done|select)(?:$|[^A-Za-z0-9_])")
+            .expect("shell control-flow pattern compiles")
+    });
+    pattern.is_match(script)
 }
 
 /// True when `value` still has `$...` or backtick command substitution outside
@@ -1121,7 +1222,10 @@ fn has_untrusted_checkout_ref(
         .is_some_and(|revision| {
             let resolved =
                 resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
-            is_untrusted_ref_expression(&resolved) || has_unresolved_step_output_ref(&resolved)
+            is_untrusted_ref_expression(&resolved)
+                || has_unresolved_step_output_ref(&resolved)
+                || has_unresolved_env_ref(&resolved)
+                || has_unresolved_inputs_access(&resolved)
         })
 }
 
@@ -1142,6 +1246,37 @@ fn has_unresolved_step_output_ref(revision: &str) -> bool {
         Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
             .expect("step output ref pattern compiles")
     });
+    expression_matches_unresolved_context(revision, pattern)
+}
+
+/// Fail closed when a checkout ref still names `env.*` after known env /
+/// `$GITHUB_ENV` rewrites — incomplete env tracking (`echo -e`, `printf`,
+/// shell `$VAR` writes) must not collapse into allow under a privileged trigger.
+fn has_unresolved_env_ref(revision: &str) -> bool {
+    static ENV_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = ENV_REF.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])env\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
+            .expect("env ref pattern compiles")
+    });
+    expression_matches_unresolved_context(revision, pattern)
+}
+
+/// Fail closed when a checkout ref still reaches the composite `inputs` context
+/// after known input rewrites — computed forms such as
+/// `fromJSON(toJSON(inputs)).ref` are not rewritten by literal `inputs.<name>`
+/// substitution and must not collapse into allow under a privileged trigger.
+fn has_unresolved_inputs_access(revision: &str) -> bool {
+    static INPUTS_ACCESS: OnceLock<Regex> = OnceLock::new();
+    let pattern = INPUTS_ACCESS.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])inputs(?:$|[^A-Za-z0-9_-])")
+            .expect("inputs access pattern compiles")
+    });
+    expression_matches_unresolved_context(revision, pattern)
+}
+
+fn expression_matches_unresolved_context(revision: &str, pattern: &Regex) -> bool {
     let normalized = normalize_bracket_property_access(revision);
     let mut found = false;
     let _ = map_expression_regions(&normalized, |inner| {
@@ -2179,6 +2314,271 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_unresolved_github_env_shell_var_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_unresolved_github_env_echo_e_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo -e "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_unresolved_github_env_printf_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: printf 'TARGET=%s\n' "${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_computed_inputs_access_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ fromJSON(toJSON(inputs)).ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn collect_step_output_bindings_invalidates_branch_dependent_writes() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: |
+  if true; then
+    echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+  else
+    echo "ref=main" >> "$GITHUB_OUTPUT"
+  fi
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "branch-dependent writes must leave the output unresolved: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_branch_dependent_step_output_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: |
+        if true; then
+          echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+        else
+          echo "ref=main" >> "$GITHUB_OUTPUT"
+        fi
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,

@@ -204,6 +204,17 @@
       "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite that writes the input to $GITHUB_OUTPUT then checks out steps.resolve.outputs.ref; expansion must track step-output taint so Critical\u2192block still applies for a pinned checkout."
     },
     {
+      "id": "workflow-local-composite-unresolved-github-env-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-unresolved-github-env-checkout",
+      "packageName": "workflow-local-composite-unresolved-github-env-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite that writes TARGET=$TARGET to $GITHUB_ENV then checks out env.TARGET; incomplete GITHUB_ENV tracking must fail closed on the unresolved env ref so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
       "id": "workflow-dangerous-permissions",
       "kind": "fixture",
       "path": "fixtures/workflow-dangerous-permissions",
