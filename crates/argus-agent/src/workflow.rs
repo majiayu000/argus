@@ -826,17 +826,35 @@ fn collect_tainted_secrets(
     Ok(tainted)
 }
 
+/// Sentinel inserted when `strategy.matrix` is an expression (for example
+/// `${{ fromJSON(inputs.payload) }}`) whose keys are unknown statically.
+/// Any later `${{ matrix.* }}` read is treated as tainted while this is set.
+const MATRIX_EXPRESSION_UNKNOWN_KEYS: &str = "__argus_matrix_expression__";
+
 /// Collect `strategy.matrix` property names whose values carry untrusted data.
 ///
 /// Covers dimension arrays (`title: ["${{ inputs.title }}"]`), scalar entries,
-/// and `include` row fields. `exclude` rows do not introduce runtime matrix
-/// values for interpolation, so they are ignored.
+/// `include` row fields, and expression-valued matrices such as
+/// `matrix: ${{ fromJSON(inputs.payload) }}`. `exclude` rows do not introduce
+/// runtime matrix values for interpolation, so they are ignored.
 fn collect_tainted_matrix(job: &Hash, taint: TaintScope<'_>, rel: &str) -> Result<HashSet<String>> {
     let mut tainted = HashSet::new();
     let Some(strategy) = get(job, "strategy").and_then(Yaml::as_hash) else {
         return Ok(tainted);
     };
-    let Some(matrix) = get(strategy, "matrix").and_then(Yaml::as_hash) else {
+    let Some(matrix_node) = get(strategy, "matrix") else {
+        return Ok(tainted);
+    };
+    // Expression-valued matrices (common with `fromJSON`) have unknown keys;
+    // conservatively taint every matrix property read when the expression
+    // itself carries untrusted data.
+    if let Some(expression) = matrix_node.as_str() {
+        if value_carries_taint(expression, taint, rel)? {
+            tainted.insert(MATRIX_EXPRESSION_UNKNOWN_KEYS.to_string());
+        }
+        return Ok(tainted);
+    }
+    let Some(matrix) = matrix_node.as_hash() else {
         return Ok(tainted);
     };
     for (key, value) in matrix {
@@ -1622,8 +1640,9 @@ fn extract_bare_string_github_output(command: &str) -> Option<(String, String, b
 
 /// Recognize `printf 'name=%s\n' "$VALUE"` (and similar) redirects to
 /// `$GITHUB_OUTPUT` / `$GITHUB_ENV`. Format strings without a leading `name=`
-/// are ignored. Every format conversion argument is included in the value so
-/// `printf 'title=prefix-%s\n' "$TITLE"` still propagates `$TITLE` taint.
+/// are ignored. Only arguments consumed by format conversions contribute to
+/// the value (and taint), so `printf 'title=fixed\n' "$TITLE"` stays clean
+/// while `printf 'title=prefix-%s\n' "$TITLE"` still propagates `$TITLE`.
 fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)> {
     let rest = command.trim().strip_prefix("printf")?.trim_start();
     let (format, after_format, format_expands) = next_shell_word(rest)?;
@@ -1636,13 +1655,62 @@ fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)>
     let mut value = fmt_value.to_string();
     let mut expands = format_expands;
     let mut remaining = after_format;
+    let mut remaining_conversions = count_printf_conversions(fmt_value);
     while let Some((arg, after, arg_expands)) = next_shell_word(remaining) {
-        value.push(' ');
-        value.push_str(arg);
-        expands = expands || arg_expands;
+        if remaining_conversions > 0 {
+            value.push(' ');
+            value.push_str(arg);
+            expands = expands || arg_expands;
+            remaining_conversions -= 1;
+        }
         remaining = after;
     }
     Some((name.to_string(), value, expands))
+}
+
+/// Count `printf` conversion specifications in a format string (`%%` is literal).
+fn count_printf_conversions(format: &str) -> usize {
+    let mut count = 0;
+    let mut chars = format.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+            }
+            Some(_) => {
+                while let Some(next) = chars.next() {
+                    if matches!(
+                        next,
+                        'd' | 'i'
+                            | 'o'
+                            | 'u'
+                            | 'x'
+                            | 'X'
+                            | 'f'
+                            | 'F'
+                            | 'e'
+                            | 'E'
+                            | 'g'
+                            | 'G'
+                            | 'a'
+                            | 'A'
+                            | 'c'
+                            | 's'
+                            | 'p'
+                            | 'n'
+                    ) {
+                        count += 1;
+                        break;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+    count
 }
 
 /// Split the next shell word, tracking whether it shell-expands.
@@ -1666,21 +1734,46 @@ fn next_shell_word(input: &str) -> Option<(&str, &str, bool)> {
 }
 
 fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a str> {
-    let index = line.find(">>")?;
-    let (before, after) = line.split_at(index);
-    let after = after.trim_start_matches('>').trim();
-    let target = strip_wrapping_shell_quotes(after).trim();
-    // Drop a trailing shell comment so `>> "$GITHUB_OUTPUT" # note` still matches.
-    let target = target
-        .split_whitespace()
-        .next()
-        .map(strip_wrapping_shell_quotes)
-        .unwrap_or(target);
-    if matches_github_file_var_target(target, file_var) {
-        Some(before.trim())
-    } else {
-        None
+    // Locate `>>` outside shell quotes so a payload such as
+    // `echo "title=prefix >> $TITLE" >> "$GITHUB_OUTPUT"` keeps the content
+    // `>>` and uses the real redirect target.
+    let mut index = 0;
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'>' && bytes.get(index + 1) == Some(&b'>') {
+            let before = &line[..index];
+            let after = line[index..].trim_start_matches('>').trim();
+            let target = strip_wrapping_shell_quotes(after).trim();
+            // Drop a trailing shell comment so `>> "$GITHUB_OUTPUT" # note` still matches.
+            let target = target
+                .split_whitespace()
+                .next()
+                .map(strip_wrapping_shell_quotes)
+                .unwrap_or(target);
+            if matches_github_file_var_target(target, file_var) {
+                return Some(before.trim());
+            }
+            // Unquoted `>>` that is not the Actions file target: keep scanning.
+            index += 2;
+            continue;
+        }
+        index += 1;
     }
+    None
 }
 
 /// True when `target` names a GitHub Actions environment file via Bash
@@ -2110,7 +2203,36 @@ fn expression_uses_tainted_matrix(expression: &str, tainted_matrix: &HashSet<Str
     if expression_reads_whole_context(expression, "matrix") {
         return true;
     }
+    // Expression-valued matrices expose unknown keys; any matrix property /
+    // index / wildcard read is treated as tainted.
+    if tainted_matrix.contains(MATRIX_EXPRESSION_UNKNOWN_KEYS) {
+        return expression_references_any_matrix_property(expression);
+    }
     expression_uses_tainted_context_property(expression, "matrix", tainted_matrix)
+}
+
+/// True when `expression` references any `matrix` property or index, including
+/// named keys that are unknown for expression-valued matrices.
+fn expression_references_any_matrix_property(expression: &str) -> bool {
+    static MATRIX_ANY: OnceLock<Regex> = OnceLock::new();
+    let pattern = MATRIX_ANY.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\bmatrix\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+        )
+        .expect("any matrix reference pattern compiles")
+    });
+    pattern.captures_iter(expression).any(|capture| {
+        let Some(matched) = capture.get(0) else {
+            return false;
+        };
+        if matched.start() > 0 && expression[..matched.start()].trim_end().ends_with('.') {
+            return false;
+        }
+        if offset_inside_single_quoted_literal(expression, matched.start()) {
+            return false;
+        }
+        true
+    })
 }
 
 /// Detect `${{ steps.<id>.outputs.<name> }}` when a prior step wrote a tainted
@@ -4288,10 +4410,118 @@ jobs:
     }
 
     #[test]
+    fn expression_valued_strategy_matrix_fromjson_propagates_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      payload: ${{ toJSON(github.event) }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      payload:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(inputs.payload) }}
+    steps:
+      - run: echo "${{ matrix.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("matrix.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn quoted_redirect_payload_with_inner_arrows_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=prefix >> $TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn printf_unused_argument_does_not_taint_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: printf 'title=fixed\n' "$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(!findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
     fn split_github_file_redirect_accepts_cmd_percent_syntax() {
         assert_eq!(
             split_github_file_redirect(r#"echo title=%TITLE%>>%GITHUB_OUTPUT%"#, "GITHUB_OUTPUT"),
             Some(r#"echo title=%TITLE%"#)
+        );
+        assert_eq!(
+            split_github_file_redirect(
+                r#"echo "title=prefix >> $TITLE" >> "$GITHUB_OUTPUT""#,
+                "GITHUB_OUTPUT"
+            ),
+            Some(r#"echo "title=prefix >> $TITLE""#)
         );
         assert!(matches_github_file_var_target(
             "%GITHUB_OUTPUT%",
@@ -4309,5 +4539,8 @@ jobs:
             extract_echo_payload(r#"echo -ne "title=$TITLE""#),
             Some(r#""title=$TITLE""#)
         );
+        assert_eq!(count_printf_conversions(r#"title=fixed\n"#), 0);
+        assert_eq!(count_printf_conversions(r#"title=%s\n"#), 1);
+        assert_eq!(count_printf_conversions(r#"title=%%s\n"#), 0);
     }
 }
