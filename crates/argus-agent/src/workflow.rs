@@ -282,6 +282,8 @@ fn scan_workflow_inner(
                     &mut discarded,
                     &file.rel,
                 )?;
+                // `$GITHUB_ENV` writes become env bindings for later steps.
+                apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
                 tainted_step_outputs.extend(added);
             }
             let added = {
@@ -373,30 +375,26 @@ fn scan_workflow_inner(
                     &file.rel,
                 )?;
             }
-            let added = {
-                let step_scope = TaintScope {
-                    envs: &step_tainted_envs,
-                    inputs: caller_taint.inputs,
-                    secrets: caller_taint.secrets,
-                    step_outputs: &tainted_step_outputs,
-                    job_outputs: &tainted_job_outputs,
-                };
-                let from_composite = scan_step(
-                    step,
-                    &file.rel,
-                    privileged_trigger,
-                    step_scope,
-                    actions,
-                    visiting,
-                    findings,
-                )?;
-                let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
-                from_composite
-                    .into_iter()
-                    .chain(from_run)
-                    .collect::<HashSet<_>>()
+            let step_scope = TaintScope {
+                envs: &step_tainted_envs,
+                inputs: caller_taint.inputs,
+                secrets: caller_taint.secrets,
+                step_outputs: &tainted_step_outputs,
+                job_outputs: &tainted_job_outputs,
             };
-            tainted_step_outputs.extend(added);
+            let from_composite = scan_step(
+                step,
+                &file.rel,
+                privileged_trigger,
+                step_scope,
+                actions,
+                visiting,
+                findings,
+            )?;
+            let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
+            // `$GITHUB_ENV` writes become env bindings for later steps.
+            apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
+            tainted_step_outputs.extend(from_composite.into_iter().chain(from_run));
         }
     }
     let exported = collect_tainted_workflow_call_outputs(
@@ -450,9 +448,10 @@ fn scan_action_metadata(
     let empty_secrets = HashSet::new();
     let empty_outputs = HashSet::new();
     let mut tainted_step_outputs = HashSet::new();
+    // Caller env remains visible; `$GITHUB_ENV` writes accumulate across steps.
+    let mut cross_step_envs = caller_taint.envs.clone();
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        // Caller env remains visible inside local composite steps at runtime.
-        let mut step_tainted_envs = caller_taint.envs.clone();
+        let mut step_tainted_envs = cross_step_envs.clone();
         if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
             apply_env_taints(
                 &mut step_tainted_envs,
@@ -467,24 +466,19 @@ fn scan_action_metadata(
                 &file.rel,
             )?;
         }
-        let added = {
-            let step_scope = TaintScope {
-                envs: &step_tainted_envs,
-                inputs: caller_taint.inputs,
-                secrets: &empty_secrets,
-                step_outputs: &tainted_step_outputs,
-                job_outputs: &empty_outputs,
-            };
-            let from_composite = scan_step(
-                step, &file.rel, false, step_scope, actions, visiting, findings,
-            )?;
-            let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
-            from_composite
-                .into_iter()
-                .chain(from_run)
-                .collect::<HashSet<_>>()
+        let step_scope = TaintScope {
+            envs: &step_tainted_envs,
+            inputs: caller_taint.inputs,
+            secrets: &empty_secrets,
+            step_outputs: &tainted_step_outputs,
+            job_outputs: &empty_outputs,
         };
-        tainted_step_outputs.extend(added);
+        let from_composite = scan_step(
+            step, &file.rel, false, step_scope, actions, visiting, findings,
+        )?;
+        let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
+        apply_github_env_file_taints(&mut cross_step_envs, step, step_scope, &file.rel)?;
+        tainted_step_outputs.extend(from_composite.into_iter().chain(from_run));
     }
     let exported = collect_tainted_declared_outputs(
         root,
@@ -879,6 +873,30 @@ fn github_output_value_is_tainted(
     Ok(value_references_tainted_shell_env(value, taint.envs))
 }
 
+/// Merge `$GITHUB_ENV` writes from a `run` step into later-step env taint.
+///
+/// GitHub exposes these values to subsequent steps via `${{ env.NAME }}` (and
+/// shell `$NAME`). A clean overwrite clears prior taint for that name.
+fn apply_github_env_file_taints(
+    env_taints: &mut HashSet<String>,
+    step: &Hash,
+    taint: TaintScope<'_>,
+    rel: &str,
+) -> Result<()> {
+    let Some(script) = get_string(step, "run") else {
+        return Ok(());
+    };
+    for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
+        let key = normalize_env_name(&name);
+        if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
+            env_taints.insert(key);
+        } else {
+            env_taints.remove(&key);
+        }
+    }
+    Ok(())
+}
+
 /// Collect tainted `{job_id}.{output}` keys from a job's `outputs:` map.
 fn collect_tainted_job_outputs(
     job: &Hash,
@@ -994,17 +1012,21 @@ fn declared_output_value(value: &Yaml) -> Option<&str> {
     }
 }
 
-/// Parse simple `echo` / `printf` writes to `$GITHUB_OUTPUT`.
+/// Parse simple `echo` / `printf` writes to `$GITHUB_OUTPUT` or `$GITHUB_ENV`.
 /// The third tuple field is whether the payload shell-expands (`false` when
 /// the entire value is single-quoted).
 fn parse_github_output_writes(script: &str) -> Vec<(String, String, bool)> {
+    parse_github_file_writes(script, "GITHUB_OUTPUT")
+}
+
+fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String, bool)> {
     let mut writes = Vec::new();
     for line in script.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(command) = split_github_output_redirect(trimmed) else {
+        let Some(command) = split_github_file_redirect(trimmed, file_var) else {
             continue;
         };
         if let Some(write) = extract_echo_github_output(command) {
@@ -1034,7 +1056,9 @@ fn extract_echo_github_output(command: &str) -> Option<(String, String, bool)> {
 }
 
 /// Recognize `printf 'name=%s\n' "$VALUE"` (and similar) redirects to
-/// `$GITHUB_OUTPUT`. Format strings without a leading `name=` are ignored.
+/// `$GITHUB_OUTPUT` / `$GITHUB_ENV`. Format strings without a leading `name=`
+/// are ignored. Every format conversion argument is included in the value so
+/// `printf 'title=prefix-%s\n' "$TITLE"` still propagates `$TITLE` taint.
 fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)> {
     let rest = command.trim().strip_prefix("printf")?.trim_start();
     let (format, after_format, format_expands) = next_shell_word(rest)?;
@@ -1044,20 +1068,16 @@ fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)>
         return None;
     }
     let fmt_value = fmt_value.trim();
-    // `printf 'title=%s\n' "$TITLE"` — take the next argument as the value.
-    let normalized = fmt_value
-        .trim_end_matches(['\n', '\r'])
-        .trim_end_matches("\\n");
-    if normalized == "%s" || normalized.starts_with("%s") {
-        if let Some((arg, _, arg_expands)) = next_shell_word(after_format) {
-            return Some((
-                name.to_string(),
-                arg.to_string(),
-                format_expands || arg_expands,
-            ));
-        }
+    let mut value = fmt_value.to_string();
+    let mut expands = format_expands;
+    let mut remaining = after_format;
+    while let Some((arg, after, arg_expands)) = next_shell_word(remaining) {
+        value.push(' ');
+        value.push_str(arg);
+        expands = expands || arg_expands;
+        remaining = after;
     }
-    Some((name.to_string(), fmt_value.to_string(), format_expands))
+    Some((name.to_string(), value, expands))
 }
 
 /// Split the next shell word, tracking whether it shell-expands.
@@ -1080,7 +1100,7 @@ fn next_shell_word(input: &str) -> Option<(&str, &str, bool)> {
     Some((&input[..end], &input[end..], true))
 }
 
-fn split_github_output_redirect(line: &str) -> Option<&str> {
+fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a str> {
     let index = line.find(">>")?;
     let (before, after) = line.split_at(index);
     let after = after.trim_start_matches('>').trim();
@@ -1091,7 +1111,9 @@ fn split_github_output_redirect(line: &str) -> Option<&str> {
         .next()
         .map(strip_wrapping_shell_quotes)
         .unwrap_or(target);
-    if target == "$GITHUB_OUTPUT" || target == "${GITHUB_OUTPUT}" {
+    let dollar = format!("${file_var}");
+    let braced = format!("${{{file_var}}}");
+    if target == dollar || target == braced {
         Some(before.trim())
     } else {
         None
@@ -1396,7 +1418,9 @@ fn expression_uses_tainted_secret(expression: &str, tainted_secrets: &HashSet<St
 }
 
 /// Detect `${{ steps.<id>.outputs.<name> }}` when a prior step wrote a tainted
-/// value to `$GITHUB_OUTPUT`.
+/// value to `$GITHUB_OUTPUT`. Whole-context / wildcard reads such as
+/// `toJSON(steps)`, bare `steps`, or `steps.*.outputs.title` are tainted when
+/// any step output in scope is tainted.
 fn expression_uses_tainted_step_output(
     expression: &str,
     tainted_step_outputs: &HashSet<String>,
@@ -1404,17 +1428,24 @@ fn expression_uses_tainted_step_output(
     if tainted_step_outputs.is_empty() {
         return false;
     }
+    if expression_reads_whole_context(expression, "steps") {
+        return true;
+    }
     expression_uses_tainted_nested_output(expression, "steps", tainted_step_outputs)
 }
 
 /// Detect `${{ needs.<job>.outputs.<name> }}` when a peer job exposed a tainted
-/// output.
+/// output. Whole-context / wildcard reads such as `toJSON(needs)` or
+/// `needs.*.outputs.title` are tainted whenever any job output is tainted.
 fn expression_uses_tainted_job_output(
     expression: &str,
     tainted_job_outputs: &HashSet<String>,
 ) -> bool {
     if tainted_job_outputs.is_empty() {
         return false;
+    }
+    if expression_reads_whole_context(expression, "needs") {
+        return true;
     }
     expression_uses_tainted_nested_output(expression, "needs", tainted_job_outputs)
 }
@@ -3026,6 +3057,104 @@ jobs:
                 && finding.severity == Severity::Critical
                 && finding.detail.contains("needs.call.outputs.title")
                 && finding.location.as_deref() == Some(".github/workflows/caller.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn github_env_file_write_taints_later_step_env_interpolation() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "ALIAS=$TITLE" >> "$GITHUB_ENV"
+      - run: echo "${{ env.ALIAS }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.ALIAS")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn steps_whole_context_and_wildcard_output_reads_are_tainted() {
+        let to_json = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo '${{ toJSON(steps) }}'
+"#,
+        );
+        let wildcard = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.*.outputs.title }}"
+"#,
+        );
+
+        assert!(to_json.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("toJSON(steps)")
+        }));
+        assert!(wildcard.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.*.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&to_json), Decision::Block);
+        assert_eq!(crate::decision::derive(&wildcard), Decision::Block);
+    }
+
+    #[test]
+    fn printf_github_output_prefix_format_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: printf 'title=prefix-%s\n' "$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
