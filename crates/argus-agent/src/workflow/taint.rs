@@ -212,7 +212,38 @@ fn scan_workflow_jobs(
     Ok(next_job_outputs)
 }
 
-pub(super) fn scan_run_script(
+/// Scan inline `run:` and first-party `actions/github-script` `with.script`.
+pub(super) fn scan_step_scripts(
+    step: &Hash,
+    rel: &str,
+    ctx: &StepScanCtx<'_>,
+    step_env: &EnvBindings,
+    findings: &mut Vec<argus_core::Finding>,
+) -> Result<()> {
+    if let Some(script) = get_string(step, "run") {
+        scan_run_script(script, rel, ctx, step_env, findings)?;
+    }
+    if let Some(action) = get_string(step, "uses") {
+        if is_github_script(action) {
+            if let Some(script) = get(step, "with")
+                .and_then(Yaml::as_hash)
+                .and_then(|with| get_string(with, "script"))
+            {
+                scan_run_script(script, rel, ctx, step_env, findings)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_github_script(action: &str) -> bool {
+    action
+        .split_once('@')
+        .map_or(action, |(name, _)| name)
+        .eq_ignore_ascii_case("actions/github-script")
+}
+
+fn scan_run_script(
     script: &str,
     rel: &str,
     ctx: &StepScanCtx<'_>,
@@ -431,4 +462,119 @@ fn resolve_local_workflow<'a>(
         return None;
     }
     workflows.get(normalized).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::run;
+    use crate::{SurfaceFile, SurfaceKind};
+    use argus_core::{Decision, Finding, Severity};
+
+    const RULE_CONTEXT_INJECTION: &str = "AGT-06-workflow-context-injection";
+
+    fn findings_for(content: &str) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        run(
+            &[SurfaceFile {
+                rel: ".github/workflows/test.yml".to_string(),
+                content: content.to_string(),
+                kind: SurfaceKind::Workflow,
+            }],
+            &mut findings,
+        )
+        .expect("scan workflow fixture");
+        findings
+    }
+
+    fn github_script_workflow(script: &str) -> String {
+        format!(
+            r#"
+name: Comment
+on: issues
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            {script}
+"#
+        )
+    }
+
+    fn assert_context_injection_blocks(findings: &[Finding], case: &str) {
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule_id == RULE_CONTEXT_INJECTION && finding.severity == Severity::Critical
+            }),
+            "expected context injection for {case}; findings={findings:?}"
+        );
+        assert_eq!(
+            crate::decision::derive(findings),
+            Decision::Block,
+            "expected block for {case}"
+        );
+    }
+
+    #[test]
+    fn github_script_with_script_context_injection_blocks() {
+        let scripts = [
+            r#"console.log("${{ github.event.issue.title }}")"#,
+            r#"console.log("${{ github.event['issue']['title'] }}")"#,
+            r#"console.log("${{ github.event.issue['body'] }}")"#,
+            r#"console.log("${{ github['head_ref'] }}")"#,
+            r#"console.log("${{ toJSON(github['event']) }}")"#,
+        ];
+        for script in scripts {
+            assert_context_injection_blocks(&findings_for(&github_script_workflow(script)), script);
+        }
+    }
+
+    #[test]
+    fn github_script_env_indirection_blocks() {
+        assert_context_injection_blocks(
+            &findings_for(
+                r#"
+name: Comment
+on: issues
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("${{ env.TITLE }}")
+"#,
+            ),
+            "github-script env indirection",
+        );
+    }
+
+    #[test]
+    fn github_script_env_passthrough_is_not_context_injection() {
+        let findings = findings_for(
+            r#"
+name: Comment
+on: issues
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: actions/github-script@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        with:
+          script: |
+            console.log(process.env.TITLE)
+"#,
+        );
+        assert!(findings
+            .iter()
+            .all(|finding| finding.rule_id != RULE_CONTEXT_INJECTION));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
 }

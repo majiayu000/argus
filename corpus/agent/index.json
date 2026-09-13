@@ -138,6 +138,18 @@
       "notes": "Same privileged pull_request_target attack as workflow-dangerous, but uses bracket and mixed property access so dotted-only detectors cannot miss equivalent github.event / head_ref / checkout ref paths."
     },
     {
+      "id": "workflow-github-script-injection",
+      "kind": "fixture",
+      "path": "fixtures/workflow-github-script-injection",
+      "packageName": "workflow-github-script-injection",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection",
+        "workflow-mutable-action"
+      ],
+      "notes": "actions/github-script interpolates github.event.issue.title into with.script using dotted and bracket access. The untrusted context never appears under run:, so scanners that only inspect run: would miss Critical script injection."
+    },
+    {
       "id": "workflow-local-composite-untrusted-checkout",
       "kind": "fixture",
       "path": "fixtures/workflow-local-composite-untrusted-checkout",
