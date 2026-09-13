@@ -50,10 +50,6 @@ struct StepScanEffects {
     env_writes: Option<HashMap<String, bool>>,
 }
 
-fn apply_github_env_overlay(envs: &mut HashSet<String>, writes: &HashMap<String, bool>) {
-    apply_github_env_overlay_retaining(envs, writes, false);
-}
-
 /// Apply composite/`$GITHUB_ENV` overlay writes. When `retain_on_clean` is set
 /// (caller step has an Actions `if:`), clean overwrites do not clear prior
 /// taint because the step may be skipped at runtime.
@@ -577,7 +573,13 @@ fn scan_action_metadata(
             apply_github_env_file_taints(&mut cross_step_envs, step, step_scope, &file.rel)?;
         env_writes.extend(step_env_writes);
         if let Some(nested_writes) = from_composite.env_writes {
-            apply_github_env_overlay(&mut cross_step_envs, &nested_writes);
+            // Nested composite calls may be skipped by Actions `if:`; retain
+            // prior taint on clean overwrites the same way workflow callers do.
+            apply_github_env_overlay_retaining(
+                &mut cross_step_envs,
+                &nested_writes,
+                step_has_actions_condition(step),
+            );
             env_writes.extend(nested_writes);
         }
         tainted_step_outputs.extend(from_composite.outputs.into_iter().chain(from_run));
@@ -1206,8 +1208,8 @@ fn apply_shell_local_assignment(
     }
 }
 
-/// Parse `NAME=value` / `export NAME=value` / `$name = value` /
-/// `$env:NAME = value` / `set NAME=value` shell assignments.
+/// Parse `NAME=value` / `export NAME=value` / `readonly|declare NAME=value` /
+/// `$name = value` / `$env:NAME = value` / `set NAME=value` shell assignments.
 fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     parse_posix_shell_assignment(segment)
         .or_else(|| parse_pwsh_env_assignment(segment))
@@ -1215,22 +1217,14 @@ fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
         .or_else(|| parse_cmd_set_assignment(segment))
 }
 
-/// Parse `NAME=value` / `export NAME=value` POSIX shell assignments.
+/// Parse `NAME=value` / `export|readonly|declare NAME=value` POSIX assignments.
 ///
 /// Command-scoped prefixes such as `ALIAS=fixed /bin/true` are temporary for
 /// that command only and must not clear or update the persistent local alias
 /// set.
 fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     let segment = segment.trim();
-    let segment = if let Some(rest) = segment.strip_prefix("export") {
-        if rest.starts_with(char::is_whitespace) {
-            rest.trim_start()
-        } else {
-            return None;
-        }
-    } else {
-        segment
-    };
+    let segment = strip_posix_assignment_builtin(segment)?;
     let eq = segment.find('=')?;
     let name = &segment[..eq];
     if !is_posix_shell_ident(name) {
@@ -1242,6 +1236,22 @@ fn parse_posix_shell_assignment(segment: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, rhs))
+}
+
+/// Strip `export` / `readonly` / `declare` when they introduce an assignment.
+///
+/// Returns `None` when the token looks like a glued builtin (`exportFOO=…`)
+/// rather than a spaced declaration form.
+fn strip_posix_assignment_builtin(segment: &str) -> Option<&str> {
+    for builtin in ["export", "readonly", "declare"] {
+        if let Some(rest) = segment.strip_prefix(builtin) {
+            if rest.starts_with(char::is_whitespace) {
+                return Some(rest.trim_start());
+            }
+            return None;
+        }
+    }
+    Some(segment)
 }
 
 /// Split an assignment RHS into one shell word and any trailing command text.
@@ -2839,8 +2849,24 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
             };
             let inner = rest[..end].trim();
             index += 2 + end + 1;
-            // `${TITLE:-fallback}` expands TITLE; parse the ident before operators.
-            braced_shell_param_name(inner)
+            // PowerShell `${env:TITLE}` must be recognized before POSIX
+            // parameter parsing, which would truncate at `:` to `env`.
+            if let Some(env_rest) = strip_pwsh_env_prefix(inner) {
+                let name_len = env_rest
+                    .chars()
+                    .take_while(|character| {
+                        character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+                    })
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                if name_len == 0 {
+                    continue;
+                }
+                &env_rest[..name_len]
+            } else {
+                // `${TITLE:-fallback}` expands TITLE; parse before operators.
+                braced_shell_param_name(inner)
+            }
         } else if let Some(rest) = strip_pwsh_env_prefix(after_dollar) {
             // PowerShell `$env:TITLE` (hyphens allowed in the env name).
             let name_len = rest
@@ -6348,6 +6374,134 @@ jobs:
         run: |
           ALIAS="$TITLE"-suffix
           echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn conditional_nested_composite_clean_env_export_retains_outer_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: outer
+        uses: ./.github/actions/outer
+      - run: echo "${{ steps.outer.outputs.relay }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/outer/action.yml".to_string(),
+                content: r#"
+name: Outer
+description: Export tainted alias then conditionally clear via nested composite
+outputs:
+  relay:
+    value: ${{ steps.set.outputs.out }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "ALIAS=$TITLE" >> "$GITHUB_ENV"
+    - if: false
+      uses: ./.github/actions/clean-alias
+    - id: set
+      shell: bash
+      run: echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+            SurfaceFile {
+                rel: ".github/actions/clean-alias/action.yml".to_string(),
+                content: r#"
+name: Clean alias
+description: Overwrite ALIAS with a fixed value
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "ALIAS=fixed" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.outer.outputs.relay")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn bash_readonly_declare_assignment_propagates_taint_to_github_output() {
+        for script_line in [r#"readonly ALIAS="$TITLE""#, r#"declare ALIAS="$TITLE""#] {
+            let findings = findings_for(&format!(
+                r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{{{ github.event.issue.title }}}}
+    steps:
+      - id: set
+        run: |
+          {script_line}
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{{{ steps.set.outputs.out }}}}"
+"#
+            ));
+
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.rule_id == "AGT-06-workflow-context-injection"
+                        && finding.severity == Severity::Critical
+                        && finding.detail.contains("steps.set.outputs.out")
+                }),
+                "expected AGT-06 for `{script_line}`"
+            );
+            assert_eq!(crate::decision::derive(&findings), Decision::Block);
+        }
+    }
+
+    #[test]
+    fn pwsh_braced_env_var_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: '"out=${env:TITLE}" >> $env:GITHUB_OUTPUT'
       - run: echo "${{ steps.set.outputs.out }}"
 "#,
         );
