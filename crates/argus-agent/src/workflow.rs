@@ -30,6 +30,9 @@ struct TaintScope<'a> {
     /// Peer-job `outputs:` values keyed as `{job_id}.{output_name}` for
     /// `needs.<job>.outputs.<name>` reads.
     job_outputs: &'a HashSet<String>,
+    /// `strategy.matrix` properties that carry untrusted values for
+    /// `${{ matrix.* }}` interpolations in this job (and nested composites).
+    matrix: &'a HashSet<String>,
 }
 
 /// Outputs and post-scan env taint exported from a local composite action.
@@ -81,6 +84,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
                         secrets: &empty,
                         step_outputs: &empty,
                         job_outputs: &empty,
+                        matrix: &empty,
                     },
                     &actions,
                     &workflows,
@@ -99,6 +103,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
                         secrets: &empty,
                         step_outputs: &empty,
                         job_outputs: &empty,
+                        matrix: &empty,
                     },
                     &actions,
                     &mut visiting,
@@ -182,6 +187,7 @@ fn scan_workflow_inner(
                 secrets: caller_taint.secrets,
                 step_outputs: &empty_outputs,
                 job_outputs: &empty_outputs,
+                matrix: &empty_outputs,
             },
             &file.rel,
         )?;
@@ -196,6 +202,7 @@ fn scan_workflow_inner(
                 secrets: caller_taint.secrets,
                 step_outputs: &empty_outputs,
                 job_outputs: &empty_outputs,
+                matrix: &empty_outputs,
             },
             &file.rel,
         );
@@ -216,6 +223,18 @@ fn scan_workflow_inner(
                 continue;
             };
             let mut job_tainted_envs = workflow_tainted_envs.clone();
+            let job_tainted_matrix = collect_tainted_matrix(
+                job,
+                TaintScope {
+                    envs: &job_tainted_envs,
+                    inputs: caller_taint.inputs,
+                    secrets: caller_taint.secrets,
+                    step_outputs: &empty_outputs,
+                    job_outputs: &tainted_job_outputs,
+                    matrix: &empty_outputs,
+                },
+                &file.rel,
+            )?;
             if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
                 apply_env_taints(
                     &mut job_tainted_envs,
@@ -226,6 +245,7 @@ fn scan_workflow_inner(
                         secrets: caller_taint.secrets,
                         step_outputs: &empty_outputs,
                         job_outputs: &tainted_job_outputs,
+                        matrix: &job_tainted_matrix,
                     },
                     &file.rel,
                 )?;
@@ -241,6 +261,7 @@ fn scan_workflow_inner(
                             secrets: caller_taint.secrets,
                             step_outputs: &empty_outputs,
                             job_outputs: &tainted_job_outputs,
+                            matrix: &job_tainted_matrix,
                         };
                         let job_tainted_inputs =
                             collect_tainted_with_inputs(job, job_scope, &file.rel)?;
@@ -256,6 +277,7 @@ fn scan_workflow_inner(
                                 secrets: &job_tainted_secrets,
                                 step_outputs: &empty_outputs,
                                 job_outputs: &empty_outputs,
+                                matrix: &empty_outputs,
                             },
                             actions,
                             workflows,
@@ -287,6 +309,7 @@ fn scan_workflow_inner(
                             secrets: caller_taint.secrets,
                             step_outputs: &tainted_step_outputs,
                             job_outputs: &tainted_job_outputs,
+                            matrix: &job_tainted_matrix,
                         },
                         &file.rel,
                     )?;
@@ -297,6 +320,7 @@ fn scan_workflow_inner(
                     secrets: caller_taint.secrets,
                     step_outputs: &tainted_step_outputs,
                     job_outputs: &tainted_job_outputs,
+                    matrix: &job_tainted_matrix,
                 };
                 let mut discarded = Vec::new();
                 let effects = collect_step_produced_output_taint(
@@ -321,6 +345,7 @@ fn scan_workflow_inner(
                     secrets: caller_taint.secrets,
                     step_outputs: &tainted_step_outputs,
                     job_outputs: &tainted_job_outputs,
+                    matrix: &job_tainted_matrix,
                 };
                 collect_tainted_job_outputs(job, job_id, job_scope, &file.rel)?
             };
@@ -334,6 +359,18 @@ fn scan_workflow_inner(
     for job in jobs.values().filter_map(Yaml::as_hash) {
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         let mut job_tainted_envs = workflow_tainted_envs.clone();
+        let job_tainted_matrix = collect_tainted_matrix(
+            job,
+            TaintScope {
+                envs: &job_tainted_envs,
+                inputs: caller_taint.inputs,
+                secrets: caller_taint.secrets,
+                step_outputs: &empty_outputs,
+                job_outputs: &tainted_job_outputs,
+                matrix: &empty_outputs,
+            },
+            &file.rel,
+        )?;
         if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
             apply_env_taints(
                 &mut job_tainted_envs,
@@ -344,6 +381,7 @@ fn scan_workflow_inner(
                     secrets: caller_taint.secrets,
                     step_outputs: &empty_outputs,
                     job_outputs: &tainted_job_outputs,
+                    matrix: &job_tainted_matrix,
                 },
                 &file.rel,
             )?;
@@ -361,6 +399,7 @@ fn scan_workflow_inner(
                         secrets: caller_taint.secrets,
                         step_outputs: &empty_outputs,
                         job_outputs: &tainted_job_outputs,
+                        matrix: &job_tainted_matrix,
                     };
                     let job_tainted_inputs =
                         collect_tainted_with_inputs(job, job_scope, &file.rel)?;
@@ -374,6 +413,7 @@ fn scan_workflow_inner(
                             secrets: &job_tainted_secrets,
                             step_outputs: &empty_outputs,
                             job_outputs: &empty_outputs,
+                            matrix: &empty_outputs,
                         },
                         actions,
                         workflows,
@@ -399,6 +439,7 @@ fn scan_workflow_inner(
                         secrets: caller_taint.secrets,
                         step_outputs: &tainted_step_outputs,
                         job_outputs: &tainted_job_outputs,
+                        matrix: &job_tainted_matrix,
                     },
                     &file.rel,
                 )?;
@@ -409,6 +450,7 @@ fn scan_workflow_inner(
                 secrets: caller_taint.secrets,
                 step_outputs: &tainted_step_outputs,
                 job_outputs: &tainted_job_outputs,
+                matrix: &job_tainted_matrix,
             };
             let from_composite = scan_step(
                 step,
@@ -436,6 +478,7 @@ fn scan_workflow_inner(
             secrets: caller_taint.secrets,
             step_outputs: &empty_outputs,
             job_outputs: &tainted_job_outputs,
+            matrix: &empty_outputs,
         },
         &file.rel,
     )?;
@@ -498,6 +541,7 @@ fn scan_action_metadata(
                     secrets: &empty_secrets,
                     step_outputs: &tainted_step_outputs,
                     job_outputs: &empty_outputs,
+                    matrix: caller_taint.matrix,
                 },
                 &file.rel,
             )?;
@@ -508,6 +552,7 @@ fn scan_action_metadata(
             secrets: &empty_secrets,
             step_outputs: &tainted_step_outputs,
             job_outputs: &empty_outputs,
+            matrix: caller_taint.matrix,
         };
         let from_composite = scan_step(
             step, &file.rel, false, step_scope, actions, visiting, findings,
@@ -530,6 +575,7 @@ fn scan_action_metadata(
             secrets: &empty_secrets,
             step_outputs: &tainted_step_outputs,
             job_outputs: &empty_outputs,
+            matrix: caller_taint.matrix,
         },
         &file.rel,
     )?;
@@ -578,6 +624,7 @@ fn scan_step(
                         // Nested composites start with a fresh step-output scope.
                         step_outputs: &empty_outputs,
                         job_outputs: &empty_outputs,
+                        matrix: taint.matrix,
                     },
                     actions,
                     visiting,
@@ -643,6 +690,7 @@ fn collect_step_produced_output_taint(
             secrets: &empty_secrets,
             step_outputs: &empty_outputs,
             job_outputs: &empty_outputs,
+            matrix: taint.matrix,
         },
         actions,
         visiting,
@@ -778,6 +826,66 @@ fn collect_tainted_secrets(
     Ok(tainted)
 }
 
+/// Collect `strategy.matrix` property names whose values carry untrusted data.
+///
+/// Covers dimension arrays (`title: ["${{ inputs.title }}"]`), scalar entries,
+/// and `include` row fields. `exclude` rows do not introduce runtime matrix
+/// values for interpolation, so they are ignored.
+fn collect_tainted_matrix(job: &Hash, taint: TaintScope<'_>, rel: &str) -> Result<HashSet<String>> {
+    let mut tainted = HashSet::new();
+    let Some(strategy) = get(job, "strategy").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    let Some(matrix) = get(strategy, "matrix").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    for (key, value) in matrix {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        if name == "include" {
+            if let Some(rows) = value.as_vec() {
+                for row in rows.iter().filter_map(Yaml::as_hash) {
+                    for (row_key, row_value) in row {
+                        let Some(row_name) = row_key.as_str() else {
+                            continue;
+                        };
+                        if yaml_value_carries_taint(row_value, taint, rel)? {
+                            tainted.insert(row_name.to_string());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if name == "exclude" {
+            continue;
+        }
+        if yaml_value_carries_taint(value, taint, rel)? {
+            tainted.insert(name.to_string());
+        }
+    }
+    Ok(tainted)
+}
+
+fn yaml_value_carries_taint(value: &Yaml, taint: TaintScope<'_>, rel: &str) -> Result<bool> {
+    match value {
+        Yaml::String(text) => value_carries_taint(text, taint, rel),
+        Yaml::Array(items) => {
+            for item in items {
+                if yaml_value_carries_taint(item, taint, rel)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        // Non-string scalars are constants; nested mappings are unusual for
+        // matrix dimensions and are treated conservatively as non-tainted here
+        // (taint still flows via string leaves above).
+        _ => Ok(false),
+    }
+}
+
 fn apply_env_taints(
     tainted: &mut HashSet<String>,
     env: &Hash,
@@ -795,6 +903,7 @@ fn apply_env_taints(
         secrets: parent.secrets,
         step_outputs: parent.step_outputs,
         job_outputs: parent.job_outputs,
+        matrix: parent.matrix,
     };
     let mut updates = Vec::new();
     for (key, value) in env {
@@ -838,7 +947,8 @@ fn value_carries_taint(value: &str, taint: TaintScope<'_>, rel: &str) -> Result<
         || value_references_tainted_input(value, taint.inputs, rel)?
         || value_references_tainted_secret(value, taint.secrets, rel)?
         || value_references_tainted_step_output(value, taint.step_outputs, rel)?
-        || value_references_tainted_job_output(value, taint.job_outputs, rel)?)
+        || value_references_tainted_job_output(value, taint.job_outputs, rel)?
+        || value_references_tainted_matrix(value, taint.matrix, rel)?)
 }
 
 fn value_contains_untrusted_context(value: &str, rel: &str) -> Result<bool> {
@@ -890,6 +1000,16 @@ fn value_references_tainted_job_output(
 ) -> Result<bool> {
     for_each_expression(value, rel, |expression| {
         Ok(expression_uses_tainted_job_output(expression, tainted))
+    })
+}
+
+fn value_references_tainted_matrix(
+    value: &str,
+    tainted: &HashSet<String>,
+    rel: &str,
+) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(expression_uses_tainted_matrix(expression, tainted))
     })
 }
 
@@ -1602,16 +1722,35 @@ fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
 
 fn extract_echo_payload(command: &str) -> Option<&str> {
     let trimmed = command.trim();
-    let rest = trimmed.strip_prefix("echo")?.trim_start();
-    let rest = rest
-        .strip_prefix("-n")
-        .map(|value| value.trim_start())
-        .unwrap_or(rest);
+    let mut rest = trimmed.strip_prefix("echo")?.trim_start();
+    // Bash `echo` accepts `-n`, `-e`, `-E`, and combinations such as `-ne`.
+    // Strip every leading option token so `echo -e "name=value"` still parses.
+    while let Some(token_end) = rest.find(|c: char| c.is_whitespace()) {
+        let token = &rest[..token_end];
+        if is_echo_option_token(token) {
+            rest = rest[token_end..].trim_start();
+            continue;
+        }
+        break;
+    }
+    if !rest.is_empty() && !rest.contains(char::is_whitespace) && is_echo_option_token(rest) {
+        // `echo -n` with no payload
+        return None;
+    }
     if rest.is_empty() {
         None
     } else {
         Some(rest)
     }
+}
+
+fn is_echo_option_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    if chars.next() != Some('-') {
+        return false;
+    }
+    let rest: String = chars.collect();
+    !rest.is_empty() && rest.chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
 }
 
 fn strip_wrapping_shell_quotes(value: &str) -> &str {
@@ -1901,6 +2040,7 @@ fn check_inline_script(
             || expression_uses_tainted_secret(expression, taint.secrets)
             || expression_uses_tainted_step_output(expression, taint.step_outputs)
             || expression_uses_tainted_job_output(expression, taint.job_outputs)
+            || expression_uses_tainted_matrix(expression, taint.matrix)
         {
             findings.push(
                 Finding::new(
@@ -1959,6 +2099,18 @@ fn expression_uses_tainted_secret(expression: &str, tainted_secrets: &HashSet<St
         return true;
     }
     expression_uses_tainted_context_property(expression, "secrets", tainted_secrets)
+}
+
+/// Detect `${{ matrix.NAME }}` when `strategy.matrix` bound that property to an
+/// untrusted value (direct context, tainted input/env/secret/output, etc.).
+fn expression_uses_tainted_matrix(expression: &str, tainted_matrix: &HashSet<String>) -> bool {
+    if tainted_matrix.is_empty() {
+        return false;
+    }
+    if expression_reads_whole_context(expression, "matrix") {
+        return true;
+    }
+    expression_uses_tainted_context_property(expression, "matrix", tainted_matrix)
 }
 
 /// Detect `${{ steps.<id>.outputs.<name> }}` when a prior step wrote a tainted
@@ -2116,6 +2268,7 @@ fn expression_uses_tainted_context_property(
     static ENV_REF: OnceLock<Regex> = OnceLock::new();
     static INPUTS_REF: OnceLock<Regex> = OnceLock::new();
     static SECRETS_REF: OnceLock<Regex> = OnceLock::new();
+    static MATRIX_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = match context {
         "env" => ENV_REF.get_or_init(|| {
             Regex::new(
@@ -2134,6 +2287,12 @@ fn expression_uses_tainted_context_property(
                 r#"(?i)\bsecrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
             )
             .expect("tainted secrets reference pattern compiles")
+        }),
+        "matrix" => MATRIX_REF.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\bmatrix\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+            )
+            .expect("tainted matrix reference pattern compiles")
         }),
         _ => return false,
     };
@@ -2606,6 +2765,7 @@ jobs:
                 secrets: &empty,
                 step_outputs: &empty,
                 job_outputs: &empty,
+                matrix: &empty,
             },
             &actions,
             &workflows,
@@ -4051,6 +4211,83 @@ jobs:
     }
 
     #[test]
+    fn echo_dash_e_github_output_write_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo -e "title=$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn strategy_matrix_input_taint_propagates_into_inline_script() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ github.event.issue.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        title: ["${{ inputs.title }}"]
+    steps:
+      - run: echo "${{ matrix.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("matrix.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
     fn split_github_file_redirect_accepts_cmd_percent_syntax() {
         assert_eq!(
             split_github_file_redirect(r#"echo title=%TITLE%>>%GITHUB_OUTPUT%"#, "GITHUB_OUTPUT"),
@@ -4064,5 +4301,13 @@ jobs:
             "${GITHUB_OUTPUT:-fallback}",
             "GITHUB_OUTPUT"
         ));
+        assert_eq!(
+            extract_echo_payload(r#"echo -e "title=$TITLE""#),
+            Some(r#""title=$TITLE""#)
+        );
+        assert_eq!(
+            extract_echo_payload(r#"echo -ne "title=$TITLE""#),
+            Some(r#""title=$TITLE""#)
+        );
     }
 }
