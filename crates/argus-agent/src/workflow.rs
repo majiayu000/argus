@@ -45,7 +45,12 @@
 //! or an omitted `with` that relies on an untrusted input default — cannot
 //! bypass Critical→block. `$GITHUB_ENV` writes inside an expanded local
 //! composite propagate to later caller steps (GitHub job-wide env file),
+//! including when the composite writes a value equal to the invoking step's
+//! transient `env:` override,
 //! steps with a statically false `if:` do not apply env/output side effects,
+//! non-literal/`if` conditions treat env writes as uncertain (invalidate),
+//! braced parameter expansions such as `${GITHUB_ENV:?missing}` are recognized
+//! as environment-file targets,
 //! `&&`/`||` multi-redirect lists are fully parsed, and unresolved
 //! `needs.*.outputs.*` checkout refs fail closed. Unresolved
 //! `steps.*.outputs.*`, unresolved `env` access, and unresolved `inputs`
@@ -64,7 +69,7 @@ use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
@@ -74,6 +79,20 @@ type InputBindings = BTreeMap<String, String>;
 type EnvBindings = BTreeMap<String, String>;
 /// Prior-step `$GITHUB_OUTPUT` writes keyed as `{step_id}.{output_name}`.
 type StepOutputBindings = BTreeMap<String, String>;
+
+/// `$GITHUB_ENV` side effects from an expanded local composite.
+///
+/// `env` is the full map after scanning (inherited bindings plus writes).
+/// `written_keys` names keys assigned or cleared via `$GITHUB_ENV` (including
+/// nested composites). `cleared` is set when an opaque write wiped the map.
+/// Propagation uses `written_keys` rather than value diffs against the
+/// composite entry map so a write equal to the invoking step's transient
+/// `env:` still persists to later caller steps.
+struct CompositeEnvEffects {
+    env: EnvBindings,
+    written_keys: BTreeSet<String>,
+    cleared: bool,
+}
 
 struct StepScanCtx<'a> {
     privileged_trigger: bool,
@@ -181,15 +200,26 @@ fn scan_workflow(
             if step_condition_is_always_false(step) {
                 continue;
             }
-            if let Some(final_env) = composite_env {
-                propagate_env_binding_diff(&step_env, &final_env, &mut env_bindings);
+            // Runtime-dependent or non-literal conditions may or may not run;
+            // apply concrete values only when execution is definite. Otherwise
+            // invalidate keys the step would touch so stale safe bindings
+            // cannot mask attacker-controlled values.
+            if !step_condition_is_definitely_executed(step) {
+                if let Some(effects) = composite_env {
+                    invalidate_composite_env_effects(&effects, &mut env_bindings);
+                }
+                invalidate_github_env_writes(step, &mut env_bindings);
+                continue;
+            }
+            if let Some(effects) = composite_env {
+                apply_composite_env_effects(&effects, &mut env_bindings);
             }
             for (key, value) in
                 collect_step_output_bindings(step, &empty_bindings, &step_env, &step_outputs)
             {
                 step_outputs.insert(key, value);
             }
-            apply_github_env_writes(
+            let _ = apply_github_env_writes(
                 step,
                 &empty_bindings,
                 &step_env,
@@ -241,22 +271,30 @@ fn scan_composite_steps(
     rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<EnvBindings> {
+) -> Result<CompositeEnvEffects> {
+    let empty_effects = || CompositeEnvEffects {
+        env: ctx.env_bindings.clone(),
+        written_keys: BTreeSet::new(),
+        cleared: false,
+    };
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
-        return Ok(ctx.env_bindings.clone());
+        return Ok(empty_effects());
     };
     if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
-        return Ok(ctx.env_bindings.clone());
+        return Ok(empty_effects());
     }
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
-        return Ok(ctx.env_bindings.clone());
+        return Ok(empty_effects());
     };
     let mut step_outputs = StepOutputBindings::new();
     // Accumulate `$GITHUB_ENV` writes so later composite steps see them via
-    // `${{ env.NAME }}` the same way GitHub does. The final map is returned so
+    // `${{ env.NAME }}` the same way GitHub does. Written keys are tracked so
     // callers can propagate job-wide env-file writes across the composite
-    // boundary.
+    // boundary even when the written value equals the invoking step's
+    // transient `env:`.
     let mut env_bindings = ctx.env_bindings.clone();
+    let mut written_keys = BTreeSet::new();
+    let mut cleared = false;
     for step in steps.iter().filter_map(Yaml::as_hash) {
         let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
         let nested_env = scan_step(
@@ -276,23 +314,55 @@ fn scan_composite_steps(
         if step_condition_is_always_false(step) {
             continue;
         }
-        if let Some(final_env) = nested_env {
-            propagate_env_binding_diff(&step_env, &final_env, &mut env_bindings);
+        if !step_condition_is_definitely_executed(step) {
+            if let Some(effects) = nested_env {
+                merge_invalidated_composite_env(
+                    &effects,
+                    &mut env_bindings,
+                    &mut written_keys,
+                    &mut cleared,
+                );
+            }
+            let invalidated = invalidate_github_env_writes(step, &mut env_bindings);
+            if cleared {
+                written_keys.clear();
+            } else {
+                written_keys.extend(invalidated);
+            }
+            continue;
+        }
+        if let Some(effects) = nested_env {
+            merge_composite_env_effects(
+                &effects,
+                &mut env_bindings,
+                &mut written_keys,
+                &mut cleared,
+            );
         }
         for (key, value) in
             collect_step_output_bindings(step, ctx.input_bindings, &step_env, &step_outputs)
         {
             step_outputs.insert(key, value);
         }
-        apply_github_env_writes(
+        let (step_keys, step_cleared) = apply_github_env_writes(
             step,
             ctx.input_bindings,
             &step_env,
             &step_outputs,
             &mut env_bindings,
         );
+        if step_cleared {
+            cleared = true;
+            written_keys.clear();
+        } else if !cleared {
+            written_keys.extend(step_keys);
+        }
     }
-    Ok(env_bindings)
+    Ok(CompositeEnvEffects {
+        env: env_bindings,
+        written_keys,
+        cleared,
+    })
 }
 
 fn scan_step(
@@ -300,7 +370,7 @@ fn scan_step(
     rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<Option<EnvBindings>> {
+) -> Result<Option<CompositeEnvEffects>> {
     // Expansion (depth > 0) only adds privileged-context findings. Mutable-action
     // and inline-script findings for composite bodies are emitted once by the
     // ActionMetadata pass so call-site count does not inflate source findings.
@@ -357,7 +427,7 @@ fn expand_local_composite(
     caller_rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<EnvBindings> {
+) -> Result<CompositeEnvEffects> {
     if ctx.depth >= MAX_LOCAL_COMPOSITE_DEPTH {
         bail!(
             "local composite expansion depth exceeded while resolving `{action}` from `{caller_rel}`"
@@ -399,22 +469,71 @@ fn expand_local_composite(
     )
 }
 
-/// Apply `$GITHUB_ENV` side effects from an expanded composite onto the caller's
-/// accumulated env map without persisting the calling step's transient `env:`.
-///
-/// `start` is the env map the composite began with (caller job/composite env
-/// merged with the invoking step's `env:`). `end` is the map after composite
-/// `$GITHUB_ENV` writes. Only keys that changed are written back to `persist`.
-fn propagate_env_binding_diff(start: &EnvBindings, end: &EnvBindings, persist: &mut EnvBindings) {
-    for (key, value) in end {
-        if start.get(key) != Some(value) {
-            persist.insert(key.clone(), value.clone());
+/// Apply tracked `$GITHUB_ENV` side effects from an expanded composite onto the
+/// caller's accumulated env map without persisting the calling step's
+/// transient `env:`.
+fn apply_composite_env_effects(effects: &CompositeEnvEffects, persist: &mut EnvBindings) {
+    if effects.cleared {
+        persist.clear();
+        return;
+    }
+    for key in &effects.written_keys {
+        match effects.env.get(key) {
+            Some(value) => {
+                persist.insert(key.clone(), value.clone());
+            }
+            None => {
+                persist.remove(key);
+            }
         }
     }
-    for key in start.keys() {
-        if !end.contains_key(key) {
-            persist.remove(key);
-        }
+}
+
+/// Fail closed: drop keys a conditionally executed composite would write so a
+/// skipped safe overwrite cannot leave a stale trusted binding.
+fn invalidate_composite_env_effects(effects: &CompositeEnvEffects, persist: &mut EnvBindings) {
+    if effects.cleared {
+        persist.clear();
+        return;
+    }
+    for key in &effects.written_keys {
+        persist.remove(key);
+    }
+}
+
+fn merge_composite_env_effects(
+    effects: &CompositeEnvEffects,
+    env_bindings: &mut EnvBindings,
+    written_keys: &mut BTreeSet<String>,
+    cleared: &mut bool,
+) {
+    if effects.cleared {
+        env_bindings.clear();
+        written_keys.clear();
+        *cleared = true;
+        return;
+    }
+    apply_composite_env_effects(effects, env_bindings);
+    if !*cleared {
+        written_keys.extend(effects.written_keys.iter().cloned());
+    }
+}
+
+fn merge_invalidated_composite_env(
+    effects: &CompositeEnvEffects,
+    env_bindings: &mut EnvBindings,
+    written_keys: &mut BTreeSet<String>,
+    cleared: &mut bool,
+) {
+    if effects.cleared {
+        env_bindings.clear();
+        written_keys.clear();
+        *cleared = true;
+        return;
+    }
+    invalidate_composite_env_effects(effects, env_bindings);
+    if !*cleared {
+        written_keys.extend(effects.written_keys.iter().cloned());
     }
 }
 
@@ -424,14 +543,30 @@ fn step_condition_is_always_false(step: &Hash) -> bool {
     get_string(step, "if").is_some_and(is_always_false_condition)
 }
 
+/// True when a step has no `if:` or a statically true condition, so side
+/// effects definitely run. Any other condition is treated as uncertain.
+fn step_condition_is_definitely_executed(step: &Hash) -> bool {
+    match get_string(step, "if") {
+        None => true,
+        Some(condition) => is_always_true_condition(condition),
+    }
+}
+
 fn is_always_false_condition(condition: &str) -> bool {
+    expression_condition_atom(condition).eq_ignore_ascii_case("false")
+}
+
+fn is_always_true_condition(condition: &str) -> bool {
+    expression_condition_atom(condition).eq_ignore_ascii_case("true")
+}
+
+fn expression_condition_atom(condition: &str) -> &str {
     let trimmed = condition.trim();
-    let inner = trimmed
+    trimmed
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
         .map(str::trim)
-        .unwrap_or(trimmed);
-    inner.eq_ignore_ascii_case("false")
+        .unwrap_or(trimmed)
 }
 
 /// Fill omitted composite inputs from Action metadata `inputs.*.default`.
@@ -670,15 +805,16 @@ fn apply_github_env_writes(
     step_env: &EnvBindings,
     step_outputs: &StepOutputBindings,
     env_bindings: &mut EnvBindings,
-) {
+) -> (BTreeSet<String>, bool) {
     let Some(script) = get_string(step, "run") else {
-        return;
+        return (BTreeSet::new(), false);
     };
     let (_, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
     if opaque_redirect {
         env_bindings.clear();
-        return;
+        return (BTreeSet::new(), true);
     }
+    let mut written = BTreeSet::new();
     for (name, resolved) in resolve_github_file_write_bindings(
         script,
         "GITHUB_ENV",
@@ -686,6 +822,7 @@ fn apply_github_env_writes(
         step_env,
         step_outputs,
     ) {
+        written.insert(name.clone());
         match resolved {
             Some(value) => {
                 env_bindings.insert(name, value);
@@ -695,6 +832,26 @@ fn apply_github_env_writes(
             }
         }
     }
+    (written, false)
+}
+
+/// Drop keys a `$GITHUB_ENV` writer would touch without applying resolved
+/// values — used when the step's `if:` is not statically definite.
+fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> BTreeSet<String> {
+    let Some(script) = get_string(step, "run") else {
+        return BTreeSet::new();
+    };
+    let (writes, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
+    if opaque_redirect {
+        env_bindings.clear();
+        return BTreeSet::new();
+    }
+    let mut written = BTreeSet::new();
+    for (name, _, _) in writes {
+        written.insert(name.clone());
+        env_bindings.remove(&name);
+    }
+    written
 }
 
 /// Resolve `echo … >> $GITHUB_{OUTPUT,ENV}` writes into tracked values or
@@ -966,12 +1123,34 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
 }
 
 /// True when `target` names a GitHub Actions environment file via Bash
-/// `$VAR` / `${VAR}` or PowerShell `$env:VAR` syntax.
+/// `$VAR` / `${VAR}` / `${VAR:…}` parameter expansions or PowerShell
+/// `$env:VAR` syntax.
 fn is_github_file_redirect_target(target: &str, file_var: &str) -> bool {
     let dollar = format!("${file_var}");
-    let braced = format!("${{{file_var}}}");
     let pwsh = format!("$env:{file_var}");
-    target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh)
+    if target == dollar || target.eq_ignore_ascii_case(&pwsh) {
+        return true;
+    }
+    is_braced_github_file_ref(target, file_var)
+}
+
+/// `${VAR}`, `${VAR:?msg}`, `${VAR:-word}`, and other bash parameter
+/// expansions whose base name is a GitHub environment-file variable.
+fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
+    let prefix = format!("${{{file_var}");
+    let Some(rest) = target
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with(':')
+        || rest.starts_with('#')
+        || rest.starts_with('%')
+        || rest.starts_with('/')
+        || rest.starts_with('^')
+        || rest.starts_with(',')
 }
 
 /// True when a shell segment mentions `$GITHUB_{OUTPUT,ENV}` / `${…}` /
@@ -984,9 +1163,35 @@ fn segment_references_github_file(segment: &str, file_var: &str) -> bool {
     if segment.contains(&dollar) || segment.contains(&braced) {
         return true;
     }
+    if contains_braced_github_file_ref(segment, file_var) {
+        return true;
+    }
     // PowerShell provider names are case-insensitive (`$Env:GITHUB_ENV`).
     let lower = segment.to_ascii_lowercase();
     lower.contains(&pwsh.to_ascii_lowercase())
+}
+
+fn contains_braced_github_file_ref(segment: &str, file_var: &str) -> bool {
+    let prefix = format!("${{{file_var}");
+    let mut search = segment;
+    while let Some(rel) = search.find(&prefix) {
+        let after_prefix = &search[rel + prefix.len()..];
+        if let Some(end) = after_prefix.find('}') {
+            let rest = &after_prefix[..end];
+            if rest.is_empty()
+                || rest.starts_with(':')
+                || rest.starts_with('#')
+                || rest.starts_with('%')
+                || rest.starts_with('/')
+                || rest.starts_with('^')
+                || rest.starts_with(',')
+            {
+                return true;
+            }
+        }
+        search = &search[rel + 1..];
+    }
+    false
 }
 
 /// Drop an unquoted trailing `# ...` shell comment.
@@ -2571,13 +2776,15 @@ run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
             "${{ github.event.pull_request.head.sha }}".to_string(),
         );
         let mut env_bindings = EnvBindings::new();
-        apply_github_env_writes(
+        let (written, cleared) = apply_github_env_writes(
             step,
             &inputs,
             &EnvBindings::new(),
             &StepOutputBindings::new(),
             &mut env_bindings,
         );
+        assert!(!cleared);
+        assert!(written.contains("TARGET"));
         assert!(
             env_bindings
                 .get("TARGET")
@@ -3814,6 +4021,182 @@ runs:
     - if: ${{ false }}
       shell: bash
       run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_workflow_composite_github_env_propagates_matching_step_env() {
+        // Invoking step overrides TARGET with attacker-controlled taint; composite
+        // persists that same value via `$GITHUB_ENV`. Propagation must not drop
+        // the write just because it equals the transient step env.
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: main
+    steps:
+      - uses: ./.github/actions/export-ref
+        env:
+          TARGET: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/export-ref/action.yml".to_string(),
+                content: r#"
+name: export-ref
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ env.TARGET }}" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_uncertain_false_condition_env_write_is_invalidated() {
+        // `${{ false && true }}` is not the literal `false`, so the step must not
+        // confidently overwrite attacker-controlled TARGET with `main`.
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - if: ${{ false && true }}
+      shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn is_github_file_redirect_target_accepts_braced_parameter_expansions() {
+        assert!(is_github_file_redirect_target(
+            "${GITHUB_ENV:?missing}",
+            "GITHUB_ENV"
+        ));
+        assert!(is_github_file_redirect_target(
+            "${GITHUB_ENV:-$fallback}",
+            "GITHUB_ENV"
+        ));
+        assert!(is_github_file_redirect_target(
+            "${GITHUB_ENV}",
+            "GITHUB_ENV"
+        ));
+        assert!(segment_references_github_file(
+            r#"echo "TARGET=$EVIL" >> "${GITHUB_ENV:?missing}""#,
+            "GITHUB_ENV"
+        ));
+        assert_eq!(
+            split_github_file_redirect(
+                r#"echo "TARGET=$EVIL" >> "${GITHUB_ENV:?missing}""#,
+                "GITHUB_ENV"
+            ),
+            Some(r#"echo "TARGET=$EVIL""#)
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_braced_github_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - shell: bash
+      env:
+        EVIL: ${{ inputs.ref }}
+      run: echo "TARGET=$EVIL" >> "${GITHUB_ENV:?missing}"
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
