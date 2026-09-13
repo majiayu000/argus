@@ -830,6 +830,11 @@ fn collect_tainted_secrets(
 /// Any later `${{ matrix.* }}` read is treated as tainted while this is set.
 const MATRIX_EXPRESSION_UNKNOWN_KEYS: &str = "__argus_matrix_expression__";
 
+/// Output-name sentinel for opaque `$GITHUB_OUTPUT` producers under inherited
+/// taint. Stored as `{step_id}.*` so any later `steps.<id>.outputs.<name>`
+/// read is treated as tainted without aborting the scan.
+const OPAQUE_STEP_OUTPUT_NAME: &str = "*";
+
 /// Collect `strategy.matrix` property names whose values carry untrusted data.
 ///
 /// Covers dimension arrays (`title: ["${{ inputs.title }}"]`), scalar entries,
@@ -1091,7 +1096,7 @@ fn collect_tainted_github_outputs(
     let Some(script) = get_string(step, "run") else {
         return Ok(tainted);
     };
-    let retain_on_clean = script_has_shell_control_flow(script);
+    let retain_on_clean = script_has_shell_control_flow(script) || step_has_actions_condition(step);
     let mut locals = HashSet::new();
     for effect in parse_github_file_effects(script, "GITHUB_OUTPUT", rel)? {
         match effect {
@@ -1124,14 +1129,15 @@ fn collect_tainted_github_outputs(
                 shell_envs.extend(locals.iter().cloned());
                 // Opaque producers inherit the process environment, so a tool
                 // may emit tracked taint without naming it on the command line.
-                // Fail closed whenever any tracked env/local taint is in scope
-                // (or the producer command itself expands taint / expressions).
+                // Conservatively taint every later `steps.<id>.outputs.*` read
+                // when any tracked env/local taint is in scope (or the producer
+                // command itself expands taint / expressions). This keeps the
+                // scan complete for benign opaque stdout (e.g. rust-ci matrix
+                // calculation) while still blocking injection sinks.
                 if !shell_envs.is_empty()
                     || github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)?
                 {
-                    bail!(
-                        "GitHub Actions surface `{rel}` contains an unsupported `$GITHUB_OUTPUT` producer that cannot be assessed statically"
-                    );
+                    tainted.insert(format!("{step_id}.{OPAQUE_STEP_OUTPUT_NAME}"));
                 }
             }
         }
@@ -1181,10 +1187,11 @@ fn apply_shell_local_assignment(
     }
 }
 
-/// Parse `NAME=value` / `export NAME=value` / `$name = value` / `set NAME=value`
-/// shell assignments.
+/// Parse `NAME=value` / `export NAME=value` / `$name = value` /
+/// `$env:NAME = value` / `set NAME=value` shell assignments.
 fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
     parse_posix_shell_assignment(segment)
+        .or_else(|| parse_pwsh_env_assignment(segment))
         .or_else(|| parse_pwsh_local_assignment(segment))
         .or_else(|| parse_cmd_set_assignment(segment))
 }
@@ -1272,15 +1279,38 @@ fn parse_cmd_set_assignment(segment: &str) -> Option<(&str, &str)> {
     Some((name, &rest[eq + 1..]))
 }
 
+/// Parse PowerShell process-environment assignments such as
+/// `$env:ALIAS = $env:TITLE`. These mutate the inherited process env for later
+/// commands in the same step (tracked like shell-local aliases).
+fn parse_pwsh_env_assignment(segment: &str) -> Option<(&str, &str)> {
+    let segment = segment.trim();
+    let rest = segment.strip_prefix('$')?;
+    let rest = strip_pwsh_env_prefix(rest)?;
+    let name_len = rest
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+        })
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if name_len == 0 {
+        return None;
+    }
+    let name = &rest[..name_len];
+    if !is_github_ident(name) {
+        return None;
+    }
+    let after_name = rest[name_len..].trim_start();
+    let rhs = after_name.strip_prefix('=')?.trim_start();
+    Some((name, rhs))
+}
+
 /// Parse PowerShell local assignments such as `$alias = $env:TITLE`.
 fn parse_pwsh_local_assignment(segment: &str) -> Option<(&str, &str)> {
     let segment = segment.trim();
     let rest = segment.strip_prefix('$')?;
-    if rest
-        .get(..4)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("env:"))
-    {
-        // `$env:NAME = ...` mutates the process environment, not a local alias.
+    if strip_pwsh_env_prefix(rest).is_some() {
+        // `$env:NAME = ...` is handled by `parse_pwsh_env_assignment`.
         return None;
     }
     let name_len = rest
@@ -1327,7 +1357,9 @@ fn apply_github_env_file_taints(
     let Some(script) = get_string(step, "run") else {
         return Ok(writes);
     };
-    let retain_on_clean = script_has_shell_control_flow(script);
+    // Actions-level `if:` makes the whole step skippable, so clean `$GITHUB_ENV`
+    // overwrites are not guaranteed even when the script itself is straight-line.
+    let retain_on_clean = script_has_shell_control_flow(script) || step_has_actions_condition(step);
     let mut locals = HashSet::new();
     for effect in parse_github_file_effects(script, "GITHUB_ENV", rel)? {
         match effect {
@@ -1367,9 +1399,8 @@ fn apply_github_env_file_taints(
             ShellFileEffect::UnsupportedProducer { command } => {
                 let mut shell_envs = taint.envs.clone();
                 shell_envs.extend(locals.iter().cloned());
-                // Same opaque-producer rule as `$GITHUB_OUTPUT`: inherited
-                // process env can carry tracked taint without a shell expansion
-                // in the redirected command text.
+                // Opaque `$GITHUB_ENV` producers can invent arbitrary env names;
+                // fail closed when inherited taint may flow into those writes.
                 if !shell_envs.is_empty()
                     || github_output_value_is_tainted(&command, taint, rel, true, &shell_envs)?
                 {
@@ -1381,6 +1412,11 @@ fn apply_github_env_file_taints(
         }
     }
     Ok(writes)
+}
+
+/// True when the step has an Actions-level `if:` condition that can skip it.
+fn step_has_actions_condition(step: &Hash) -> bool {
+    get(step, "if").is_some()
 }
 
 /// True when `script` contains shell control-flow keywords or boolean lists that
@@ -3040,6 +3076,7 @@ fn expression_uses_tainted_nested_output(
             return false;
         };
         tainted_keys.contains(&format!("{owner}.{output}"))
+            || tainted_keys.contains(&format!("{owner}.{OPAQUE_STEP_OUTPUT_NAME}"))
     })
 }
 
@@ -5735,10 +5772,9 @@ jobs:
     }
 
     #[test]
-    fn opaque_github_output_under_tainted_env_is_incomplete_scan_error() {
-        let file = SurfaceFile {
-            rel: ".github/workflows/test.yml".to_string(),
-            content: r#"
+    fn opaque_github_output_under_tainted_env_taints_all_step_outputs() {
+        let findings = findings_for(
+            r#"
 name: Matrix
 on: push
 jobs:
@@ -5750,37 +5786,36 @@ jobs:
       - id: jobs
         run: python generate.py >> "$GITHUB_OUTPUT"
       - run: echo "${{ steps.jobs.outputs.title }}"
-"#
-            .to_string(),
-            kind: SurfaceKind::Workflow,
-        };
-        let mut findings = Vec::new();
-        let actions = HashMap::new();
-        let workflows = HashMap::new();
-        let empty = HashSet::new();
-        let mut visiting = HashSet::new();
-        let error = scan_workflow(
-            &file,
-            TaintScope {
-                envs: &empty,
-                inputs: &empty,
-                secrets: &empty,
-                step_outputs: &empty,
-                job_outputs: &empty,
-                matrix: &empty,
-            },
-            &actions,
-            &workflows,
-            &mut visiting,
-            &mut findings,
-        )
-        .expect_err("opaque producer under tainted env");
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported `$GITHUB_OUTPUT` producer"),
-            "unexpected error: {error:#}"
+"#,
         );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.jobs.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn opaque_github_output_under_tainted_env_without_interpolation_is_complete_allow() {
+        let findings = findings_for(
+            r#"
+name: Matrix
+on: push
+jobs:
+  calculate_matrix:
+    runs-on: ubuntu-latest
+    env:
+      COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+    steps:
+      - id: jobs
+        run: python generate.py >> "$GITHUB_OUTPUT"
+      - run: echo matrix ready
+"#,
+        );
+
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 
     #[test]
@@ -5903,10 +5938,9 @@ jobs:
     }
 
     #[test]
-    fn unsupported_github_output_producer_is_incomplete_scan_error() {
-        let file = SurfaceFile {
-            rel: ".github/workflows/test.yml".to_string(),
-            content: r#"
+    fn unsupported_github_output_producer_with_expanded_taint_blocks_interpolation() {
+        let findings = findings_for(
+            r#"
 name: Echo issue
 on: issues
 jobs:
@@ -5918,37 +5952,73 @@ jobs:
       - id: set
         run: custom_writer "$TITLE" > "$GITHUB_OUTPUT"
       - run: echo "${{ steps.set.outputs.title }}"
-"#
-            .to_string(),
-            kind: SurfaceKind::Workflow,
-        };
-        let mut findings = Vec::new();
-        let actions = HashMap::new();
-        let workflows = HashMap::new();
-        let empty = HashSet::new();
-        let mut visiting = HashSet::new();
-        let error = scan_workflow(
-            &file,
-            TaintScope {
-                envs: &empty,
-                inputs: &empty,
-                secrets: &empty,
-                step_outputs: &empty,
-                job_outputs: &empty,
-                matrix: &empty,
-            },
-            &actions,
-            &workflows,
-            &mut visiting,
-            &mut findings,
-        )
-        .expect_err("unsupported GITHUB_OUTPUT producer");
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported `$GITHUB_OUTPUT` producer"),
-            "unexpected error: {error:#}"
+"#,
         );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn actions_if_condition_preserves_github_env_taint_across_clean_overwrite() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "ALIAS=$TITLE" >> "$GITHUB_ENV"
+      - if: false
+        run: echo "ALIAS=fixed" >> "$GITHUB_ENV"
+      - id: set
+        run: echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_process_env_assignment_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: |
+          $env:ALIAS = $env:TITLE
+          "out=$env:ALIAS" >> $env:GITHUB_OUTPUT
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
