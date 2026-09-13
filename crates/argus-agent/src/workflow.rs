@@ -43,11 +43,16 @@
 //! opaque `$GITHUB_ENV` redirects that cannot name the overwritten key,
 //! including PowerShell `$env:GITHUB_ENV` / `$env:GITHUB_OUTPUT` writers,
 //! or an omitted `with` that relies on an untrusted input default — cannot
-//! bypass Critical→block. Unresolved `steps.*.outputs.*`, unresolved
-//! `env` access, and unresolved `inputs` access in checkout refs fail closed
-//! under a privileged trigger. Quoted expression literals such as
-//! `${{ 'inputs.ref' }}` are not treated as input references; `}}` inside
-//! those quotes does not terminate the expression region. Single-quoted
+//! bypass Critical→block. `$GITHUB_ENV` writes inside an expanded local
+//! composite propagate to later caller steps (GitHub job-wide env file),
+//! steps with a statically false `if:` do not apply env/output side effects,
+//! `&&`/`||` multi-redirect lists are fully parsed, and unresolved
+//! `needs.*.outputs.*` checkout refs fail closed. Unresolved
+//! `steps.*.outputs.*`, unresolved `env` access, and unresolved `inputs`
+//! access in checkout refs fail closed under a privileged trigger. Quoted
+//! expression literals such as `${{ 'inputs.ref' }}` are not treated as input
+//! references; `}}` inside those quotes does not terminate the expression
+//! region. Single-quoted
 //! shell payloads such as `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their
 //! literal value (no shell expansion) and are not marked untracked.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
@@ -156,7 +161,7 @@ fn scan_workflow(
         let mut env_bindings = job_env;
         for step in steps.iter().filter_map(Yaml::as_hash) {
             let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
-            scan_step(
+            let composite_env = scan_step(
                 step,
                 &file.rel,
                 &StepScanCtx {
@@ -170,6 +175,15 @@ fn scan_workflow(
                 },
                 findings,
             )?;
+            // Statically skipped steps do not run, so their `$GITHUB_ENV` /
+            // `$GITHUB_OUTPUT` writes and nested composite env side effects
+            // must not update later-step bindings.
+            if step_condition_is_always_false(step) {
+                continue;
+            }
+            if let Some(final_env) = composite_env {
+                propagate_env_binding_diff(&step_env, &final_env, &mut env_bindings);
+            }
             for (key, value) in
                 collect_step_output_bindings(step, &empty_bindings, &step_env, &step_outputs)
             {
@@ -219,6 +233,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
         },
         findings,
     )
+    .map(|_| ())
 }
 
 fn scan_composite_steps(
@@ -226,23 +241,25 @@ fn scan_composite_steps(
     rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<EnvBindings> {
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
-        return Ok(());
+        return Ok(ctx.env_bindings.clone());
     };
     if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
-        return Ok(());
+        return Ok(ctx.env_bindings.clone());
     }
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
-        return Ok(());
+        return Ok(ctx.env_bindings.clone());
     };
     let mut step_outputs = StepOutputBindings::new();
     // Accumulate `$GITHUB_ENV` writes so later composite steps see them via
-    // `${{ env.NAME }}` the same way GitHub does.
+    // `${{ env.NAME }}` the same way GitHub does. The final map is returned so
+    // callers can propagate job-wide env-file writes across the composite
+    // boundary.
     let mut env_bindings = ctx.env_bindings.clone();
     for step in steps.iter().filter_map(Yaml::as_hash) {
         let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
-        scan_step(
+        let nested_env = scan_step(
             step,
             rel,
             &StepScanCtx {
@@ -256,6 +273,12 @@ fn scan_composite_steps(
             },
             findings,
         )?;
+        if step_condition_is_always_false(step) {
+            continue;
+        }
+        if let Some(final_env) = nested_env {
+            propagate_env_binding_diff(&step_env, &final_env, &mut env_bindings);
+        }
         for (key, value) in
             collect_step_output_bindings(step, ctx.input_bindings, &step_env, &step_outputs)
         {
@@ -269,7 +292,7 @@ fn scan_composite_steps(
             &mut env_bindings,
         );
     }
-    Ok(())
+    Ok(env_bindings)
 }
 
 fn scan_step(
@@ -277,12 +300,13 @@ fn scan_step(
     rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<Option<EnvBindings>> {
     // Expansion (depth > 0) only adds privileged-context findings. Mutable-action
     // and inline-script findings for composite bodies are emitted once by the
     // ActionMetadata pass so call-site count does not inflate source findings.
     let emit_source_findings = ctx.depth == 0;
     let step_env = merge_env_bindings(ctx.env_bindings, &collect_env_bindings(step));
+    let mut composite_env = None;
     if let Some(action) = get_string(step, "uses") {
         if emit_source_findings {
             check_action_ref(action, rel, findings);
@@ -304,7 +328,7 @@ fn scan_step(
             let nested_bindings =
                 resolve_step_input_bindings(step, ctx.input_bindings, &step_env, ctx.step_outputs);
             let empty_step_outputs = StepOutputBindings::new();
-            expand_local_composite(
+            composite_env = Some(expand_local_composite(
                 action,
                 rel,
                 &StepScanCtx {
@@ -317,7 +341,7 @@ fn scan_step(
                     step_outputs: &empty_step_outputs,
                 },
                 findings,
-            )?;
+            )?);
         }
     }
     if emit_source_findings {
@@ -325,7 +349,7 @@ fn scan_step(
             check_inline_script(script, rel, findings)?;
         }
     }
-    Ok(())
+    Ok(composite_env)
 }
 
 fn expand_local_composite(
@@ -333,7 +357,7 @@ fn expand_local_composite(
     caller_rel: &str,
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<EnvBindings> {
     if ctx.depth >= MAX_LOCAL_COMPOSITE_DEPTH {
         bail!(
             "local composite expansion depth exceeded while resolving `{action}` from `{caller_rel}`"
@@ -373,6 +397,41 @@ fn expand_local_composite(
         },
         findings,
     )
+}
+
+/// Apply `$GITHUB_ENV` side effects from an expanded composite onto the caller's
+/// accumulated env map without persisting the calling step's transient `env:`.
+///
+/// `start` is the env map the composite began with (caller job/composite env
+/// merged with the invoking step's `env:`). `end` is the map after composite
+/// `$GITHUB_ENV` writes. Only keys that changed are written back to `persist`.
+fn propagate_env_binding_diff(start: &EnvBindings, end: &EnvBindings, persist: &mut EnvBindings) {
+    for (key, value) in end {
+        if start.get(key) != Some(value) {
+            persist.insert(key.clone(), value.clone());
+        }
+    }
+    for key in start.keys() {
+        if !end.contains_key(key) {
+            persist.remove(key);
+        }
+    }
+}
+
+/// True when a step `if:` is statically false (`false` / `${{ false }}`), so
+/// GitHub skips the step and its env/output side effects must be ignored.
+fn step_condition_is_always_false(step: &Hash) -> bool {
+    get_string(step, "if").is_some_and(is_always_false_condition)
+}
+
+fn is_always_false_condition(condition: &str) -> bool {
+    let trimmed = condition.trim();
+    let inner = trimmed
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    inner.eq_ignore_ascii_case("false")
 }
 
 /// Fill omitted composite inputs from Action metadata `inputs.*.default`.
@@ -823,8 +882,8 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
     (writes, opaque_redirect)
 }
 
-/// Split a shell line on unquoted `;` so multi-redirect command lists are each
-/// inspected rather than keeping only the first `>>` write.
+/// Split a shell line on unquoted `;`, `&&`, and `||` so multi-redirect command
+/// lists are each inspected rather than keeping only the first `>>` write.
 fn split_shell_list_segments(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut segments = Vec::new();
@@ -844,6 +903,26 @@ fn split_shell_list_segments(line: &str) -> Vec<&str> {
             b';' if !in_single && !in_double => {
                 segments.push(&line[start..index]);
                 start = index + 1;
+            }
+            b'&' if !in_single
+                && !in_double
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'&' =>
+            {
+                segments.push(&line[start..index]);
+                start = index + 2;
+                index += 2;
+                continue;
+            }
+            b'|' if !in_single
+                && !in_double
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'|' =>
+            {
+                segments.push(&line[start..index]);
+                start = index + 2;
+                index += 2;
+                continue;
             }
             _ => {}
         }
@@ -1381,6 +1460,7 @@ fn has_untrusted_checkout_ref(
                 resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
             is_untrusted_ref_expression(&resolved)
                 || has_unresolved_step_output_ref(&resolved)
+                || has_unresolved_needs_output_ref(&resolved)
                 || has_unresolved_env_ref(&resolved)
                 || has_unresolved_inputs_access(&resolved)
         })
@@ -1437,6 +1517,19 @@ fn has_unresolved_step_output_ref(revision: &str) -> bool {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
         Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
             .expect("step output ref pattern compiles")
+    });
+    expression_matches_unresolved_context(revision, pattern)
+}
+
+/// Fail closed when a checkout ref still names `needs.*.outputs.*` after known
+/// rewrites — cross-job outputs are not yet tracked into composite input
+/// bindings and must not collapse into allow under a privileged trigger.
+fn has_unresolved_needs_output_ref(revision: &str) -> bool {
+    static NEEDS_OUTPUT_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = NEEDS_OUTPUT_REF.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])needs\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
+            .expect("needs output ref pattern compiles")
     });
     expression_matches_unresolved_context(revision, pattern)
 }
@@ -3637,6 +3730,228 @@ runs:
         assert!(findings
             .iter()
             .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT));
+    }
+
+    #[test]
+    fn privileged_workflow_composite_github_env_propagates_to_caller_checkout() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: main
+    steps:
+      - uses: ./.github/actions/export-ref
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/export-ref/action.yml".to_string(),
+                content: r#"
+name: export-ref
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_skipped_step_env_write_is_ignored() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - if: ${{ false }}
+      shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn collect_step_output_bindings_processes_boolean_multi_redirect_line() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: echo "ref=main" >> "$GITHUB_OUTPUT" && echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "boolean multi-redirect must not retain the earlier safe binding: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_boolean_multi_redirect_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: echo "ref=main" >> "$GITHUB_OUTPUT" && echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_unresolved_needs_output_checkout_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.export.outputs.ref }}
+    steps:
+      - id: export
+        env:
+          TARGET: ${{ github.event.pull_request.head.sha }}
+        run: echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+  run:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
