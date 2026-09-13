@@ -39,14 +39,15 @@
 //! whole-context serialization
 //! `ref: ${{ fromJSON(toJSON(github)).event.pull_request.head.sha }}`,
 //! branch-dependent `$GITHUB_OUTPUT` writes under `if`/`else`/`&&`/`||` that
-//! cannot be proven sequential, multi-redirect command lists on one line,
+//! cannot be proven sequential, unconditional `exit`/`return` that makes later
+//! textual writes unreachable, multi-redirect command lists on one line,
 //! opaque `$GITHUB_ENV` redirects that cannot name the overwritten key,
 //! including PowerShell `$env:GITHUB_ENV` / `$env:GITHUB_OUTPUT` writers,
-//! or an omitted `with` that relies on an untrusted input default — cannot
-//! bypass Critical→block. `$GITHUB_ENV` writes inside an expanded local
-//! composite propagate to later caller steps (GitHub job-wide env file),
-//! including when the composite writes a value equal to the invoking step's
-//! transient `env:` override,
+//! cmd.exe `%NAME%` / `%NAME:~0%` expansions, or an omitted `with` that relies
+//! on an untrusted input default — cannot bypass Critical→block. `$GITHUB_ENV`
+//! writes inside an expanded local composite propagate to later caller steps
+//! (GitHub job-wide env file), including when the composite writes a value equal
+//! to the invoking step's transient `env:` override,
 //! steps with a statically false `if:` do not apply env/output side effects,
 //! non-literal/`if` conditions treat env writes as uncertain (invalidate),
 //! braced parameter expansions such as `${GITHUB_ENV:?missing}` are recognized
@@ -57,9 +58,11 @@
 //! access in checkout refs fail closed under a privileged trigger. Quoted
 //! expression literals such as `${{ 'inputs.ref' }}` are not treated as input
 //! references; `}}` inside those quotes does not terminate the expression
-//! region. Single-quoted
-//! shell payloads such as `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their
-//! literal value (no shell expansion) and are not marked untracked.
+//! region. Plain literal `with` values (no `${{ }}`) are embedded as expression
+//! string literals so they are not re-parsed as GitHub context paths.
+//! Single-quoted shell payloads such as
+//! `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their literal value (no shell
+//! expansion) and are not marked untracked.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed; source findings on composite bodies are left
@@ -825,6 +828,11 @@ fn apply_github_env_writes(
     let Some(script) = get_string(step, "run") else {
         return (BTreeSet::new(), false);
     };
+    // Unconditional exit/return makes later (and conservatively all) writes in
+    // this script unreachable; do not clear or update inherited bindings.
+    if script_has_unconditional_shell_exit(script) {
+        return (BTreeSet::new(), false);
+    }
     let (_, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
     if opaque_redirect {
         env_bindings.clear();
@@ -857,6 +865,10 @@ fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> 
     let Some(script) = get_string(step, "run") else {
         return BTreeSet::new();
     };
+    // Unreachable scripts under exit/return do not mutate the env file.
+    if script_has_unconditional_shell_exit(script) {
+        return BTreeSet::new();
+    }
     let (writes, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
     if opaque_redirect {
         env_bindings.clear();
@@ -877,6 +889,9 @@ fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> 
 /// any earlier safe binding. Scripts with shell control flow (`if`/`else`/…)
 /// cannot prove which branch runs, so competing or untracked writes for the
 /// same name stay unresolved instead of retaining a later textual binding.
+/// Unconditional `exit`/`return` makes later textual writes unreachable while
+/// GitHub still continues to subsequent steps, so every write from that script
+/// stays unresolved rather than applying dead-code bindings.
 fn resolve_github_file_write_bindings(
     script: &str,
     file_var: &str,
@@ -886,6 +901,13 @@ fn resolve_github_file_write_bindings(
 ) -> Vec<(String, Option<String>)> {
     let (writes, opaque_redirect) = parse_github_file_writes(script, file_var);
     if writes.is_empty() {
+        return Vec::new();
+    }
+    if script_has_unconditional_shell_exit(script) {
+        // Unreachable writes must not update bindings. Returning no entries leaves
+        // earlier values intact (matching the shell) rather than applying dead
+        // safe overwrites or spuriously clearing prior taint.
+        let _ = (writes, opaque_redirect);
         return Vec::new();
     }
     if script_has_shell_control_flow(script) {
@@ -969,6 +991,20 @@ fn script_has_shell_control_flow(script: &str) -> bool {
     pattern.is_match(&blank_github_expression_regions(script))
 }
 
+/// True when `script` contains an unconditional shell `exit` or `return`.
+///
+/// Later writes in the same step are unreachable, but subsequent workflow steps
+/// still run — so applying those dead writes would fail open.
+fn script_has_unconditional_shell_exit(script: &str) -> bool {
+    static EXIT_COMMAND: OnceLock<Regex> = OnceLock::new();
+    let pattern = EXIT_COMMAND.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?m)(?:^|[^A-Za-z0-9_])(?:exit|return)(?:$|[^A-Za-z0-9_])")
+            .expect("shell exit pattern compiles")
+    });
+    pattern.is_match(&blank_github_expression_regions(script))
+}
+
 /// True when `value` still has `$...`, backtick command substitution, or
 /// cmd.exe `%VAR%` expansion outside GitHub expressions.
 fn value_contains_untracked_shell_expansion(value: &str) -> bool {
@@ -981,6 +1017,9 @@ fn value_contains_untracked_shell_expansion(value: &str) -> bool {
 }
 
 /// True when `value` contains a cmd.exe `%NAME%` environment expansion.
+///
+/// Includes substring/replacement modifiers such as `%EVIL:~0%` /
+/// `%EVIL:~0,5%` / `%EVIL:str=rep%`, which cmd expands from the base variable.
 fn contains_cmd_percent_expansion(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -994,12 +1033,24 @@ fn contains_cmd_percent_expansion(value: &str) -> bool {
             return false;
         };
         let name = &value[name_start..name_start + rel_end];
-        if !name.is_empty() && is_github_ident(name) {
+        if !name.is_empty() && is_cmd_percent_expansion_name(name) {
             return true;
         }
         index = name_start + rel_end + 1;
     }
     false
+}
+
+/// True when text between cmd `%...%` delimiters names an environment expansion.
+fn is_cmd_percent_expansion_name(name: &str) -> bool {
+    if is_github_ident(name) {
+        return true;
+    }
+    // Modifiers: `%VAR:~0%`, `%VAR:~0,5%`, `%VAR:str1=str2%`.
+    let Some((base, modifier)) = name.split_once(':') else {
+        return false;
+    };
+    !modifier.is_empty() && is_github_ident(base)
 }
 
 /// Replace each `${{ ... }}` span with a single space (unclosed tails blanked).
@@ -1469,7 +1520,7 @@ fn replace_context_identifier_in_region(
             .is_none_or(|character| !is_expression_ident_char(character));
         if precedes_ok && follows_ok {
             output.push_str(&value[cursor..offset]);
-            output.push_str(replacement);
+            output.push_str(&embed_binding_in_expression(replacement));
             cursor = end;
             continue;
         }
@@ -1478,6 +1529,27 @@ fn replace_context_identifier_in_region(
     }
     output.push_str(&value[cursor..]);
     output
+}
+
+/// Embed a stored binding value into an already-open `${{ ... }}` region.
+///
+/// GitHub does not re-parse input/env/output values as expression syntax: a
+/// plain YAML literal such as `github.event.pull_request.head.sha` remains that
+/// branch name. Whole `${{ ... }}` bindings unwrap to their inner expression so
+/// attacker-controlled context paths stay visible to the detector. Other plain
+/// literals are quoted as expression strings.
+fn embed_binding_in_expression(replacement: &str) -> String {
+    let trimmed = replacement.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+    {
+        return inner.trim().to_string();
+    }
+    if trimmed.contains("${{") {
+        return replacement.to_string();
+    }
+    format!("'{}'", trimmed.replace('\'', "''"))
 }
 
 /// True when `offset` falls inside a GitHub expression string literal (`'...'`).
@@ -2470,10 +2542,205 @@ runs:
             "prefix`cmd`suffix"
         ));
         assert!(value_contains_untracked_shell_expansion("%EVIL%"));
+        assert!(value_contains_untracked_shell_expansion("%EVIL:~0%"));
+        assert!(value_contains_untracked_shell_expansion("%EVIL:~0,5%"));
         assert!(!value_contains_untracked_shell_expansion("main"));
         assert!(!value_contains_untracked_shell_expansion(
             "${{ inputs.ref }}"
         ));
+    }
+
+    #[test]
+    fn resolve_input_expressions_quotes_plain_literal_bindings() {
+        let mut bindings = InputBindings::new();
+        bindings.insert(
+            "ref".to_string(),
+            "github.event.pull_request.head.sha".to_string(),
+        );
+        let resolved = resolve_input_expressions("${{ inputs.ref }}", &bindings);
+        assert_eq!(resolved, "${{ 'github.event.pull_request.head.sha' }}");
+        assert!(
+            !is_untrusted_ref_expression(&resolved),
+            "literal YAML binding must not be re-parsed as a context path: {resolved}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_plain_literal_input_is_not_tainted() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: github.event.pull_request.head.sha
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT),
+            "plain literal with.ref must not be treated as an expression: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_unreachable_post_exit_writes() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  exit 0
+  echo "TARGET=main" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.is_empty());
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "post-exit write must not overwrite prior taint: {env:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_post_exit_env_write_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: |
+        exit 0
+        echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_cmd_modifier_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - shell: cmd
+      env:
+        EVIL: ${{ inputs.ref }}
+      run: echo TARGET=%EVIL:~0%>>%GITHUB_ENV%
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
@@ -3779,7 +4046,7 @@ runs:
             "${{ false && '}}' || inputs.ref }}",
             "inputs",
             "ref",
-            "github.event.pull_request.head.sha",
+            "${{ github.event.pull_request.head.sha }}",
             true,
         );
         assert_eq!(
