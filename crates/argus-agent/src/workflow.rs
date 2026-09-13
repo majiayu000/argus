@@ -75,6 +75,8 @@
 //! arithmetic left-shifts such as `: $((1 << 1))` do not open heredoc state,
 //! heredoc-looking tokens inside inline shell comments (`echo noop # <<EOF`)
 //! do not open heredoc state,
+//! append redirects inside inline shell comments
+//! (`echo TARGET=main # >> "$GITHUB_ENV"`) are not treated as env-file writes,
 //! single `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes guarded by `&&`/`||`/branching
 //! stay unresolved even when only one assignment is present,
 //! echo payloads that include an unquoted shell pipeline
@@ -1977,6 +1979,8 @@ fn github_file_stdout_redirect_overridden(segment: &str, file_var: &str) -> bool
 ///
 /// Descriptor-prefixed redirects such as `2>>` target stderr (or another fd)
 /// and must not be treated as environment-file writes from `echo` stdout.
+/// Unquoted `#` comments (including after `;#`) are not scanned, so a token
+/// such as `echo TARGET=main # >> "$GITHUB_ENV"` is not a real env-file write.
 fn find_stdout_append_redirect(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut index = 0;
@@ -1991,6 +1995,15 @@ fn find_stdout_append_redirect(line: &str) -> Option<usize> {
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single
+                && !in_double
+                && (index == 0
+                    || bytes[index - 1].is_ascii_whitespace()
+                    || is_shell_comment_boundary(bytes[index - 1])) =>
+            {
+                // Remainder of the line is a comment; stop looking for `>>`.
+                break;
+            }
             b'>' if !in_single && !in_double && bytes[index + 1] == b'>' => {
                 if append_redirect_targets_stdout(bytes, index) {
                     return Some(index);
@@ -2153,7 +2166,10 @@ fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
 /// True when a shell segment mentions `$GITHUB_{OUTPUT,ENV}` / `${…}` /
 /// `$env:GITHUB_{OUTPUT,ENV}` / `%GITHUB_{OUTPUT,ENV}%` even without a
 /// recognized `>>` redirect (pipes, `tee`, `cat`, …).
+/// Inline shell comments are ignored so a token such as
+/// `echo TARGET=main # >> "$GITHUB_ENV"` is not an opaque env-file write.
 fn segment_references_github_file(segment: &str, file_var: &str) -> bool {
+    let segment = strip_trailing_shell_comment(segment);
     let dollar = format!("${file_var}");
     let braced = format!("${{{file_var}}}");
     let pwsh = format!("$env:{file_var}");
@@ -2195,8 +2211,9 @@ fn contains_braced_github_file_ref(segment: &str, file_var: &str) -> bool {
 /// Drop an unquoted trailing `# ...` shell comment.
 ///
 /// Bash only starts a comment when `#` is at a word boundary (start of the
-/// string or after whitespace). `"$GITHUB_OUTPUT"#backup` keeps `#backup` as
-/// part of the redirect word, so that form must not be stripped.
+/// string, after whitespace, or after a control operator such as `;`).
+/// `"$GITHUB_OUTPUT"#backup` keeps `#backup` as part of the redirect word, so
+/// that form must not be stripped.
 fn strip_trailing_shell_comment(value: &str) -> &str {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -2213,7 +2230,9 @@ fn strip_trailing_shell_comment(value: &str) -> &str {
             b'"' if !in_single => in_double = !in_double,
             b'#' if !in_single
                 && !in_double
-                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+                && (index == 0
+                    || bytes[index - 1].is_ascii_whitespace()
+                    || is_shell_comment_boundary(bytes[index - 1])) =>
             {
                 return value[..index].trim_end();
             }
@@ -4624,6 +4643,111 @@ run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV";# ; echo "TARGET=main" >> 
             Some("${{ github.event.pull_request.head.sha }}"),
             "`;#`-commented safe overwrite must not win last-write: {env:?}"
         );
+    }
+
+    #[test]
+    fn split_github_file_redirect_ignores_append_inside_shell_comment() {
+        assert_eq!(
+            split_github_file_redirect(r#"echo TARGET=main # >> "$GITHUB_ENV""#, "GITHUB_ENV"),
+            None,
+            "commented >> must not be treated as a GITHUB_ENV write"
+        );
+        assert_eq!(
+            find_stdout_append_redirect(r#"echo TARGET=main # >> "$GITHUB_ENV""#),
+            None,
+            "find_stdout_append_redirect must stop at unquoted #"
+        );
+        assert_eq!(
+            split_github_file_redirect(r#"echo TARGET=main;# >> "$GITHUB_ENV""#, "GITHUB_ENV"),
+            None,
+            "`;#`-commented >> must not be treated as a GITHUB_ENV write"
+        );
+        // Glued `#` is part of the echo word; the redirect remains real.
+        assert_eq!(
+            split_github_file_redirect(r#"echo TARGET=main# >> "$GITHUB_ENV""#, "GITHUB_ENV"),
+            Some("echo TARGET=main#"),
+            "glued # must not start a comment before a real redirect"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_commented_append_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  echo TARGET=main # >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (_written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "commented safe append must not clear attacker TARGET: {env:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_commented_append_safe_overwrite_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: Checkout PR
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+        echo TARGET=main # >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
