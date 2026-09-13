@@ -22,6 +22,9 @@ const RULE_PRIVILEGED_WRITE: &str = "AGT-06-workflow-privileged-write";
 struct TaintScope<'a> {
     envs: &'a HashSet<String>,
     inputs: &'a HashSet<String>,
+    /// Named secrets bound by a reusable-workflow caller via `secrets:`.
+    /// Composite actions have no `secrets` context, so this stays empty there.
+    secrets: &'a HashSet<String>,
 }
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
@@ -45,6 +48,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
                     TaintScope {
                         envs: &empty,
                         inputs: &empty,
+                        secrets: &empty,
                     },
                     &actions,
                     &workflows,
@@ -60,6 +64,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
                     TaintScope {
                         envs: &empty,
                         inputs: &empty,
+                        secrets: &empty,
                     },
                     &actions,
                     &mut visiting,
@@ -137,6 +142,7 @@ fn scan_workflow_inner(
             &mut workflow_tainted_envs,
             env,
             caller_taint.inputs,
+            caller_taint.secrets,
             &file.rel,
         )?;
     }
@@ -148,26 +154,36 @@ fn scan_workflow_inner(
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         let mut job_tainted_envs = workflow_tainted_envs.clone();
         if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(&mut job_tainted_envs, env, caller_taint.inputs, &file.rel)?;
+            apply_env_taints(
+                &mut job_tainted_envs,
+                env,
+                caller_taint.inputs,
+                caller_taint.secrets,
+                &file.rel,
+            )?;
         }
         if let Some(action) = get_string(job, "uses") {
             check_action_ref(action, &file.rel, findings);
             // Local reusable workflows receive caller `with:` as `inputs.*` and
-            // do not inherit the caller's environment across the workflow boundary.
+            // caller `secrets:` as `secrets.*`. They do not inherit the caller's
+            // environment across the workflow boundary.
             if let Some(local) = action.strip_prefix("./") {
                 if let Some(workflow_file) = resolve_local_workflow(local, workflows) {
                     let job_scope = TaintScope {
                         envs: &job_tainted_envs,
                         inputs: caller_taint.inputs,
+                        secrets: caller_taint.secrets,
                     };
                     let job_tainted_inputs =
                         collect_tainted_with_inputs(job, job_scope, &file.rel)?;
+                    let job_tainted_secrets = collect_tainted_secrets(job, job_scope, &file.rel)?;
                     let empty_envs = HashSet::new();
                     scan_workflow(
                         workflow_file,
                         TaintScope {
                             envs: &empty_envs,
                             inputs: &job_tainted_inputs,
+                            secrets: &job_tainted_secrets,
                         },
                         actions,
                         workflows,
@@ -183,7 +199,13 @@ fn scan_workflow_inner(
         for step in steps.iter().filter_map(Yaml::as_hash) {
             let mut step_tainted_envs = job_tainted_envs.clone();
             if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
-                apply_env_taints(&mut step_tainted_envs, env, caller_taint.inputs, &file.rel)?;
+                apply_env_taints(
+                    &mut step_tainted_envs,
+                    env,
+                    caller_taint.inputs,
+                    caller_taint.secrets,
+                    &file.rel,
+                )?;
             }
             scan_step(
                 step,
@@ -192,6 +214,7 @@ fn scan_workflow_inner(
                 TaintScope {
                     envs: &step_tainted_envs,
                     inputs: caller_taint.inputs,
+                    secrets: caller_taint.secrets,
                 },
                 actions,
                 visiting,
@@ -235,11 +258,19 @@ fn scan_action_metadata(
         visiting.remove(&file.rel);
         return Ok(());
     };
+    // Composite actions have no `secrets` context; only env + inputs apply.
+    let empty_secrets = HashSet::new();
     for step in steps.iter().filter_map(Yaml::as_hash) {
         // Caller env remains visible inside local composite steps at runtime.
         let mut step_tainted_envs = caller_taint.envs.clone();
         if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(&mut step_tainted_envs, env, caller_taint.inputs, &file.rel)?;
+            apply_env_taints(
+                &mut step_tainted_envs,
+                env,
+                caller_taint.inputs,
+                &empty_secrets,
+                &file.rel,
+            )?;
         }
         scan_step(
             step,
@@ -248,6 +279,7 @@ fn scan_action_metadata(
             TaintScope {
                 envs: &step_tainted_envs,
                 inputs: caller_taint.inputs,
+                secrets: &empty_secrets,
             },
             actions,
             visiting,
@@ -282,11 +314,14 @@ fn scan_step(
         if let Some(local) = action.strip_prefix("./") {
             if let Some(action_file) = resolve_local_action(local, actions) {
                 let step_tainted_inputs = collect_tainted_with_inputs(step, taint, rel)?;
+                let empty_secrets = HashSet::new();
                 scan_action_metadata(
                     action_file,
                     TaintScope {
                         envs: taint.envs,
                         inputs: &step_tainted_inputs,
+                        // Composites cannot read the caller's `secrets` context.
+                        secrets: &empty_secrets,
                     },
                     actions,
                     visiting,
@@ -375,11 +410,50 @@ fn collect_tainted_with_inputs(
         };
         // Caller `with:` bindings are evaluated before the composite or
         // reusable workflow runs, so a tainted env, tainted input forwarded
-        // from a parent, or a direct untrusted context becomes a tainted
-        // input for the callee.
+        // from a parent, tainted secret, or a direct untrusted context becomes
+        // a tainted input for the callee.
         if value_contains_untrusted_context(value, rel)?
             || value_references_tainted_env(value, taint.envs, rel)?
             || value_references_tainted_input(value, taint.inputs, rel)?
+            || value_references_tainted_secret(value, taint.secrets, rel)?
+        {
+            tainted.insert(name.to_string());
+        }
+    }
+    Ok(tainted)
+}
+
+/// Collect secrets bound by a reusable-workflow caller that carry untrusted
+/// values. `secrets: inherit` forwards every already-tainted secret name.
+fn collect_tainted_secrets(
+    binding: &Hash,
+    taint: TaintScope<'_>,
+    rel: &str,
+) -> Result<HashSet<String>> {
+    let mut tainted = HashSet::new();
+    let Some(secrets_node) = get(binding, "secrets") else {
+        return Ok(tainted);
+    };
+    if secrets_node
+        .as_str()
+        .is_some_and(|value| value.eq_ignore_ascii_case("inherit"))
+    {
+        return Ok(taint.secrets.iter().cloned().collect());
+    }
+    let Some(secrets_map) = secrets_node.as_hash() else {
+        return Ok(tainted);
+    };
+    for (key, value) in secrets_map {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        if value_contains_untrusted_context(value, rel)?
+            || value_references_tainted_env(value, taint.envs, rel)?
+            || value_references_tainted_input(value, taint.inputs, rel)?
+            || value_references_tainted_secret(value, taint.secrets, rel)?
         {
             tainted.insert(name.to_string());
         }
@@ -391,6 +465,7 @@ fn apply_env_taints(
     tainted: &mut HashSet<String>,
     env: &Hash,
     tainted_inputs: &HashSet<String>,
+    tainted_secrets: &HashSet<String>,
     rel: &str,
 ) -> Result<()> {
     // GitHub Actions resolves each map entry against the parent scope, not
@@ -406,10 +481,12 @@ fn apply_env_taints(
         match value {
             Yaml::String(value) => {
                 // Inherit taint from direct untrusted contexts, tainted env
-                // aliases, and composite `inputs.*` when those are in scope.
+                // aliases, composite/reusable `inputs.*`, and reusable
+                // `secrets.*` when those are in scope.
                 let is_tainted = value_contains_untrusted_context(value, rel)?
                     || value_references_tainted_env(value, &inherited, rel)?
-                    || value_references_tainted_input(value, tainted_inputs, rel)?;
+                    || value_references_tainted_input(value, tainted_inputs, rel)?
+                    || value_references_tainted_secret(value, tainted_secrets, rel)?;
                 updates.push((name.to_string(), is_tainted));
             }
             // Non-string YAML scalars are constant overrides and clear taint.
@@ -451,6 +528,16 @@ fn value_references_tainted_input(
 ) -> Result<bool> {
     for_each_expression(value, rel, |expression| {
         Ok(expression_uses_tainted_input(expression, tainted))
+    })
+}
+
+fn value_references_tainted_secret(
+    value: &str,
+    tainted: &HashSet<String>,
+    rel: &str,
+) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(expression_uses_tainted_secret(expression, tainted))
     })
 }
 
@@ -583,6 +670,7 @@ fn check_inline_script(
         if is_untrusted_context(expression)
             || expression_uses_tainted_env(expression, taint.envs)
             || expression_uses_tainted_input(expression, taint.inputs)
+            || expression_uses_tainted_secret(expression, taint.secrets)
         {
             findings.push(
                 Finding::new(
@@ -629,6 +717,18 @@ fn expression_uses_tainted_input(expression: &str, tainted_inputs: &HashSet<Stri
         return true;
     }
     expression_uses_tainted_context_property(expression, "inputs", tainted_inputs)
+}
+
+/// Detect `${{ secrets.NAME }}` when a reusable-workflow caller bound that
+/// secret to an untrusted value via `secrets:`.
+fn expression_uses_tainted_secret(expression: &str, tainted_secrets: &HashSet<String>) -> bool {
+    if tainted_secrets.is_empty() {
+        return false;
+    }
+    if expression_reads_whole_context(expression, "secrets") {
+        return true;
+    }
+    expression_uses_tainted_context_property(expression, "secrets", tainted_secrets)
 }
 
 fn expression_reads_whole_context(expression: &str, context: &str) -> bool {
@@ -683,6 +783,7 @@ fn expression_uses_tainted_context_property(
 ) -> bool {
     static ENV_REF: OnceLock<Regex> = OnceLock::new();
     static INPUTS_REF: OnceLock<Regex> = OnceLock::new();
+    static SECRETS_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = match context {
         "env" => ENV_REF.get_or_init(|| {
             Regex::new(
@@ -695,6 +796,12 @@ fn expression_uses_tainted_context_property(
                 r#"(?i)\binputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
             )
             .expect("tainted inputs reference pattern compiles")
+        }),
+        "secrets" => SECRETS_REF.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\bsecrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])"#,
+            )
+            .expect("tainted secrets reference pattern compiles")
         }),
         _ => return false,
     };
@@ -1158,6 +1265,7 @@ jobs:
             TaintScope {
                 envs: &empty,
                 inputs: &empty,
+                secrets: &empty,
             },
             &actions,
             &workflows,
@@ -1742,6 +1850,53 @@ jobs:
             finding.rule_id == "AGT-06-workflow-context-injection"
                 && finding.severity == Severity::Critical
                 && finding.detail.contains("inputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn local_reusable_workflow_with_secret_propagates_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    secrets:
+      title: ${{ github.event.issue.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    secrets:
+      title:
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ secrets.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("secrets.title")
                 && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
