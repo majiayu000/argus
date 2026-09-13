@@ -1,0 +1,16 @@
+name: checkout-pr
+description: Check out a caller-supplied ref via untracked GITHUB_ENV indirection
+inputs:
+  ref:
+    description: Git ref to check out
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
