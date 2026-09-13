@@ -1052,10 +1052,11 @@ fn collect_tainted_github_outputs(
     let Some(script) = get_string(step, "run") else {
         return Ok(tainted);
     };
+    let shell_envs = effective_shell_env_taints(script, taint.envs);
     let retain_on_clean = script_has_shell_control_flow(script);
     for (name, raw_value, shell_expands) in parse_github_output_writes(script) {
         let key = format!("{step_id}.{name}");
-        if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
+        if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands, &shell_envs)? {
             tainted.insert(key);
         } else if !retain_on_clean {
             tainted.remove(&key);
@@ -1069,6 +1070,7 @@ fn github_output_value_is_tainted(
     taint: TaintScope<'_>,
     rel: &str,
     shell_expands: bool,
+    shell_envs: &HashSet<String>,
 ) -> Result<bool> {
     if value_carries_taint(value, taint, rel)? {
         return Ok(true);
@@ -1076,10 +1078,99 @@ fn github_output_value_is_tainted(
     // Safe remediation writes (`echo "title=$TITLE" >> $GITHUB_OUTPUT`) still
     // propagate attacker-controlled env values into step outputs. Single-quoted
     // payloads are literal shell text, so `$TITLE` must not count as taint.
+    // `shell_envs` also includes shell-local aliases such as `ALIAS=$TITLE`.
     if !shell_expands {
         return Ok(false);
     }
-    Ok(value_references_tainted_shell_env(value, taint.envs))
+    Ok(value_references_tainted_shell_env(value, shell_envs))
+}
+
+/// Actions env taint plus shell-local aliases that copy those values.
+fn effective_shell_env_taints(script: &str, tainted_envs: &HashSet<String>) -> HashSet<String> {
+    let mut envs = tainted_envs.clone();
+    envs.extend(collect_shell_local_taints(script, tainted_envs));
+    envs
+}
+
+/// Track shell-local assignments such as `ALIAS=$TITLE` so later
+/// `echo "out=$ALIAS" >> "$GITHUB_OUTPUT"` still propagates taint.
+fn collect_shell_local_taints(script: &str, tainted_envs: &HashSet<String>) -> HashSet<String> {
+    if tainted_envs.is_empty() {
+        return HashSet::new();
+    }
+    let segments = shell_script_command_segments(script);
+    let mut locals = HashSet::new();
+    loop {
+        let mut working = tainted_envs.clone();
+        working.extend(locals.iter().cloned());
+        let mut next_locals = HashSet::new();
+        for segment in &segments {
+            let Some((name, rhs)) = parse_shell_assignment(segment) else {
+                continue;
+            };
+            let key = normalize_env_name(name);
+            let (rhs, expands) = match strip_wrapping_shell_quote_style(rhs.trim()) {
+                Some((inner, b'\'')) => (inner, false),
+                Some((inner, _)) => (inner, true),
+                None => (rhs.trim(), true),
+            };
+            if expands && value_references_tainted_shell_env(rhs, &working) {
+                next_locals.insert(key.clone());
+                working.insert(key);
+            } else {
+                working.remove(&key);
+            }
+        }
+        if next_locals == locals {
+            break;
+        }
+        locals = next_locals;
+    }
+    locals
+}
+
+/// Split a `run` script into top-level command segments (lines and `;`).
+fn shell_script_command_segments(script: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    for line in script.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        segments.extend(split_shell_group_commands(line));
+    }
+    segments
+}
+
+/// Parse `NAME=value` / `export NAME=value` shell assignments.
+fn parse_shell_assignment(segment: &str) -> Option<(&str, &str)> {
+    let segment = segment.trim();
+    let segment = if let Some(rest) = segment.strip_prefix("export") {
+        if rest.starts_with(char::is_whitespace) {
+            rest.trim_start()
+        } else {
+            return None;
+        }
+    } else {
+        segment
+    };
+    let eq = segment.find('=')?;
+    let name = &segment[..eq];
+    if !is_posix_shell_ident(name) {
+        return None;
+    }
+    Some((name, &segment[eq + 1..]))
+}
+
+fn is_posix_shell_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 /// Merge `$GITHUB_ENV` writes from a `run` step into later-step env taint.
@@ -1098,10 +1189,12 @@ fn apply_github_env_file_taints(
     let Some(script) = get_string(step, "run") else {
         return Ok(writes);
     };
+    let shell_envs = effective_shell_env_taints(script, taint.envs);
     let retain_on_clean = script_has_shell_control_flow(script);
     for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
         let key = normalize_env_name(&name);
-        let tainted = github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)?;
+        let tainted =
+            github_output_value_is_tainted(&raw_value, taint, rel, shell_expands, &shell_envs)?;
         if tainted {
             env_taints.insert(key.clone());
             writes.insert(key, true);
@@ -1302,12 +1395,22 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String
             writes.push((name, value, shell_expands));
             continue;
         }
+        if let Some((delimiter, shell_expands)) = extract_cat_heredoc_header(command) {
+            writes.extend(collect_cat_heredoc_github_file_writes(
+                &lines,
+                &mut index,
+                &delimiter,
+                shell_expands,
+            ));
+            continue;
+        }
         if let Some(write) = extract_echo_github_output(command) {
             writes.push(write);
             continue;
         }
-        if let Some(write) = extract_printf_github_output(command) {
-            writes.push(write);
+        let printf_writes = extract_printf_github_output(command);
+        if !printf_writes.is_empty() {
+            writes.extend(printf_writes);
             continue;
         }
         if let Some(write) = extract_bare_string_github_output(command) {
@@ -1335,12 +1438,23 @@ fn parse_redirect_free_github_file_commands(body: &str) -> Vec<(String, String, 
             writes.push((name, value, shell_expands));
             continue;
         }
+        if let Some((delimiter, shell_expands)) = extract_cat_heredoc_header(command) {
+            let command_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+            writes.extend(collect_cat_heredoc_github_file_writes(
+                &command_refs,
+                &mut index,
+                &delimiter,
+                shell_expands,
+            ));
+            continue;
+        }
         if let Some(write) = extract_echo_github_output(command) {
             writes.push(write);
             continue;
         }
-        if let Some(write) = extract_printf_github_output(command) {
-            writes.push(write);
+        let printf_writes = extract_printf_github_output(command);
+        if !printf_writes.is_empty() {
+            writes.extend(printf_writes);
             continue;
         }
         if let Some(write) = extract_bare_string_github_output(command) {
@@ -1643,29 +1757,106 @@ fn extract_bare_string_github_output(command: &str) -> Option<(String, String, b
 /// are ignored. Only arguments consumed by format conversions contribute to
 /// the value (and taint), so `printf 'title=fixed\n' "$TITLE"` stays clean
 /// while `printf 'title=prefix-%s\n' "$TITLE"` still propagates `$TITLE`.
-fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)> {
-    let rest = command.trim().strip_prefix("printf")?.trim_start();
-    let (format, after_format, format_expands) = next_shell_word(rest)?;
-    let (name, fmt_value) = format.split_once('=')?;
+///
+/// Bash reuses the format to consume remaining arguments, so
+/// `printf 'title=%s\n' fixed "$TITLE"` emits two writes (clean, then tainted).
+fn extract_printf_github_output(command: &str) -> Vec<(String, String, bool)> {
+    let mut writes = Vec::new();
+    let Some(rest) = command.trim().strip_prefix("printf").map(str::trim_start) else {
+        return writes;
+    };
+    let Some((format, after_format, format_expands)) = next_shell_word(rest) else {
+        return writes;
+    };
+    let Some((name, fmt_value)) = format.split_once('=') else {
+        return writes;
+    };
     let name = name.trim();
     if !is_github_ident(name) {
-        return None;
+        return writes;
     }
     let fmt_value = fmt_value.trim();
-    let mut value = fmt_value.to_string();
-    let mut expands = format_expands;
+    let conversion_count = count_printf_conversions(fmt_value);
+    let mut args = Vec::new();
     let mut remaining = after_format;
-    let mut remaining_conversions = count_printf_conversions(fmt_value);
     while let Some((arg, after, arg_expands)) = next_shell_word(remaining) {
-        if remaining_conversions > 0 {
-            value.push(' ');
-            value.push_str(arg);
-            expands = expands || arg_expands;
-            remaining_conversions -= 1;
-        }
+        args.push((arg, arg_expands));
         remaining = after;
     }
-    Some((name.to_string(), value, expands))
+    if conversion_count == 0 {
+        // Constant format: leftover args are unused and must not contribute taint.
+        writes.push((name.to_string(), fmt_value.to_string(), format_expands));
+        return writes;
+    }
+    if args.is_empty() {
+        writes.push((name.to_string(), fmt_value.to_string(), format_expands));
+        return writes;
+    }
+    // Reuse the format for each cycle of conversions (bash printf behavior).
+    for chunk in args.chunks(conversion_count) {
+        let mut value = fmt_value.to_string();
+        let mut expands = format_expands;
+        for (arg, arg_expands) in chunk {
+            value.push(' ');
+            value.push_str(arg);
+            expands = expands || *arg_expands;
+        }
+        writes.push((name.to_string(), value, expands));
+    }
+    writes
+}
+
+/// Recognize `cat <<EOF` / `cat <<'EOF'` / `cat <<-EOF` producers redirected to
+/// Actions command files. Quoted delimiters disable shell expansion in the body.
+fn extract_cat_heredoc_header(command: &str) -> Option<(String, bool)> {
+    let rest = command.trim().strip_prefix("cat")?.trim_start();
+    let rest = rest.strip_prefix("--").map(str::trim_start).unwrap_or(rest);
+    let rest = rest.strip_prefix("<<")?;
+    let rest = if let Some(stripped) = rest.strip_prefix('-') {
+        stripped.trim_start()
+    } else {
+        rest.trim_start()
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    // Any quoting of the delimiter disables body expansion (bash heredoc rules).
+    let (delimiter, shell_expands) = match strip_wrapping_shell_quote_style(rest.trim()) {
+        Some((inner, _)) => (inner.to_string(), false),
+        None => (rest.trim().to_string(), true),
+    };
+    if delimiter.is_empty() || delimiter.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((delimiter, shell_expands))
+}
+
+/// Collect `name=value` records from a `cat` heredoc body until the delimiter.
+fn collect_cat_heredoc_github_file_writes(
+    lines: &[&str],
+    index: &mut usize,
+    delimiter: &str,
+    shell_expands: bool,
+) -> Vec<(String, String, bool)> {
+    let mut writes = Vec::new();
+    while *index < lines.len() {
+        let line = lines[*index];
+        *index += 1;
+        // `<<-` strips leading tabs from the delimiter line; accept either form.
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed == delimiter || trimmed.trim_start_matches('\t') == delimiter {
+            break;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !is_github_ident(name) {
+            continue;
+        }
+        writes.push((name.to_string(), value.to_string(), shell_expands));
+    }
+    writes
 }
 
 /// Count `printf` conversion specifications in a format string (`%%` is literal).
@@ -4508,6 +4699,89 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn shell_local_alias_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          ALIAS=$TITLE
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn cat_heredoc_github_output_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          cat <<EOF >> "$GITHUB_OUTPUT"
+          title=$TITLE
+          EOF
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn printf_format_reuse_propagates_later_tainted_argument() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: printf 'title=%s\n' fixed "$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
