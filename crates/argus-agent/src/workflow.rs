@@ -1093,14 +1093,23 @@ fn parse_github_output_writes(script: &str) -> Vec<(String, String, bool)> {
 
 fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String, bool)> {
     let mut writes = Vec::new();
-    for line in script.lines() {
-        let trimmed = line.trim();
+    let lines: Vec<&str> = script.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        index += 1;
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let Some(command) = split_github_file_redirect(trimmed, file_var) else {
             continue;
         };
+        if let Some((name, delimiter)) = extract_echo_multiline_header(command) {
+            let (value, shell_expands) =
+                collect_multiline_github_file_body(&lines, &mut index, file_var, &delimiter);
+            writes.push((name, value, shell_expands));
+            continue;
+        }
         if let Some(write) = extract_echo_github_output(command) {
             writes.push(write);
             continue;
@@ -1110,6 +1119,76 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String
         }
     }
     writes
+}
+
+/// Recognize `echo 'name<<EOF'` headers used by GitHub's multiline env-file form.
+fn extract_echo_multiline_header(command: &str) -> Option<(String, String)> {
+    let payload = extract_echo_payload(command)?;
+    let (payload, _) = match strip_wrapping_shell_quote_style(payload.trim()) {
+        Some((inner, _)) => (inner, true),
+        None => (payload.trim(), true),
+    };
+    // Prefer `name=value` over `name<<delim` when both markers appear.
+    if payload.contains('=') {
+        return None;
+    }
+    let (name, delimiter) = payload.split_once("<<")?;
+    let name = name.trim();
+    let delimiter = delimiter.trim();
+    if !is_github_ident(name) || delimiter.is_empty() || !is_multiline_delimiter(delimiter) {
+        return None;
+    }
+    Some((name.to_string(), delimiter.to_string()))
+}
+
+fn is_multiline_delimiter(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Collect body lines after `name<<EOF` until a matching delimiter redirect.
+fn collect_multiline_github_file_body(
+    lines: &[&str],
+    index: &mut usize,
+    file_var: &str,
+    delimiter: &str,
+) -> (String, bool) {
+    let mut value = String::new();
+    let mut shell_expands = false;
+    while *index < lines.len() {
+        let trimmed = lines[*index].trim();
+        *index += 1;
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(command) = split_github_file_redirect(trimmed, file_var) else {
+            // Non-redirect lines are outside the common per-line multiline form.
+            break;
+        };
+        let Some(payload) = extract_echo_payload(command) else {
+            break;
+        };
+        let (payload, expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
+            Some((inner, b'\'')) => (inner, false),
+            Some((inner, _)) => (inner, true),
+            None => (payload.trim(), true),
+        };
+        if payload == delimiter {
+            break;
+        }
+        if !value.is_empty() {
+            value.push('\n');
+        }
+        value.push_str(payload);
+        shell_expands = shell_expands || expands;
+    }
+    (value, shell_expands)
 }
 
 fn extract_echo_github_output(command: &str) -> Option<(String, String, bool)> {
@@ -1185,7 +1264,9 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
         .unwrap_or(target);
     let dollar = format!("${file_var}");
     let braced = format!("${{{file_var}}}");
-    if target == dollar || target == braced {
+    // PowerShell steps write via `$env:GITHUB_OUTPUT` / `$env:GITHUB_ENV`.
+    let pwsh = format!("$env:{file_var}");
+    if target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh) {
         Some(before.trim())
     } else {
         None
@@ -1240,7 +1321,7 @@ fn normalize_env_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-/// Detect `$NAME` / `${NAME}` shell expansions that read a tainted env binding.
+/// Detect `$NAME` / `${NAME}` / `$env:NAME` expansions that read a tainted env.
 fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
         return false;
@@ -1274,12 +1355,28 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
             let name = rest[..end].trim();
             index += 2 + end + 1;
             name
-        } else {
-            let name_len = after_dollar
+        } else if let Some(rest) = strip_pwsh_env_prefix(after_dollar) {
+            // PowerShell `$env:TITLE` (hyphens allowed in the env name).
+            let name_len = rest
                 .chars()
                 .take_while(|character| {
                     character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
                 })
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if name_len == 0 {
+                index += 1;
+                continue;
+            }
+            let name = &rest[..name_len];
+            // `$` + `env:` + name
+            index += 1 + 4 + name_len;
+            name
+        } else {
+            // POSIX unbraced names stop before `-` so `$TITLE-suffix` reads TITLE.
+            let name_len = after_dollar
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
                 .map(char::len_utf8)
                 .sum::<usize>();
             if name_len == 0 {
@@ -1295,6 +1392,14 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
         }
     }
     false
+}
+
+fn strip_pwsh_env_prefix(after_dollar: &str) -> Option<&str> {
+    if after_dollar.len() >= 4 && after_dollar[..4].eq_ignore_ascii_case("env:") {
+        Some(&after_dollar[4..])
+    } else {
+        None
+    }
 }
 
 fn for_each_expression(
@@ -3302,5 +3407,87 @@ jobs:
                 || !finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn multiline_github_output_record_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          echo 'title<<EOF' >> "$GITHUB_OUTPUT"
+          echo "$TITLE" >> "$GITHUB_OUTPUT"
+          echo 'EOF' >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn unbraced_shell_var_stops_before_hyphen_suffix() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "out=$TITLE-suffix" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_env_github_output_redirect_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: echo "title=$env:TITLE" >> $env:GITHUB_OUTPUT
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 }
