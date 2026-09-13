@@ -32,6 +32,31 @@ struct TaintScope<'a> {
     job_outputs: &'a HashSet<String>,
 }
 
+/// Outputs and post-scan env taint exported from a local composite action.
+struct CompositeExport {
+    outputs: HashSet<String>,
+    /// `$GITHUB_ENV` writes from the composite (and nested composites).
+    /// `true` = tainted, `false` = clean overwrite that clears prior taint.
+    env_writes: HashMap<String, bool>,
+}
+
+/// Step scan side effects: produced outputs and optional composite env export.
+struct StepScanEffects {
+    outputs: HashSet<String>,
+    /// `$GITHUB_ENV` writes when the step invoked a local composite.
+    env_writes: Option<HashMap<String, bool>>,
+}
+
+fn apply_github_env_overlay(envs: &mut HashSet<String>, writes: &HashMap<String, bool>) {
+    for (name, tainted) in writes {
+        if *tainted {
+            envs.insert(name.clone());
+        } else {
+            envs.remove(name);
+        }
+    }
+}
+
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     let actions: HashMap<&str, &SurfaceFile> = files
         .iter()
@@ -274,7 +299,7 @@ fn scan_workflow_inner(
                     job_outputs: &tainted_job_outputs,
                 };
                 let mut discarded = Vec::new();
-                let added = collect_step_produced_output_taint(
+                let effects = collect_step_produced_output_taint(
                     step,
                     step_scope,
                     actions,
@@ -284,7 +309,10 @@ fn scan_workflow_inner(
                 )?;
                 // `$GITHUB_ENV` writes become env bindings for later steps.
                 apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
-                tainted_step_outputs.extend(added);
+                if let Some(ref env_writes) = effects.env_writes {
+                    apply_github_env_overlay(&mut job_tainted_envs, env_writes);
+                }
+                tainted_step_outputs.extend(effects.outputs);
             }
             let added = {
                 let job_scope = TaintScope {
@@ -394,7 +422,10 @@ fn scan_workflow_inner(
             let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
             // `$GITHUB_ENV` writes become env bindings for later steps.
             apply_github_env_file_taints(&mut job_tainted_envs, step, step_scope, &file.rel)?;
-            tainted_step_outputs.extend(from_composite.into_iter().chain(from_run));
+            if let Some(ref env_writes) = from_composite.env_writes {
+                apply_github_env_overlay(&mut job_tainted_envs, env_writes);
+            }
+            tainted_step_outputs.extend(from_composite.outputs.into_iter().chain(from_run));
         }
     }
     let exported = collect_tainted_workflow_call_outputs(
@@ -417,9 +448,13 @@ fn scan_action_metadata(
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<HashSet<String>> {
+) -> Result<CompositeExport> {
+    let unchanged = || CompositeExport {
+        outputs: HashSet::new(),
+        env_writes: HashMap::new(),
+    };
     if !visiting.insert(file.rel.clone()) {
-        return Ok(HashSet::new());
+        return Ok(unchanged());
     }
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
@@ -434,15 +469,15 @@ fn scan_action_metadata(
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
         visiting.remove(&file.rel);
-        return Ok(HashSet::new());
+        return Ok(unchanged());
     };
     if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
         visiting.remove(&file.rel);
-        return Ok(HashSet::new());
+        return Ok(unchanged());
     }
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
         visiting.remove(&file.rel);
-        return Ok(HashSet::new());
+        return Ok(unchanged());
     };
     // Composite actions have no `secrets` context; only env + inputs apply.
     let empty_secrets = HashSet::new();
@@ -450,6 +485,7 @@ fn scan_action_metadata(
     let mut tainted_step_outputs = HashSet::new();
     // Caller env remains visible; `$GITHUB_ENV` writes accumulate across steps.
     let mut cross_step_envs = caller_taint.envs.clone();
+    let mut env_writes = HashMap::new();
     for step in steps.iter().filter_map(Yaml::as_hash) {
         let mut step_tainted_envs = cross_step_envs.clone();
         if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
@@ -477,8 +513,14 @@ fn scan_action_metadata(
             step, &file.rel, false, step_scope, actions, visiting, findings,
         )?;
         let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
-        apply_github_env_file_taints(&mut cross_step_envs, step, step_scope, &file.rel)?;
-        tainted_step_outputs.extend(from_composite.into_iter().chain(from_run));
+        let step_env_writes =
+            apply_github_env_file_taints(&mut cross_step_envs, step, step_scope, &file.rel)?;
+        env_writes.extend(step_env_writes);
+        if let Some(nested_writes) = from_composite.env_writes {
+            apply_github_env_overlay(&mut cross_step_envs, &nested_writes);
+            env_writes.extend(nested_writes);
+        }
+        tainted_step_outputs.extend(from_composite.outputs.into_iter().chain(from_run));
     }
     let exported = collect_tainted_declared_outputs(
         root,
@@ -492,7 +534,10 @@ fn scan_action_metadata(
         &file.rel,
     )?;
     visiting.remove(&file.rel);
-    Ok(exported)
+    Ok(CompositeExport {
+        outputs: exported,
+        env_writes,
+    })
 }
 
 fn scan_step(
@@ -503,8 +548,9 @@ fn scan_step(
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<HashSet<String>> {
+) -> Result<StepScanEffects> {
     let mut produced = HashSet::new();
+    let mut env_writes = None;
     if let Some(action) = get_string(step, "uses") {
         check_action_ref(action, rel, findings);
         if privileged_trigger && is_checkout(action) && has_untrusted_checkout_ref(step) {
@@ -537,9 +583,10 @@ fn scan_step(
                     visiting,
                     findings,
                 )?;
+                env_writes = Some(exported.env_writes);
                 if let Some(step_id) = get_string(step, "id") {
                     if is_github_ident(step_id) {
-                        for name in exported {
+                        for name in exported.outputs {
                             produced.insert(format!("{step_id}.{name}"));
                         }
                     }
@@ -550,7 +597,10 @@ fn scan_step(
     if let Some(script) = get_string(step, "run") {
         check_inline_script(script, rel, taint, findings)?;
     }
-    Ok(produced)
+    Ok(StepScanEffects {
+        outputs: produced,
+        env_writes,
+    })
 }
 
 /// Collect `$GITHUB_OUTPUT` writes and local composite exported outputs for a
@@ -562,16 +612,25 @@ fn collect_step_produced_output_taint(
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
     rel: &str,
-) -> Result<HashSet<String>> {
+) -> Result<StepScanEffects> {
     let mut produced = collect_tainted_github_outputs(step, taint, rel)?;
     let Some(action) = get_string(step, "uses") else {
-        return Ok(produced);
+        return Ok(StepScanEffects {
+            outputs: produced,
+            env_writes: None,
+        });
     };
     let Some(local) = action.strip_prefix("./") else {
-        return Ok(produced);
+        return Ok(StepScanEffects {
+            outputs: produced,
+            env_writes: None,
+        });
     };
     let Some(action_file) = resolve_local_action(local, actions) else {
-        return Ok(produced);
+        return Ok(StepScanEffects {
+            outputs: produced,
+            env_writes: None,
+        });
     };
     let step_tainted_inputs = collect_tainted_with_inputs(step, taint, rel)?;
     let empty_secrets = HashSet::new();
@@ -591,12 +650,15 @@ fn collect_step_produced_output_taint(
     )?;
     if let Some(step_id) = get_string(step, "id") {
         if is_github_ident(step_id) {
-            for name in exported {
+            for name in exported.outputs {
                 produced.insert(format!("{step_id}.{name}"));
             }
         }
     }
-    Ok(produced)
+    Ok(StepScanEffects {
+        outputs: produced,
+        env_writes: Some(exported.env_writes),
+    })
 }
 
 fn resolve_local_action<'a>(
@@ -832,6 +894,9 @@ fn value_references_tainted_job_output(
 }
 
 /// Collect tainted `{step_id}.{output}` keys written via `$GITHUB_OUTPUT`.
+///
+/// Multiple writes to the same output name are processed in order; a later clean
+/// overwrite clears prior taint for that name (matching Actions semantics).
 fn collect_tainted_github_outputs(
     step: &Hash,
     taint: TaintScope<'_>,
@@ -848,8 +913,11 @@ fn collect_tainted_github_outputs(
         return Ok(tainted);
     };
     for (name, raw_value, shell_expands) in parse_github_output_writes(script) {
+        let key = format!("{step_id}.{name}");
         if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
-            tainted.insert(format!("{step_id}.{name}"));
+            tainted.insert(key);
+        } else {
+            tainted.remove(&key);
         }
     }
     Ok(tainted)
@@ -877,24 +945,28 @@ fn github_output_value_is_tainted(
 ///
 /// GitHub exposes these values to subsequent steps via `${{ env.NAME }}` (and
 /// shell `$NAME`). A clean overwrite clears prior taint for that name.
+/// Returns the ordered write overlay (`true` = tainted, `false` = clean).
 fn apply_github_env_file_taints(
     env_taints: &mut HashSet<String>,
     step: &Hash,
     taint: TaintScope<'_>,
     rel: &str,
-) -> Result<()> {
+) -> Result<HashMap<String, bool>> {
+    let mut writes = HashMap::new();
     let Some(script) = get_string(step, "run") else {
-        return Ok(());
+        return Ok(writes);
     };
     for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
         let key = normalize_env_name(&name);
-        if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
-            env_taints.insert(key);
+        let tainted = github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)?;
+        if tainted {
+            env_taints.insert(key.clone());
         } else {
             env_taints.remove(&key);
         }
+        writes.insert(key, tainted);
     }
-    Ok(())
+    Ok(writes)
 }
 
 /// Collect tainted `{job_id}.{output}` keys from a job's `outputs:` map.
@@ -3157,5 +3229,78 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn composite_github_env_write_taints_caller_later_step() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/echo.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - uses: ./.github/actions/export
+      - run: echo "${{ env.ALIAS }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/export/action.yml".to_string(),
+                content: r#"
+name: Export alias
+description: Write tainted env for the caller
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "ALIAS=$TITLE" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.ALIAS")
+                && finding.location.as_deref() == Some(".github/workflows/echo.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn later_clean_github_output_overwrite_clears_prior_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "title=fixed" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().all(|finding| {
+            finding.rule_id != "AGT-06-workflow-context-injection"
+                || !finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 }
