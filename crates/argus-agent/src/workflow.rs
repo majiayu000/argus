@@ -49,6 +49,7 @@
 //! (GitHub job-wide env file), including when the composite writes a value equal
 //! to the invoking step's transient `env:` override,
 //! steps with a statically false `if:` do not apply env/output side effects,
+//! jobs with a statically false `if:` skip step and local-composite scans,
 //! non-literal/`if` conditions treat env writes as uncertain (invalidate),
 //! steps with no `if:` or bare `if: true` / `${{ true }}` (still gated by
 //! GitHub's implicit `success()` unless a status function is present) are not
@@ -66,8 +67,10 @@
 //! unconditional `exit`/`return` is recognized only in shell command position
 //! (not inside quoted arguments, command substitutions, or subshells), heredoc
 //! payload lines — including every payload from multi-heredoc openers such as
-//! `cat <<A <<B`, and after quote-removal of backslash-quoted delimiters such
-//! as `cat <<\EOF` — are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands,
+//! `cat <<A <<B`, after quote-removal of backslash-quoted delimiters such as
+//! `cat <<\EOF`, and after concatenating adjacent quoted/unquoted delimiter
+//! fragments such as `cat <<'E'OF` — are not parsed as `$GITHUB_ENV`/
+//! `$GITHUB_OUTPUT` commands,
 //! heredoc-looking tokens inside inline shell comments (`echo noop # <<EOF`)
 //! do not open heredoc state,
 //! single `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes guarded by `&&`/`||`/branching
@@ -199,6 +202,11 @@ fn scan_workflow(
         check_permissions(job, "job", privileged_trigger, &file.rel, findings);
         if let Some(action) = get_string(job, "uses") {
             check_action_ref(action, &file.rel, findings);
+        }
+        // Jobs with a statically false `if:` never run on GitHub; skip step and
+        // local-composite expansion so unreachable checkouts are not findings.
+        if step_condition_is_always_false(job) {
+            continue;
         }
         let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
             continue;
@@ -1724,50 +1732,73 @@ fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
     delimiters
 }
 
-/// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, `"EOF"`, or
-/// backslash-quoted forms such as `\EOF` (runtime terminator `EOF`).
+/// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, `"EOF"`,
+/// backslash-quoted forms such as `\EOF`, and adjacent quoted/unquoted
+/// fragments such as `'E'OF` / `E'OF'` (Bash concatenates them to `EOF`).
+///
+/// Unclosed quotes fail closed (`None`) so callers treat the script as opaque
+/// rather than locking onto a partial delimiter that never terminates.
 fn parse_heredoc_word(value: &str) -> Option<(String, usize)> {
     let bytes = value.as_bytes();
     if bytes.is_empty() {
         return None;
     }
-    match bytes[0] {
-        b'\'' | b'"' => {
-            let quote = bytes[0];
-            let mut end = 1;
-            while end < bytes.len() && bytes[end] != quote {
-                end += 1;
-            }
-            if end >= bytes.len() {
-                return None;
-            }
-            Some((value[1..end].to_string(), end + 1))
+    let mut index = 0;
+    let mut word = String::new();
+    let mut saw_fragment = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if is_heredoc_word_boundary(byte) {
+            break;
         }
-        _ => {
-            let mut end = 0;
-            while end < bytes.len() {
-                let byte = bytes[end];
-                if byte.is_ascii_whitespace()
-                    || byte == b';'
-                    || byte == b'&'
-                    || byte == b'|'
-                    || byte == b'<'
-                    || byte == b'>'
-                    || byte == b'('
-                    || byte == b')'
-                {
+        match byte {
+            b'\'' | b'"' => {
+                let quote = byte;
+                index += 1;
+                let start = index;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return None;
+                }
+                word.push_str(&value[start..index]);
+                index += 1;
+                saw_fragment = true;
+            }
+            _ => {
+                let start = index;
+                while index < bytes.len() {
+                    let next = bytes[index];
+                    if is_heredoc_word_boundary(next) || next == b'\'' || next == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index == start {
                     break;
                 }
-                end += 1;
+                // Bash quote-removal on bare fragments turns `\EOF` into `EOF`.
+                word.push_str(&strip_backslash_escapes(&value[start..index]));
+                saw_fragment = true;
             }
-            if end == 0 {
-                return None;
-            }
-            // Bash quote-removal on bare words turns `\EOF` into the terminator
-            // `EOF`; keeping the backslash would never leave heredoc state.
-            Some((strip_backslash_escapes(&value[..end]), end))
         }
     }
+    if !saw_fragment {
+        return None;
+    }
+    Some((word, index))
+}
+
+fn is_heredoc_word_boundary(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte == b';'
+        || byte == b'&'
+        || byte == b'|'
+        || byte == b'<'
+        || byte == b'>'
+        || byte == b'('
+        || byte == b')'
 }
 
 /// Apply Bash-style backslash quote removal to a bare heredoc delimiter word.
@@ -3977,6 +4008,42 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_tracks_after_split_quoted_heredoc_delimiter() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  cat <<'E'OF
+  ignored
+  EOF
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "split-quoted heredoc ('E'OF) must end so later attacker write is tracked: {env:?}"
+        );
+    }
+
+    #[test]
     fn apply_github_env_writes_tracks_after_comment_heredoc_lookalike() {
         let docs = YamlLoader::load_from_str(
             r#"
@@ -4141,6 +4208,57 @@ runs:
       run: |
         echo "TARGET=main" >> "$GITHUB_ENV"
         cat <<\EOF
+        ignored
+        EOF
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_split_quoted_heredoc_then_env_write_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=main" >> "$GITHUB_ENV"
+        cat <<'E'OF
         ignored
         EOF
         echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
@@ -6908,6 +7026,54 @@ runs:
                 .iter()
                 .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT),
             "statically skipped checkout must not emit Critical: {findings:?}"
+        );
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn privileged_job_statically_false_untrusted_checkout_is_not_flagged() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  skipped:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT),
+            "job-level if: false must not emit Critical for unreachable checkout: {findings:?}"
         );
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
