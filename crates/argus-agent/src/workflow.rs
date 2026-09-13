@@ -50,16 +50,25 @@
 //! to the invoking step's transient `env:` override,
 //! steps with a statically false `if:` do not apply env/output side effects,
 //! non-literal/`if` conditions treat env writes as uncertain (invalidate),
+//! steps with no `if:` (implicit `success()`) are not treated as definite when a
+//! later step can still run after failure (`always()` / `failure()` /
+//! `cancelled()`), so a skipped safe `$GITHUB_ENV` overwrite cannot mask taint
+//! for an `if: always()` checkout,
 //! braced parameter expansions such as `${GITHUB_ENV:?missing}` are recognized
 //! as environment-file targets,
-//! `&&`/`||` multi-redirect lists are fully parsed, and unresolved
-//! `needs.*.outputs.*` checkout refs fail closed. Unresolved
-//! `steps.*.outputs.*`, unresolved `env` access, and unresolved `inputs`
-//! access in checkout refs fail closed under a privileged trigger. Quoted
-//! expression literals such as `${{ 'inputs.ref' }}` are not treated as input
-//! references; `}}` inside those quotes does not terminate the expression
-//! region. Plain literal `with` values (no `${{ }}`) are embedded as expression
-//! string literals so they are not re-parsed as GitHub context paths.
+//! `&&`/`||` multi-redirect lists are fully parsed (without splitting through
+//! unquoted `#` comments), later stdout redirections override an earlier
+//! `>> $GITHUB_ENV`/`$GITHUB_OUTPUT` in the same command, unconditional
+//! `exit`/`return` is recognized only in shell command position (not inside
+//! quoted arguments), and unresolved `needs.*.outputs.*` checkout refs —
+//! including whole-context `fromJSON(toJSON(needs))…` reconstruction — fail
+//! closed. Unresolved `steps.*.outputs.*`, including whole-context
+//! `fromJSON(toJSON(steps))…` reconstruction, unresolved `env` access, and
+//! unresolved `inputs` access in checkout refs fail closed under a privileged
+//! trigger. Quoted expression literals such as `${{ 'inputs.ref' }}` are not
+//! treated as input references; `}}` inside those quotes does not terminate the
+//! expression region. Plain literal `with` values (no `${{ }}`) are embedded as
+//! expression string literals so they are not re-parsed as GitHub context paths.
 //! Single-quoted shell payloads such as
 //! `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their literal value (no shell
 //! expansion) and are not marked untracked.
@@ -181,7 +190,11 @@ fn scan_workflow(
         let mut step_outputs = StepOutputBindings::new();
         // `$GITHUB_ENV` writes from earlier steps become env bindings for later ones.
         let mut env_bindings = job_env;
-        for step in steps.iter().filter_map(Yaml::as_hash) {
+        let step_hashes: Vec<&Hash> = steps.iter().filter_map(Yaml::as_hash).collect();
+        for (index, step) in step_hashes.iter().enumerate() {
+            let later_post_failure = step_hashes[index + 1..]
+                .iter()
+                .any(|later| step_can_run_after_failure(later));
             let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
             let composite_env = scan_step(
                 step,
@@ -206,8 +219,10 @@ fn scan_workflow(
             // Runtime-dependent or non-literal conditions may or may not run;
             // apply concrete values only when execution is definite. Otherwise
             // invalidate keys the step would touch so stale safe bindings
-            // cannot mask attacker-controlled values.
-            if !step_condition_is_definitely_executed(step) {
+            // cannot mask attacker-controlled values. Absent `if:` is implicit
+            // `success()` and is not definite when a later step can still run
+            // after failure.
+            if !step_condition_is_definitely_executed(step, later_post_failure) {
                 if let Some(effects) = composite_env {
                     invalidate_composite_env_effects(&effects, &mut env_bindings);
                 }
@@ -298,7 +313,11 @@ fn scan_composite_steps(
     let mut env_bindings = ctx.env_bindings.clone();
     let mut written_keys = BTreeSet::new();
     let mut cleared = false;
-    for step in steps.iter().filter_map(Yaml::as_hash) {
+    let step_hashes: Vec<&Hash> = steps.iter().filter_map(Yaml::as_hash).collect();
+    for (index, step) in step_hashes.iter().enumerate() {
+        let later_post_failure = step_hashes[index + 1..]
+            .iter()
+            .any(|later| step_can_run_after_failure(later));
         let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
         let nested_env = scan_step(
             step,
@@ -317,7 +336,7 @@ fn scan_composite_steps(
         if step_condition_is_always_false(step) {
             continue;
         }
-        if !step_condition_is_definitely_executed(step) {
+        if !step_condition_is_definitely_executed(step, later_post_failure) {
             if let Some(effects) = nested_env {
                 merge_invalidated_composite_env(
                     &effects,
@@ -562,13 +581,46 @@ fn step_condition_is_always_false(step: &Hash) -> bool {
 
 /// True when a step has no `if:` or a statically true condition, so side
 /// effects definitely run. Any other condition is treated as uncertain.
-fn step_condition_is_definitely_executed(step: &Hash) -> bool {
+///
+/// Absent `if:` is GitHub's implicit `success()`. When `later_post_failure` is
+/// set because a later step uses `always()` / `failure()` / `cancelled()`, that
+/// implicit gate is not definite: a prior failure would skip the write while
+/// the later step still runs.
+fn step_condition_is_definitely_executed(step: &Hash, later_post_failure: bool) -> bool {
     match get(step, "if") {
-        None => true,
+        None => !later_post_failure,
         Some(Yaml::Boolean(true)) => true,
         Some(Yaml::Boolean(false)) => false,
-        Some(value) => value.as_str().is_some_and(is_always_true_condition),
+        Some(value) => {
+            let Some(condition) = value.as_str() else {
+                return false;
+            };
+            if is_always_true_condition(condition) {
+                return true;
+            }
+            if later_post_failure && is_success_status_condition(condition) {
+                return false;
+            }
+            false
+        }
     }
+}
+
+/// True when a step's `if:` can still evaluate after a prior step failure.
+fn step_can_run_after_failure(step: &Hash) -> bool {
+    match get(step, "if") {
+        Some(Yaml::Boolean(true)) => true,
+        Some(value) => value.as_str().is_some_and(condition_can_run_after_failure),
+        _ => false,
+    }
+}
+
+fn condition_can_run_after_failure(condition: &str) -> bool {
+    let atom = expression_condition_atom(condition).to_ascii_lowercase();
+    atom == "true"
+        || atom.contains("always()")
+        || atom.contains("failure()")
+        || atom.contains("cancelled()")
 }
 
 fn is_always_false_condition(condition: &str) -> bool {
@@ -577,6 +629,10 @@ fn is_always_false_condition(condition: &str) -> bool {
 
 fn is_always_true_condition(condition: &str) -> bool {
     expression_condition_atom(condition).eq_ignore_ascii_case("true")
+}
+
+fn is_success_status_condition(condition: &str) -> bool {
+    expression_condition_atom(condition).eq_ignore_ascii_case("success()")
 }
 
 fn expression_condition_atom(condition: &str) -> &str {
@@ -978,26 +1034,88 @@ fn script_has_shell_control_flow(script: &str) -> bool {
 }
 
 /// Prefix of `script` that can still run before an unconditional `exit` /
-/// `return`. Writes after that command are unreachable; writes before it
-/// persist to later workflow steps.
+/// `return` in shell command position. Writes after that command are
+/// unreachable; writes before it persist to later workflow steps. Quoted
+/// arguments such as `echo "exit"` must not truncate the script.
 fn script_reachable_before_unconditional_exit(script: &str) -> &str {
-    static EXIT_COMMAND: OnceLock<Regex> = OnceLock::new();
-    let pattern = EXIT_COMMAND.get_or_init(|| {
-        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?m)(?:^|[^A-Za-z0-9_])(?:exit|return)(?:$|[^A-Za-z0-9_])")
-            .expect("shell exit pattern compiles")
-    });
     let blanked = blank_github_expressions_preserving_len(script);
-    let Some(matched) = pattern.find(&blanked) else {
-        return script;
-    };
-    // Drop a leading boundary character so the cut is at `exit`/`return`.
-    let keyword_offset = match matched.as_str().as_bytes().first() {
-        Some(b'e' | b'r') => 0,
-        _ => 1,
-    };
-    let cut = matched.start() + keyword_offset;
-    script.get(..cut).unwrap_or(script)
+    let bytes = blanked.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut at_command_position = true;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                at_command_position = false;
+                continue;
+            }
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                at_command_position = false;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                at_command_position = false;
+            }
+            b'\n' if !in_single && !in_double => {
+                at_command_position = true;
+            }
+            b';' | b'|' | b'&' | b'(' if !in_single && !in_double => {
+                // `&&` / `||` / `&` / `|` / `;` / `(` start a new command.
+                at_command_position = true;
+            }
+            b'#' if !in_single
+                && !in_double
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                // Rest of the line is a comment.
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            _ if !in_single && !in_double && at_command_position => {
+                if byte.is_ascii_whitespace() {
+                    index += 1;
+                    continue;
+                }
+                if shell_exit_or_return_at(&blanked[index..]).is_some() {
+                    return script.get(..index).unwrap_or(script);
+                }
+                at_command_position = false;
+            }
+            _ => {
+                if !in_single && !in_double && !byte.is_ascii_whitespace() {
+                    at_command_position = false;
+                }
+            }
+        }
+        index += 1;
+    }
+    script
+}
+
+/// Length of an `exit` / `return` token at the start of `value`, or `None`.
+fn shell_exit_or_return_at(value: &str) -> Option<usize> {
+    for keyword in ["exit", "return"] {
+        if value.len() >= keyword.len()
+            && value.as_bytes()[..keyword.len()].eq_ignore_ascii_case(keyword.as_bytes())
+        {
+            let rest = &value[keyword.len()..];
+            if rest.is_empty()
+                || rest
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+            {
+                return Some(keyword.len());
+            }
+        }
+    }
+    None
 }
 
 /// Blank `${{ … }}` regions with spaces of equal length so match offsets into
@@ -1119,6 +1237,11 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
                 continue;
             }
             let Some(command) = split_github_file_redirect(segment, file_var) else {
+                // A `>> $GITHUB_*` redirect overridden by a later stdout
+                // redirect is a no-op at runtime — do not treat it as opaque.
+                if github_file_stdout_redirect_overridden(segment, file_var) {
+                    continue;
+                }
                 // Pipes / `tee` / other non-`>>` writers still mutate the file at
                 // runtime; ignoring them would retain a stale safe binding.
                 if segment_references_github_file(segment, file_var) {
@@ -1153,6 +1276,7 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
 
 /// Split a shell line on unquoted `;`, `&&`, and `||` so multi-redirect command
 /// lists are each inspected rather than keeping only the first `>>` write.
+/// Unquoted `#` starts a comment: operators after it must not create segments.
 fn split_shell_list_segments(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut segments = Vec::new();
@@ -1160,8 +1284,13 @@ fn split_shell_list_segments(line: &str) -> Vec<&str> {
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_comment = false;
     while index < bytes.len() {
         let byte = bytes[index];
+        if in_comment {
+            index += 1;
+            continue;
+        }
         match byte {
             b'\\' if in_double && index + 1 < bytes.len() => {
                 index += 2;
@@ -1169,6 +1298,12 @@ fn split_shell_list_segments(line: &str) -> Vec<&str> {
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single
+                && !in_double
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                in_comment = true;
+            }
             b';' if !in_single && !in_double => {
                 segments.push(&line[start..index]);
                 start = index + 1;
@@ -1229,11 +1364,64 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
     // `"$GITHUB_OUTPUT"#backup` is one shell word (included by first_shell_token)
     // and will not match a clean environment-file target.
     let target = strip_wrapping_shell_quotes(target_token).trim();
-    if is_github_file_redirect_target(target, file_var) {
-        Some(before.trim())
-    } else {
-        None
+    if !is_github_file_redirect_target(target, file_var) {
+        return None;
     }
+    // Bash applies redirections left-to-right; a later stdout redirect
+    // (`>` / `>>`) replaces the earlier `$GITHUB_*` destination.
+    let after_target = after[target_token.len()..].trim_start();
+    if stdout_redirect_follows(after_target) {
+        return None;
+    }
+    Some(before.trim())
+}
+
+/// True when `segment` has `>> $GITHUB_*` but a later stdout redirect makes
+/// that write a no-op (so callers must not mark the segment opaque).
+fn github_file_stdout_redirect_overridden(segment: &str, file_var: &str) -> bool {
+    let Some(index) = segment.find(">>") else {
+        return false;
+    };
+    let after = segment[index..].trim_start_matches('>').trim();
+    let after = strip_trailing_shell_comment(after).trim();
+    let Some(target_token) = first_shell_token(after) else {
+        return false;
+    };
+    let target = strip_wrapping_shell_quotes(target_token).trim();
+    if !is_github_file_redirect_target(target, file_var) {
+        return false;
+    }
+    let after_target = after[target_token.len()..].trim_start();
+    stdout_redirect_follows(after_target)
+}
+
+/// True when unquoted `>` / `>>` appears in `value` (another stdout redirect).
+fn stdout_redirect_follows(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single
+                && !in_double
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                return false;
+            }
+            b'>' if !in_single && !in_double => return true,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// True when `target` names a GitHub Actions environment file via Bash
@@ -1873,8 +2061,9 @@ fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
 /// Fail closed when a checkout ref still reaches a `steps.*.outputs` context
 /// after known `$GITHUB_OUTPUT` rewrites — including computed forms such as
 /// `fromJSON(toJSON(steps.resolve.outputs)).ref` where `.outputs.<name>` is
-/// not contiguous. Incomplete step-output tracking must not collapse into
-/// allow under a privileged trigger.
+/// not contiguous, and whole-context reconstruction such as
+/// `fromJSON(toJSON(steps)).resolve.outputs.ref`. Incomplete step-output
+/// tracking must not collapse into allow under a privileged trigger.
 fn has_unresolved_step_output_ref(revision: &str) -> bool {
     static STEP_OUTPUT_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = STEP_OUTPUT_REF.get_or_init(|| {
@@ -1884,12 +2073,18 @@ fn has_unresolved_step_output_ref(revision: &str) -> bool {
         )
         .expect("step output ref pattern compiles")
     });
-    expression_matches_unresolved_context(revision, pattern)
+    if expression_matches_unresolved_context(revision, pattern) {
+        return true;
+    }
+    // Whole `steps` context serialization: `toJSON(steps)` then `.….outputs`.
+    expression_contains_whole_context_outputs(revision, "steps")
 }
 
 /// Fail closed when a checkout ref still names `needs.*.outputs.*` after known
 /// rewrites — cross-job outputs are not yet tracked into composite input
 /// bindings and must not collapse into allow under a privileged trigger.
+/// Includes whole-context reconstruction such as
+/// `fromJSON(toJSON(needs)).prepare.outputs.ref`.
 fn has_unresolved_needs_output_ref(revision: &str) -> bool {
     static NEEDS_OUTPUT_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = NEEDS_OUTPUT_REF.get_or_init(|| {
@@ -1897,7 +2092,26 @@ fn has_unresolved_needs_output_ref(revision: &str) -> bool {
         Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])needs\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
             .expect("needs output ref pattern compiles")
     });
-    expression_matches_unresolved_context(revision, pattern)
+    if expression_matches_unresolved_context(revision, pattern) {
+        return true;
+    }
+    expression_contains_whole_context_outputs(revision, "needs")
+}
+
+/// True when an expression serializes the whole `steps`/`needs` context via
+/// `toJSON(<context>)` and then reads an `.outputs` path after `fromJSON`.
+fn expression_contains_whole_context_outputs(revision: &str, context: &str) -> bool {
+    let needle = format!("tojson({context})");
+    let mut found = false;
+    let normalized = normalize_bracket_property_access(revision);
+    let _ = map_expression_regions(&normalized, |inner| {
+        let cleaned = remove_expression_string_literals(inner).to_ascii_lowercase();
+        if cleaned.contains(&needle) && cleaned.contains(".outputs") {
+            found = true;
+        }
+        inner.to_string()
+    });
+    found
 }
 
 /// Fail closed when a checkout ref still reaches the `env` context after known
@@ -2721,6 +2935,141 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_does_not_treat_quoted_exit_as_terminator() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "exit"
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        env.insert("TARGET".to_string(), "main".to_string());
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "quoted exit argument must not truncate later GITHUB_ENV write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn split_shell_list_segments_ignores_operators_inside_comments() {
+        let segments = split_shell_list_segments(
+            r#"echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV" # ; echo "TARGET=main" >> "$GITHUB_ENV""#,
+        );
+        assert_eq!(
+            segments.len(),
+            1,
+            "commented semicolon must not create a second segment: {segments:?}"
+        );
+        assert!(
+            segments[0].contains("inputs.ref"),
+            "attacker write must remain the only segment: {segments:?}"
+        );
+        assert!(
+            !segments.iter().any(|segment| {
+                let trimmed = segment.trim();
+                trimmed.starts_with("echo \"TARGET=main\"")
+                    || trimmed.starts_with("echo 'TARGET=main'")
+            }),
+            "commented safe overwrite must not become executable: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_commented_trailing_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV" # ; echo "TARGET=main" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "commented safe overwrite must not win last-write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn split_github_file_redirect_rejects_later_stdout_override() {
+        assert_eq!(
+            split_github_file_redirect(
+                r#"echo "TARGET=main" >> "$GITHUB_ENV" > /dev/null"#,
+                "GITHUB_ENV"
+            ),
+            None,
+            "later > /dev/null must override the GITHUB_ENV redirect"
+        );
+        assert!(github_file_stdout_redirect_overridden(
+            r#"echo "TARGET=main" >> "$GITHUB_ENV" > /dev/null"#,
+            "GITHUB_ENV"
+        ));
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_redirect_overridden_by_later_stdout() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: echo "TARGET=main" >> "$GITHUB_ENV" > /dev/null
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.is_empty());
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "overridden safe overwrite must not clear prior taint: {env:?}"
+        );
+    }
+
+    #[test]
     fn privileged_local_composite_pre_exit_env_write_blocks() {
         let findings = findings_for_files(&[
             SurfaceFile {
@@ -3256,6 +3605,156 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ fromJSON(toJSON(steps.resolve.outputs)).ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_whole_steps_context_reconstruction_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      run: echo "ref=${{ inputs.ref }}" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ fromJSON(toJSON(steps)).resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_whole_needs_context_reconstruction_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.export.outputs.ref }}
+    steps:
+      - id: export
+        env:
+          TARGET: ${{ github.event.pull_request.head.sha }}
+        run: echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+  run:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ fromJSON(toJSON(needs)).prepare.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ inputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_implicit_success_overwrite_before_always_checkout_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - if: ${{ always() }}
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
