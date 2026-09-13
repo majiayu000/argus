@@ -48,7 +48,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
         match file.kind {
             SurfaceKind::Workflow => {
                 let mut visiting = HashSet::new();
-                scan_workflow(
+                let _ = scan_workflow(
                     file,
                     TaintScope {
                         envs: &empty,
@@ -113,9 +113,9 @@ fn scan_workflow(
     workflows: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
     if !visiting.insert(file.rel.clone()) {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     let result = scan_workflow_inner(file, caller_taint, actions, workflows, visiting, findings);
     visiting.remove(&file.rel);
@@ -129,7 +129,7 @@ fn scan_workflow_inner(
     workflows: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
     if documents.len() != 1 {
@@ -163,7 +163,17 @@ fn scan_workflow_inner(
     }
 
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
-        return Ok(());
+        return collect_tainted_workflow_call_outputs(
+            root,
+            TaintScope {
+                envs: &workflow_tainted_envs,
+                inputs: caller_taint.inputs,
+                secrets: caller_taint.secrets,
+                step_outputs: &empty_outputs,
+                job_outputs: &empty_outputs,
+            },
+            &file.rel,
+        );
     };
 
     // Collect job-output taint before scanning so `needs.*.outputs` is available
@@ -178,12 +188,6 @@ fn scan_workflow_inner(
                 continue;
             };
             let Some(job) = job_yaml.as_hash() else {
-                continue;
-            };
-            if get_string(job, "uses").is_some() {
-                continue;
-            }
-            let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
                 continue;
             };
             let mut job_tainted_envs = workflow_tainted_envs.clone();
@@ -201,6 +205,50 @@ fn scan_workflow_inner(
                     &file.rel,
                 )?;
             }
+            if let Some(action) = get_string(job, "uses") {
+                // Map reusable-workflow `on.workflow_call.outputs` back onto the
+                // call job so later `needs.<call>.outputs.*` reads stay tainted.
+                if let Some(local) = action.strip_prefix("./") {
+                    if let Some(workflow_file) = resolve_local_workflow(local, workflows) {
+                        let job_scope = TaintScope {
+                            envs: &job_tainted_envs,
+                            inputs: caller_taint.inputs,
+                            secrets: caller_taint.secrets,
+                            step_outputs: &empty_outputs,
+                            job_outputs: &tainted_job_outputs,
+                        };
+                        let job_tainted_inputs =
+                            collect_tainted_with_inputs(job, job_scope, &file.rel)?;
+                        let job_tainted_secrets =
+                            collect_tainted_secrets(job, job_scope, &file.rel)?;
+                        let empty_envs = HashSet::new();
+                        let mut discarded = Vec::new();
+                        let exported = scan_workflow(
+                            workflow_file,
+                            TaintScope {
+                                envs: &empty_envs,
+                                inputs: &job_tainted_inputs,
+                                secrets: &job_tainted_secrets,
+                                step_outputs: &empty_outputs,
+                                job_outputs: &empty_outputs,
+                            },
+                            actions,
+                            workflows,
+                            visiting,
+                            &mut discarded,
+                        )?;
+                        for name in exported {
+                            if is_github_ident(&name) {
+                                tainted_job_outputs.insert(format!("{job_id}.{name}"));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
+                continue;
+            };
             let mut tainted_step_outputs = HashSet::new();
             for step in steps.iter().filter_map(Yaml::as_hash) {
                 let mut step_tainted_envs = job_tainted_envs.clone();
@@ -288,7 +336,7 @@ fn scan_workflow_inner(
                         collect_tainted_with_inputs(job, job_scope, &file.rel)?;
                     let job_tainted_secrets = collect_tainted_secrets(job, job_scope, &file.rel)?;
                     let empty_envs = HashSet::new();
-                    scan_workflow(
+                    let _ = scan_workflow(
                         workflow_file,
                         TaintScope {
                             envs: &empty_envs,
@@ -351,7 +399,18 @@ fn scan_workflow_inner(
             tainted_step_outputs.extend(added);
         }
     }
-    Ok(())
+    let exported = collect_tainted_workflow_call_outputs(
+        root,
+        TaintScope {
+            envs: &workflow_tainted_envs,
+            inputs: caller_taint.inputs,
+            secrets: caller_taint.secrets,
+            step_outputs: &empty_outputs,
+            job_outputs: &tainted_job_outputs,
+        },
+        &file.rel,
+    )?;
+    Ok(exported)
 }
 
 fn scan_action_metadata(
@@ -704,11 +763,14 @@ fn apply_env_taints(
         }
     }
     for (name, is_tainted) in updates {
+        // Actions env lookups are case-insensitive on Windows runners; store a
+        // canonical key so `TITLE` taint still matches `${{ env.title }}`.
+        let key = normalize_env_name(&name);
         if is_tainted {
-            tainted.insert(name);
+            tainted.insert(key);
         } else {
             // A same-scope redeclaration without untrusted contexts clears prior taint.
-            tainted.remove(&name);
+            tainted.remove(&key);
         }
     }
     Ok(())
@@ -869,6 +931,61 @@ fn collect_tainted_declared_outputs(
     Ok(tainted)
 }
 
+/// Collect reusable-workflow `on.workflow_call.outputs` that forward tainted
+/// `jobs.*.outputs.*` (or other in-scope taint) back to the caller.
+fn collect_tainted_workflow_call_outputs(
+    root: &Hash,
+    taint: TaintScope<'_>,
+    rel: &str,
+) -> Result<HashSet<String>> {
+    let mut tainted = HashSet::new();
+    let Some(on) = get(root, "on").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    let Some(workflow_call) = get(on, "workflow_call").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    let Some(outputs) = get(workflow_call, "outputs").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    for (key, value) in outputs {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        if !is_github_ident(name) {
+            continue;
+        }
+        let Some(expr) = declared_output_value(value) else {
+            continue;
+        };
+        if workflow_call_output_carries_taint(expr, taint, rel)? {
+            tainted.insert(name.to_string());
+        }
+    }
+    Ok(tainted)
+}
+
+fn workflow_call_output_carries_taint(
+    value: &str,
+    taint: TaintScope<'_>,
+    rel: &str,
+) -> Result<bool> {
+    Ok(value_carries_taint(value, taint, rel)?
+        || value_references_tainted_jobs_output(value, taint.job_outputs, rel)?)
+}
+
+fn value_references_tainted_jobs_output(
+    value: &str,
+    tainted: &HashSet<String>,
+    rel: &str,
+) -> Result<bool> {
+    for_each_expression(value, rel, |expression| {
+        Ok(expression_uses_tainted_nested_output(
+            expression, "jobs", tainted,
+        ))
+    })
+}
+
 fn declared_output_value(value: &Yaml) -> Option<&str> {
     match value {
         Yaml::String(text) => Some(text.as_str()),
@@ -877,9 +994,9 @@ fn declared_output_value(value: &Yaml) -> Option<&str> {
     }
 }
 
-/// Parse simple `echo[ -n] "name=value" >> $GITHUB_OUTPUT` lines from a script.
-/// The third tuple field is whether the echo payload shell-expands (`false` when
-/// the entire payload is single-quoted).
+/// Parse simple `echo` / `printf` writes to `$GITHUB_OUTPUT`.
+/// The third tuple field is whether the payload shell-expands (`false` when
+/// the entire value is single-quoted).
 fn parse_github_output_writes(script: &str) -> Vec<(String, String, bool)> {
     let mut writes = Vec::new();
     for line in script.lines() {
@@ -890,24 +1007,77 @@ fn parse_github_output_writes(script: &str) -> Vec<(String, String, bool)> {
         let Some(command) = split_github_output_redirect(trimmed) else {
             continue;
         };
-        let Some(payload) = extract_echo_payload(command) else {
-            continue;
-        };
-        let (payload, shell_expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
-            Some((inner, b'\'')) => (inner, false),
-            Some((inner, _)) => (inner, true),
-            None => (payload.trim(), true),
-        };
-        let Some((name, value)) = payload.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        if !is_github_ident(name) {
+        if let Some(write) = extract_echo_github_output(command) {
+            writes.push(write);
             continue;
         }
-        writes.push((name.to_string(), value.trim().to_string(), shell_expands));
+        if let Some(write) = extract_printf_github_output(command) {
+            writes.push(write);
+        }
     }
     writes
+}
+
+fn extract_echo_github_output(command: &str) -> Option<(String, String, bool)> {
+    let payload = extract_echo_payload(command)?;
+    let (payload, shell_expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
+        Some((inner, b'\'')) => (inner, false),
+        Some((inner, _)) => (inner, true),
+        None => (payload.trim(), true),
+    };
+    let (name, value) = payload.split_once('=')?;
+    let name = name.trim();
+    if !is_github_ident(name) {
+        return None;
+    }
+    Some((name.to_string(), value.trim().to_string(), shell_expands))
+}
+
+/// Recognize `printf 'name=%s\n' "$VALUE"` (and similar) redirects to
+/// `$GITHUB_OUTPUT`. Format strings without a leading `name=` are ignored.
+fn extract_printf_github_output(command: &str) -> Option<(String, String, bool)> {
+    let rest = command.trim().strip_prefix("printf")?.trim_start();
+    let (format, after_format, format_expands) = next_shell_word(rest)?;
+    let (name, fmt_value) = format.split_once('=')?;
+    let name = name.trim();
+    if !is_github_ident(name) {
+        return None;
+    }
+    let fmt_value = fmt_value.trim();
+    // `printf 'title=%s\n' "$TITLE"` — take the next argument as the value.
+    let normalized = fmt_value
+        .trim_end_matches(['\n', '\r'])
+        .trim_end_matches("\\n");
+    if normalized == "%s" || normalized.starts_with("%s") {
+        if let Some((arg, _, arg_expands)) = next_shell_word(after_format) {
+            return Some((
+                name.to_string(),
+                arg.to_string(),
+                format_expands || arg_expands,
+            ));
+        }
+    }
+    Some((name.to_string(), fmt_value.to_string(), format_expands))
+}
+
+/// Split the next shell word, tracking whether it shell-expands.
+fn next_shell_word(input: &str) -> Option<(&str, &str, bool)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    if bytes[0] == b'\'' || bytes[0] == b'"' {
+        let quote = bytes[0];
+        let expands = quote == b'"';
+        let rest = &input[1..];
+        let end = rest.find(quote as char)?;
+        let word = &rest[..end];
+        let after = &rest[end + 1..];
+        return Some((word, after, expands));
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..], true))
 }
 
 fn split_github_output_redirect(line: &str) -> Option<&str> {
@@ -915,6 +1085,12 @@ fn split_github_output_redirect(line: &str) -> Option<&str> {
     let (before, after) = line.split_at(index);
     let after = after.trim_start_matches('>').trim();
     let target = strip_wrapping_shell_quotes(after).trim();
+    // Drop a trailing shell comment so `>> "$GITHUB_OUTPUT" # note` still matches.
+    let target = target
+        .split_whitespace()
+        .next()
+        .map(strip_wrapping_shell_quotes)
+        .unwrap_or(target);
     if target == "$GITHUB_OUTPUT" || target == "${GITHUB_OUTPUT}" {
         Some(before.trim())
     } else {
@@ -966,6 +1142,10 @@ fn is_github_ident(value: &str) -> bool {
     chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
 }
 
+fn normalize_env_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
 /// Detect `$NAME` / `${NAME}` shell expansions that read a tainted env binding.
 fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
@@ -987,7 +1167,9 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
             }
         }
         if bytes[index] != b'$' {
-            index += 1;
+            // Advance by Unicode scalar so a non-ASCII byte (e.g. in `é`) never
+            // leaves `index` mid-character before the next `value[index..]` slice.
+            index += value[index..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
         let after_dollar = &value[index + 1..];
@@ -1014,7 +1196,7 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
             index += 1 + name_len;
             name
         };
-        if is_github_ident(name) && tainted_envs.contains(name) {
+        if is_github_ident(name) && tainted_envs.contains(&normalize_env_name(name)) {
             return true;
         }
     }
@@ -1244,6 +1426,7 @@ fn expression_uses_tainted_nested_output(
 ) -> bool {
     static STEPS_REF: OnceLock<Regex> = OnceLock::new();
     static NEEDS_REF: OnceLock<Regex> = OnceLock::new();
+    static JOBS_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = match root {
         "steps" => STEPS_REF.get_or_init(|| {
             Regex::new(
@@ -1256,6 +1439,12 @@ fn expression_uses_tainted_nested_output(
                 r#"(?i)\bneeds\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])\s*\.\s*outputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])?"#,
             )
             .expect("tainted needs output reference pattern compiles")
+        }),
+        "jobs" => JOBS_REF.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\bjobs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])\s*\.\s*outputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*(?:['"]([^'"]+)['"]|([^\]]+?))\s*\])?"#,
+            )
+            .expect("tainted jobs output reference pattern compiles")
         }),
         _ => return false,
     };
@@ -1396,7 +1585,13 @@ fn expression_uses_tainted_context_property(
             .get(1)
             .or_else(|| capture.get(2))
             .map(|matched| matched.as_str());
-        name.is_some_and(|name| tainted_names.contains(name))
+        name.is_some_and(|name| {
+            if context == "env" {
+                tainted_names.contains(&normalize_env_name(name))
+            } else {
+                tainted_names.contains(name)
+            }
+        })
     })
 }
 
@@ -2698,5 +2893,140 @@ jobs:
                 || !finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn github_output_shell_scan_advances_past_utf8_without_panic() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=é $TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn printf_github_output_write_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: printf 'title=%s\n' "$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn env_context_taint_lookup_is_case_insensitive() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - run: echo "${{ env.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("env.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn reusable_workflow_call_outputs_propagate_to_caller_needs() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ github.event.issue.title }}
+  consume:
+    needs: call
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ needs.call.outputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+    outputs:
+      title:
+        value: ${{ jobs.echo.outputs.title }}
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    outputs:
+      title: ${{ steps.set.outputs.title }}
+    steps:
+      - id: set
+        run: echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("needs.call.outputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/caller.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 }
