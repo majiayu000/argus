@@ -407,9 +407,7 @@ fn scan_step(
             )?);
         }
     }
-    if let Some(script) = get_string(step, "run") {
-        taint::scan_run_script(script, rel, ctx, &step_env, findings)?;
-    }
+    taint::scan_step_scripts(step, rel, ctx, &step_env, findings)?;
     Ok(composite_env)
 }
 

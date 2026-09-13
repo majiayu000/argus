@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 context-injection bypass where `actions/github-script`
+  puts executable JavaScript in `with.script`. Workflow scans now inspect
+  that input the same way as inline `run:` scripts, including env-indirection
+  and bracket-notation untrusted contexts.
 - Close the AGT-06 untrusted-checkout bypass where a `pull_request_target` or
   `workflow_run` workflow invokes a same-repo local composite that checks out
   an attacker-controlled pull-request or workflow-run ref. Workflow scans now
