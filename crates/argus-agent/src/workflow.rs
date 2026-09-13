@@ -2216,7 +2216,14 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
     if contains_unquoted_shell_pipeline(trimmed) {
         return None;
     }
-    let rest = trimmed.strip_prefix("echo")?.trim_start();
+    let rest = trimmed.strip_prefix("echo")?;
+    // Bash treats `echo` as the builtin only when it is a complete word.
+    // `echoTARGET=main` is a variable assignment (writes zero bytes through a
+    // bare redirect), not `echo TARGET=main`.
+    let rest = match rest.as_bytes().first() {
+        Some(byte) if byte.is_ascii_whitespace() => rest.trim_start(),
+        _ => return None,
+    };
     // Bash treats `-n` as the no-newline option only when it is a separate
     // word. `echo -nTARGET=main` prints the literal `-nTARGET=main`.
     let rest = match rest.strip_prefix("-n") {
@@ -4114,6 +4121,56 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_does_not_treat_glued_echo_as_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  echoTARGET=main >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(
+            opaque || !env.contains_key("TARGET") || env.get("TARGET").map(String::as_str)
+                != Some("main"),
+            "glued echoTARGET must not record a safe TARGET=main overwrite: written={written:?} opaque={opaque} env={env:?}"
+        );
+        assert_ne!(
+            env.get("TARGET").map(String::as_str),
+            Some("main"),
+            "glued echoTARGET must not clear attacker TARGET binding: {env:?}"
+        );
+    }
+
+    #[test]
+    fn extract_echo_payload_requires_command_boundary() {
+        assert_eq!(
+            extract_echo_payload("echo TARGET=main"),
+            Some("TARGET=main")
+        );
+        assert_eq!(
+            extract_echo_payload("echo\tTARGET=main"),
+            Some("TARGET=main")
+        );
+        assert_eq!(extract_echo_payload("echoTARGET=main"), None);
+        assert_eq!(extract_echo_payload("echo-n TARGET=main"), None);
+    }
+
+    #[test]
     fn parse_github_file_writes_treats_echo_pipeline_as_opaque() {
         let (writes, opaque) =
             parse_github_file_writes(r#"echo TARGET=main | true >> "$GITHUB_ENV""#, "GITHUB_ENV");
@@ -5509,6 +5566,54 @@ runs:
       run: |
         echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
         echo -nTARGET=main >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_glued_echo_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+        echoTARGET=main >> "$GITHUB_ENV"
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
