@@ -1681,7 +1681,7 @@ fn count_printf_conversions(format: &str) -> usize {
                 chars.next();
             }
             Some(_) => {
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if matches!(
                         next,
                         'd' | 'i'
