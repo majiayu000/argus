@@ -235,21 +235,19 @@ fn scan_workflow_inner(
                 },
                 &file.rel,
             )?;
-            if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-                apply_env_taints(
-                    &mut job_tainted_envs,
-                    env,
-                    TaintScope {
-                        envs: &empty_outputs,
-                        inputs: caller_taint.inputs,
-                        secrets: caller_taint.secrets,
-                        step_outputs: &empty_outputs,
-                        job_outputs: &tainted_job_outputs,
-                        matrix: &job_tainted_matrix,
-                    },
-                    &file.rel,
-                )?;
-            }
+            apply_job_level_env_taints(
+                &mut job_tainted_envs,
+                job,
+                TaintScope {
+                    envs: &empty_outputs,
+                    inputs: caller_taint.inputs,
+                    secrets: caller_taint.secrets,
+                    step_outputs: &empty_outputs,
+                    job_outputs: &tainted_job_outputs,
+                    matrix: &job_tainted_matrix,
+                },
+                &file.rel,
+            )?;
             if let Some(action) = get_string(job, "uses") {
                 // Map reusable-workflow `on.workflow_call.outputs` back onto the
                 // call job so later `needs.<call>.outputs.*` reads stay tainted.
@@ -371,21 +369,19 @@ fn scan_workflow_inner(
             },
             &file.rel,
         )?;
-        if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(
-                &mut job_tainted_envs,
-                env,
-                TaintScope {
-                    envs: &empty_outputs,
-                    inputs: caller_taint.inputs,
-                    secrets: caller_taint.secrets,
-                    step_outputs: &empty_outputs,
-                    job_outputs: &tainted_job_outputs,
-                    matrix: &job_tainted_matrix,
-                },
-                &file.rel,
-            )?;
-        }
+        apply_job_level_env_taints(
+            &mut job_tainted_envs,
+            job,
+            TaintScope {
+                envs: &empty_outputs,
+                inputs: caller_taint.inputs,
+                secrets: caller_taint.secrets,
+                step_outputs: &empty_outputs,
+                job_outputs: &tainted_job_outputs,
+                matrix: &job_tainted_matrix,
+            },
+            &file.rel,
+        )?;
         if let Some(action) = get_string(job, "uses") {
             check_action_ref(action, &file.rel, findings);
             // Local reusable workflows receive caller `with:` as `inputs.*` and
@@ -567,10 +563,13 @@ fn scan_action_metadata(
         }
         tainted_step_outputs.extend(from_composite.outputs.into_iter().chain(from_run));
     }
+    // Declared outputs may reference env vars written earlier via `$GITHUB_ENV`
+    // (for example `value: ${{ env.ALIAS }}`); evaluate against the final
+    // cross-step environment, not only the original caller env.
     let exported = collect_tainted_declared_outputs(
         root,
         TaintScope {
-            envs: caller_taint.envs,
+            envs: &cross_step_envs,
             inputs: caller_taint.inputs,
             secrets: &empty_secrets,
             step_outputs: &tainted_step_outputs,
@@ -873,6 +872,13 @@ fn collect_tainted_matrix(job: &Hash, taint: TaintScope<'_>, rel: &str) -> Resul
                         }
                     }
                 }
+            } else if let Some(expression) = value.as_str() {
+                // Expression-valued includes (e.g. `include: ${{ fromJSON(inputs.rows) }}`)
+                // introduce unknown row properties; conservatively taint every
+                // matrix property read when the expression carries untrusted data.
+                if value_carries_taint(expression, taint, rel)? {
+                    tainted.insert(MATRIX_EXPRESSION_UNKNOWN_KEYS.to_string());
+                }
             }
             continue;
         }
@@ -897,11 +903,41 @@ fn yaml_value_carries_taint(value: &Yaml, taint: TaintScope<'_>, rel: &str) -> R
             }
             Ok(false)
         }
-        // Non-string scalars are constants; nested mappings are unusual for
-        // matrix dimensions and are treated conservatively as non-tainted here
-        // (taint still flows via string leaves above).
+        // Object-valued matrix dimensions such as
+        // `target: [{ title: "${{ inputs.title }}" }]` carry taint in nested
+        // string leaves; recurse into mappings so `${{ matrix.target.title }}`
+        // still sees the parent dimension as tainted.
+        Yaml::Hash(map) => {
+            for (_, item) in map {
+                if yaml_value_carries_taint(item, taint, rel)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        // Non-string scalars are constants.
         _ => Ok(false),
     }
+}
+
+/// Apply job-level `env` and `container.env` taint. Container env vars are
+/// injected into every step's shell on container jobs, so they must enter the
+/// same job env taint set as `jobs.<id>.env`.
+fn apply_job_level_env_taints(
+    job_tainted_envs: &mut HashSet<String>,
+    job: &Hash,
+    parent: TaintScope<'_>,
+    rel: &str,
+) -> Result<()> {
+    if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
+        apply_env_taints(job_tainted_envs, env, parent, rel)?;
+    }
+    if let Some(container) = get(job, "container").and_then(Yaml::as_hash) {
+        if let Some(env) = get(container, "env").and_then(Yaml::as_hash) {
+            apply_env_taints(job_tainted_envs, env, parent, rel)?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_env_taints(
@@ -1118,6 +1154,9 @@ fn collect_shell_local_taints(script: &str, tainted_envs: &HashSet<String>) -> H
                 next_locals.insert(key.clone());
                 working.insert(key);
             } else {
+                // Later clean assignments replace earlier aliases; track the
+                // final ordered state rather than accumulating every taint.
+                next_locals.remove(&key);
                 working.remove(&key);
             }
         }
@@ -4782,6 +4821,218 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn container_env_taint_propagates_into_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      env:
+        TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "out=$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn composite_github_env_declared_output_propagates_to_caller() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        uses: ./.github/actions/echo
+        with:
+          title: ${{ github.event.issue.title }}
+      - run: echo "${{ steps.action.outputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/echo/action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Export env written via GITHUB_ENV
+inputs:
+  title:
+    required: true
+outputs:
+  title:
+    value: ${{ env.ALIAS }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "ALIAS=${{ inputs.title }}" >> "$GITHUB_ENV"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.action.outputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/caller.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn expression_valued_matrix_include_fromjson_propagates_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      rows: ${{ toJSON(github.event) }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      rows:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.rows) }}
+    steps:
+      - run: echo "${{ matrix.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("matrix.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn object_valued_matrix_dimension_propagates_nested_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ github.event.issue.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - title: "${{ inputs.title }}"
+    steps:
+      - run: echo "${{ matrix.target.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("matrix.target")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn shell_local_alias_clean_overwrite_clears_prior_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          ALIAS=$TITLE
+          ALIAS=fixed
+          echo "out=$ALIAS" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.out }}"
+"#,
+        );
+
+        assert!(findings.iter().all(|finding| {
+            finding.rule_id != "AGT-06-workflow-context-injection"
+                || !finding.detail.contains("steps.set.outputs.out")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 
     #[test]
