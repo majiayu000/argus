@@ -1101,6 +1101,14 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        // `{ echo ...; echo ...; } >> $GITHUB_OUTPUT` (single- or multi-line).
+        if let Some((body, next_index)) =
+            extract_brace_group_redirect_body(&lines, index - 1, file_var)
+        {
+            index = next_index;
+            writes.extend(parse_redirect_free_github_file_commands(&body));
+            continue;
+        }
         let Some(command) = split_github_file_redirect(trimmed, file_var) else {
             continue;
         };
@@ -1116,9 +1124,239 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String
         }
         if let Some(write) = extract_printf_github_output(command) {
             writes.push(write);
+            continue;
+        }
+        if let Some(write) = extract_bare_string_github_output(command) {
+            writes.push(write);
         }
     }
     writes
+}
+
+/// Collect writes from brace-group bodies where only the closing `}` is redirected.
+fn parse_redirect_free_github_file_commands(body: &str) -> Vec<(String, String, bool)> {
+    let mut writes = Vec::new();
+    let commands = split_shell_group_commands(body);
+    let mut index = 0;
+    while index < commands.len() {
+        let command = commands[index].trim();
+        index += 1;
+        if command.is_empty() || command.starts_with('#') {
+            continue;
+        }
+        if let Some((name, delimiter)) = extract_echo_multiline_header(command) {
+            let (value, shell_expands) = collect_multiline_github_file_body_without_redirect(
+                &commands, &mut index, &delimiter,
+            );
+            writes.push((name, value, shell_expands));
+            continue;
+        }
+        if let Some(write) = extract_echo_github_output(command) {
+            writes.push(write);
+            continue;
+        }
+        if let Some(write) = extract_printf_github_output(command) {
+            writes.push(write);
+            continue;
+        }
+        if let Some(write) = extract_bare_string_github_output(command) {
+            writes.push(write);
+        }
+    }
+    writes
+}
+
+/// Split a `{ ... }` body on newlines and top-level `;` separators.
+fn split_shell_group_commands(body: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut start = 0;
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        let mut quote: Option<u8> = None;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if let Some(current) = quote {
+                if byte == current {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+                index += 1;
+                continue;
+            }
+            if byte == b';' {
+                let piece = line[start..index].trim();
+                if !piece.is_empty() {
+                    commands.push(piece.to_string());
+                }
+                index += 1;
+                start = index;
+                continue;
+            }
+            index += 1;
+        }
+        let piece = line[start..].trim();
+        if !piece.is_empty() {
+            commands.push(piece.to_string());
+        }
+    }
+    commands
+}
+
+/// Parse `{ ... } >> $GITHUB_*` spanning one or more lines. Returns the group
+/// body and the index of the line after the closing redirect.
+fn extract_brace_group_redirect_body(
+    lines: &[&str],
+    start_index: usize,
+    file_var: &str,
+) -> Option<(String, usize)> {
+    let first = lines.get(start_index)?.trim();
+    if !first.starts_with('{') {
+        return None;
+    }
+
+    // Fast path: open brace and redirected close share one line.
+    if let Some((inner, _)) = split_closing_brace_redirect(first[1..].trim_start(), file_var) {
+        return Some((inner.to_string(), start_index + 1));
+    }
+
+    let mut body = String::new();
+    // Remainder after `{` on the opening line.
+    let after_open = first[1..].trim();
+    if !after_open.is_empty() {
+        body.push_str(after_open);
+    }
+
+    for (offset, line) in lines[start_index + 1..].iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some((before, _)) = split_line_closing_brace_redirect(trimmed, file_var) {
+            if !before.is_empty() {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(before);
+            }
+            let body = body.trim().trim_end_matches(';').trim().to_string();
+            return Some((body, start_index + 1 + offset + 1));
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(trimmed);
+    }
+    None
+}
+
+/// Split `inner } >> $GITHUB_*` when the open brace and redirect share a line.
+fn split_closing_brace_redirect<'a>(
+    after_open: &'a str,
+    file_var: &str,
+) -> Option<(&'a str, &'a str)> {
+    split_line_closing_brace_redirect(after_open, file_var)
+}
+
+/// Find a top-level `} >> $GITHUB_*` on `line` and return the text before `}`.
+fn split_line_closing_brace_redirect<'a>(
+    line: &'a str,
+    file_var: &str,
+) -> Option<(&'a str, &'a str)> {
+    let mut quote: Option<u8> = None;
+    let bytes = line.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(current) = quote {
+            if byte == current {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'{' {
+            depth += 1;
+            index += 1;
+            continue;
+        }
+        if byte == b'}' {
+            if depth == 0 {
+                let inner = line[..index].trim().trim_end_matches(';').trim();
+                let rest = line[index + 1..].trim_start();
+                if is_github_file_redirect_target(rest, file_var) {
+                    return Some((inner, rest));
+                }
+                return None;
+            }
+            depth -= 1;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_github_file_redirect_target(after_close: &str, file_var: &str) -> bool {
+    let trimmed = after_close.trim_start();
+    if !trimmed.starts_with(">>") {
+        return false;
+    }
+    let after = trimmed.trim_start_matches('>').trim();
+    let target = strip_wrapping_shell_quotes(after).trim();
+    let target = target
+        .split_whitespace()
+        .next()
+        .map(strip_wrapping_shell_quotes)
+        .unwrap_or(target);
+    let dollar = format!("${file_var}");
+    let braced = format!("${{{file_var}}}");
+    let pwsh = format!("$env:{file_var}");
+    target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh)
+}
+
+/// Collect multiline body lines that are bare `echo` commands (no per-line redirect).
+fn collect_multiline_github_file_body_without_redirect(
+    commands: &[String],
+    index: &mut usize,
+    delimiter: &str,
+) -> (String, bool) {
+    let mut value = String::new();
+    let mut shell_expands = false;
+    while *index < commands.len() {
+        let command = commands[*index].trim();
+        *index += 1;
+        if command.is_empty() || command.starts_with('#') {
+            continue;
+        }
+        let Some(payload) = extract_echo_payload(command) else {
+            break;
+        };
+        let (payload, expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
+            Some((inner, b'\'')) => (inner, false),
+            Some((inner, _)) => (inner, true),
+            None => (payload.trim(), true),
+        };
+        if payload == delimiter {
+            break;
+        }
+        if !value.is_empty() {
+            value.push('\n');
+        }
+        value.push_str(payload);
+        shell_expands = shell_expands || expands;
+    }
+    (value, shell_expands)
 }
 
 /// Recognize `echo 'name<<EOF'` headers used by GitHub's multiline env-file form.
@@ -1204,6 +1442,19 @@ fn extract_echo_github_output(command: &str) -> Option<(String, String, bool)> {
         return None;
     }
     Some((name.to_string(), value.trim().to_string(), shell_expands))
+}
+
+/// Recognize PowerShell string redirects such as
+/// `"title=$env:TITLE" >> $env:GITHUB_OUTPUT` (no `echo`/`printf`).
+fn extract_bare_string_github_output(command: &str) -> Option<(String, String, bool)> {
+    let (payload, shell_expands) = strip_wrapping_shell_quote_style(command.trim())?;
+    let (name, value) = payload.split_once('=')?;
+    let name = name.trim();
+    if !is_github_ident(name) {
+        return None;
+    }
+    let expands = shell_expands != b'\'';
+    Some((name.to_string(), value.trim().to_string(), expands))
 }
 
 /// Recognize `printf 'name=%s\n' "$VALUE"` (and similar) redirects to
@@ -1395,7 +1646,10 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
 }
 
 fn strip_pwsh_env_prefix(after_dollar: &str) -> Option<&str> {
-    if after_dollar.len() >= 4 && after_dollar[..4].eq_ignore_ascii_case("env:") {
+    // Use `get` so a multi-byte scalar straddling offset 4 (e.g. `$é€`) returns
+    // None instead of panicking on a non-char boundary.
+    let prefix = after_dollar.get(..4)?;
+    if prefix.eq_ignore_ascii_case("env:") {
         Some(&after_dollar[4..])
     } else {
         None
@@ -3479,6 +3733,115 @@ jobs:
       - id: set
         shell: pwsh
         run: echo "title=$env:TITLE" >> $env:GITHUB_OUTPUT
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn pwsh_prefix_scan_tolerates_utf8_before_env_marker() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=$é€$TITLE" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn grouped_multiline_github_output_redirect_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          { echo 'title<<EOF'
+            echo "$TITLE"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn grouped_oneline_multiline_github_output_redirect_propagates_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: "{ echo 'title<<EOF'; echo \"$TITLE\"; echo EOF; } >> \"$GITHUB_OUTPUT\""
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn bare_pwsh_string_github_output_redirect_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: pwsh
+        run: '"title=$env:TITLE" >> $env:GITHUB_OUTPUT'
       - run: echo "${{ steps.set.outputs.title }}"
 "#,
         );
