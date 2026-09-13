@@ -66,8 +66,13 @@
 //! unconditional `exit`/`return` is recognized only in shell command position
 //! (not inside quoted arguments, command substitutions, or subshells), heredoc
 //! payload lines — including every payload from multi-heredoc openers such as
-//! `cat <<A <<B` — are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands,
-//! and
+//! `cat <<A <<B`, and after quote-removal of backslash-quoted delimiters such
+//! as `cat <<\EOF` — are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands,
+//! single `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes guarded by `&&`/`||`/branching
+//! stay unresolved even when only one assignment is present,
+//! echo payloads that include an unquoted shell pipeline
+//! (`echo TARGET=main | true >> "$GITHUB_ENV"`) are treated as opaque rather
+//! than literal assignments, and
 //! unresolved `needs.*.outputs.*` checkout refs —
 //! including whole-context `fromJSON(toJSON(needs))…` reconstruction — fail
 //! closed. Unresolved `steps.*.outputs.*`, including whole-context
@@ -890,6 +895,8 @@ fn collect_step_output_bindings(
 /// shell expansions invalidate any earlier binding for the same name (last write
 /// wins, and an untracked last write must not leave a stale safe value). Writes
 /// under shell control flow that compete for the same name are left unresolved.
+/// Writes under shell control flow — including a single guarded assignment —
+/// are left unresolved rather than trusted.
 /// An opaque `$GITHUB_ENV` redirect that cannot recover an assignment name can
 /// replace any key, so every inherited binding is dropped rather than retaining
 /// a stale safe value.
@@ -954,11 +961,13 @@ fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> 
 /// explicit unresolved markers (`None`).
 ///
 /// Linear scripts keep last-write-wins, with untracked shell expansions clearing
-/// any earlier safe binding. Scripts with shell control flow (`if`/`else`/…)
-/// cannot prove which branch runs, so competing or untracked writes for the
-/// same name stay unresolved instead of retaining a later textual binding.
-/// Unconditional `exit`/`return` truncates the script so only reachable
-/// (pre-exit) writes are considered; post-exit dead writes are ignored.
+/// any earlier safe binding. Scripts with shell control flow (`if`/`else`/…
+/// /`&&`/`||`) cannot prove which branch runs, so every write under that
+/// control flow stays unresolved — including a single textual assignment such
+/// as `true || echo TARGET=main >> "$GITHUB_ENV"` that may never execute while
+/// the script still succeeds. Unconditional `exit`/`return` truncates the
+/// script so only reachable (pre-exit) writes are considered; post-exit dead
+/// writes are ignored.
 fn resolve_github_file_write_bindings(
     script: &str,
     file_var: &str,
@@ -972,37 +981,14 @@ fn resolve_github_file_write_bindings(
     }
     let script = script_reachable_before_unconditional_exit(script);
     if script_has_shell_control_flow(script) {
-        let mut grouped: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
-        for (name, raw_value, shell_expands) in writes {
-            grouped
-                .entry(name)
-                .or_default()
-                .push((raw_value, shell_expands));
-        }
-        return grouped
+        // Even one write is uncertain under unresolved control flow; retaining a
+        // later safe binding would allow an inherited attacker value to persist
+        // at runtime while the scan treats the key as overwritten.
+        return writes
             .into_iter()
-            .map(|(name, entries)| {
-                if opaque_redirect || entries.len() != 1 {
-                    return (name, None);
-                }
-                let Some((raw_value, shell_expands)) = entries.into_iter().next() else {
-                    return (name, None);
-                };
-                // Single-quoted echo payloads are shell literals (`$` / backticks
-                // do not expand), so they remain trackable.
-                if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
-                    return (name, None);
-                }
-                (
-                    name,
-                    Some(resolve_context_expressions(
-                        &raw_value,
-                        input_bindings,
-                        env_bindings,
-                        step_outputs,
-                    )),
-                )
-            })
+            .map(|(name, _, _)| (name, None))
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
             .collect();
     }
 
@@ -1320,6 +1306,13 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
                 }
                 continue;
             };
+            // `echo TARGET=main | true >> "$GITHUB_ENV"` redirects the right-hand
+            // side; treating the whole left-hand command as an echo assignment
+            // would record a false safe write.
+            if contains_unquoted_shell_pipeline(command) {
+                opaque_redirect = true;
+                continue;
+            }
             let Some(payload) = extract_echo_payload(command) else {
                 if let Some(name) = infer_github_file_assignment_name(command) {
                     // Force untracked invalidation for this name (last write wins).
@@ -1410,7 +1403,8 @@ fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
     delimiters
 }
 
-/// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, or `"EOF"`.
+/// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, `"EOF"`, or
+/// backslash-quoted forms such as `\EOF` (runtime terminator `EOF`).
 fn parse_heredoc_word(value: &str) -> Option<(String, usize)> {
     let bytes = value.as_bytes();
     if bytes.is_empty() {
@@ -1448,9 +1442,27 @@ fn parse_heredoc_word(value: &str) -> Option<(String, usize)> {
             if end == 0 {
                 return None;
             }
-            Some((value[..end].to_string(), end))
+            // Bash quote-removal on bare words turns `\EOF` into the terminator
+            // `EOF`; keeping the backslash would never leave heredoc state.
+            Some((strip_backslash_escapes(&value[..end]), end))
         }
     }
+}
+
+/// Apply Bash-style backslash quote removal to a bare heredoc delimiter word.
+fn strip_backslash_escapes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 /// Split a shell line on unquoted `;`, `&&`, and `||` so multi-redirect command
@@ -1847,6 +1859,11 @@ fn first_shell_token(value: &str) -> Option<&str> {
 
 fn extract_echo_payload(command: &str) -> Option<&str> {
     let trimmed = command.trim();
+    // Pipelines are handled before this helper; keep the guard so callers that
+    // pass a raw command cannot record `echo … | …` as a literal assignment.
+    if contains_unquoted_shell_pipeline(trimmed) {
+        return None;
+    }
     let rest = trimmed.strip_prefix("echo")?.trim_start();
     let rest = rest
         .strip_prefix("-n")
@@ -1857,6 +1874,36 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
     } else {
         Some(rest)
     }
+}
+
+/// True when `command` contains an unquoted `|` pipeline operator.
+fn contains_unquoted_shell_pipeline(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'|' if !in_single && !in_double => {
+                // `||` is boolean control flow, not a pipeline.
+                if index + 1 < bytes.len() && bytes[index + 1] == b'|' {
+                    index += 2;
+                    continue;
+                }
+                return true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Strip wrapping shell quotes and report whether the shell would expand the payload.
@@ -3347,6 +3394,232 @@ run: |
             Some("${{ github.event.pull_request.head.sha }}"),
             "second heredoc payload must not be treated as a real GITHUB_ENV write: {env:?}"
         );
+    }
+
+    #[test]
+    fn apply_github_env_writes_invalidates_single_control_flow_guarded_write() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: true || echo TARGET=main >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert!(
+            !env.contains_key("TARGET"),
+            "single control-flow-guarded write must not overwrite inherited taint: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_tracks_after_backslash_quoted_heredoc_delimiter() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  cat <<\EOF
+  ignored
+  EOF
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "backslash-quoted heredoc must end so later attacker write is tracked: {env:?}"
+        );
+    }
+
+    #[test]
+    fn parse_github_file_writes_treats_echo_pipeline_as_opaque() {
+        let (writes, opaque) =
+            parse_github_file_writes(r#"echo TARGET=main | true >> "$GITHUB_ENV""#, "GITHUB_ENV");
+        assert!(
+            opaque,
+            "echo pipeline redirect must be opaque rather than a literal assignment"
+        );
+        assert!(
+            writes.is_empty(),
+            "echo pipeline must not record a false safe write: {writes:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_single_control_flow_env_write_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: true || echo TARGET=main >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_backslash_heredoc_then_env_write_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=main" >> "$GITHUB_ENV"
+        cat <<\EOF
+        ignored
+        EOF
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_echo_pipeline_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: echo TARGET=main | true >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
     }
 
     #[test]
