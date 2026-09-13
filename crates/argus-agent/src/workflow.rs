@@ -50,17 +50,20 @@
 //! to the invoking step's transient `env:` override,
 //! steps with a statically false `if:` do not apply env/output side effects,
 //! non-literal/`if` conditions treat env writes as uncertain (invalidate),
-//! steps with no `if:` (implicit `success()`) are not treated as definite when a
-//! later step can still run after failure (`always()` / `failure()` /
-//! `cancelled()`), so a skipped safe `$GITHUB_ENV` overwrite cannot mask taint
-//! for an `if: always()` checkout,
+//! steps with no `if:` or bare `if: true` / `${{ true }}` (still gated by
+//! GitHub's implicit `success()` unless a status function is present) are not
+//! treated as definite when a later step can still run after failure
+//! (`always()` / `failure()` / `cancelled()`), so a skipped safe `$GITHUB_ENV`
+//! overwrite cannot mask taint for an `if: always()` checkout,
 //! braced parameter expansions such as `${GITHUB_ENV:?missing}` are recognized
 //! as environment-file targets,
 //! `&&`/`||` multi-redirect lists are fully parsed (without splitting through
 //! unquoted `#` comments), later stdout redirections override an earlier
 //! `>> $GITHUB_ENV`/`$GITHUB_OUTPUT` in the same command, unconditional
 //! `exit`/`return` is recognized only in shell command position (not inside
-//! quoted arguments), and unresolved `needs.*.outputs.*` checkout refs —
+//! quoted arguments, command substitutions, or subshells), heredoc payload
+//! lines are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands, and
+//! unresolved `needs.*.outputs.*` checkout refs —
 //! including whole-context `fromJSON(toJSON(needs))…` reconstruction — fail
 //! closed. Unresolved `steps.*.outputs.*`, including whole-context
 //! `fromJSON(toJSON(steps))…` reconstruction, unresolved `env` access, and
@@ -582,21 +585,25 @@ fn step_condition_is_always_false(step: &Hash) -> bool {
 /// True when a step has no `if:` or a statically true condition, so side
 /// effects definitely run. Any other condition is treated as uncertain.
 ///
-/// Absent `if:` is GitHub's implicit `success()`. When `later_post_failure` is
-/// set because a later step uses `always()` / `failure()` / `cancelled()`, that
-/// implicit gate is not definite: a prior failure would skip the write while
-/// the later step still runs.
+/// Absent `if:` is GitHub's implicit `success()`. Bare YAML `if: true` and
+/// `${{ true }}` are also still gated by that implicit status check unless a
+/// status function (`always()` / `failure()` / `cancelled()`) is present. When
+/// `later_post_failure` is set because a later step uses such a status
+/// function, that implicit gate is not definite: a prior failure would skip
+/// the write while the later step still runs.
 fn step_condition_is_definitely_executed(step: &Hash, later_post_failure: bool) -> bool {
     match get(step, "if") {
         None => !later_post_failure,
-        Some(Yaml::Boolean(true)) => true,
+        // Bare `true` still requires implicit `success()` — same as absent `if:`.
+        Some(Yaml::Boolean(true)) => !later_post_failure,
         Some(Yaml::Boolean(false)) => false,
         Some(value) => {
             let Some(condition) = value.as_str() else {
                 return false;
             };
             if is_always_true_condition(condition) {
-                return true;
+                // `${{ true }}` / `true` do not override the success() gate.
+                return !later_post_failure;
             }
             if later_post_failure && is_success_status_condition(condition) {
                 return false;
@@ -607,9 +614,12 @@ fn step_condition_is_definitely_executed(step: &Hash, later_post_failure: bool) 
 }
 
 /// True when a step's `if:` can still evaluate after a prior step failure.
+///
+/// Only status check functions override GitHub's default `success()` gate;
+/// bare `true` does not.
 fn step_can_run_after_failure(step: &Hash) -> bool {
     match get(step, "if") {
-        Some(Yaml::Boolean(true)) => true,
+        Some(Yaml::Boolean(true)) => false,
         Some(value) => value.as_str().is_some_and(condition_can_run_after_failure),
         _ => false,
     }
@@ -617,10 +627,7 @@ fn step_can_run_after_failure(step: &Hash) -> bool {
 
 fn condition_can_run_after_failure(condition: &str) -> bool {
     let atom = expression_condition_atom(condition).to_ascii_lowercase();
-    atom == "true"
-        || atom.contains("always()")
-        || atom.contains("failure()")
-        || atom.contains("cancelled()")
+    atom.contains("always()") || atom.contains("failure()") || atom.contains("cancelled()")
 }
 
 fn is_always_false_condition(condition: &str) -> bool {
@@ -1036,39 +1043,71 @@ fn script_has_shell_control_flow(script: &str) -> bool {
 /// Prefix of `script` that can still run before an unconditional `exit` /
 /// `return` in shell command position. Writes after that command are
 /// unreachable; writes before it persist to later workflow steps. Quoted
-/// arguments such as `echo "exit"` must not truncate the script.
+/// arguments such as `echo "exit"`, and `exit`/`return` inside command
+/// substitutions (`$(…)`) or subshells (`(…)`), must not truncate the outer
+/// script.
 fn script_reachable_before_unconditional_exit(script: &str) -> &str {
     let blanked = blank_github_expressions_preserving_len(script);
     let bytes = blanked.as_bytes();
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_backtick = false;
+    let mut subshell_depth: usize = 0;
     let mut at_command_position = true;
     while index < bytes.len() {
         let byte = bytes[index];
         match byte {
-            b'\\' if in_double && index + 1 < bytes.len() => {
+            b'\\' if (in_double || in_backtick) && index + 1 < bytes.len() => {
                 index += 2;
                 at_command_position = false;
                 continue;
             }
-            b'\'' if !in_double => {
+            b'\'' if !in_double && !in_backtick => {
                 in_single = !in_single;
                 at_command_position = false;
             }
-            b'"' if !in_single => {
+            b'"' if !in_single && !in_backtick => {
                 in_double = !in_double;
                 at_command_position = false;
+            }
+            b'`' if !in_single && !in_double => {
+                // Backtick command substitution: exit inside does not end the outer shell.
+                in_backtick = !in_backtick;
+                at_command_position = in_backtick;
+            }
+            b'$' if !in_single
+                && !in_double
+                && !in_backtick
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'('
+                && !(index + 2 < bytes.len() && bytes[index + 2] == b'(') =>
+            {
+                // `$(…)` command substitution (not arithmetic `$((…))`).
+                subshell_depth += 1;
+                index += 2;
+                at_command_position = true;
+                continue;
             }
             b'\n' if !in_single && !in_double => {
                 at_command_position = true;
             }
-            b';' | b'|' | b'&' | b'(' if !in_single && !in_double => {
-                // `&&` / `||` / `&` / `|` / `;` / `(` start a new command.
+            b';' | b'|' | b'&' if !in_single && !in_double => {
+                // `&&` / `||` / `&` / `|` / `;` start a new command.
                 at_command_position = true;
+            }
+            b'(' if !in_single && !in_double && !in_backtick => {
+                // Explicit `(…)` subshell — exit only ends the subshell.
+                subshell_depth += 1;
+                at_command_position = true;
+            }
+            b')' if !in_single && !in_double && !in_backtick => {
+                subshell_depth = subshell_depth.saturating_sub(1);
+                at_command_position = false;
             }
             b'#' if !in_single
                 && !in_double
+                && !in_backtick
                 && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
             {
                 // Rest of the line is a comment.
@@ -1083,9 +1122,14 @@ fn script_reachable_before_unconditional_exit(script: &str) -> &str {
                     continue;
                 }
                 if shell_exit_or_return_at(&blanked[index..]).is_some() {
-                    return script.get(..index).unwrap_or(script);
+                    // Only truncate for outer-shell exit/return, not nested ones.
+                    if subshell_depth == 0 && !in_backtick {
+                        return script.get(..index).unwrap_or(script);
+                    }
+                    at_command_position = false;
+                } else {
+                    at_command_position = false;
                 }
-                at_command_position = false;
             }
             _ => {
                 if !in_single && !in_double && !byte.is_ascii_whitespace() {
@@ -1220,17 +1264,30 @@ fn blank_github_expression_regions(value: &str) -> String {
 /// writes such as `printf 'ref=%s\n' "$TARGET"` still contribute an untracked
 /// write for the inferred name so earlier safe bindings are invalidated.
 /// Semicolon-separated command lists on one line are split so each redirect is
-/// processed.
+/// processed. Heredoc payload lines are never treated as executable shell
+/// commands (they are stdin to the producer).
 fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, String, bool)>, bool) {
     // Ignore unreachable post-exit writes while still parsing the reachable prefix.
     let script = script_reachable_before_unconditional_exit(script);
     let mut writes = Vec::new();
     let mut opaque_redirect = false;
+    let mut heredoc_delimiter: Option<HeredocDelimiter> = None;
     for line in script.lines() {
+        if let Some(delimiter) = heredoc_delimiter.as_ref() {
+            if is_heredoc_terminator(line, delimiter) {
+                heredoc_delimiter = None;
+            }
+            // Payload lines are not executed by the shell.
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        // Capture a heredoc opener on this line before parsing redirects so
+        // subsequent payload lines are skipped even when the opener itself is
+        // an opaque `cat <<EOF >> "$GITHUB_ENV"` writer.
+        let pending_heredoc = extract_heredoc_delimiter(line);
         for segment in split_shell_list_segments(trimmed) {
             let segment = segment.trim();
             if segment.is_empty() || segment.starts_with('#') {
@@ -1270,8 +1327,113 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
             }
             writes.push((name.to_string(), value.trim().to_string(), shell_expands));
         }
+        if let Some(delimiter) = pending_heredoc {
+            heredoc_delimiter = Some(delimiter);
+        }
     }
     (writes, opaque_redirect)
+}
+
+/// Heredoc end-marker captured from a `<<` / `<<-` opener.
+struct HeredocDelimiter {
+    /// Literal terminator word (quotes already stripped).
+    word: String,
+    /// `<<-` strips leading tabs from the terminator line.
+    strip_tabs: bool,
+}
+
+/// True when `line` ends the active heredoc.
+fn is_heredoc_terminator(line: &str, delimiter: &HeredocDelimiter) -> bool {
+    let candidate = if delimiter.strip_tabs {
+        line.trim_start_matches('\t')
+    } else {
+        line
+    };
+    candidate == delimiter.word
+}
+
+/// Find an unquoted `<<[-]?` heredoc opener and return its delimiter word.
+fn extract_heredoc_delimiter(line: &str) -> Option<HeredocDelimiter> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'<' if !in_single
+                && !in_double
+                && index + 1 < bytes.len()
+                && bytes[index + 1] == b'<' =>
+            {
+                index += 2;
+                let strip_tabs = index < bytes.len() && bytes[index] == b'-';
+                if strip_tabs {
+                    index += 1;
+                }
+                while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return None;
+                }
+                let (word, _) = parse_heredoc_word(&line[index..])?;
+                return Some(HeredocDelimiter { word, strip_tabs });
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, or `"EOF"`.
+fn parse_heredoc_word(value: &str) -> Option<(String, usize)> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    match bytes[0] {
+        b'\'' | b'"' => {
+            let quote = bytes[0];
+            let mut end = 1;
+            while end < bytes.len() && bytes[end] != quote {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                return None;
+            }
+            Some((value[1..end].to_string(), end + 1))
+        }
+        _ => {
+            let mut end = 0;
+            while end < bytes.len() {
+                let byte = bytes[end];
+                if byte.is_ascii_whitespace()
+                    || byte == b';'
+                    || byte == b'&'
+                    || byte == b'|'
+                    || byte == b'<'
+                    || byte == b'>'
+                    || byte == b'('
+                    || byte == b')'
+                {
+                    break;
+                }
+                end += 1;
+            }
+            if end == 0 {
+                return None;
+            }
+            Some((value[..end].to_string(), end))
+        }
+    }
 }
 
 /// Split a shell line on unquoted `;`, `&&`, and `||` so multi-redirect command
@@ -2969,6 +3131,75 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_does_not_treat_command_substitution_exit_as_terminator() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  x=$(exit 0)
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        env.insert("TARGET".to_string(), "main".to_string());
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "exit inside $(…) must not truncate later GITHUB_ENV write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_heredoc_payload_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  cat <<'EOF'
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  EOF
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "heredoc payload must not be treated as a real GITHUB_ENV write: {env:?}"
+        );
+    }
+
+    #[test]
     fn split_shell_list_segments_ignores_operators_inside_comments() {
         let segments = split_shell_list_segments(
             r#"echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV" # ; echo "TARGET=main" >> "$GITHUB_ENV""#,
@@ -3753,6 +3984,154 @@ runs:
       run: echo "TARGET=main" >> "$GITHUB_ENV"
     - if: ${{ always() }}
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_yaml_true_overwrite_before_always_checkout_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - if: true
+      shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - if: ${{ always() }}
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_command_substitution_exit_env_write_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        x=$(exit 0)
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_heredoc_payload_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+        cat <<'EOF'
+        echo "TARGET=main" >> "$GITHUB_ENV"
+        EOF
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
 "#
