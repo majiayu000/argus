@@ -828,11 +828,8 @@ fn apply_github_env_writes(
     let Some(script) = get_string(step, "run") else {
         return (BTreeSet::new(), false);
     };
-    // Unconditional exit/return makes later (and conservatively all) writes in
-    // this script unreachable; do not clear or update inherited bindings.
-    if script_has_unconditional_shell_exit(script) {
-        return (BTreeSet::new(), false);
-    }
+    // Only the reachable prefix before an unconditional exit/return is applied;
+    // post-exit writes are dead while pre-exit writes still persist to later steps.
     let (_, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
     if opaque_redirect {
         env_bindings.clear();
@@ -865,10 +862,6 @@ fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> 
     let Some(script) = get_string(step, "run") else {
         return BTreeSet::new();
     };
-    // Unreachable scripts under exit/return do not mutate the env file.
-    if script_has_unconditional_shell_exit(script) {
-        return BTreeSet::new();
-    }
     let (writes, opaque_redirect) = parse_github_file_writes(script, "GITHUB_ENV");
     if opaque_redirect {
         env_bindings.clear();
@@ -889,9 +882,8 @@ fn invalidate_github_env_writes(step: &Hash, env_bindings: &mut EnvBindings) -> 
 /// any earlier safe binding. Scripts with shell control flow (`if`/`else`/…)
 /// cannot prove which branch runs, so competing or untracked writes for the
 /// same name stay unresolved instead of retaining a later textual binding.
-/// Unconditional `exit`/`return` makes later textual writes unreachable while
-/// GitHub still continues to subsequent steps, so every write from that script
-/// stays unresolved rather than applying dead-code bindings.
+/// Unconditional `exit`/`return` truncates the script so only reachable
+/// (pre-exit) writes are considered; post-exit dead writes are ignored.
 fn resolve_github_file_write_bindings(
     script: &str,
     file_var: &str,
@@ -903,13 +895,7 @@ fn resolve_github_file_write_bindings(
     if writes.is_empty() {
         return Vec::new();
     }
-    if script_has_unconditional_shell_exit(script) {
-        // Unreachable writes must not update bindings. Returning no entries leaves
-        // earlier values intact (matching the shell) rather than applying dead
-        // safe overwrites or spuriously clearing prior taint.
-        let _ = (writes, opaque_redirect);
-        return Vec::new();
-    }
+    let script = script_reachable_before_unconditional_exit(script);
     if script_has_shell_control_flow(script) {
         let mut grouped: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
         for (name, raw_value, shell_expands) in writes {
@@ -991,18 +977,51 @@ fn script_has_shell_control_flow(script: &str) -> bool {
     pattern.is_match(&blank_github_expression_regions(script))
 }
 
-/// True when `script` contains an unconditional shell `exit` or `return`.
-///
-/// Later writes in the same step are unreachable, but subsequent workflow steps
-/// still run — so applying those dead writes would fail open.
-fn script_has_unconditional_shell_exit(script: &str) -> bool {
+/// Prefix of `script` that can still run before an unconditional `exit` /
+/// `return`. Writes after that command are unreachable; writes before it
+/// persist to later workflow steps.
+fn script_reachable_before_unconditional_exit(script: &str) -> &str {
     static EXIT_COMMAND: OnceLock<Regex> = OnceLock::new();
     let pattern = EXIT_COMMAND.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
         Regex::new(r"(?m)(?:^|[^A-Za-z0-9_])(?:exit|return)(?:$|[^A-Za-z0-9_])")
             .expect("shell exit pattern compiles")
     });
-    pattern.is_match(&blank_github_expression_regions(script))
+    let blanked = blank_github_expressions_preserving_len(script);
+    let Some(matched) = pattern.find(&blanked) else {
+        return script;
+    };
+    // Drop a leading boundary character so the cut is at `exit`/`return`.
+    let keyword_offset = match matched.as_str().as_bytes().first() {
+        Some(b'e' | b'r') => 0,
+        _ => 1,
+    };
+    let cut = matched.start() + keyword_offset;
+    script.get(..cut).unwrap_or(script)
+}
+
+/// Blank `${{ … }}` regions with spaces of equal length so match offsets into
+/// the blanked string remain valid indexes into the original script.
+fn blank_github_expressions_preserving_len(value: &str) -> String {
+    let mut chars = value.as_bytes().to_vec();
+    let mut cursor = 0;
+    while let Some(rel_start) = value[cursor..].find("${{") {
+        let start = cursor + rel_start;
+        let after_open = start + 3;
+        let end = match find_expression_close(&value[after_open..]) {
+            Some(rel_end) => after_open + rel_end + 2,
+            None => chars.len(),
+        };
+        for byte in &mut chars[start..end] {
+            *byte = b' ';
+        }
+        if end >= chars.len() {
+            break;
+        }
+        cursor = end;
+    }
+    // Only ASCII `${{` / `}}` regions are blanked, so UTF-8 stays valid.
+    String::from_utf8(chars).expect("blanking ASCII expression markers preserves UTF-8")
 }
 
 /// True when `value` still has `$...`, backtick command substitution, or
@@ -1085,6 +1104,8 @@ fn blank_github_expression_regions(value: &str) -> String {
 /// Semicolon-separated command lists on one line are split so each redirect is
 /// processed.
 fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, String, bool)>, bool) {
+    // Ignore unreachable post-exit writes while still parsing the reachable prefix.
+    let script = script_reachable_before_unconditional_exit(script);
     let mut writes = Vec::new();
     let mut opaque_redirect = false;
     for line in script.lines() {
@@ -1200,11 +1221,13 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
     let index = line.find(">>")?;
     let (before, after) = line.split_at(index);
     let after = after.trim_start_matches('>').trim();
-    // Trailing `# ...` comments and operators after the redirect target are
-    // valid Bash; exact-matching the whole suffix would drop the write and
-    // retain an earlier safe binding (fail-open for AGT-06).
+    // Trailing `# ...` comments after the redirect target are valid Bash when
+    // `#` begins a new word (whitespace-bounded). Exact-matching the whole
+    // suffix would drop the write and retain an earlier safe binding.
     let after = strip_trailing_shell_comment(after).trim();
     let target_token = first_shell_token(after)?;
+    // `"$GITHUB_OUTPUT"#backup` is one shell word (included by first_shell_token)
+    // and will not match a clean environment-file target.
     let target = strip_wrapping_shell_quotes(target_token).trim();
     if is_github_file_redirect_target(target, file_var) {
         Some(before.trim())
@@ -1288,6 +1311,10 @@ fn contains_braced_github_file_ref(segment: &str, file_var: &str) -> bool {
 }
 
 /// Drop an unquoted trailing `# ...` shell comment.
+///
+/// Bash only starts a comment when `#` is at a word boundary (start of the
+/// string or after whitespace). `"$GITHUB_OUTPUT"#backup` keeps `#backup` as
+/// part of the redirect word, so that form must not be stripped.
 fn strip_trailing_shell_comment(value: &str) -> &str {
     let bytes = value.as_bytes();
     let mut index = 0;
@@ -1302,7 +1329,12 @@ fn strip_trailing_shell_comment(value: &str) -> &str {
             }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
-            b'#' if !in_single && !in_double => return value[..index].trim_end(),
+            b'#' if !in_single
+                && !in_double
+                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+            {
+                return value[..index].trim_end();
+            }
             _ => {}
         }
         index += 1;
@@ -1310,7 +1342,8 @@ fn strip_trailing_shell_comment(value: &str) -> &str {
     value
 }
 
-/// First shell word: a quoted span or an unquoted run until whitespace.
+/// First shell word: a quoted span (plus any immediately adjacent unquoted
+/// concatenation) or an unquoted run until whitespace.
 fn first_shell_token(value: &str) -> Option<&str> {
     let trimmed = value.trim_start();
     if trimmed.is_empty() {
@@ -1327,7 +1360,13 @@ fn first_shell_token(value: &str) -> Option<&str> {
                     continue;
                 }
                 if bytes[index] == quote {
-                    return Some(&trimmed[..=index]);
+                    // Include adjacent unquoted material (`"$VAR"#suffix`) as
+                    // one shell word rather than stopping at the closing quote.
+                    let mut end = index + 1;
+                    while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+                        end += 1;
+                    }
+                    return Some(&trimmed[..end]);
                 }
                 index += 1;
             }
@@ -1831,15 +1870,19 @@ fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
 }
 
-/// Fail closed when a checkout ref still names `steps.*.outputs.*` after
-/// known `$GITHUB_OUTPUT` rewrites — incomplete step-output tracking must not
-/// collapse into allow under a privileged trigger.
+/// Fail closed when a checkout ref still reaches a `steps.*.outputs` context
+/// after known `$GITHUB_OUTPUT` rewrites — including computed forms such as
+/// `fromJSON(toJSON(steps.resolve.outputs)).ref` where `.outputs.<name>` is
+/// not contiguous. Incomplete step-output tracking must not collapse into
+/// allow under a privileged trigger.
 fn has_unresolved_step_output_ref(revision: &str) -> bool {
     static STEP_OUTPUT_REF: OnceLock<Regex> = OnceLock::new();
     let pattern = STEP_OUTPUT_REF.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?i)(?:^|[^A-Za-z0-9_.])steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs\.[A-Za-z_][A-Za-z0-9_-]*(?:$|[^A-Za-z0-9_-])")
-            .expect("step output ref pattern compiles")
+        Regex::new(
+            r"(?i)(?:^|[^A-Za-z0-9_.])steps\.[A-Za-z_][A-Za-z0-9_-]*\.outputs(?:$|[^A-Za-z0-9_-])",
+        )
+        .expect("step output ref pattern compiles")
     });
     expression_matches_unresolved_context(revision, pattern)
 }
@@ -2644,6 +2687,90 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_preserves_reachable_pre_exit_writes() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  exit 0
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        env.insert("TARGET".to_string(), "main".to_string());
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "pre-exit write must update bindings before exit: {env:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_pre_exit_env_write_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - shell: bash
+      run: |
+        echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+        exit 0
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
     fn privileged_local_composite_post_exit_env_write_fails_closed() {
         let findings = findings_for_files(&[
             SurfaceFile {
@@ -2989,6 +3116,146 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn strip_trailing_shell_comment_requires_word_boundary() {
+        assert_eq!(
+            strip_trailing_shell_comment(r#""$GITHUB_OUTPUT" # note"#),
+            r#""$GITHUB_OUTPUT""#
+        );
+        assert_eq!(
+            strip_trailing_shell_comment(r##""$GITHUB_OUTPUT"#backup"##),
+            r##""$GITHUB_OUTPUT"#backup"##
+        );
+    }
+
+    #[test]
+    fn collect_step_output_bindings_ignores_hash_glued_redirect_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r##"
+id: resolve
+run: |
+  echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+  echo "ref=main" >> "$GITHUB_OUTPUT"#backup
+"##,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut env = EnvBindings::new();
+        env.insert(
+            "TARGET".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &env,
+            &StepOutputBindings::new(),
+        );
+        // Opaque glued redirect invalidates earlier tracked writes.
+        assert!(
+            !collected.contains_key("resolve.ref"),
+            "expected unresolved/missing binding after glued #backup overwrite: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_glued_hash_redirect_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r##"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: |
+        echo "ref=$TARGET" >> "$GITHUB_OUTPUT"
+        echo "ref=main" >> "$GITHUB_OUTPUT"#backup
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"##
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_computed_step_outputs_access_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      run: echo "ref=${{ inputs.ref }}" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ fromJSON(toJSON(steps.resolve.outputs)).ref }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
