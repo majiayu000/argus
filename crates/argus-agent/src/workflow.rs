@@ -897,6 +897,8 @@ fn value_references_tainted_job_output(
 ///
 /// Multiple writes to the same output name are processed in order; a later clean
 /// overwrite clears prior taint for that name (matching Actions semantics).
+/// When the script contains shell control flow (`if`/`&&`/…), a clean overwrite
+/// is not guaranteed to run, so prior taint is retained.
 fn collect_tainted_github_outputs(
     step: &Hash,
     taint: TaintScope<'_>,
@@ -912,11 +914,12 @@ fn collect_tainted_github_outputs(
     let Some(script) = get_string(step, "run") else {
         return Ok(tainted);
     };
+    let retain_on_clean = script_has_shell_control_flow(script);
     for (name, raw_value, shell_expands) in parse_github_output_writes(script) {
         let key = format!("{step_id}.{name}");
         if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
             tainted.insert(key);
-        } else {
+        } else if !retain_on_clean {
             tainted.remove(&key);
         }
     }
@@ -944,7 +947,8 @@ fn github_output_value_is_tainted(
 /// Merge `$GITHUB_ENV` writes from a `run` step into later-step env taint.
 ///
 /// GitHub exposes these values to subsequent steps via `${{ env.NAME }}` (and
-/// shell `$NAME`). A clean overwrite clears prior taint for that name.
+/// shell `$NAME`). A clean overwrite clears prior taint for that name unless the
+/// script has shell control flow (conditional overwrites are not guaranteed).
 /// Returns the ordered write overlay (`true` = tainted, `false` = clean).
 fn apply_github_env_file_taints(
     env_taints: &mut HashSet<String>,
@@ -956,17 +960,59 @@ fn apply_github_env_file_taints(
     let Some(script) = get_string(step, "run") else {
         return Ok(writes);
     };
+    let retain_on_clean = script_has_shell_control_flow(script);
     for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
         let key = normalize_env_name(&name);
         let tainted = github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)?;
         if tainted {
             env_taints.insert(key.clone());
-        } else {
+            writes.insert(key, true);
+        } else if !retain_on_clean {
             env_taints.remove(&key);
+            writes.insert(key, false);
+        } else if env_taints.contains(&key) {
+            // Conditional clean overwrite: keep prior taint visible to later steps.
+            writes.insert(key, true);
+        } else {
+            writes.insert(key, false);
         }
-        writes.insert(key, tainted);
     }
     Ok(writes)
+}
+
+/// True when `script` contains shell control-flow keywords or boolean lists that
+/// make lexical last-write-wins unsafe for `$GITHUB_OUTPUT` / `$GITHUB_ENV`
+/// tracking.
+fn script_has_shell_control_flow(script: &str) -> bool {
+    static CONTROL_FLOW: OnceLock<Regex> = OnceLock::new();
+    let pattern = CONTROL_FLOW.get_or_init(|| {
+        Regex::new(
+            r"(?m)(?:(?:^|[^A-Za-z0-9_])(?:if|elif|else|fi|case|esac|for|while|until|done|select)(?:$|[^A-Za-z0-9_])|&&|\|\|)",
+        )
+        .expect("shell control-flow pattern compiles")
+    });
+    // Blank `${{ }}` regions so expression operators such as
+    // `${{ false && inputs.ref }}` are not treated as shell control flow.
+    pattern.is_match(&blank_github_expression_regions(script))
+}
+
+/// Replace each `${{ ... }}` span with a single space (unclosed tails blanked).
+fn blank_github_expression_regions(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(rel_start) = value[cursor..].find("${{") {
+        let start = cursor + rel_start;
+        output.push_str(&value[cursor..start]);
+        let after_open = start + 3;
+        let Some(rel_end) = find_expression_close(&value[after_open..]) else {
+            output.push(' ');
+            return output;
+        };
+        output.push(' ');
+        cursor = after_open + rel_end + 2;
+    }
+    output.push_str(&value[cursor..]);
+    output
 }
 
 /// Collect tainted `{job_id}.{output}` keys from a job's `outputs:` map.
@@ -1319,10 +1365,7 @@ fn is_github_file_redirect_target(after_close: &str, file_var: &str) -> bool {
         .next()
         .map(strip_wrapping_shell_quotes)
         .unwrap_or(target);
-    let dollar = format!("${file_var}");
-    let braced = format!("${{{file_var}}}");
-    let pwsh = format!("$env:{file_var}");
-    target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh)
+    matches_github_file_var_target(target, file_var)
 }
 
 /// Collect multiline body lines that are bare `echo` commands (no per-line redirect).
@@ -1513,15 +1556,48 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
         .next()
         .map(strip_wrapping_shell_quotes)
         .unwrap_or(target);
-    let dollar = format!("${file_var}");
-    let braced = format!("${{{file_var}}}");
-    // PowerShell steps write via `$env:GITHUB_OUTPUT` / `$env:GITHUB_ENV`.
-    let pwsh = format!("$env:{file_var}");
-    if target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh) {
+    if matches_github_file_var_target(target, file_var) {
         Some(before.trim())
     } else {
         None
     }
+}
+
+/// True when `target` names a GitHub Actions environment file via Bash
+/// `$VAR` / `${VAR}` / `${VAR:…}` parameter expansions, PowerShell
+/// `$env:VAR`, or cmd.exe `%VAR%` syntax.
+fn matches_github_file_var_target(target: &str, file_var: &str) -> bool {
+    let dollar = format!("${file_var}");
+    let braced = format!("${{{file_var}}}");
+    let pwsh = format!("$env:{file_var}");
+    let cmd = format!("%{file_var}%");
+    if target == dollar
+        || target == braced
+        || target.eq_ignore_ascii_case(&pwsh)
+        || target.eq_ignore_ascii_case(&cmd)
+    {
+        return true;
+    }
+    is_braced_github_file_ref(target, file_var)
+}
+
+/// `${VAR}`, `${VAR:?msg}`, `${VAR:-word}`, and other bash parameter
+/// expansions whose base name is a GitHub environment-file variable.
+fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
+    let prefix = format!("${{{file_var}");
+    let Some(rest) = target
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with(':')
+        || rest.starts_with('#')
+        || rest.starts_with('%')
+        || rest.starts_with('/')
+        || rest.starts_with('^')
+        || rest.starts_with(',')
 }
 
 fn extract_echo_payload(command: &str) -> Option<&str> {
@@ -1572,10 +1648,14 @@ fn normalize_env_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-/// Detect `$NAME` / `${NAME}` / `$env:NAME` expansions that read a tainted env.
+/// Detect `$NAME` / `${NAME}` / `${NAME:-…}` / `$env:NAME` / `%NAME%` expansions
+/// that read a tainted env.
 fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String>) -> bool {
     if tainted_envs.is_empty() {
         return false;
+    }
+    if value_references_tainted_cmd_env(value, tainted_envs) {
+        return true;
     }
     let mut index = 0;
     let bytes = value.as_bytes();
@@ -1603,9 +1683,10 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
             let Some(end) = rest.find('}') else {
                 break;
             };
-            let name = rest[..end].trim();
+            let inner = rest[..end].trim();
             index += 2 + end + 1;
-            name
+            // `${TITLE:-fallback}` expands TITLE; parse the ident before operators.
+            braced_shell_param_name(inner)
         } else if let Some(rest) = strip_pwsh_env_prefix(after_dollar) {
             // PowerShell `$env:TITLE` (hyphens allowed in the env name).
             let name_len = rest
@@ -1641,6 +1722,38 @@ fn value_references_tainted_shell_env(value: &str, tainted_envs: &HashSet<String
         if is_github_ident(name) && tainted_envs.contains(&normalize_env_name(name)) {
             return true;
         }
+    }
+    false
+}
+
+/// Extract the parameter name from a braced expansion body such as
+/// `TITLE:-fallback`, `TITLE:?err`, or `#TITLE` (length).
+fn braced_shell_param_name(inner: &str) -> &str {
+    let inner = inner.strip_prefix('#').unwrap_or(inner);
+    let end = inner
+        .find([':', '#', '%', '/', '^', ',', '['])
+        .unwrap_or(inner.len());
+    inner[..end].trim()
+}
+
+/// Detect cmd.exe `%NAME%` expansions that read a tainted env.
+fn value_references_tainted_cmd_env(value: &str, tainted_envs: &HashSet<String>) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let name_start = index + 1;
+        let Some(rel_end) = value[name_start..].find('%') else {
+            return false;
+        };
+        let name = &value[name_start..name_start + rel_end];
+        if is_github_ident(name) && tainted_envs.contains(&normalize_env_name(name)) {
+            return true;
+        }
+        index = name_start + rel_end + 1;
     }
     false
 }
@@ -3852,5 +3965,104 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn conditional_clean_github_output_overwrite_retains_prior_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: |
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          if false; then
+            echo "title=fixed" >> "$GITHUB_OUTPUT"
+          fi
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn braced_shell_param_default_propagates_taint_to_github_output() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo "title=${TITLE:-fallback}" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn cmd_percent_github_output_redirect_propagates_shell_env_taint() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: windows-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        shell: cmd
+        run: echo title=%TITLE%>>%GITHUB_OUTPUT%
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn split_github_file_redirect_accepts_cmd_percent_syntax() {
+        assert_eq!(
+            split_github_file_redirect(r#"echo title=%TITLE%>>%GITHUB_OUTPUT%"#, "GITHUB_OUTPUT"),
+            Some(r#"echo title=%TITLE%"#)
+        );
+        assert!(matches_github_file_var_target(
+            "%GITHUB_OUTPUT%",
+            "GITHUB_OUTPUT"
+        ));
+        assert!(is_braced_github_file_ref(
+            "${GITHUB_OUTPUT:-fallback}",
+            "GITHUB_OUTPUT"
+        ));
     }
 }
