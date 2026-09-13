@@ -20,10 +20,14 @@
 //! including when a later untracked `$GITHUB_OUTPUT` overwrite (with optional
 //! trailing shell comments / operators after the redirect) or backtick
 //! command substitution would otherwise leave a stale safe binding,
+//! a `$GITHUB_ENV` write such as `echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"`
+//! followed by `ref: ${{ env.TARGET }}`,
 //! or an omitted `with` that relies on an untrusted input default — cannot
 //! bypass Critical→block. Unresolved `steps.*.outputs.*` checkout refs fail
 //! closed under a privileged trigger. Quoted expression literals such as
-//! `${{ 'inputs.ref' }}` are not treated as input references.
+//! `${{ 'inputs.ref' }}` are not treated as input references. Single-quoted
+//! shell payloads such as `echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"` keep their
+//! literal value (no shell expansion) and are not marked untracked.
 //! Standalone Action metadata scans still use `privileged_trigger=false` so
 //! composites alone do not invent a privileged trigger. Local expansion is
 //! depth-bounded and fail-closed; source findings on composite bodies are left
@@ -126,8 +130,10 @@ fn scan_workflow(
         };
         let job_env = merge_env_bindings(&workflow_env, &collect_env_bindings(job));
         let mut step_outputs = StepOutputBindings::new();
+        // `$GITHUB_ENV` writes from earlier steps become env bindings for later ones.
+        let mut env_bindings = job_env;
         for step in steps.iter().filter_map(Yaml::as_hash) {
-            let step_env = merge_env_bindings(&job_env, &collect_env_bindings(step));
+            let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
             scan_step(
                 step,
                 &file.rel,
@@ -137,7 +143,7 @@ fn scan_workflow(
                     depth: 0,
                     expand_local: true,
                     input_bindings: &empty_bindings,
-                    env_bindings: &job_env,
+                    env_bindings: &env_bindings,
                     step_outputs: &step_outputs,
                 },
                 findings,
@@ -147,6 +153,13 @@ fn scan_workflow(
             {
                 step_outputs.insert(key, value);
             }
+            apply_github_env_writes(
+                step,
+                &empty_bindings,
+                &step_env,
+                &step_outputs,
+                &mut env_bindings,
+            );
         }
     }
     Ok(())
@@ -202,8 +215,11 @@ fn scan_composite_steps(
         return Ok(());
     };
     let mut step_outputs = StepOutputBindings::new();
+    // Accumulate `$GITHUB_ENV` writes so later composite steps see them via
+    // `${{ env.NAME }}` the same way GitHub does.
+    let mut env_bindings = ctx.env_bindings.clone();
     for step in steps.iter().filter_map(Yaml::as_hash) {
-        let step_env = merge_env_bindings(ctx.env_bindings, &collect_env_bindings(step));
+        let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
         scan_step(
             step,
             rel,
@@ -213,7 +229,7 @@ fn scan_composite_steps(
                 depth: ctx.depth,
                 expand_local: ctx.expand_local,
                 input_bindings: ctx.input_bindings,
-                env_bindings: ctx.env_bindings,
+                env_bindings: &env_bindings,
                 step_outputs: &step_outputs,
             },
             findings,
@@ -223,6 +239,13 @@ fn scan_composite_steps(
         {
             step_outputs.insert(key, value);
         }
+        apply_github_env_writes(
+            step,
+            ctx.input_bindings,
+            &step_env,
+            &step_outputs,
+            &mut env_bindings,
+        );
     }
     Ok(())
 }
@@ -531,13 +554,15 @@ fn collect_step_output_bindings(
     let Some(script) = get_string(step, "run") else {
         return collected;
     };
-    for (name, raw_value) in parse_github_output_writes(script) {
+    for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_OUTPUT") {
         let key = format!("{step_id}.{name}");
         // Shell expansions outside `${{ }}` are not statically trackable; leave
         // the step output unresolved so privileged checkout fails closed.
         // GitHub keeps the last write for a given output name, so an untracked
         // overwrite must also drop any earlier safe binding for that name.
-        if value_contains_untracked_shell_expansion(&raw_value) {
+        // Single-quoted echo payloads are shell literals (`$` / backticks do not
+        // expand), so they remain trackable.
+        if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
             collected.remove(&key);
             continue;
         }
@@ -547,6 +572,33 @@ fn collect_step_output_bindings(
         );
     }
     collected
+}
+
+/// Merge `$GITHUB_ENV` writes from a `run` step into `env_bindings` for later steps.
+///
+/// GitHub exposes these values to subsequent steps via `${{ env.NAME }}`. Untracked
+/// shell expansions invalidate any earlier binding for the same name (last write
+/// wins, and an untracked last write must not leave a stale safe value).
+fn apply_github_env_writes(
+    step: &Hash,
+    input_bindings: &InputBindings,
+    step_env: &EnvBindings,
+    step_outputs: &StepOutputBindings,
+    env_bindings: &mut EnvBindings,
+) {
+    let Some(script) = get_string(step, "run") else {
+        return;
+    };
+    for (name, raw_value, shell_expands) in parse_github_file_writes(script, "GITHUB_ENV") {
+        if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
+            env_bindings.remove(&name);
+            continue;
+        }
+        env_bindings.insert(
+            name,
+            resolve_context_expressions(&raw_value, input_bindings, step_env, step_outputs),
+        );
+    }
 }
 
 /// True when `value` still has `$...` or backtick command substitution outside
@@ -577,21 +629,24 @@ fn blank_github_expression_regions(value: &str) -> String {
     output
 }
 
-/// Parse simple `echo[ -n] "name=value" >> $GITHUB_OUTPUT` lines from a script.
-fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
+/// Parse simple `echo[ -n] "name=value" >> $GITHUB_{OUTPUT,ENV}` lines.
+///
+/// The third tuple field is `shell_expands`: false when the echo payload was
+/// single-quoted (shell literal), true for double-quoted or unquoted payloads.
+fn parse_github_file_writes(script: &str, file_var: &str) -> Vec<(String, String, bool)> {
     let mut writes = Vec::new();
     for line in script.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(command) = split_github_output_redirect(trimmed) else {
+        let Some(command) = split_github_file_redirect(trimmed, file_var) else {
             continue;
         };
         let Some(payload) = extract_echo_payload(command) else {
             continue;
         };
-        let payload = strip_wrapping_shell_quotes(payload.trim());
+        let (payload, shell_expands) = unwrap_echo_payload(payload.trim());
         let Some((name, value)) = payload.split_once('=') else {
             continue;
         };
@@ -599,12 +654,12 @@ fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
         if !is_github_ident(name) {
             continue;
         }
-        writes.push((name.to_string(), value.trim().to_string()));
+        writes.push((name.to_string(), value.trim().to_string(), shell_expands));
     }
     writes
 }
 
-fn split_github_output_redirect(line: &str) -> Option<&str> {
+fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a str> {
     let index = line.find(">>")?;
     let (before, after) = line.split_at(index);
     let after = after.trim_start_matches('>').trim();
@@ -614,7 +669,9 @@ fn split_github_output_redirect(line: &str) -> Option<&str> {
     let after = strip_trailing_shell_comment(after).trim();
     let target_token = first_shell_token(after)?;
     let target = strip_wrapping_shell_quotes(target_token).trim();
-    if target == "$GITHUB_OUTPUT" || target == "${GITHUB_OUTPUT}" {
+    let dollar = format!("${file_var}");
+    let braced = format!("${{{file_var}}}");
+    if target == dollar || target == braced {
         Some(before.trim())
     } else {
         None
@@ -691,16 +748,27 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
     }
 }
 
-fn strip_wrapping_shell_quotes(value: &str) -> &str {
+/// Strip wrapping shell quotes and report whether the shell would expand the payload.
+///
+/// Single-quoted payloads are literals (`$` / backticks do not expand). Double-quoted
+/// and unquoted payloads undergo shell expansion.
+fn unwrap_echo_payload(value: &str) -> (&str, bool) {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
         let first = bytes[0];
         let last = bytes[bytes.len() - 1];
-        if (first == b'"' || first == b'\'') && first == last {
-            return &value[1..value.len() - 1];
+        if first == b'\'' && last == b'\'' {
+            return (&value[1..value.len() - 1], false);
+        }
+        if first == b'"' && last == b'"' {
+            return (&value[1..value.len() - 1], true);
         }
     }
-    value
+    (value, true)
+}
+
+fn strip_wrapping_shell_quotes(value: &str) -> &str {
+    unwrap_echo_payload(value).0
 }
 
 fn is_github_ident(value: &str) -> bool {
@@ -1807,11 +1875,17 @@ run: |
     #[test]
     fn split_github_output_redirect_accepts_trailing_comment() {
         assert_eq!(
-            split_github_output_redirect(r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" # final value"#),
+            split_github_file_redirect(
+                r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" # final value"#,
+                "GITHUB_OUTPUT"
+            ),
             Some(r#"echo "ref=$TARGET""#)
         );
         assert_eq!(
-            split_github_output_redirect(r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" && true"#),
+            split_github_file_redirect(
+                r#"echo "ref=$TARGET" >> "$GITHUB_OUTPUT" && true"#,
+                "GITHUB_OUTPUT"
+            ),
             Some(r#"echo "ref=$TARGET""#)
         );
     }
@@ -1955,6 +2029,156 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn collect_step_output_bindings_preserves_single_quoted_literal_payload() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+id: resolve
+run: echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let collected = collect_step_output_bindings(
+            step,
+            &InputBindings::new(),
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+        );
+        assert_eq!(
+            collected.get("resolve.ref").map(String::as_str),
+            Some("$TARGET"),
+            "single-quoted payload must keep the literal value: {collected:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_single_quoted_github_output_is_not_untracked() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.ref }}
+      run: echo 'ref=$TARGET' >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ steps.resolve.outputs.ref }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT),
+            "literal single-quoted `$TARGET` must not be over-classified as untracked: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_tracks_input_taint() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env_bindings = EnvBindings::new();
+        apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env_bindings,
+        );
+        assert!(
+            env_bindings
+                .get("TARGET")
+                .is_some_and(|value| value.contains("github.event.pull_request.head.sha")),
+            "GITHUB_ENV write must resolve input taint: {env_bindings:?}"
+        );
+    }
+
+    #[test]
+    fn privileged_local_composite_github_env_taint_untrusted_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
