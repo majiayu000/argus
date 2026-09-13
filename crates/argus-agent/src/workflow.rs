@@ -371,6 +371,12 @@ fn scan_step(
     ctx: &StepScanCtx<'_>,
     findings: &mut Vec<Finding>,
 ) -> Result<Option<CompositeEnvEffects>> {
+    // GitHub never runs a statically false step, so its checkout / nested
+    // composite / script findings must not fire (and its side effects are
+    // already ignored by callers after this returns).
+    if step_condition_is_always_false(step) {
+        return Ok(None);
+    }
     // Expansion (depth > 0) only adds privileged-context findings. Mutable-action
     // and inline-script findings for composite bodies are emitted once by the
     // ActionMetadata pass so call-site count does not inflate source findings.
@@ -539,16 +545,26 @@ fn merge_invalidated_composite_env(
 
 /// True when a step `if:` is statically false (`false` / `${{ false }}`), so
 /// GitHub skips the step and its env/output side effects must be ignored.
+///
+/// Bare YAML `if: false` parses as `Yaml::Boolean(false)` (not a string), so
+/// string-only lookups would miss it and treat the skipped step as executed.
 fn step_condition_is_always_false(step: &Hash) -> bool {
-    get_string(step, "if").is_some_and(is_always_false_condition)
+    match get(step, "if") {
+        Some(Yaml::Boolean(false)) => true,
+        Some(Yaml::Boolean(true)) => false,
+        Some(value) => value.as_str().is_some_and(is_always_false_condition),
+        None => false,
+    }
 }
 
 /// True when a step has no `if:` or a statically true condition, so side
 /// effects definitely run. Any other condition is treated as uncertain.
 fn step_condition_is_definitely_executed(step: &Hash) -> bool {
-    match get_string(step, "if") {
+    match get(step, "if") {
         None => true,
-        Some(condition) => is_always_true_condition(condition),
+        Some(Yaml::Boolean(true)) => true,
+        Some(Yaml::Boolean(false)) => false,
+        Some(value) => value.as_str().is_some_and(is_always_true_condition),
     }
 }
 
@@ -953,13 +969,37 @@ fn script_has_shell_control_flow(script: &str) -> bool {
     pattern.is_match(&blank_github_expression_regions(script))
 }
 
-/// True when `value` still has `$...` or backtick command substitution outside
-/// GitHub expressions.
+/// True when `value` still has `$...`, backtick command substitution, or
+/// cmd.exe `%VAR%` expansion outside GitHub expressions.
 fn value_contains_untracked_shell_expansion(value: &str) -> bool {
     // Blank entire `${{ ... }}` regions, including the leading `$`, so expression
     // syntax is not mistaken for shell expansion.
     let without_expressions = blank_github_expression_regions(value);
-    without_expressions.contains('$') || without_expressions.contains('`')
+    without_expressions.contains('$')
+        || without_expressions.contains('`')
+        || contains_cmd_percent_expansion(&without_expressions)
+}
+
+/// True when `value` contains a cmd.exe `%NAME%` environment expansion.
+fn contains_cmd_percent_expansion(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let name_start = index + 1;
+        let Some(rel_end) = value[name_start..].find('%') else {
+            return false;
+        };
+        let name = &value[name_start..name_start + rel_end];
+        if !name.is_empty() && is_github_ident(name) {
+            return true;
+        }
+        index = name_start + rel_end + 1;
+    }
+    false
 }
 
 /// Replace each `${{ ... }}` span with a single space (unclosed tails blanked).
@@ -1123,12 +1163,13 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
 }
 
 /// True when `target` names a GitHub Actions environment file via Bash
-/// `$VAR` / `${VAR}` / `${VAR:…}` parameter expansions or PowerShell
-/// `$env:VAR` syntax.
+/// `$VAR` / `${VAR}` / `${VAR:…}` parameter expansions, PowerShell
+/// `$env:VAR`, or cmd.exe `%VAR%` syntax.
 fn is_github_file_redirect_target(target: &str, file_var: &str) -> bool {
     let dollar = format!("${file_var}");
     let pwsh = format!("$env:{file_var}");
-    if target == dollar || target.eq_ignore_ascii_case(&pwsh) {
+    let cmd = format!("%{file_var}%");
+    if target == dollar || target.eq_ignore_ascii_case(&pwsh) || target.eq_ignore_ascii_case(&cmd) {
         return true;
     }
     is_braced_github_file_ref(target, file_var)
@@ -1154,21 +1195,22 @@ fn is_braced_github_file_ref(target: &str, file_var: &str) -> bool {
 }
 
 /// True when a shell segment mentions `$GITHUB_{OUTPUT,ENV}` / `${…}` /
-/// `$env:GITHUB_{OUTPUT,ENV}` even without a recognized `>>` redirect
-/// (pipes, `tee`, `cat`, …).
+/// `$env:GITHUB_{OUTPUT,ENV}` / `%GITHUB_{OUTPUT,ENV}%` even without a
+/// recognized `>>` redirect (pipes, `tee`, `cat`, …).
 fn segment_references_github_file(segment: &str, file_var: &str) -> bool {
     let dollar = format!("${file_var}");
     let braced = format!("${{{file_var}}}");
     let pwsh = format!("$env:{file_var}");
+    let cmd = format!("%{file_var}%");
     if segment.contains(&dollar) || segment.contains(&braced) {
         return true;
     }
     if contains_braced_github_file_ref(segment, file_var) {
         return true;
     }
-    // PowerShell provider names are case-insensitive (`$Env:GITHUB_ENV`).
+    // PowerShell provider names and cmd `%VAR%` expansions are case-insensitive.
     let lower = segment.to_ascii_lowercase();
-    lower.contains(&pwsh.to_ascii_lowercase())
+    lower.contains(&pwsh.to_ascii_lowercase()) || lower.contains(&cmd.to_ascii_lowercase())
 }
 
 fn contains_braced_github_file_ref(segment: &str, file_var: &str) -> bool {
@@ -1692,11 +1734,15 @@ fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
     if haystack.chars().all(|character| character.is_whitespace()) {
         haystack = remove_expression_string_literals(revision);
     }
+    // GitHub context/property lookup is case-insensitive
+    // (`GitHub.Event.Pull_Request.Head.Sha` resolves the same as the lowercase
+    // spelling), so normalize before substring checks.
+    let haystack = haystack.to_ascii_lowercase();
     // Contiguous dotted paths plus computed forms that reassemble
     // `github.event` → `pull_request` / `workflow_run` across `toJSON`/`fromJSON`,
     // including whole-context `toJSON(github)` followed by `.event…`.
     let has_github_event = haystack.contains("github.event")
-        || (haystack.contains("toJSON(github)") && haystack.contains(".event"));
+        || (haystack.contains("tojson(github)") && haystack.contains(".event"));
     let has_pr_head = haystack.contains(".head.sha")
         || haystack.contains(".head.ref")
         || haystack.contains(".head.repo")
@@ -2423,6 +2469,7 @@ runs:
         assert!(value_contains_untracked_shell_expansion(
             "prefix`cmd`suffix"
         ));
+        assert!(value_contains_untracked_shell_expansion("%EVIL%"));
         assert!(!value_contains_untracked_shell_expansion("main"));
         assert!(!value_contains_untracked_shell_expansion(
             "${{ inputs.ref }}"
@@ -3167,6 +3214,69 @@ runs:
             finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_cmd_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - shell: cmd
+      env:
+        EVIL: ${{ inputs.ref }}
+      run: echo TARGET=%EVIL%>>%GITHUB_ENV%
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn split_github_env_redirect_accepts_cmd_percent_syntax() {
+        assert_eq!(
+            split_github_file_redirect(r#"echo TARGET=%EVIL%>>%GITHUB_ENV%"#, "GITHUB_ENV"),
+            Some(r#"echo TARGET=%EVIL%"#)
+        );
+        assert!(is_github_file_redirect_target("%GITHUB_ENV%", "GITHUB_ENV"));
+        assert!(segment_references_github_file(
+            r#"type evil.txt >> %GITHUB_ENV%"#,
+            "GITHUB_ENV"
+        ));
     }
 
     #[test]
@@ -4024,6 +4134,139 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_yaml_boolean_false_skipped_env_write_is_ignored() {
+        // Bare `if: false` is Yaml::Boolean(false); string-only condition
+        // lookups must not treat the skipped safe overwrite as executed.
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - if: false
+      shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_statically_skipped_untrusted_checkout_is_not_flagged() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule_id != RULE_UNTRUSTED_CHECKOUT),
+            "statically skipped checkout must not emit Critical: {findings:?}"
+        );
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+    }
+
+    #[test]
+    fn privileged_local_composite_mixed_case_github_context_checkout_blocks() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ GitHub.Event.Pull_Request.Head.Sha }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
