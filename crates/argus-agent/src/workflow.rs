@@ -33,12 +33,15 @@
 //! computed input access such as `ref: ${{ fromJSON(toJSON(inputs)).ref }}`,
 //! computed env access such as `ref: ${{ fromJSON(toJSON(env)).TARGET }}`,
 //! computed GitHub event access such as
-//! `ref: ${{ fromJSON(toJSON(github.event.pull_request)).head.sha }}` or
+//! `ref: ${{ fromJSON(toJSON(github.event.pull_request)).head.sha }}`,
 //! parent serialization
-//! `ref: ${{ fromJSON(toJSON(github.event)).pull_request.head.sha }}`,
+//! `ref: ${{ fromJSON(toJSON(github.event)).pull_request.head.sha }}`, or
+//! whole-context serialization
+//! `ref: ${{ fromJSON(toJSON(github)).event.pull_request.head.sha }}`,
 //! branch-dependent `$GITHUB_OUTPUT` writes under `if`/`else`/`&&`/`||` that
 //! cannot be proven sequential, multi-redirect command lists on one line,
 //! opaque `$GITHUB_ENV` redirects that cannot name the overwritten key,
+//! including PowerShell `$env:GITHUB_ENV` / `$env:GITHUB_OUTPUT` writers,
 //! or an omitted `with` that relies on an untrusted input default — cannot
 //! bypass Critical→block. Unresolved `steps.*.outputs.*`, unresolved
 //! `env` access, and unresolved `inputs` access in checkout refs fail closed
@@ -876,21 +879,35 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
     let after = strip_trailing_shell_comment(after).trim();
     let target_token = first_shell_token(after)?;
     let target = strip_wrapping_shell_quotes(target_token).trim();
-    let dollar = format!("${file_var}");
-    let braced = format!("${{{file_var}}}");
-    if target == dollar || target == braced {
+    if is_github_file_redirect_target(target, file_var) {
         Some(before.trim())
     } else {
         None
     }
 }
 
-/// True when a shell segment mentions `$GITHUB_{OUTPUT,ENV}` / `${…}` even
-/// without a recognized `>>` redirect (pipes, `tee`, `cat`, …).
+/// True when `target` names a GitHub Actions environment file via Bash
+/// `$VAR` / `${VAR}` or PowerShell `$env:VAR` syntax.
+fn is_github_file_redirect_target(target: &str, file_var: &str) -> bool {
+    let dollar = format!("${file_var}");
+    let braced = format!("${{{file_var}}}");
+    let pwsh = format!("$env:{file_var}");
+    target == dollar || target == braced || target.eq_ignore_ascii_case(&pwsh)
+}
+
+/// True when a shell segment mentions `$GITHUB_{OUTPUT,ENV}` / `${…}` /
+/// `$env:GITHUB_{OUTPUT,ENV}` even without a recognized `>>` redirect
+/// (pipes, `tee`, `cat`, …).
 fn segment_references_github_file(segment: &str, file_var: &str) -> bool {
     let dollar = format!("${file_var}");
     let braced = format!("${{{file_var}}}");
-    segment.contains(&dollar) || segment.contains(&braced)
+    let pwsh = format!("$env:{file_var}");
+    if segment.contains(&dollar) || segment.contains(&braced) {
+        return true;
+    }
+    // PowerShell provider names are case-insensitive (`$Env:GITHUB_ENV`).
+    let lower = segment.to_ascii_lowercase();
+    lower.contains(&pwsh.to_ascii_lowercase())
 }
 
 /// Drop an unquoted trailing `# ...` shell comment.
@@ -1375,10 +1392,11 @@ fn is_untrusted_ref_expression(revision: &str) -> bool {
 }
 
 /// True when `revision` names an attacker-controlled GitHub event ref, including
-/// computed forms such as `fromJSON(toJSON(github.event.pull_request)).head.sha`
-/// or parent serialization
-/// `fromJSON(toJSON(github.event)).pull_request.head.sha` where the classic
-/// contiguous dotted path is split by function calls.
+/// computed forms such as `fromJSON(toJSON(github.event.pull_request)).head.sha`,
+/// parent serialization
+/// `fromJSON(toJSON(github.event)).pull_request.head.sha`, or whole-context
+/// serialization `fromJSON(toJSON(github)).event.pull_request.head.sha` where
+/// the classic contiguous dotted path is split by function calls.
 fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
     let mut haystack = String::new();
     let _ = map_expression_regions(revision, |inner| {
@@ -1390,7 +1408,10 @@ fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         haystack = remove_expression_string_literals(revision);
     }
     // Contiguous dotted paths plus computed forms that reassemble
-    // `github.event` → `pull_request` / `workflow_run` across `toJSON`/`fromJSON`.
+    // `github.event` → `pull_request` / `workflow_run` across `toJSON`/`fromJSON`,
+    // including whole-context `toJSON(github)` followed by `.event…`.
+    let has_github_event = haystack.contains("github.event")
+        || (haystack.contains("toJSON(github)") && haystack.contains(".event"));
     let has_pr_head = haystack.contains(".head.sha")
         || haystack.contains(".head.ref")
         || haystack.contains(".head.repo")
@@ -1403,10 +1424,8 @@ fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || haystack.contains("github.event.pull_request.merge_commit_sha")
         || haystack.contains("github.event.workflow_run.head_sha")
         || haystack.contains("github.event.workflow_run.head_branch")
-        || (haystack.contains("github.event") && haystack.contains("pull_request") && has_pr_head)
-        || (haystack.contains("github.event")
-            && haystack.contains("workflow_run")
-            && has_workflow_run_head)
+        || (has_github_event && haystack.contains("pull_request") && has_pr_head)
+        || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
 }
 
 /// Fail closed when a checkout ref still names `steps.*.outputs.*` after
@@ -2201,6 +2220,25 @@ run: |
     }
 
     #[test]
+    fn split_github_env_redirect_accepts_powershell_env_syntax() {
+        assert_eq!(
+            split_github_file_redirect(
+                r#"echo "TARGET=$env:EVIL" >> $env:GITHUB_ENV"#,
+                "GITHUB_ENV"
+            ),
+            Some(r#"echo "TARGET=$env:EVIL""#)
+        );
+        assert_eq!(
+            split_github_file_redirect(r#""TARGET=$env:EVIL" >> $Env:GITHUB_ENV"#, "GITHUB_ENV"),
+            Some(r#""TARGET=$env:EVIL""#)
+        );
+        assert!(segment_references_github_file(
+            r#"Add-Content -Path $env:GITHUB_ENV -Value "TARGET=$env:EVIL""#,
+            "GITHUB_ENV"
+        ));
+    }
+
+    #[test]
     fn privileged_local_composite_step_output_untracked_overwrite_fails_closed() {
         let findings = findings_for_files(&[
             SurfaceFile {
@@ -2782,6 +2820,56 @@ runs:
     }
 
     #[test]
+    fn privileged_local_composite_powershell_env_overwrite_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - shell: pwsh
+      env:
+        EVIL: ${{ inputs.ref }}
+      run: '"TARGET=$env:EVIL" >> $env:GITHUB_ENV'
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
     fn collect_step_output_bindings_invalidates_boolean_control_flow_writes() {
         let docs = YamlLoader::load_from_str(
             r#"
@@ -3224,6 +3312,45 @@ runs:
     - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ fromJSON(toJSON(github.event)).pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_computed_github_whole_context_serialization_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ fromJSON(toJSON(github)).event.pull_request.head.sha }}
 "#
                 .to_string(),
                 kind: SurfaceKind::ActionMetadata,
