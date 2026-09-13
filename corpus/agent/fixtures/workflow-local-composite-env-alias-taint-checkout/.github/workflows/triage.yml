@@ -1,0 +1,13 @@
+name: Triage pull request
+on: pull_request_target
+
+env:
+  PR_REF: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ env.PR_REF }}

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 untrusted-checkout bypass where a `pull_request_target` or
+  `workflow_run` workflow invokes a same-repo local composite that checks out
+  an attacker-controlled pull-request or workflow-run ref. Workflow scans now
+  expand `uses: ./...` composites with the caller's privileged-trigger flag;
+  missing or invalid local Action metadata remains fail-closed.
+
 ## [0.3.0] - 2026-09-02
 
 - Detect computed-property and `Object.defineProperty` rewrites of
