@@ -53,16 +53,21 @@
 //! steps with no `if:` or bare `if: true` / `${{ true }}` (still gated by
 //! GitHub's implicit `success()` unless a status function is present) are not
 //! treated as definite when a later step can still run after failure
-//! (`always()` / `failure()` / `cancelled()`), so a skipped safe `$GITHUB_ENV`
+//! (`always()` / `failure()` / `cancelled()`, or compound/negated `success()`
+//! such as `success() || true`), so a skipped safe `$GITHUB_ENV`
 //! overwrite cannot mask taint for an `if: always()` checkout,
 //! braced parameter expansions such as `${GITHUB_ENV:?missing}` are recognized
 //! as environment-file targets,
 //! `&&`/`||` multi-redirect lists are fully parsed (without splitting through
-//! unquoted `#` comments), later stdout redirections override an earlier
-//! `>> $GITHUB_ENV`/`$GITHUB_OUTPUT` in the same command, unconditional
-//! `exit`/`return` is recognized only in shell command position (not inside
-//! quoted arguments, command substitutions, or subshells), heredoc payload
-//! lines are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands, and
+//! unquoted `#` comments, including `;#` after a control operator), later
+//! stdout redirections override an earlier
+//! `>> $GITHUB_ENV`/`$GITHUB_OUTPUT` in the same command while descriptor-
+//! prefixed redirects such as `2>>` are not treated as stdout env writes,
+//! unconditional `exit`/`return` is recognized only in shell command position
+//! (not inside quoted arguments, command substitutions, or subshells), heredoc
+//! payload lines — including every payload from multi-heredoc openers such as
+//! `cat <<A <<B` — are not parsed as `$GITHUB_ENV`/`$GITHUB_OUTPUT` commands,
+//! and
 //! unresolved `needs.*.outputs.*` checkout refs —
 //! including whole-context `fromJSON(toJSON(needs))…` reconstruction — fail
 //! closed. Unresolved `steps.*.outputs.*`, including whole-context
@@ -84,7 +89,7 @@ use crate::{SurfaceFile, SurfaceKind};
 use anyhow::{bail, Context, Result};
 use argus_core::{Finding, Severity};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 use yaml_rust2::{yaml::Hash, Yaml, YamlLoader};
 
@@ -627,7 +632,14 @@ fn step_can_run_after_failure(step: &Hash) -> bool {
 
 fn condition_can_run_after_failure(condition: &str) -> bool {
     let atom = expression_condition_atom(condition).to_ascii_lowercase();
-    atom.contains("always()") || atom.contains("failure()") || atom.contains("cancelled()")
+    if atom.contains("always()") || atom.contains("failure()") || atom.contains("cancelled()") {
+        return true;
+    }
+    // An explicit status function replaces GitHub's implicit `success()` gate.
+    // Pure `success()` still requires a successful job, but compound or negated
+    // forms such as `success() || true` / `!success()` can evaluate true after
+    // an earlier step failure.
+    atom.contains("success()") && !is_success_status_condition(condition)
 }
 
 fn is_always_false_condition(condition: &str) -> bool {
@@ -1271,11 +1283,13 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
     let script = script_reachable_before_unconditional_exit(script);
     let mut writes = Vec::new();
     let mut opaque_redirect = false;
-    let mut heredoc_delimiter: Option<HeredocDelimiter> = None;
+    // Bash accepts multiple heredocs on one command (`cat <<A <<B`); each
+    // delimiter's payload must be skipped in order.
+    let mut heredoc_delimiters: VecDeque<HeredocDelimiter> = VecDeque::new();
     for line in script.lines() {
-        if let Some(delimiter) = heredoc_delimiter.as_ref() {
+        if let Some(delimiter) = heredoc_delimiters.front() {
             if is_heredoc_terminator(line, delimiter) {
-                heredoc_delimiter = None;
+                heredoc_delimiters.pop_front();
             }
             // Payload lines are not executed by the shell.
             continue;
@@ -1284,10 +1298,10 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        // Capture a heredoc opener on this line before parsing redirects so
+        // Capture heredoc openers on this line before parsing redirects so
         // subsequent payload lines are skipped even when the opener itself is
         // an opaque `cat <<EOF >> "$GITHUB_ENV"` writer.
-        let pending_heredoc = extract_heredoc_delimiter(line);
+        let pending_heredocs = extract_heredoc_delimiters(line);
         for segment in split_shell_list_segments(trimmed) {
             let segment = segment.trim();
             if segment.is_empty() || segment.starts_with('#') {
@@ -1327,9 +1341,7 @@ fn parse_github_file_writes(script: &str, file_var: &str) -> (Vec<(String, Strin
             }
             writes.push((name.to_string(), value.trim().to_string(), shell_expands));
         }
-        if let Some(delimiter) = pending_heredoc {
-            heredoc_delimiter = Some(delimiter);
-        }
+        heredoc_delimiters.extend(pending_heredocs);
     }
     (writes, opaque_redirect)
 }
@@ -1352,9 +1364,10 @@ fn is_heredoc_terminator(line: &str, delimiter: &HeredocDelimiter) -> bool {
     candidate == delimiter.word
 }
 
-/// Find an unquoted `<<[-]?` heredoc opener and return its delimiter word.
-fn extract_heredoc_delimiter(line: &str) -> Option<HeredocDelimiter> {
+/// Find every unquoted `<<[-]?` heredoc opener on a command line.
+fn extract_heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
     let bytes = line.as_bytes();
+    let mut delimiters = Vec::new();
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
@@ -1381,16 +1394,20 @@ fn extract_heredoc_delimiter(line: &str) -> Option<HeredocDelimiter> {
                     index += 1;
                 }
                 if index >= bytes.len() {
-                    return None;
+                    break;
                 }
-                let (word, _) = parse_heredoc_word(&line[index..])?;
-                return Some(HeredocDelimiter { word, strip_tabs });
+                let Some((word, consumed)) = parse_heredoc_word(&line[index..]) else {
+                    break;
+                };
+                delimiters.push(HeredocDelimiter { word, strip_tabs });
+                index += consumed;
+                continue;
             }
             _ => {}
         }
         index += 1;
     }
-    None
+    delimiters
 }
 
 /// Parse a heredoc delimiter word: bare `EOF`, `'EOF'`, or `"EOF"`.
@@ -1438,7 +1455,8 @@ fn parse_heredoc_word(value: &str) -> Option<(String, usize)> {
 
 /// Split a shell line on unquoted `;`, `&&`, and `||` so multi-redirect command
 /// lists are each inspected rather than keeping only the first `>>` write.
-/// Unquoted `#` starts a comment: operators after it must not create segments.
+/// Unquoted `#` starts a comment when it begins a word (after whitespace or a
+/// control operator such as `;`): operators after it must not create segments.
 fn split_shell_list_segments(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut segments = Vec::new();
@@ -1462,8 +1480,12 @@ fn split_shell_list_segments(line: &str) -> Vec<&str> {
             b'"' if !in_single => in_double = !in_double,
             b'#' if !in_single
                 && !in_double
-                && (index == 0 || bytes[index - 1].is_ascii_whitespace()) =>
+                && (index == 0
+                    || bytes[index - 1].is_ascii_whitespace()
+                    || is_shell_comment_boundary(bytes[index - 1])) =>
             {
+                // Bash starts a comment when `#` begins a word, including after
+                // control operators with no intervening whitespace (`;# …`).
                 in_comment = true;
             }
             b';' if !in_single && !in_double => {
@@ -1515,8 +1537,10 @@ fn infer_github_file_assignment_name(command: &str) -> Option<String> {
 }
 
 fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a str> {
-    let index = line.find(">>")?;
-    let (before, after) = line.split_at(index);
+    let index = find_stdout_append_redirect(line)?;
+    let command_end = stdout_append_command_end(line.as_bytes(), index);
+    let before = &line[..command_end];
+    let after = &line[index..];
     let after = after.trim_start_matches('>').trim();
     // Trailing `# ...` comments after the redirect target are valid Bash when
     // `#` begins a new word (whitespace-bounded). Exact-matching the whole
@@ -1541,7 +1565,7 @@ fn split_github_file_redirect<'a>(line: &'a str, file_var: &str) -> Option<&'a s
 /// True when `segment` has `>> $GITHUB_*` but a later stdout redirect makes
 /// that write a no-op (so callers must not mark the segment opaque).
 fn github_file_stdout_redirect_overridden(segment: &str, file_var: &str) -> bool {
-    let Some(index) = segment.find(">>") else {
+    let Some(index) = find_stdout_append_redirect(segment) else {
         return false;
     };
     let after = segment[index..].trim_start_matches('>').trim();
@@ -1555,6 +1579,95 @@ fn github_file_stdout_redirect_overridden(segment: &str, file_var: &str) -> bool
     }
     let after_target = after[target_token.len()..].trim_start();
     stdout_redirect_follows(after_target)
+}
+
+/// Index of an unquoted stdout `>>` / `1>>` / `&>>` append redirect, if any.
+///
+/// Descriptor-prefixed redirects such as `2>>` target stderr (or another fd)
+/// and must not be treated as environment-file writes from `echo` stdout.
+fn find_stdout_append_redirect(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index + 1 < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'\\' if in_double && index + 1 < bytes.len() => {
+                index += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'>' if !in_single && !in_double && bytes[index + 1] == b'>' => {
+                if append_redirect_targets_stdout(bytes, index) {
+                    return Some(index);
+                }
+                index += 2;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// End of the command text before a stdout append redirect at `index`.
+///
+/// Strips an explicit `1` fd prefix or `&` from `&>>`, but keeps digits that
+/// belong to the preceding word (`echo TARGET=main2>>file`).
+fn stdout_append_command_end(bytes: &[u8], index: usize) -> usize {
+    if index > 0 && bytes[index - 1] == b'&' {
+        return index - 1;
+    }
+    let mut fd_start = index;
+    while fd_start > 0 && bytes[fd_start - 1].is_ascii_digit() {
+        fd_start -= 1;
+    }
+    if fd_start == index {
+        return index;
+    }
+    let prefix_ok = fd_start == 0
+        || bytes[fd_start - 1].is_ascii_whitespace()
+        || is_shell_comment_boundary(bytes[fd_start - 1]);
+    if prefix_ok {
+        fd_start
+    } else {
+        index
+    }
+}
+
+/// True when the `>>` at `index` appends stdout (`>>`, `1>>`, or `&>>`).
+fn append_redirect_targets_stdout(bytes: &[u8], index: usize) -> bool {
+    if index > 0 && bytes[index - 1] == b'&' {
+        // `&>>file` redirects both stdout and stderr.
+        return true;
+    }
+    let mut fd_start = index;
+    while fd_start > 0 && bytes[fd_start - 1].is_ascii_digit() {
+        fd_start -= 1;
+    }
+    if fd_start == index {
+        return true;
+    }
+    // Digits only form an fd prefix when they begin a new shell word.
+    let prefix_ok = fd_start == 0
+        || bytes[fd_start - 1].is_ascii_whitespace()
+        || is_shell_comment_boundary(bytes[fd_start - 1]);
+    if !prefix_ok {
+        // e.g. `echo TARGET=main2>>file` — `2` belongs to the word.
+        return true;
+    }
+    std::str::from_utf8(&bytes[fd_start..index])
+        .ok()
+        .and_then(|fd| fd.parse::<u32>().ok())
+        == Some(1)
+}
+
+/// Bytes that end a shell word so a following `#` starts a comment.
+fn is_shell_comment_boundary(byte: u8) -> bool {
+    matches!(byte, b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>')
 }
 
 /// True when unquoted `>` / `>>` appears in `value` (another stdout redirect).
@@ -3200,6 +3313,43 @@ run: |
     }
 
     #[test]
+    fn apply_github_env_writes_ignores_multi_heredoc_payload_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  cat <<'A' <<'B'
+  ignored-A
+  A
+  echo "TARGET=main" >> "$GITHUB_ENV"
+  B
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "second heredoc payload must not be treated as a real GITHUB_ENV write: {env:?}"
+        );
+    }
+
+    #[test]
     fn split_shell_list_segments_ignores_operators_inside_comments() {
         let segments = split_shell_list_segments(
             r#"echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV" # ; echo "TARGET=main" >> "$GITHUB_ENV""#,
@@ -3220,6 +3370,34 @@ run: |
                     || trimmed.starts_with("echo 'TARGET=main'")
             }),
             "commented safe overwrite must not become executable: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn split_shell_list_segments_starts_comment_after_control_operator() {
+        let segments = split_shell_list_segments(
+            r#"echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV";# ; echo "TARGET=main" >> "$GITHUB_ENV""#,
+        );
+        assert_eq!(
+            segments.len(),
+            2,
+            "`;#` must end the first command and comment the rest: {segments:?}"
+        );
+        assert!(
+            segments[0].contains("inputs.ref"),
+            "attacker write must remain executable: {segments:?}"
+        );
+        assert!(
+            segments[1].trim().is_empty() || segments[1].trim().starts_with('#'),
+            "post-`;#` text must not become an executable segment: {segments:?}"
+        );
+        assert!(
+            !segments.iter().any(|segment| {
+                let trimmed = segment.trim();
+                trimmed.starts_with("echo \"TARGET=main\"")
+                    || trimmed.starts_with("echo 'TARGET=main'")
+            }),
+            "`;#`-commented safe overwrite must not become executable: {segments:?}"
         );
     }
 
@@ -3251,6 +3429,84 @@ run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV" # ; echo "TARGET=main" >> 
             env.get("TARGET").map(String::as_str),
             Some("${{ github.event.pull_request.head.sha }}"),
             "commented safe overwrite must not win last-write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_operator_glued_comment_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV";# ; echo "TARGET=main" >> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (written, opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        assert!(!opaque);
+        assert!(written.contains("TARGET"));
+        assert_eq!(
+            env.get("TARGET").map(String::as_str),
+            Some("${{ github.event.pull_request.head.sha }}"),
+            "`;#`-commented safe overwrite must not win last-write: {env:?}"
+        );
+    }
+
+    #[test]
+    fn split_github_file_redirect_rejects_stderr_descriptor_prefix() {
+        assert_eq!(
+            split_github_file_redirect(r#"echo "TARGET=main" 2>> "$GITHUB_ENV""#, "GITHUB_ENV"),
+            None,
+            "2>> must not be treated as a stdout GITHUB_ENV write"
+        );
+        assert_eq!(
+            split_github_file_redirect(r#"echo "TARGET=main" 1>> "$GITHUB_ENV""#, "GITHUB_ENV"),
+            Some(r#"echo "TARGET=main""#),
+            "1>> remains a stdout GITHUB_ENV write"
+        );
+    }
+
+    #[test]
+    fn apply_github_env_writes_ignores_stderr_descriptor_safe_overwrite() {
+        let docs = YamlLoader::load_from_str(
+            r#"
+run: |
+  echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+  echo "TARGET=main" 2>> "$GITHUB_ENV"
+"#,
+        )
+        .expect("parse step");
+        let step = docs[0].as_hash().expect("step mapping");
+        let mut inputs = InputBindings::new();
+        inputs.insert(
+            "ref".to_string(),
+            "${{ github.event.pull_request.head.sha }}".to_string(),
+        );
+        let mut env = EnvBindings::new();
+        let (_written, _opaque) = apply_github_env_writes(
+            step,
+            &inputs,
+            &EnvBindings::new(),
+            &StepOutputBindings::new(),
+            &mut env,
+        );
+        // Either retained attacker value or opaque invalidation is fail-closed;
+        // never accept the stderr-only `main` overwrite as authoritative.
+        assert_ne!(
+            env.get("TARGET").map(String::as_str),
+            Some("main"),
+            "stderr-only 2>> must not record a safe overwrite: {env:?}"
         );
     }
 
@@ -3983,6 +4239,55 @@ runs:
     - shell: bash
       run: echo "TARGET=main" >> "$GITHUB_ENV"
     - if: ${{ always() }}
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      with:
+        ref: ${{ env.TARGET }}
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ]);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == RULE_UNTRUSTED_CHECKOUT && finding.severity == Severity::Critical
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn privileged_local_composite_compound_success_checkout_fails_closed() {
+        let findings = findings_for_files(&[
+            SurfaceFile {
+                rel: ".github/workflows/triage.yml".to_string(),
+                content: r#"
+name: Triage
+on: pull_request_target
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/checkout-pr/action.yml".to_string(),
+                content: r#"
+name: checkout-pr
+inputs:
+  ref:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "TARGET=${{ inputs.ref }}" >> "$GITHUB_ENV"
+    - shell: bash
+      run: echo "TARGET=main" >> "$GITHUB_ENV"
+    - if: ${{ success() || true }}
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       with:
         ref: ${{ env.TARGET }}
