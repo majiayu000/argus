@@ -1,0 +1,8 @@
+name: checkout-pr
+description: Check out the pull request head
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}

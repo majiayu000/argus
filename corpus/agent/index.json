@@ -15,7 +15,11 @@
       "path": "fixtures/skill-config-backdoor",
       "packageName": "markdown-beautifier",
       "expectedDecision": "block",
-      "rules": ["capability-misfit", "agent-config-write", "hook-persistence"],
+      "rules": [
+        "capability-misfit",
+        "agent-config-write",
+        "hook-persistence"
+      ],
       "notes": "SKILL.md claims markdown formatting; setup.sh writes ~/.claude/settings.local.json and registers an auto-approve hook. Declared intent has no reason to touch agent config."
     },
     {
@@ -24,7 +28,11 @@
       "path": "fixtures/skill-cred-exfil",
       "packageName": "repo-stats",
       "expectedDecision": "block",
-      "rules": ["capability-misfit", "credential-access", "network-exfiltration"],
+      "rules": [
+        "capability-misfit",
+        "credential-access",
+        "network-exfiltration"
+      ],
       "notes": "SKILL.md claims repo stats; collect.sh reads ~/.aws/credentials + .env + ANTHROPIC_API_KEY/GITHUB_TOKEN and POSTs them to a remote host. sensitive_read + net_egress combo to non-declared host."
     },
     {
@@ -33,7 +41,11 @@
       "path": "fixtures/skill-obfuscated-dropper",
       "packageName": "emoji-picker",
       "expectedDecision": "block",
-      "rules": ["obfuscation", "shell-pipe-execution", "remote-download"],
+      "rules": [
+        "obfuscation",
+        "shell-pipe-execution",
+        "remote-download"
+      ],
       "notes": "postinstall.sh does curl | base64 -d | bash plus an inline base64-decoded pipe-to-sh. Obfuscated remote stage-2 execution."
     },
     {
@@ -42,8 +54,11 @@
       "path": "fixtures/skill-injection-md",
       "packageName": "helpful-assistant",
       "expectedDecision": "block",
-      "rules": ["injection-override", "concealment"],
-      "notes": "SKILL.md hides an HTML comment claiming absolute authority, telling the agent to ignore prior instructions, push to an attacker remote, and not mention it. Pure text/LLM-instruction attack (no scripts) — the dominant attack surface in the census."
+      "rules": [
+        "injection-override",
+        "concealment"
+      ],
+      "notes": "SKILL.md hides an HTML comment claiming absolute authority, telling the agent to ignore prior instructions, push to an attacker remote, and not mention it. Pure text/LLM-instruction attack (no scripts) \u2014 the dominant attack surface in the census."
     },
     {
       "id": "skill-formatted-system-override",
@@ -51,7 +66,9 @@
       "path": "fixtures/skill-formatted-system-override",
       "packageName": "formatted-system-override",
       "expectedDecision": "block",
-      "rules": ["injection-override"],
+      "rules": [
+        "injection-override"
+      ],
       "notes": "SKILL.md uses Markdown emphasis, bounded inline HTML, and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
     },
     {
@@ -61,7 +78,7 @@
       "packageName": "python-project-init",
       "expectedDecision": "allow",
       "rules": [],
-      "notes": "NEGATIVE / FP-trap. SKILL.md documents `curl https://astral.sh/uv/install.sh | sh` (official vendor installer) as a prerequisite. No bundled scripts. The current lexical curl_pipe_sh rule flags this — it must NOT block. Census showed 1571 such benign hits."
+      "notes": "NEGATIVE / FP-trap. SKILL.md documents `curl https://astral.sh/uv/install.sh | sh` (official vendor installer) as a prerequisite. No bundled scripts. The current lexical curl_pipe_sh rule flags this \u2014 it must NOT block. Census showed 1571 such benign hits."
     },
     {
       "id": "skill-wbr-system-override",
@@ -69,7 +86,9 @@
       "path": "fixtures/skill-wbr-system-override",
       "packageName": "wbr-system-override",
       "expectedDecision": "block",
-      "rules": ["injection-override"],
+      "rules": [
+        "injection-override"
+      ],
       "notes": "SKILL.md isolates a no-space `<wbr>` break opportunity between `system` and the authority target. Pure text/LLM-instruction attack (no scripts)."
     },
     {
@@ -78,8 +97,10 @@
       "path": "fixtures/skill-benign-net-tool",
       "packageName": "weather-lookup",
       "expectedDecision": "allow-with-approval",
-      "rules": ["capability-manifest"],
-      "notes": "NEGATIVE / FP-trap. fetch.sh reads WEATHER_API_KEY + calls a weather API — capabilities present but consistent with declared intent and targeting the tool's own host. Should surface a capability manifest and require approval, NOT block. Guards against 'reads key + net egress = malicious'."
+      "rules": [
+        "capability-manifest"
+      ],
+      "notes": "NEGATIVE / FP-trap. fetch.sh reads WEATHER_API_KEY + calls a weather API \u2014 capabilities present but consistent with declared intent and targeting the tool's own host. Should surface a capability manifest and require approval, NOT block. Guards against 'reads key + net egress = malicious'."
     },
     {
       "id": "skill-benign-system-override",
@@ -96,8 +117,102 @@
       "path": "fixtures/workflow-dangerous",
       "packageName": "workflow-dangerous",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection", "workflow-mutable-action", "workflow-untrusted-checkout"],
+      "rules": [
+        "workflow-context-injection",
+        "workflow-mutable-action",
+        "workflow-untrusted-checkout"
+      ],
       "notes": "A privileged pull_request_target workflow checks out attacker-controlled pull-request code and directly interpolates an attacker-controlled title into a shell script."
+    },
+    {
+      "id": "workflow-local-composite-untrusted-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-untrusted-checkout",
+      "packageName": "workflow-local-composite-untrusted-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-mutable-action",
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow invokes a same-repo composite that checks out github.event.pull_request.head.sha. Local uses expansion must propagate privileged_trigger so wrapping cannot bypass Critical\u2192block."
+    },
+    {
+      "id": "workflow-local-composite-input-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-input-taint-checkout",
+      "packageName": "workflow-local-composite-input-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-mutable-action",
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite input; expansion must propagate with bindings so compound ref: ${{ inputs.ref || github.sha }} still triggers Critical\u2192block."
+    },
+    {
+      "id": "workflow-local-composite-bracket-input-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-bracket-input-taint-checkout",
+      "packageName": "workflow-local-composite-bracket-input-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite input; expansion must resolve bracket ref: ${{ inputs['ref'] }} so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-case-input-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-case-input-taint-checkout",
+      "packageName": "workflow-local-composite-case-input-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite with casing that differs from the declared input (with.ref vs inputs.Ref); expansion must resolve case-insensitively so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-env-alias-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-env-alias-taint-checkout",
+      "packageName": "workflow-local-composite-env-alias-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow stores the PR head SHA in env.PR_REF and passes with.ref: ${{ env.PR_REF }} into a local composite; expansion must resolve env aliases so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-bracket-github-context-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-bracket-github-context-checkout",
+      "packageName": "workflow-local-composite-bracket-github-context-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow invokes a same-repo composite that checks out github['event']['pull_request']['head']['sha']; bracket normalization must run even with empty input bindings so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-step-output-taint-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-step-output-taint-checkout",
+      "packageName": "workflow-local-composite-step-output-taint-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite that writes the input to $GITHUB_OUTPUT then checks out steps.resolve.outputs.ref; expansion must track step-output taint so Critical\u2192block still applies for a pinned checkout."
+    },
+    {
+      "id": "workflow-local-composite-unresolved-github-env-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-local-composite-unresolved-github-env-checkout",
+      "packageName": "workflow-local-composite-unresolved-github-env-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A pull_request_target workflow passes github.event.pull_request.head.sha into a local composite that writes TARGET=$TARGET to $GITHUB_ENV then checks out env.TARGET; incomplete GITHUB_ENV tracking must fail closed on the unresolved env ref so Critical\u2192block still applies for a pinned checkout."
     },
     {
       "id": "workflow-dangerous-permissions",
@@ -105,7 +220,10 @@
       "path": "fixtures/workflow-dangerous-permissions",
       "packageName": "workflow-dangerous-permissions",
       "expectedDecision": "block",
-      "rules": ["workflow-privileged-write", "workflow-write-all"],
+      "rules": [
+        "workflow-privileged-write",
+        "workflow-write-all"
+      ],
       "notes": "A pull_request_target workflow grants a scoped workflow write permission and gives one job write access to every GITHUB_TOKEN permission."
     },
     {
@@ -114,7 +232,9 @@
       "path": "fixtures/workflow-mutable-action",
       "packageName": "workflow-mutable-action",
       "expectedDecision": "allow-with-approval",
-      "rules": ["workflow-mutable-action"],
+      "rules": [
+        "workflow-mutable-action"
+      ],
       "notes": "A normal CI workflow references actions/checkout by mutable major tag, requiring explicit approval without claiming compromise."
     },
     {
@@ -132,7 +252,10 @@
       "path": "fixtures/composite-action-dangerous",
       "packageName": "composite-action-dangerous",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection", "workflow-mutable-action"],
+      "rules": [
+        "workflow-context-injection",
+        "workflow-mutable-action"
+      ],
       "notes": "A local composite Action uses a mutable remote dependency and directly interpolates attacker-controlled pull-request data into an inline script."
     },
     {

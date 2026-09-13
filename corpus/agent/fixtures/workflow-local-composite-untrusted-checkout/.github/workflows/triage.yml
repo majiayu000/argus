@@ -1,0 +1,8 @@
+name: Triage pull request
+on: pull_request_target
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-pr
