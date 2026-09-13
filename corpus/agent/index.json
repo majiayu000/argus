@@ -15,7 +15,11 @@
       "path": "fixtures/skill-config-backdoor",
       "packageName": "markdown-beautifier",
       "expectedDecision": "block",
-      "rules": ["capability-misfit", "agent-config-write", "hook-persistence"],
+      "rules": [
+        "capability-misfit",
+        "agent-config-write",
+        "hook-persistence"
+      ],
       "notes": "SKILL.md claims markdown formatting; setup.sh writes ~/.claude/settings.local.json and registers an auto-approve hook. Declared intent has no reason to touch agent config."
     },
     {
@@ -24,7 +28,11 @@
       "path": "fixtures/skill-cred-exfil",
       "packageName": "repo-stats",
       "expectedDecision": "block",
-      "rules": ["capability-misfit", "credential-access", "network-exfiltration"],
+      "rules": [
+        "capability-misfit",
+        "credential-access",
+        "network-exfiltration"
+      ],
       "notes": "SKILL.md claims repo stats; collect.sh reads ~/.aws/credentials + .env + ANTHROPIC_API_KEY/GITHUB_TOKEN and POSTs them to a remote host. sensitive_read + net_egress combo to non-declared host."
     },
     {
@@ -33,7 +41,11 @@
       "path": "fixtures/skill-obfuscated-dropper",
       "packageName": "emoji-picker",
       "expectedDecision": "block",
-      "rules": ["obfuscation", "shell-pipe-execution", "remote-download"],
+      "rules": [
+        "obfuscation",
+        "shell-pipe-execution",
+        "remote-download"
+      ],
       "notes": "postinstall.sh does curl | base64 -d | bash plus an inline base64-decoded pipe-to-sh. Obfuscated remote stage-2 execution."
     },
     {
@@ -42,8 +54,11 @@
       "path": "fixtures/skill-injection-md",
       "packageName": "helpful-assistant",
       "expectedDecision": "block",
-      "rules": ["injection-override", "concealment"],
-      "notes": "SKILL.md hides an HTML comment claiming absolute authority, telling the agent to ignore prior instructions, push to an attacker remote, and not mention it. Pure text/LLM-instruction attack (no scripts) — the dominant attack surface in the census."
+      "rules": [
+        "injection-override",
+        "concealment"
+      ],
+      "notes": "SKILL.md hides an HTML comment claiming absolute authority, telling the agent to ignore prior instructions, push to an attacker remote, and not mention it. Pure text/LLM-instruction attack (no scripts) \u2014 the dominant attack surface in the census."
     },
     {
       "id": "skill-formatted-system-override",
@@ -51,7 +66,9 @@
       "path": "fixtures/skill-formatted-system-override",
       "packageName": "formatted-system-override",
       "expectedDecision": "block",
-      "rules": ["injection-override"],
+      "rules": [
+        "injection-override"
+      ],
       "notes": "SKILL.md uses Markdown emphasis, bounded inline HTML, and a safety qualifier between `system` and the authority target noun. Pure text/LLM-instruction attack (no scripts)."
     },
     {
@@ -61,7 +78,7 @@
       "packageName": "python-project-init",
       "expectedDecision": "allow",
       "rules": [],
-      "notes": "NEGATIVE / FP-trap. SKILL.md documents `curl https://astral.sh/uv/install.sh | sh` (official vendor installer) as a prerequisite. No bundled scripts. The current lexical curl_pipe_sh rule flags this — it must NOT block. Census showed 1571 such benign hits."
+      "notes": "NEGATIVE / FP-trap. SKILL.md documents `curl https://astral.sh/uv/install.sh | sh` (official vendor installer) as a prerequisite. No bundled scripts. The current lexical curl_pipe_sh rule flags this \u2014 it must NOT block. Census showed 1571 such benign hits."
     },
     {
       "id": "skill-wbr-system-override",
@@ -69,7 +86,9 @@
       "path": "fixtures/skill-wbr-system-override",
       "packageName": "wbr-system-override",
       "expectedDecision": "block",
-      "rules": ["injection-override"],
+      "rules": [
+        "injection-override"
+      ],
       "notes": "SKILL.md isolates a no-space `<wbr>` break opportunity between `system` and the authority target. Pure text/LLM-instruction attack (no scripts)."
     },
     {
@@ -78,8 +97,10 @@
       "path": "fixtures/skill-benign-net-tool",
       "packageName": "weather-lookup",
       "expectedDecision": "allow-with-approval",
-      "rules": ["capability-manifest"],
-      "notes": "NEGATIVE / FP-trap. fetch.sh reads WEATHER_API_KEY + calls a weather API — capabilities present but consistent with declared intent and targeting the tool's own host. Should surface a capability manifest and require approval, NOT block. Guards against 'reads key + net egress = malicious'."
+      "rules": [
+        "capability-manifest"
+      ],
+      "notes": "NEGATIVE / FP-trap. fetch.sh reads WEATHER_API_KEY + calls a weather API \u2014 capabilities present but consistent with declared intent and targeting the tool's own host. Should surface a capability manifest and require approval, NOT block. Guards against 'reads key + net egress = malicious'."
     },
     {
       "id": "skill-benign-system-override",
@@ -96,7 +117,11 @@
       "path": "fixtures/workflow-dangerous",
       "packageName": "workflow-dangerous",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection", "workflow-mutable-action", "workflow-untrusted-checkout"],
+      "rules": [
+        "workflow-context-injection",
+        "workflow-mutable-action",
+        "workflow-untrusted-checkout"
+      ],
       "notes": "A privileged pull_request_target workflow checks out attacker-controlled pull-request code and directly interpolates an attacker-controlled title into a shell script."
     },
     {
@@ -105,7 +130,10 @@
       "path": "fixtures/workflow-dangerous-permissions",
       "packageName": "workflow-dangerous-permissions",
       "expectedDecision": "block",
-      "rules": ["workflow-privileged-write", "workflow-write-all"],
+      "rules": [
+        "workflow-privileged-write",
+        "workflow-write-all"
+      ],
       "notes": "A pull_request_target workflow grants a scoped workflow write permission and gives one job write access to every GITHUB_TOKEN permission."
     },
     {
@@ -114,7 +142,9 @@
       "path": "fixtures/workflow-mutable-action",
       "packageName": "workflow-mutable-action",
       "expectedDecision": "allow-with-approval",
-      "rules": ["workflow-mutable-action"],
+      "rules": [
+        "workflow-mutable-action"
+      ],
       "notes": "A normal CI workflow references actions/checkout by mutable major tag, requiring explicit approval without claiming compromise."
     },
     {
@@ -132,7 +162,9 @@
       "path": "fixtures/workflow-env-indirection-dangerous",
       "packageName": "workflow-env-indirection-dangerous",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Same-step env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in run, which expands before the shell parses the script."
     },
     {
@@ -141,7 +173,9 @@
       "path": "fixtures/workflow-env-indirection-job-env",
       "packageName": "workflow-env-indirection-job-env",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Job-level env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in a later run step."
     },
     {
@@ -150,7 +184,9 @@
       "path": "fixtures/workflow-env-indirection-alias",
       "packageName": "workflow-env-indirection-alias",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Step-level env aliases a tainted job env via ${{ env.TITLE }} and re-interpolates the alias in run."
     },
     {
@@ -159,7 +195,9 @@
       "path": "fixtures/workflow-env-indirection-composite",
       "packageName": "workflow-env-indirection-composite",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Caller job env taints TITLE and a local composite action re-interpolates ${{ env.TITLE }} in run, which inherits the caller environment."
     },
     {
@@ -168,7 +206,9 @@
       "path": "fixtures/workflow-env-indirection-hyphenated",
       "packageName": "workflow-env-indirection-hyphenated",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Hyphenated env name ISSUE-TITLE is re-interpolated via ${{ env.ISSUE-TITLE }} in run."
     },
     {
@@ -177,8 +217,32 @@
       "path": "fixtures/workflow-env-indirection-reusable",
       "packageName": "workflow-env-indirection-reusable",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection"],
+      "rules": [
+        "workflow-context-injection"
+      ],
       "notes": "Caller passes github.event.issue.title through with: into a local reusable workflow that interpolates ${{ inputs.title }} in run."
+    },
+    {
+      "id": "workflow-env-indirection-needs-relay",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-needs-relay",
+      "packageName": "workflow-env-indirection-needs-relay",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Relay job declared before producer re-exports needs.producer.outputs.title; consumer reusable workflow interpolates the multi-hop needs.relay.outputs.title input."
+    },
+    {
+      "id": "workflow-env-indirection-composite-output",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-composite-output",
+      "packageName": "workflow-env-indirection-composite-output",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Local composite writes a tainted input to $GITHUB_OUTPUT, declares outputs.title from that step output, and the caller interpolates steps.action.outputs.title in a later run step."
     },
     {
       "id": "composite-action-dangerous",
@@ -186,7 +250,10 @@
       "path": "fixtures/composite-action-dangerous",
       "packageName": "composite-action-dangerous",
       "expectedDecision": "block",
-      "rules": ["workflow-context-injection", "workflow-mutable-action"],
+      "rules": [
+        "workflow-context-injection",
+        "workflow-mutable-action"
+      ],
       "notes": "A local composite Action uses a mutable remote dependency and directly interpolates attacker-controlled pull-request data into an inline script."
     },
     {

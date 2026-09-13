@@ -66,7 +66,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
             }
             SurfaceKind::ActionMetadata => {
                 let mut visiting = HashSet::new();
-                scan_action_metadata(
+                let _ = scan_action_metadata(
                     file,
                     TaintScope {
                         envs: &empty,
@@ -167,54 +167,57 @@ fn scan_workflow_inner(
     };
 
     // Collect job-output taint before scanning so `needs.*.outputs` is available
-    // regardless of YAML job order.
+    // regardless of YAML job order. Iterate to a fixed point: a relay job may be
+    // declared before its producer and re-export `needs.producer.outputs.*`.
     let mut tainted_job_outputs = HashSet::new();
-    for (job_key, job_yaml) in jobs {
-        let Some(job_id) = job_key.as_str() else {
-            continue;
-        };
-        let Some(job) = job_yaml.as_hash() else {
-            continue;
-        };
-        if get_string(job, "uses").is_some() {
-            continue;
-        }
-        let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
-            continue;
-        };
-        let mut job_tainted_envs = workflow_tainted_envs.clone();
-        if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
-            apply_env_taints(
-                &mut job_tainted_envs,
-                env,
-                TaintScope {
-                    envs: &empty_outputs,
-                    inputs: caller_taint.inputs,
-                    secrets: caller_taint.secrets,
-                    step_outputs: &empty_outputs,
-                    job_outputs: &tainted_job_outputs,
-                },
-                &file.rel,
-            )?;
-        }
-        let mut tainted_step_outputs = HashSet::new();
-        for step in steps.iter().filter_map(Yaml::as_hash) {
-            let mut step_tainted_envs = job_tainted_envs.clone();
-            if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
+    let job_count = jobs.keys().count();
+    for _ in 0..=job_count {
+        let before = tainted_job_outputs.len();
+        for (job_key, job_yaml) in jobs {
+            let Some(job_id) = job_key.as_str() else {
+                continue;
+            };
+            let Some(job) = job_yaml.as_hash() else {
+                continue;
+            };
+            if get_string(job, "uses").is_some() {
+                continue;
+            }
+            let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
+                continue;
+            };
+            let mut job_tainted_envs = workflow_tainted_envs.clone();
+            if let Some(env) = get(job, "env").and_then(Yaml::as_hash) {
                 apply_env_taints(
-                    &mut step_tainted_envs,
+                    &mut job_tainted_envs,
                     env,
                     TaintScope {
                         envs: &empty_outputs,
                         inputs: caller_taint.inputs,
                         secrets: caller_taint.secrets,
-                        step_outputs: &tainted_step_outputs,
+                        step_outputs: &empty_outputs,
                         job_outputs: &tainted_job_outputs,
                     },
                     &file.rel,
                 )?;
             }
-            let added = {
+            let mut tainted_step_outputs = HashSet::new();
+            for step in steps.iter().filter_map(Yaml::as_hash) {
+                let mut step_tainted_envs = job_tainted_envs.clone();
+                if let Some(env) = get(step, "env").and_then(Yaml::as_hash) {
+                    apply_env_taints(
+                        &mut step_tainted_envs,
+                        env,
+                        TaintScope {
+                            envs: &empty_outputs,
+                            inputs: caller_taint.inputs,
+                            secrets: caller_taint.secrets,
+                            step_outputs: &tainted_step_outputs,
+                            job_outputs: &tainted_job_outputs,
+                        },
+                        &file.rel,
+                    )?;
+                }
                 let step_scope = TaintScope {
                     envs: &step_tainted_envs,
                     inputs: caller_taint.inputs,
@@ -222,21 +225,32 @@ fn scan_workflow_inner(
                     step_outputs: &tainted_step_outputs,
                     job_outputs: &tainted_job_outputs,
                 };
-                collect_tainted_github_outputs(step, step_scope, &file.rel)?
+                let mut discarded = Vec::new();
+                let added = collect_step_produced_output_taint(
+                    step,
+                    step_scope,
+                    actions,
+                    visiting,
+                    &mut discarded,
+                    &file.rel,
+                )?;
+                tainted_step_outputs.extend(added);
+            }
+            let added = {
+                let job_scope = TaintScope {
+                    envs: &job_tainted_envs,
+                    inputs: caller_taint.inputs,
+                    secrets: caller_taint.secrets,
+                    step_outputs: &tainted_step_outputs,
+                    job_outputs: &tainted_job_outputs,
+                };
+                collect_tainted_job_outputs(job, job_id, job_scope, &file.rel)?
             };
-            tainted_step_outputs.extend(added);
+            tainted_job_outputs.extend(added);
         }
-        let added = {
-            let job_scope = TaintScope {
-                envs: &job_tainted_envs,
-                inputs: caller_taint.inputs,
-                secrets: caller_taint.secrets,
-                step_outputs: &tainted_step_outputs,
-                job_outputs: &tainted_job_outputs,
-            };
-            collect_tainted_job_outputs(job, job_id, job_scope, &file.rel)?
-        };
-        tainted_job_outputs.extend(added);
+        if tainted_job_outputs.len() == before {
+            break;
+        }
     }
 
     for job in jobs.values().filter_map(Yaml::as_hash) {
@@ -319,7 +333,7 @@ fn scan_workflow_inner(
                     step_outputs: &tainted_step_outputs,
                     job_outputs: &tainted_job_outputs,
                 };
-                scan_step(
+                let from_composite = scan_step(
                     step,
                     &file.rel,
                     privileged_trigger,
@@ -328,7 +342,11 @@ fn scan_workflow_inner(
                     visiting,
                     findings,
                 )?;
-                collect_tainted_github_outputs(step, step_scope, &file.rel)?
+                let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
+                from_composite
+                    .into_iter()
+                    .chain(from_run)
+                    .collect::<HashSet<_>>()
             };
             tainted_step_outputs.extend(added);
         }
@@ -342,9 +360,9 @@ fn scan_action_metadata(
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
     if !visiting.insert(file.rel.clone()) {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     let documents = YamlLoader::load_from_str(&file.content)
         .with_context(|| format!("parse `{}` as YAML", file.rel))?;
@@ -359,15 +377,15 @@ fn scan_action_metadata(
         .with_context(|| format!("Action metadata `{}` root must be a mapping", file.rel))?;
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
         visiting.remove(&file.rel);
-        return Ok(());
+        return Ok(HashSet::new());
     };
     if !get_string(runs, "using").is_some_and(|using| using.eq_ignore_ascii_case("composite")) {
         visiting.remove(&file.rel);
-        return Ok(());
+        return Ok(HashSet::new());
     }
     let Some(steps) = get(runs, "steps").and_then(Yaml::as_vec) else {
         visiting.remove(&file.rel);
-        return Ok(());
+        return Ok(HashSet::new());
     };
     // Composite actions have no `secrets` context; only env + inputs apply.
     let empty_secrets = HashSet::new();
@@ -398,15 +416,30 @@ fn scan_action_metadata(
                 step_outputs: &tainted_step_outputs,
                 job_outputs: &empty_outputs,
             };
-            scan_step(
+            let from_composite = scan_step(
                 step, &file.rel, false, step_scope, actions, visiting, findings,
             )?;
-            collect_tainted_github_outputs(step, step_scope, &file.rel)?
+            let from_run = collect_tainted_github_outputs(step, step_scope, &file.rel)?;
+            from_composite
+                .into_iter()
+                .chain(from_run)
+                .collect::<HashSet<_>>()
         };
         tainted_step_outputs.extend(added);
     }
+    let exported = collect_tainted_declared_outputs(
+        root,
+        TaintScope {
+            envs: caller_taint.envs,
+            inputs: caller_taint.inputs,
+            secrets: &empty_secrets,
+            step_outputs: &tainted_step_outputs,
+            job_outputs: &empty_outputs,
+        },
+        &file.rel,
+    )?;
     visiting.remove(&file.rel);
-    Ok(())
+    Ok(exported)
 }
 
 fn scan_step(
@@ -417,7 +450,8 @@ fn scan_step(
     actions: &HashMap<&str, &SurfaceFile>,
     visiting: &mut HashSet<String>,
     findings: &mut Vec<Finding>,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
+    let mut produced = HashSet::new();
     if let Some(action) = get_string(step, "uses") {
         check_action_ref(action, rel, findings);
         if privileged_trigger && is_checkout(action) && has_untrusted_checkout_ref(step) {
@@ -435,7 +469,7 @@ fn scan_step(
                 let step_tainted_inputs = collect_tainted_with_inputs(step, taint, rel)?;
                 let empty_secrets = HashSet::new();
                 let empty_outputs = HashSet::new();
-                scan_action_metadata(
+                let exported = scan_action_metadata(
                     action_file,
                     TaintScope {
                         envs: taint.envs,
@@ -450,13 +484,66 @@ fn scan_step(
                     visiting,
                     findings,
                 )?;
+                if let Some(step_id) = get_string(step, "id") {
+                    if is_github_ident(step_id) {
+                        for name in exported {
+                            produced.insert(format!("{step_id}.{name}"));
+                        }
+                    }
+                }
             }
         }
     }
     if let Some(script) = get_string(step, "run") {
         check_inline_script(script, rel, taint, findings)?;
     }
-    Ok(())
+    Ok(produced)
+}
+
+/// Collect `$GITHUB_OUTPUT` writes and local composite exported outputs for a
+/// step without requiring the caller to run the full `scan_step` finding pass.
+fn collect_step_produced_output_taint(
+    step: &Hash,
+    taint: TaintScope<'_>,
+    actions: &HashMap<&str, &SurfaceFile>,
+    visiting: &mut HashSet<String>,
+    findings: &mut Vec<Finding>,
+    rel: &str,
+) -> Result<HashSet<String>> {
+    let mut produced = collect_tainted_github_outputs(step, taint, rel)?;
+    let Some(action) = get_string(step, "uses") else {
+        return Ok(produced);
+    };
+    let Some(local) = action.strip_prefix("./") else {
+        return Ok(produced);
+    };
+    let Some(action_file) = resolve_local_action(local, actions) else {
+        return Ok(produced);
+    };
+    let step_tainted_inputs = collect_tainted_with_inputs(step, taint, rel)?;
+    let empty_secrets = HashSet::new();
+    let empty_outputs = HashSet::new();
+    let exported = scan_action_metadata(
+        action_file,
+        TaintScope {
+            envs: taint.envs,
+            inputs: &step_tainted_inputs,
+            secrets: &empty_secrets,
+            step_outputs: &empty_outputs,
+            job_outputs: &empty_outputs,
+        },
+        actions,
+        visiting,
+        findings,
+    )?;
+    if let Some(step_id) = get_string(step, "id") {
+        if is_github_ident(step_id) {
+            for name in exported {
+                produced.insert(format!("{step_id}.{name}"));
+            }
+        }
+    }
+    Ok(produced)
 }
 
 fn resolve_local_action<'a>(
@@ -704,20 +791,29 @@ fn collect_tainted_github_outputs(
     let Some(script) = get_string(step, "run") else {
         return Ok(tainted);
     };
-    for (name, raw_value) in parse_github_output_writes(script) {
-        if github_output_value_is_tainted(&raw_value, taint, rel)? {
+    for (name, raw_value, shell_expands) in parse_github_output_writes(script) {
+        if github_output_value_is_tainted(&raw_value, taint, rel, shell_expands)? {
             tainted.insert(format!("{step_id}.{name}"));
         }
     }
     Ok(tainted)
 }
 
-fn github_output_value_is_tainted(value: &str, taint: TaintScope<'_>, rel: &str) -> Result<bool> {
+fn github_output_value_is_tainted(
+    value: &str,
+    taint: TaintScope<'_>,
+    rel: &str,
+    shell_expands: bool,
+) -> Result<bool> {
     if value_carries_taint(value, taint, rel)? {
         return Ok(true);
     }
     // Safe remediation writes (`echo "title=$TITLE" >> $GITHUB_OUTPUT`) still
-    // propagate attacker-controlled env values into step outputs.
+    // propagate attacker-controlled env values into step outputs. Single-quoted
+    // payloads are literal shell text, so `$TITLE` must not count as taint.
+    if !shell_expands {
+        return Ok(false);
+    }
     Ok(value_references_tainted_shell_env(value, taint.envs))
 }
 
@@ -746,8 +842,45 @@ fn collect_tainted_job_outputs(
     Ok(tainted)
 }
 
+/// Collect composite Action `outputs.<name>` entries whose `value` carries taint.
+fn collect_tainted_declared_outputs(
+    root: &Hash,
+    taint: TaintScope<'_>,
+    rel: &str,
+) -> Result<HashSet<String>> {
+    let mut tainted = HashSet::new();
+    let Some(outputs) = get(root, "outputs").and_then(Yaml::as_hash) else {
+        return Ok(tainted);
+    };
+    for (key, value) in outputs {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        if !is_github_ident(name) {
+            continue;
+        }
+        let Some(expr) = declared_output_value(value) else {
+            continue;
+        };
+        if value_carries_taint(expr, taint, rel)? {
+            tainted.insert(name.to_string());
+        }
+    }
+    Ok(tainted)
+}
+
+fn declared_output_value(value: &Yaml) -> Option<&str> {
+    match value {
+        Yaml::String(text) => Some(text.as_str()),
+        Yaml::Hash(map) => get_string(map, "value"),
+        _ => None,
+    }
+}
+
 /// Parse simple `echo[ -n] "name=value" >> $GITHUB_OUTPUT` lines from a script.
-fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
+/// The third tuple field is whether the echo payload shell-expands (`false` when
+/// the entire payload is single-quoted).
+fn parse_github_output_writes(script: &str) -> Vec<(String, String, bool)> {
     let mut writes = Vec::new();
     for line in script.lines() {
         let trimmed = line.trim();
@@ -760,7 +893,11 @@ fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
         let Some(payload) = extract_echo_payload(command) else {
             continue;
         };
-        let payload = strip_wrapping_shell_quotes(payload.trim());
+        let (payload, shell_expands) = match strip_wrapping_shell_quote_style(payload.trim()) {
+            Some((inner, b'\'')) => (inner, false),
+            Some((inner, _)) => (inner, true),
+            None => (payload.trim(), true),
+        };
         let Some((name, value)) = payload.split_once('=') else {
             continue;
         };
@@ -768,7 +905,7 @@ fn parse_github_output_writes(script: &str) -> Vec<(String, String)> {
         if !is_github_ident(name) {
             continue;
         }
-        writes.push((name.to_string(), value.trim().to_string()));
+        writes.push((name.to_string(), value.trim().to_string(), shell_expands));
     }
     writes
 }
@@ -800,15 +937,22 @@ fn extract_echo_payload(command: &str) -> Option<&str> {
 }
 
 fn strip_wrapping_shell_quotes(value: &str) -> &str {
+    match strip_wrapping_shell_quote_style(value) {
+        Some((inner, _)) => inner,
+        None => value,
+    }
+}
+
+fn strip_wrapping_shell_quote_style(value: &str) -> Option<(&str, u8)> {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
         let first = bytes[0];
         let last = bytes[bytes.len() - 1];
         if (first == b'"' || first == b'\'') && first == last {
-            return &value[1..value.len() - 1];
+            return Some((&value[1..value.len() - 1], first));
         }
     }
-    value
+    None
 }
 
 fn is_github_ident(value: &str) -> bool {
@@ -2410,5 +2554,149 @@ jobs:
                 && finding.detail.contains("steps.set.outputs.title")
         }));
         assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn needs_relay_job_output_fixed_point_propagates_taint() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  relay:
+    needs: producer
+    runs-on: ubuntu-latest
+    outputs:
+      title: ${{ needs.producer.outputs.title }}
+    steps:
+      - run: echo relay
+  producer:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    outputs:
+      title: ${{ steps.set.outputs.title }}
+    steps:
+      - id: set
+        run: echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+  consumer:
+    needs: relay
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ needs.relay.outputs.title }}
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/workflows/reusable.yml".to_string(),
+                content: r#"
+name: Reusable echo
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("inputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/reusable.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn composite_declared_output_propagates_to_caller_step_outputs() {
+        let files = [
+            SurfaceFile {
+                rel: ".github/workflows/caller.yml".to_string(),
+                content: r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        uses: ./.github/actions/echo
+        with:
+          title: ${{ github.event.issue.title }}
+      - run: echo "${{ steps.action.outputs.title }}"
+"#
+                .to_string(),
+                kind: SurfaceKind::Workflow,
+            },
+            SurfaceFile {
+                rel: ".github/actions/echo/action.yml".to_string(),
+                content: r#"
+name: Echo title
+description: Export tainted input
+inputs:
+  title:
+    required: true
+outputs:
+  title:
+    value: ${{ steps.set.outputs.title }}
+runs:
+  using: composite
+  steps:
+    - id: set
+      shell: bash
+      run: echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
+"#
+                .to_string(),
+                kind: SurfaceKind::ActionMetadata,
+            },
+        ];
+        let findings = findings_for_files(&files);
+
+        assert!(findings.iter().any(|finding| {
+            finding.rule_id == "AGT-06-workflow-context-injection"
+                && finding.severity == Severity::Critical
+                && finding.detail.contains("steps.action.outputs.title")
+                && finding.location.as_deref() == Some(".github/workflows/caller.yml")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Block);
+    }
+
+    #[test]
+    fn single_quoted_github_output_write_keeps_literal_shell_text() {
+        let findings = findings_for(
+            r#"
+name: Echo issue
+on: issues
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - id: set
+        run: echo 'title=$TITLE' >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.set.outputs.title }}"
+"#,
+        );
+
+        assert!(findings.iter().all(|finding| {
+            finding.rule_id != "AGT-06-workflow-context-injection"
+                || !finding.detail.contains("steps.set.outputs.title")
+        }));
+        assert_eq!(crate::decision::derive(&findings), Decision::Allow);
     }
 }

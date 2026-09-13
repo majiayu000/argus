@@ -1,0 +1,12 @@
+name: Echo issue
+on: issues
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - id: action
+        uses: ./.github/actions/echo
+        with:
+          title: ${{ github.event.issue.title }}
+      - run: echo "${{ steps.action.outputs.title }}"

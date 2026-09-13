@@ -1,0 +1,14 @@
+name: Echo title
+description: Export tainted input through composite outputs
+inputs:
+  title:
+    required: true
+outputs:
+  title:
+    value: ${{ steps.set.outputs.title }}
+runs:
+  using: composite
+  steps:
+    - id: set
+      shell: bash
+      run: echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
