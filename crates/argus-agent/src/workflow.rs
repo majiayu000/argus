@@ -115,6 +115,8 @@ type InputBindings = BTreeMap<String, String>;
 type EnvBindings = BTreeMap<String, String>;
 /// Prior-step `$GITHUB_OUTPUT` writes keyed as `{step_id}.{output_name}`.
 type StepOutputBindings = BTreeMap<String, String>;
+/// Prior-job `outputs:` / reusable-workflow exports keyed as `{job_id}.{name}`.
+type JobOutputBindings = BTreeMap<String, String>;
 
 /// `$GITHUB_ENV` side effects from an expanded local composite.
 ///
@@ -128,6 +130,7 @@ struct CompositeEnvEffects {
     env: EnvBindings,
     written_keys: BTreeSet<String>,
     cleared: bool,
+    declared_outputs: BTreeMap<String, String>,
 }
 
 struct StepScanCtx<'a> {
@@ -138,6 +141,7 @@ struct StepScanCtx<'a> {
     input_bindings: &'a InputBindings,
     env_bindings: &'a EnvBindings,
     step_outputs: &'a StepOutputBindings,
+    job_outputs: &'a JobOutputBindings,
 }
 
 const RULE_MUTABLE_ACTION: &str = "AGT-06-workflow-mutable-action";
@@ -154,10 +158,21 @@ type ActionIndex<'a> = BTreeMap<&'a str, &'a SurfaceFile>;
 
 pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<()> {
     let actions = index_action_metadata(files);
+    let workflows = index_workflows(files);
+    let empty_inputs = InputBindings::new();
+    let mut visiting = BTreeSet::new();
     for file in files {
         match file.kind {
-            SurfaceKind::Workflow => scan_workflow(file, &actions, findings)
-                .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?,
+            SurfaceKind::Workflow => scan_workflow(
+                file,
+                &actions,
+                &workflows,
+                &empty_inputs,
+                &mut visiting,
+                findings,
+            )
+            .map(|_| ())
+            .with_context(|| format!("assess GitHub Actions workflow `{}`", file.rel))?,
             SurfaceKind::ActionMetadata => scan_action_metadata(file, findings)
                 .with_context(|| format!("assess GitHub Action metadata `{}`", file.rel))?,
             _ => {}
@@ -177,106 +192,21 @@ fn index_action_metadata(files: &[SurfaceFile]) -> ActionIndex<'_> {
     actions
 }
 
-fn scan_workflow(
-    file: &SurfaceFile,
-    actions: &ActionIndex<'_>,
-    findings: &mut Vec<Finding>,
-) -> Result<()> {
-    let documents = YamlLoader::load_from_str(&file.content)
-        .with_context(|| format!("parse `{}` as YAML", file.rel))?;
-    if documents.len() != 1 {
-        bail!(
-            "workflow `{}` must contain exactly one YAML document",
-            file.rel
-        );
+fn index_workflows(files: &[SurfaceFile]) -> WorkflowIndex<'_> {
+    let mut workflows = WorkflowIndex::new();
+    for file in files
+        .iter()
+        .filter(|file| file.kind == SurfaceKind::Workflow)
+    {
+        workflows.insert(file.rel.as_str(), file);
     }
-    let root = documents[0]
-        .as_hash()
-        .with_context(|| format!("workflow `{}` root must be a mapping", file.rel))?;
-    let privileged_trigger =
-        has_trigger(root, "pull_request_target") || has_trigger(root, "workflow_run");
-    check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
-
-    let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
-        return Ok(());
-    };
-    let empty_bindings = InputBindings::new();
-    let workflow_env = collect_env_bindings(root);
-    for job in jobs.values().filter_map(Yaml::as_hash) {
-        check_permissions(job, "job", privileged_trigger, &file.rel, findings);
-        if let Some(action) = get_string(job, "uses") {
-            check_action_ref(action, &file.rel, findings);
-        }
-        // Jobs with a statically false `if:` never run on GitHub; skip step and
-        // local-composite expansion so unreachable checkouts are not findings.
-        if step_condition_is_always_false(job) {
-            continue;
-        }
-        let Some(steps) = get(job, "steps").and_then(Yaml::as_vec) else {
-            continue;
-        };
-        let job_env = merge_env_bindings(&workflow_env, &collect_env_bindings(job));
-        let mut step_outputs = StepOutputBindings::new();
-        // `$GITHUB_ENV` writes from earlier steps become env bindings for later ones.
-        let mut env_bindings = job_env;
-        let step_hashes: Vec<&Hash> = steps.iter().filter_map(Yaml::as_hash).collect();
-        for (index, step) in step_hashes.iter().enumerate() {
-            let later_post_failure = step_hashes[index + 1..]
-                .iter()
-                .any(|later| step_can_run_after_failure(later));
-            let step_env = merge_env_bindings(&env_bindings, &collect_env_bindings(step));
-            let composite_env = scan_step(
-                step,
-                &file.rel,
-                &StepScanCtx {
-                    privileged_trigger,
-                    actions,
-                    depth: 0,
-                    expand_local: true,
-                    input_bindings: &empty_bindings,
-                    env_bindings: &env_bindings,
-                    step_outputs: &step_outputs,
-                },
-                findings,
-            )?;
-            // Statically skipped steps do not run, so their `$GITHUB_ENV` /
-            // `$GITHUB_OUTPUT` writes and nested composite env side effects
-            // must not update later-step bindings.
-            if step_condition_is_always_false(step) {
-                continue;
-            }
-            // Runtime-dependent or non-literal conditions may or may not run;
-            // apply concrete values only when execution is definite. Otherwise
-            // invalidate keys the step would touch so stale safe bindings
-            // cannot mask attacker-controlled values. Absent `if:` is implicit
-            // `success()` and is not definite when a later step can still run
-            // after failure.
-            if !step_condition_is_definitely_executed(step, later_post_failure) {
-                if let Some(effects) = composite_env {
-                    invalidate_composite_env_effects(&effects, &mut env_bindings);
-                }
-                invalidate_github_env_writes(step, &mut env_bindings);
-                continue;
-            }
-            if let Some(effects) = composite_env {
-                apply_composite_env_effects(&effects, &mut env_bindings);
-            }
-            for (key, value) in
-                collect_step_output_bindings(step, &empty_bindings, &step_env, &step_outputs)
-            {
-                step_outputs.insert(key, value);
-            }
-            let _ = apply_github_env_writes(
-                step,
-                &empty_bindings,
-                &step_env,
-                &step_outputs,
-                &mut env_bindings,
-            );
-        }
-    }
-    Ok(())
+    workflows
 }
+
+type WorkflowIndex<'a> = BTreeMap<&'a str, &'a SurfaceFile>;
+
+mod taint;
+use taint::scan_workflow;
 
 fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Result<()> {
     let documents = YamlLoader::load_from_str(&file.content)
@@ -294,6 +224,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
     let empty_bindings = InputBindings::new();
     let empty_env = EnvBindings::new();
     let empty_step_outputs = StepOutputBindings::new();
+    let empty_job_outputs = JobOutputBindings::new();
     // Standalone metadata keeps privileged_trigger=false and does not expand
     // nested local uses; workflow scans own that expansion with caller context.
     scan_composite_steps(
@@ -307,6 +238,7 @@ fn scan_action_metadata(file: &SurfaceFile, findings: &mut Vec<Finding>) -> Resu
             input_bindings: &empty_bindings,
             env_bindings: &empty_env,
             step_outputs: &empty_step_outputs,
+            job_outputs: &empty_job_outputs,
         },
         findings,
     )
@@ -323,6 +255,7 @@ fn scan_composite_steps(
         env: ctx.env_bindings.clone(),
         written_keys: BTreeSet::new(),
         cleared: false,
+        declared_outputs: BTreeMap::new(),
     };
     let Some(runs) = get(root, "runs").and_then(Yaml::as_hash) else {
         return Ok(empty_effects());
@@ -359,6 +292,7 @@ fn scan_composite_steps(
                 input_bindings: ctx.input_bindings,
                 env_bindings: &env_bindings,
                 step_outputs: &step_outputs,
+                job_outputs: ctx.job_outputs,
             },
             findings,
         )?;
@@ -413,6 +347,7 @@ fn scan_composite_steps(
         env: env_bindings,
         written_keys,
         cleared,
+        declared_outputs: taint::collect_declared_composite_outputs(root, &step_outputs),
     })
 }
 
@@ -466,15 +401,14 @@ fn scan_step(
                     input_bindings: &nested_bindings,
                     env_bindings: &step_env,
                     step_outputs: &empty_step_outputs,
+                    job_outputs: ctx.job_outputs,
                 },
                 findings,
             )?);
         }
     }
-    if emit_source_findings {
-        if let Some(script) = get_string(step, "run") {
-            check_inline_script(script, rel, findings)?;
-        }
+    if let Some(script) = get_string(step, "run") {
+        taint::scan_run_script(script, rel, ctx, &step_env, findings)?;
     }
     Ok(composite_env)
 }
@@ -521,6 +455,7 @@ fn expand_local_composite(
             input_bindings: &merged_bindings,
             env_bindings: ctx.env_bindings,
             step_outputs: &empty_step_outputs,
+            job_outputs: ctx.job_outputs,
         },
         findings,
     )
@@ -1172,7 +1107,10 @@ fn resolve_github_file_write_bindings(
         // GitHub keeps the last write for a given name, so an untracked
         // overwrite must also drop any earlier safe binding for that name.
         if shell_expands && value_contains_untracked_shell_expansion(&raw_value) {
-            collected.insert(name, None);
+            collected.insert(
+                name,
+                taint::tracked_shell_env_value(&raw_value, env_bindings),
+            );
             continue;
         }
         collected.insert(

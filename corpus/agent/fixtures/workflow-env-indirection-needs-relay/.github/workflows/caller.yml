@@ -1,0 +1,25 @@
+name: Echo issue
+on: issues
+
+jobs:
+  relay:
+    needs: producer
+    runs-on: ubuntu-latest
+    outputs:
+      title: ${{ needs.producer.outputs.title }}
+    steps:
+      - run: echo relay
+  producer:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    outputs:
+      title: ${{ steps.set.outputs.title }}
+    steps:
+      - id: set
+        run: echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+  consumer:
+    needs: relay
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ needs.relay.outputs.title }}

@@ -260,6 +260,94 @@
       "notes": "NEGATIVE / FP-trap. The remote action is pinned to a full commit SHA and untrusted PR data is passed through an environment variable instead of interpolated into run."
     },
     {
+      "id": "workflow-env-indirection-dangerous",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-dangerous",
+      "packageName": "workflow-env-indirection-dangerous",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Same-step env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in run, which expands before the shell parses the script."
+    },
+    {
+      "id": "workflow-env-indirection-job-env",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-job-env",
+      "packageName": "workflow-env-indirection-job-env",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Job-level env assignment of github.event.issue.title is re-interpolated via ${{ env.TITLE }} in a later run step."
+    },
+    {
+      "id": "workflow-env-indirection-alias",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-alias",
+      "packageName": "workflow-env-indirection-alias",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Step-level env aliases a tainted job env via ${{ env.TITLE }} and re-interpolates the alias in run."
+    },
+    {
+      "id": "workflow-env-indirection-composite",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-composite",
+      "packageName": "workflow-env-indirection-composite",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Caller job env taints TITLE and a local composite action re-interpolates ${{ env.TITLE }} in run, which inherits the caller environment."
+    },
+    {
+      "id": "workflow-env-indirection-hyphenated",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-hyphenated",
+      "packageName": "workflow-env-indirection-hyphenated",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Hyphenated env name ISSUE-TITLE is re-interpolated via ${{ env.ISSUE-TITLE }} in run."
+    },
+    {
+      "id": "workflow-env-indirection-reusable",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-reusable",
+      "packageName": "workflow-env-indirection-reusable",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Caller passes github.event.issue.title through with: into a local reusable workflow that interpolates ${{ inputs.title }} in run."
+    },
+    {
+      "id": "workflow-env-indirection-needs-relay",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-needs-relay",
+      "packageName": "workflow-env-indirection-needs-relay",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Relay job declared before producer re-exports needs.producer.outputs.title; consumer reusable workflow interpolates the multi-hop needs.relay.outputs.title input."
+    },
+    {
+      "id": "workflow-env-indirection-composite-output",
+      "kind": "fixture",
+      "path": "fixtures/workflow-env-indirection-composite-output",
+      "packageName": "workflow-env-indirection-composite-output",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Local composite writes a tainted input to $GITHUB_OUTPUT, declares outputs.title from that step output, and the caller interpolates steps.action.outputs.title in a later run step."
+    },
+    {
       "id": "composite-action-dangerous",
       "kind": "fixture",
       "path": "fixtures/composite-action-dangerous",

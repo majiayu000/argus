@@ -1,0 +1,7 @@
+name: Echo title
+description: Echo inherited caller env
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ env.TITLE }}"

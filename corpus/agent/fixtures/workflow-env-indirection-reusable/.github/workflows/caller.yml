@@ -1,0 +1,8 @@
+name: Echo issue
+on: issues
+
+jobs:
+  echo:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      title: ${{ github.event.issue.title }}
