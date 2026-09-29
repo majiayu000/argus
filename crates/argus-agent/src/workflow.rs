@@ -34,10 +34,10 @@
 //! computed env access such as `ref: ${{ fromJSON(toJSON(env)).TARGET }}`,
 //! computed GitHub event access such as
 //! `ref: ${{ fromJSON(toJSON(github.event.pull_request)).head.sha }}`,
-//! parent serialization
+//! head-object `fromJSON(toJSON(github.event.pull_request.head)).sha` /
+//! `.ref` or `toJSON(github.event.pull_request.head)`, parent serialization
 //! `ref: ${{ fromJSON(toJSON(github.event)).pull_request.head.sha }}`, or
-//! whole-context serialization
-//! `ref: ${{ fromJSON(toJSON(github)).event.pull_request.head.sha }}`,
+//! whole-context `ref: ${{ fromJSON(toJSON(github)).event.pull_request.head.sha }}`,
 //! branch-dependent `$GITHUB_OUTPUT` writes under `if`/`else`/`&&`/`||` that
 //! cannot be proven sequential, unconditional `exit`/`return` that makes later
 //! textual writes unreachable, multi-redirect command lists on one line,
@@ -2506,7 +2506,6 @@ fn offset_inside_expression_string_literal(value: &str, offset: usize) -> bool {
 fn is_expression_ident_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '-'
 }
-
 fn is_local_action_ref(action: &str) -> bool {
     action.starts_with("./") || action.starts_with(".github/")
 }
@@ -2716,50 +2715,11 @@ fn has_untrusted_checkout_ref(
         })
 }
 
+mod checkout_ref;
+
 fn is_untrusted_ref_expression(revision: &str) -> bool {
     let normalized = normalize_bracket_property_access(revision);
-    contains_untrusted_github_ref_tokens(&normalized)
-}
-
-/// True when `revision` names an attacker-controlled GitHub event ref, including
-/// computed forms such as `fromJSON(toJSON(github.event.pull_request)).head.sha`,
-/// parent serialization
-/// `fromJSON(toJSON(github.event)).pull_request.head.sha`, or whole-context
-/// serialization `fromJSON(toJSON(github)).event.pull_request.head.sha` where
-/// the classic contiguous dotted path is split by function calls.
-fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
-    let mut haystack = String::new();
-    let _ = map_expression_regions(revision, |inner| {
-        haystack.push_str(&remove_expression_string_literals(inner));
-        haystack.push(' ');
-        inner.to_string()
-    });
-    if haystack.chars().all(|character| character.is_whitespace()) {
-        haystack = remove_expression_string_literals(revision);
-    }
-    // GitHub context/property lookup is case-insensitive
-    // (`GitHub.Event.Pull_Request.Head.Sha` resolves the same as the lowercase
-    // spelling), so normalize before substring checks.
-    let haystack = haystack.to_ascii_lowercase();
-    // Contiguous dotted paths plus computed forms that reassemble
-    // `github.event` → `pull_request` / `workflow_run` across `toJSON`/`fromJSON`,
-    // including whole-context `toJSON(github)` followed by `.event…`.
-    let has_github_event = haystack.contains("github.event")
-        || (haystack.contains("tojson(github)") && haystack.contains(".event"));
-    let has_pr_head = haystack.contains(".head.sha")
-        || haystack.contains(".head.ref")
-        || haystack.contains(".head.repo")
-        || haystack.contains(".merge_commit_sha");
-    let has_workflow_run_head = haystack.contains(".head_sha")
-        || haystack.contains(".head_branch")
-        || haystack.contains(".head.sha")
-        || haystack.contains(".head.ref");
-    haystack.contains("github.event.pull_request.head.")
-        || haystack.contains("github.event.pull_request.merge_commit_sha")
-        || haystack.contains("github.event.workflow_run.head_sha")
-        || haystack.contains("github.event.workflow_run.head_branch")
-        || (has_github_event && haystack.contains("pull_request") && has_pr_head)
-        || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
+    checkout_ref::contains_untrusted_github_ref_tokens(&normalized)
 }
 
 /// Fail closed when a checkout ref still reaches a `steps.*.outputs` context
@@ -8021,4 +7981,5 @@ jobs:
             "toJSON(github.event)"
         );
     }
+    include!("workflow/checkout_ref_tests.rs");
 }

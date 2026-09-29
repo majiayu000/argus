@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an attacker-controlled pull-request or workflow-run ref. Workflow scans now
   expand `uses: ./...` composites with the caller's privileged-trigger flag;
   missing or invalid local Action metadata remains fail-closed.
+- Close the AGT-06 untrusted-checkout bypass where a `pull_request_target`
+  workflow checks out `fromJSON(toJSON(github.event.pull_request.head)).sha`
+  or `.ref`, including bracket notation and one local composite `inputs.ref`
+  alias. `toJSON(github.event.pull_request.head)` used as the checkout ref
+  is blocked as well.
 
 ## [0.3.0] - 2026-09-02
 

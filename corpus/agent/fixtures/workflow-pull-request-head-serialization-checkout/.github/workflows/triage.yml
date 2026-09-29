@@ -1,0 +1,19 @@
+name: Triage pull request
+on: pull_request_target
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ fromJSON(toJSON(github.event.pull_request.head)).sha }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ fromJSON(toJSON(github.event.pull_request.head)).ref }}
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ fromJSON(toJSON(github.event.pull_request.head)).sha }}
+      - uses: ./.github/actions/checkout-pr
+        with:
+          ref: ${{ fromJSON(toJSON(github.event.pull_request.head)).ref }}
