@@ -88,7 +88,7 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
     static ATOM: OnceLock<Regex> = OnceLock::new();
     let pattern = ATOM.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)))$")
+        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[[^\]]+\]|\.\*)\.number)))$")
             .expect("ref atom pattern compiles")
     });
     let expression = expression.trim();
