@@ -181,6 +181,32 @@ fn privileged_logical_pull_number_refs_block() {
 }
 
 #[test]
+fn privileged_boolean_number_and_refs_block() {
+    for revision in [
+        "refs/pull/${{ true && github.event.number }}/head",
+        "${{ format('refs/pull/{0}/merge', (true && github.event.pull_request.number)) }}",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            revision,
+        )));
+    }
+}
+
+#[test]
+fn privileged_boolean_number_or_refs_block() {
+    for revision in [
+        "refs/pull/${{ false || github.event.number }}/head",
+        "refs/pull/${{ fromJSON(toJSON(false)) || github.event.number }}/merge",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            revision,
+        )));
+    }
+}
+
+#[test]
 fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
     for revision in [
         "${{ github.event.pull_request.base.sha }}",
@@ -209,6 +235,12 @@ fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
         "refs/pull/${{ github.event.number && '42' }}/head",
         "refs/pull/${{ '42' || github.event.number }}/head",
         "refs/pull/${{ 'github.event.number || github.event.number' }}/head",
+        "refs/pull/${{ false && github.event.number }}/head",
+        "refs/pull/${{ true || github.event.number }}/head",
+        "refs/pull/${{ 'false' || github.event.number }}/head",
+        "refs/pull/${{ 'false' && '42' }}/head",
+        "refs/pull/${{ github.event.number }}/head${{ false }}",
+        "${{ format('refs/pull/{0}/head{1}', github.event.number, false) }}",
     ] {
         for trigger in ["pull_request_target", "workflow_run"] {
             assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(

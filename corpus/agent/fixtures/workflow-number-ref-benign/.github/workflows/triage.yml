@@ -19,3 +19,12 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: ${{ format('refs/pull/{0}/head', 42, github.event.pull_request.number) }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ 'false' || github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ false && github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.number }}/head${{ false }}

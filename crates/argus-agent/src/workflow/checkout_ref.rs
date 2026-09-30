@@ -128,22 +128,30 @@ fn symbolic_ref_expression(expression: &str) -> String {
         }
     };
     let mut work = vec![Work::Expression(expression)];
-    let mut values: Vec<String> = Vec::new();
+    // Keep logical truthiness separate from rendered text: boolean false is
+    // falsy, while the quoted string 'false' is truthy and both render as false.
+    let mut values: Vec<(String, bool)> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
             Work::Format { template, count } => {
-                let arguments = values.split_off(values.len() - count);
-                values.push(bounded(render_ref_format(&template, &arguments)));
+                let arguments: Vec<String> = values
+                    .split_off(values.len() - count)
+                    .into_iter()
+                    .map(|(value, _)| value)
+                    .collect();
+                let value = bounded(render_ref_format(&template, &arguments));
+                let truthy = !value.is_empty();
+                values.push((value, truthy));
             }
             Work::Logical { count, is_or } => {
                 let arguments = values.split_off(values.len() - count);
-                let mut selected = "\x01".to_string();
+                let mut selected = ("\x01".to_string(), false);
                 for value in arguments {
-                    if value.contains('\x01') {
-                        selected = "\x01".to_string();
+                    if value.0.contains('\x01') {
+                        selected = ("\x01".to_string(), false);
                         break;
                     }
-                    let truthy = !value.is_empty();
+                    let truthy = value.1;
                     selected = value;
                     if truthy == is_or {
                         break;
@@ -152,13 +160,23 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 values.push(selected);
             }
             Work::Expression(expression) => {
+                let expression = expression.trim();
+                if expression.eq_ignore_ascii_case("true")
+                    || expression.eq_ignore_ascii_case("false")
+                {
+                    values.push((
+                        expression.to_ascii_lowercase(),
+                        expression.eq_ignore_ascii_case("true"),
+                    ));
+                    continue;
+                }
                 if let Some(atom) = symbolic_ref_atom(expression) {
-                    values.push(bounded(atom));
+                    let truthy = !atom.is_empty();
+                    values.push((bounded(atom), truthy));
                     continue;
                 }
                 // Unknown expression values remain opaque. Existing head/SHA
                 // and unresolved-context checks inspect the original ref.
-                let expression = expression.trim();
                 if let Some((arguments, is_or)) = split_logical_operands(expression) {
                     work.push(Work::Logical {
                         count: arguments.len(),
@@ -197,12 +215,12 @@ fn symbolic_ref_expression(expression: &str) -> String {
                             .flatten()
                     });
                 let Some(arguments) = format else {
-                    values.push("\x01".to_string());
+                    values.push(("\x01".to_string(), false));
                     continue;
                 };
                 let mut arguments = split_format_arguments(arguments).into_iter();
                 let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
-                    values.push("\x01".to_string());
+                    values.push(("\x01".to_string(), false));
                     continue;
                 };
                 let arguments: Vec<&str> = arguments.collect();
@@ -214,7 +232,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
             }
         }
     }
-    values.pop().expect("root ref expression is rendered")
+    values.pop().expect("root ref expression is rendered").0
 }
 
 fn render_ref_format(template: &str, values: &[String]) -> String {

@@ -259,7 +259,7 @@
       "rules": [
         "workflow-untrusted-checkout"
       ],
-      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. The four issue #224 expressions, an empty-expression suffix, multi-placeholder and nested formats, JSON-wrapped numbers, reconstructed PR objects, and logical expressions must yield Critical checkout findings and block."
+      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. The four issue #224 expressions, an empty-expression suffix, multi-placeholder and nested formats, JSON-wrapped numbers, reconstructed PR objects, and logical expressions with boolean or number operands must yield Critical checkout findings and block."
     },
     {
       "id": "workflow-number-ref-benign",
@@ -268,7 +268,7 @@
       "packageName": "workflow-number-ref-benign",
       "expectedDecision": "allow",
       "rules": [],
-      "notes": "Privileged pinned checkouts use the trusted base SHA, ordinary branch names built from numbers, and quoted context text. Numbers alone must not become untrusted pull refs."
+      "notes": "Privileged pinned checkouts use the trusted base SHA, ordinary branch names built from numbers, quoted context text, and logical expressions selecting literal values. Numbers alone and boolean suffixes must not become untrusted pull refs."
     },
     {
       "id": "workflow-dangerous-permissions",
