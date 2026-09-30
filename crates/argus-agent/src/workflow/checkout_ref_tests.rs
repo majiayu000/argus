@@ -471,7 +471,8 @@ fn computed_event_number_selector_controls_remain_allowed() {
         "refs/pull/${{ github.event[format('num{0}', 'ber')] }}/head",
     ] {
         assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
-            "pull_request", revision,
+            "pull_request",
+            revision,
         )));
     }
 }
@@ -518,8 +519,10 @@ fn privileged_composite_number_refs_block() {
 
 #[test]
 fn privileged_env_number_ref_blocks() {
-    let workflow = pinned_checkout_workflow("pull_request_target", "${{ env.TARGET }}")
-        .replace("jobs:", "env:\n  TARGET: refs/pull/${{ github.event.number }}/head\njobs:");
+    let workflow = pinned_checkout_workflow("pull_request_target", "${{ env.TARGET }}").replace(
+        "jobs:",
+        "env:\n  TARGET: refs/pull/${{ github.event.number }}/head\njobs:",
+    );
     assert_untrusted_checkout_blocks(&findings_for(&workflow));
 }
 
@@ -532,9 +535,9 @@ fn trusted_composite_number_refs_remain_allowed() {
         "refs/pull/{${{ github.event.number }}}/head",
         "refs/pull/'${{ github.event.number }}'/head",
     ] {
-        assert_no_untrusted_checkout(&findings_for_files(
-            &head_serialization_composite_files(revision),
-        ));
+        assert_no_untrusted_checkout(&findings_for_files(&head_serialization_composite_files(
+            revision,
+        )));
     }
 }
 
@@ -751,38 +754,157 @@ fn pull_request_head_serialization_on_pull_request_is_not_untrusted_checkout() {
 fn pull_request_head_serialization_expression_boundaries() {
     assert!(is_untrusted_ref_expression(
         "${{ fromJSON( toJSON( github.event.pull_request.head ) ).sha }}"
-    ));
-    assert!(is_untrusted_ref_expression(
-        "${{ toJSON (github.event.pull_request.head) }}"
-    ));
+    )
+    .expect("assess checkout ref"));
+    assert!(
+        is_untrusted_ref_expression("${{ toJSON (github.event.pull_request.head) }}")
+            .expect("assess checkout ref")
+    );
     assert!(is_untrusted_ref_expression(
         "${{ fromJSON(toJSON(github.event.pull_request.head)).repo }}"
-    ));
-    assert!(is_untrusted_ref_expression(
-        "${{ (github.event.pull_request.head).ref }}"
-    ));
+    )
+    .expect("assess checkout ref"));
+    assert!(
+        is_untrusted_ref_expression("${{ (github.event.pull_request.head).ref }}")
+            .expect("assess checkout ref")
+    );
     assert!(is_untrusted_ref_expression(
         "${{ FromJSON(ToJSON(GitHub.Event.Pull_Request.Head)).Ref }}"
-    ));
-    assert!(is_untrusted_ref_expression(
-        "${{ toJSON(github.event['pull_request']['head']) }}"
-    ));
+    )
+    .expect("assess checkout ref"));
+    assert!(
+        is_untrusted_ref_expression("${{ toJSON(github.event['pull_request']['head']) }}")
+            .expect("assess checkout ref")
+    );
     assert!(is_untrusted_ref_expression(
         "${{ github.event.pull_request.head)fromjson(tojson()).sha }}"
-    ));
+    )
+    .expect("assess checkout ref"));
     assert!(!is_untrusted_ref_expression(
         "${{ fromJSON(toJSON(github.event.pull_request.head_ref)).sha }}"
-    ));
-    assert!(!is_untrusted_ref_expression(
-        "${{ (github.event.pull_request.head).sha256 }}"
-    ));
-    assert!(!is_untrusted_ref_expression(
-        "${{ (github.event.pull_request.head).label }}"
-    ));
+    )
+    .expect("assess checkout ref"));
+    assert!(
+        !is_untrusted_ref_expression("${{ (github.event.pull_request.head).sha256 }}")
+            .expect("assess checkout ref")
+    );
+    assert!(
+        !is_untrusted_ref_expression("${{ (github.event.pull_request.head).label }}")
+            .expect("assess checkout ref")
+    );
     assert!(!is_untrusted_ref_expression(
         "${{ fromJSON(toJSON(github.event.pull_request)).base.sha }}"
-    ));
-    assert!(!is_untrusted_ref_expression(
-        "${{ 'github.event.pull_request.head.sha' }}"
-    ));
+    )
+    .expect("assess checkout ref"));
+    assert!(
+        !is_untrusted_ref_expression("${{ 'github.event.pull_request.head.sha' }}")
+            .expect("assess checkout ref")
+    );
+}
+
+#[test]
+fn pull_number_state_products_fail_as_operational_errors() {
+    let operand = "github.event.action && github.event.number";
+    // Eleven binary alternatives cross the renderer's 1,024-state boundary.
+    let regions = format!(
+        "refs/pull/{}/head",
+        "${{ github.event.action && github.event.number }}".repeat(11)
+    );
+    let arguments = std::iter::repeat_n(operand, 11)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let formatted = format!("${{{{ format('refs/pull/{{0}}/head', {arguments}) }}}}");
+    let at_limit = format!(
+        "refs/pull/{}/head",
+        "${{ github.event.action && github.event.number }}".repeat(10)
+    );
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "workflow_run",
+        &at_limit,
+    )));
+    for revision in [regions, formatted] {
+        let error = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: pinned_checkout_workflow("workflow_run", &revision),
+            kind: SurfaceKind::Workflow,
+        }])
+        .expect_err("an incomplete checkout assessment must fail");
+        assert!(format!("{error:#}").contains("checkout ref exceeds 1024 symbolic alternatives"));
+    }
+}
+
+#[test]
+fn computed_workflow_run_number_indexes_resolve_before_taint() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "workflow_run",
+        "refs/pull/${{ github.event.workflow_run.pull_requests.*[format('{0}', 'NuMbEr')] }}/head",
+    )));
+    for key in [
+        "format('{0}', 'missing')",
+        "'missing'",
+        "-1",
+        "format('{0}', '0_suffix')",
+        "2147483648",
+        "format('{0}', 'NaN')",
+    ] {
+        let revision = format!(
+            "refs/pull/${{{{ github.event.workflow_run.pull_requests[{key}].number }}}}/head"
+        );
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            &revision,
+        )));
+    }
+    for key in [
+        "format('{0}', '0')",
+        "fromJSON('0')",
+        "(0)",
+        "0",
+        "format('{0}', '0.5')",
+        "true",
+        "null",
+    ] {
+        let revision = format!(
+            "refs/pull/${{{{ GitHub.Event.Workflow_Run.Pull_Requests[{key}].Number }}}}/head"
+        );
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            &revision,
+        )));
+    }
+}
+
+#[test]
+fn constant_negation_number_controls_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ !false && '42' || github.event.number }}/head",
+        "refs/pull/${{ !null && '42' || github.event.number }}/head",
+        "refs/pull/${{ !0 && '42' || github.event.number }}/head",
+        "refs/pull/${{ !'' && '42' || github.event.number }}/head",
+        "refs/pull/${{ !!true && '42' || github.event.number }}/head",
+        "refs/pull/${{ !true && github.event.number }}/head",
+        "refs/pull/${{ !'false' && github.event.number }}/head",
+        "refs/pull/${{ !(false || 0) && '42' || github.event.number }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn privileged_negated_number_branches_still_block() {
+    for revision in [
+        "refs/pull/${{ !true || github.event.number }}/head",
+        "refs/pull/${{ !!github.event.number && github.event.number }}/head",
+        "refs/pull/${{ !github.event.action && github.event.number }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
 }

@@ -7,8 +7,20 @@ use super::{
     find_expression_close, is_expression_ident_char, map_expression_regions,
     remove_expression_string_literals,
 };
+use anyhow::{ensure, Result};
 use regex::Regex;
 use std::sync::OnceLock;
+
+// Bound products before allocation: workflows are untrusted scan input.
+const MAX_REF_ALTERNATIVES: usize = 1024;
+
+fn ensure_ref_alternatives(count: usize) -> Result<()> {
+    ensure!(
+        count <= MAX_REF_ALTERNATIVES,
+        "checkout ref exceeds {MAX_REF_ALTERNATIVES} symbolic alternatives"
+    );
+    Ok(())
+}
 
 /// True when `revision` names an attacker-controlled GitHub event ref, including
 /// computed forms such as `fromJSON(toJSON(github.event.pull_request)).head.sha`,
@@ -18,9 +30,9 @@ use std::sync::OnceLock;
 /// `fromJSON(toJSON(github.event)).pull_request.head.sha`, or whole-context
 /// serialization `fromJSON(toJSON(github)).event.pull_request.head.sha` where
 /// the classic contiguous dotted path is split by function calls.
-pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
-    if contains_pull_number_ref(revision) {
-        return true;
+pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> Result<bool> {
+    if contains_pull_number_ref(revision)? {
+        return Ok(true);
     }
     let mut haystack = String::new();
     let _ = map_expression_regions(revision, |inner| {
@@ -50,20 +62,20 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || haystack.contains(".head_branch")
         || haystack.contains(".head.sha")
         || haystack.contains(".head.ref");
-    haystack.contains("github.event.pull_request.head.")
+    Ok(haystack.contains("github.event.pull_request.head.")
         || haystack.contains("github.event.pull_request.merge_commit_sha")
         || haystack.contains("github.event.workflow_run.head_sha")
         || haystack.contains("github.event.workflow_run.head_branch")
         || (has_github_event && haystack.contains("pull_request") && has_pr_head)
         || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
         || serializes_pull_request_head_object(&haystack)
-        || pull_request_head_has_checkout_property(&haystack)
+        || pull_request_head_has_checkout_property(&haystack))
 }
 
 /// Render literal ref segments and `format` arguments symbolically, so
 /// PR-number taint is checked at the pull-ref position rather than by source
 /// spelling. NUL cannot occur in a Git ref; it marks an event-derived number.
-fn contains_pull_number_ref(revision: &str) -> bool {
+fn contains_pull_number_ref(revision: &str) -> Result<bool> {
     let mut symbolic = vec![String::new()];
     let mut remaining = revision.trim();
     while let Some(start) = remaining.find("${{") {
@@ -71,7 +83,8 @@ fn contains_pull_number_ref(revision: &str) -> bool {
         let Some(end) = find_expression_close(after_open) else {
             break;
         };
-        let alternatives = symbolic_ref_expression(&after_open[..end]);
+        let alternatives = symbolic_ref_expression(&after_open[..end])?;
+        ensure_ref_alternatives(symbolic.len().saturating_mul(alternatives.len()))?;
         symbolic = symbolic
             .into_iter()
             .flat_map(|prefix| {
@@ -84,7 +97,7 @@ fn contains_pull_number_ref(revision: &str) -> bool {
         symbolic.dedup();
         remaining = &after_open[end + 2..];
     }
-    symbolic.into_iter().any(|mut value| {
+    Ok(symbolic.into_iter().any(|mut value| {
         value.push_str(remaining);
         // actions/checkout reads ref through core.getInput's JavaScript trim.
         // JavaScript retains NEL and trims BOM, unlike Rust's str::trim.
@@ -92,7 +105,7 @@ fn contains_pull_number_ref(revision: &str) -> bool {
             (character.is_whitespace() && character != '\u{0085}') || character == '\u{feff}'
         });
         matches!(value, "refs/pull/\0/head" | "refs/pull/\0/merge")
-    })
+    }))
 }
 
 fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String> {
@@ -101,7 +114,7 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
     static ATOM: OnceLock<Regex> = OnceLock::new();
     let pattern = ATOM.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[[^\]]+\]|\.\*)\.number)))$")
+        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[[0-9]+\]|\.\*)\.number)))$")
             .expect("ref atom pattern compiles")
     });
     let expression = expression.trim();
@@ -131,10 +144,14 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
     if let Some(literal) = captures.name("literal") {
         return quoted.then(|| literal.as_str().replace("''", "'"));
     }
+    if source_expression && normalized.contains('[') {
+        // Array indexes must pass through access evaluation before taint.
+        return None;
+    }
     Some("\0".to_string())
 }
 
-fn symbolic_ref_expression(expression: &str) -> Vec<String> {
+fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
     enum Work<'a> {
         Expression(&'a str),
         Format { count: usize },
@@ -142,6 +159,7 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
         Json { parse: bool },
         Access { property: Option<&'a str> },
         Join,
+        Not,
     }
     let mut work = vec![Work::Expression(expression)];
     // Keep logical truthiness separate from rendered text: boolean false is
@@ -156,15 +174,43 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
                     .map(|key| vec![(key.to_string(), Some(true), true)])
                     .unwrap_or_else(|| values.pop().expect("ref access key is rendered"));
                 let sources = values.pop().expect("ref access source is rendered");
+                ensure_ref_alternatives(sources.len().saturating_mul(keys.len()))?;
                 let mut selected = Vec::new();
                 for (source, _, is_string) in sources {
-                    for (key, _, _) in &keys {
+                    for (key, _, key_is_string) in &keys {
                         if !is_string && source.starts_with('\x03') {
                             // Keep event identity separate from quoted context text.
                             // The existing number atom matcher owns the taint paths.
                             let context = &source[1..];
                             let path = if context.ends_with(".pull_requests") {
-                                format!("{context}[{}]", key.to_ascii_lowercase())
+                                // Resolve computed array selectors before number taint.
+                                // The runner converts primitive indexes to numbers,
+                                // floors nonnegative values, and rejects NaN/range errors.
+                                let number = if !key_is_string && key == "true" {
+                                    Some(1.0)
+                                } else if key.is_empty() || (!key_is_string && key == "false") {
+                                    Some(0.0)
+                                } else {
+                                    key.trim().parse::<f64>().ok()
+                                };
+                                if property == Some("*") {
+                                    format!("{context}.*")
+                                } else if let Some(index) = number.filter(|index| {
+                                    index.is_finite()
+                                        && *index >= 0.0
+                                        && index.floor() <= i32::MAX as f64
+                                }) {
+                                    format!("{context}[{}]", index.floor() as i32)
+                                } else if key.contains('\x01')
+                                    || key.contains('\x03')
+                                    || key == "\0"
+                                {
+                                    // An unresolved selector may still select a PR.
+                                    format!("{context}.*")
+                                } else {
+                                    selected.push((String::new(), Some(false), false));
+                                    continue;
+                                }
                             } else {
                                 format!("{context}.{}", key.to_ascii_lowercase())
                             };
@@ -202,6 +248,7 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
             Work::Join => {
                 let separators = values.pop().expect("join separator is rendered");
                 let sources = values.pop().expect("join argument is rendered");
+                ensure_ref_alternatives(sources.len().saturating_mul(separators.len()))?;
                 let mut joined = Vec::new();
                 for (source, _, is_string) in sources {
                     for (separator, _, _) in &separators {
@@ -231,6 +278,7 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
                 let arguments = values.split_off(values.len() - count);
                 let mut combinations = vec![Vec::new()];
                 for alternatives in arguments {
+                    ensure_ref_alternatives(combinations.len().saturating_mul(alternatives.len()))?;
                     combinations = combinations
                         .into_iter()
                         .flat_map(|arguments: Vec<String>| {
@@ -276,12 +324,26 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
                             }
                             can_continue |= value.1.is_none() || value.1 != Some(is_or);
                         }
+                        ensure_ref_alternatives(selected.len())?;
                     }
                     if !can_continue {
                         break;
                     }
                 }
                 values.push(selected);
+            }
+            Work::Not => {
+                let arguments = values.pop().expect("negated argument is rendered");
+                let mut negated = Vec::new();
+                for (_, truthy, _) in arguments {
+                    for value in [false, true] {
+                        if truthy.is_none() || truthy == Some(!value) {
+                            negated.push((value.to_string(), Some(value), false));
+                        }
+                    }
+                    ensure_ref_alternatives(negated.len())?;
+                }
+                values.push(negated);
             }
             Work::Json { parse } => {
                 let arguments = values.pop().expect("JSON argument is rendered");
@@ -366,6 +428,11 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
                         is_or,
                     });
                     work.extend(arguments.into_iter().rev().map(Work::Expression));
+                    continue;
+                }
+                if let Some(inner) = expression.strip_prefix('!') {
+                    work.push(Work::Not);
+                    work.push(Work::Expression(inner));
                     continue;
                 }
                 if let Some((source, key, computed)) = split_ref_access(expression) {
@@ -454,12 +521,12 @@ fn symbolic_ref_expression(expression: &str) -> Vec<String> {
             alternatives.dedup();
         }
     }
-    values
+    Ok(values
         .pop()
         .expect("root ref expression is rendered")
         .into_iter()
         .map(|(value, _, _)| value)
-        .collect()
+        .collect())
 }
 
 fn render_ref_json_value(value: serde_json::Value) -> (String, Option<bool>, bool) {
@@ -517,7 +584,7 @@ fn split_ref_access(expression: &str) -> Option<(&str, &str, bool)> {
     let key = if computed {
         key.strip_suffix(']')?.trim()
     } else {
-        if !key.chars().all(is_expression_ident_char) {
+        if key != "*" && !key.chars().all(is_expression_ident_char) {
             return None;
         }
         key

@@ -375,7 +375,7 @@ fn scan_step(
         }
         if ctx.privileged_trigger
             && is_checkout(action)
-            && has_untrusted_checkout_ref(step, ctx.input_bindings, &step_env, ctx.step_outputs)
+            && has_untrusted_checkout_ref(step, ctx.input_bindings, &step_env, ctx.step_outputs)?
         {
             findings.push(
                 Finding::new(
@@ -2723,24 +2723,25 @@ fn has_untrusted_checkout_ref(
     input_bindings: &InputBindings,
     env_bindings: &EnvBindings,
     step_outputs: &StepOutputBindings,
-) -> bool {
-    get(step, "with")
+) -> Result<bool> {
+    let Some(revision) = get(step, "with")
         .and_then(Yaml::as_hash)
         .and_then(|with| get_string(with, "ref"))
-        .is_some_and(|revision| {
-            let resolved =
-                resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
-            is_untrusted_ref_expression(&resolved)
-                || has_unresolved_step_output_ref(&resolved)
-                || has_unresolved_needs_output_ref(&resolved)
-                || has_unresolved_env_ref(&resolved)
-                || has_unresolved_inputs_access(&resolved)
-        })
+    else {
+        return Ok(false);
+    };
+    let resolved =
+        resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
+    Ok(is_untrusted_ref_expression(&resolved)?
+        || has_unresolved_step_output_ref(&resolved)
+        || has_unresolved_needs_output_ref(&resolved)
+        || has_unresolved_env_ref(&resolved)
+        || has_unresolved_inputs_access(&resolved))
 }
 
 mod checkout_ref;
 
-fn is_untrusted_ref_expression(revision: &str) -> bool {
+fn is_untrusted_ref_expression(revision: &str) -> Result<bool> {
     let normalized = normalize_bracket_property_access(revision);
     checkout_ref::contains_untrusted_github_ref_tokens(&normalized)
 }
@@ -3240,7 +3241,7 @@ jobs:
         let resolved = resolve_input_expressions("${{ inputs.ref || github.sha }}", &bindings);
         assert!(resolved.contains("github.event.pull_request.head.sha"));
         assert!(!resolved.contains("inputs.ref"));
-        assert!(is_untrusted_ref_expression(&resolved));
+        assert!(is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
     }
 
     #[test]
@@ -3265,7 +3266,7 @@ jobs:
                 "bracket token remained in {expression}: {resolved}"
             );
             assert!(
-                is_untrusted_ref_expression(&resolved),
+                is_untrusted_ref_expression(&resolved).expect("assess checkout ref"),
                 "resolved expression was not untrusted: {resolved}"
             );
         }
@@ -3289,7 +3290,7 @@ jobs:
                 "failed to substitute in {expression}: {resolved}"
             );
             assert!(
-                is_untrusted_ref_expression(&resolved),
+                is_untrusted_ref_expression(&resolved).expect("assess checkout ref"),
                 "resolved expression was not untrusted: {resolved}"
             );
         }
@@ -3302,7 +3303,7 @@ jobs:
             &InputBindings::new(),
         );
         assert_eq!(resolved, "${{ github.event.pull_request.head.sha }}");
-        assert!(is_untrusted_ref_expression(&resolved));
+        assert!(is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
     }
 
     #[test]
@@ -3314,7 +3315,7 @@ jobs:
         );
         let resolved = resolve_input_expressions("refs/heads/inputs.ref", &bindings);
         assert_eq!(resolved, "refs/heads/inputs.ref");
-        assert!(!is_untrusted_ref_expression(&resolved));
+        assert!(!is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
     }
 
     #[test]
@@ -3326,7 +3327,7 @@ jobs:
         );
         let resolved = resolve_input_expressions("${{ 'inputs.ref' }}", &bindings);
         assert_eq!(resolved, "${{ 'inputs.ref' }}");
-        assert!(!is_untrusted_ref_expression(&resolved));
+        assert!(!is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
         let compound =
             resolve_input_expressions("${{ 'inputs.ref' || inputs.ref || github.sha }}", &bindings);
         assert!(
@@ -3359,7 +3360,7 @@ jobs:
             "env→inputs chain must resolve: {resolved}"
         );
         assert!(!resolved.contains("inputs.ref") && !resolved.contains("env.TARGET"));
-        assert!(is_untrusted_ref_expression(&resolved));
+        assert!(is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
     }
 
     #[test]
@@ -3382,7 +3383,7 @@ jobs:
             "step-output→inputs chain must resolve: {resolved}"
         );
         assert!(!resolved.contains("steps.resolve.outputs.ref"));
-        assert!(is_untrusted_ref_expression(&resolved));
+        assert!(is_untrusted_ref_expression(&resolved).expect("assess checkout ref"));
     }
 
     #[test]
@@ -3504,7 +3505,7 @@ runs:
         let resolved = resolve_input_expressions("${{ inputs.ref }}", &bindings);
         assert_eq!(resolved, "${{ 'github.event.pull_request.head.sha' }}");
         assert!(
-            !is_untrusted_ref_expression(&resolved),
+            !is_untrusted_ref_expression(&resolved).expect("assess checkout ref"),
             "literal YAML binding must not be re-parsed as a context path: {resolved}"
         );
     }

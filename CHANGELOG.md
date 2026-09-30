@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Repeated JSON serialization
   keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use the same surrounding-whitespace trimming as checkout.
+  Computed workflow-run indexes and constant negation preserve actual logical
+  selection. Symbolic products exceeding 1,024 alternatives fail with an
+  explicit operational error before allocation.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text
   remain allowed.

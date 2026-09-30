@@ -584,6 +584,10 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs.
+   Computed workflow-run indexes resolve before number taint; unary negation
+   preserves known truthiness. Symbolic products are limited to 1,024
+   alternatives before allocation; exceeding that boundary fails the scan
+   with an operational error (CLI exit 2) instead of an incomplete allow.
    A reviewed full SHA removes tag retargeting but does not prove the upstream
    Action code is benign; exact-SHA intelligence remains a feed problem.
 

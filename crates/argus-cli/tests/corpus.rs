@@ -181,3 +181,37 @@ fn agent_fixture_eval_reports_scoped_confusion_matrix() -> Result<()> {
     assert_eq!(report["recall"], 1.0);
     Ok(())
 }
+
+#[test]
+fn checkout_ref_state_products_report_operational_errors() -> Result<()> {
+    let operand = "github.event.action && github.event.number";
+    let regions = format!(
+        "refs/pull/{}/head",
+        "${{ github.event.action && github.event.number }}".repeat(30)
+    );
+    let arguments = std::iter::repeat_n(operand, 30)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let formatted = format!("${{{{ format('refs/pull/{{0}}/head', {arguments}) }}}}");
+    for revision in [regions, formatted] {
+        let root = tempfile::tempdir()?;
+        let workflows = root.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows)?;
+        std::fs::write(
+            workflows.join("test.yml"),
+            format!(
+                "name: State boundary\non: workflow_run\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: {revision}\n"
+            ),
+        )?;
+        let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+            .args(["agent", "scan"])
+            .arg(root.path())
+            .args(["--format", "json"])
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)?
+            .contains("checkout ref exceeds 1024 symbolic alternatives"));
+    }
+    Ok(())
+}
