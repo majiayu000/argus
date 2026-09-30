@@ -60,7 +60,7 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || pull_request_head_has_checkout_property(&haystack)
 }
 
-/// Render literal ref segments and flat `format` arguments symbolically, so
+/// Render literal ref segments and `format` arguments symbolically, so
 /// PR-number taint is checked at the pull-ref position rather than by source
 /// spelling. NUL cannot occur in a Git ref; it marks an event-derived number.
 fn contains_pull_number_ref(revision: &str) -> bool {
@@ -100,37 +100,75 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
 }
 
 fn symbolic_ref_expression(expression: &str) -> String {
-    if let Some(atom) = symbolic_ref_atom(expression) {
-        return atom;
+    enum Work<'a> {
+        Expression(&'a str),
+        Format { template: String, count: usize },
     }
-    // Unknown expression values remain opaque. Existing head/SHA and
-    // unresolved-context checks still inspect the original ref afterwards.
-    let expression = expression.trim();
-    let Some((function, arguments)) = expression.split_once('(') else {
-        return expression.to_string();
+    // Rendering supported formats only appends argument values. A chunk longer
+    // than the target ref cannot later fit that ref; keep it opaque and bounded
+    // so nested formats cannot expand strings exponentially.
+    let bounded = |value: String| {
+        if value.len() <= "refs/pull/\0/merge".len() {
+            value
+        } else {
+            "\x01".to_string()
+        }
     };
-    let Some(arguments) = arguments.strip_suffix(')') else {
-        return expression.to_string();
-    };
-    if !function.trim().eq_ignore_ascii_case("format") {
-        return expression.to_string();
+    let mut work = vec![Work::Expression(expression)];
+    let mut values: Vec<String> = Vec::new();
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Format { template, count } => {
+                let arguments = values.split_off(values.len() - count);
+                values.push(bounded(render_ref_format(&template, &arguments)));
+            }
+            Work::Expression(expression) => {
+                if let Some(atom) = symbolic_ref_atom(expression) {
+                    values.push(bounded(atom));
+                    continue;
+                }
+                // Unknown expression values remain opaque. Existing head/SHA
+                // and unresolved-context checks inspect the original ref.
+                let expression = expression.trim();
+                let format = expression
+                    .split_once('(')
+                    .and_then(|(function, arguments)| {
+                        function
+                            .trim()
+                            .eq_ignore_ascii_case("format")
+                            .then(|| arguments.strip_suffix(')'))
+                            .flatten()
+                    });
+                let Some(arguments) = format else {
+                    values.push(bounded(expression.to_string()));
+                    continue;
+                };
+                let mut arguments = split_format_arguments(arguments).into_iter();
+                let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
+                    values.push(bounded(expression.to_string()));
+                    continue;
+                };
+                let arguments: Vec<&str> = arguments.collect();
+                work.push(Work::Format {
+                    template,
+                    count: arguments.len(),
+                });
+                work.extend(arguments.into_iter().rev().map(Work::Expression));
+            }
+        }
     }
-    let mut arguments = split_format_arguments(arguments).into_iter();
-    let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
-        return expression.to_string();
-    };
-    let values: Vec<String> = arguments
-        .map(|argument| symbolic_ref_atom(argument).unwrap_or_else(|| argument.to_string()))
-        .collect();
+    values.pop().expect("root ref expression is rendered")
+}
+
+fn render_ref_format(template: &str, values: &[String]) -> String {
     static FORMAT_FIELD: OnceLock<Regex> = OnceLock::new();
     let pattern = FORMAT_FIELD.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
         Regex::new(r"\{\{|\}\}|\{([0-9]+)\}").expect("format field pattern compiles")
     });
     pattern
-        .replace_all(
-            &template,
-            |captures: &regex::Captures<'_>| match &captures[0] {
+        .replace_all(template, |captures: &regex::Captures<'_>| {
+            match &captures[0] {
                 "{{" => "{".to_string(),
                 "}}" => "}".to_string(),
                 field => captures
@@ -139,8 +177,8 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     .and_then(|index| values.get(index))
                     .cloned()
                     .unwrap_or_else(|| field.to_string()),
-            },
-        )
+            }
+        })
         .into_owned()
 }
 
