@@ -149,6 +149,23 @@ fn privileged_nested_pull_number_format_refs_block() {
 }
 
 #[test]
+fn privileged_reconstructed_pull_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ fromJSON(toJSON(github.event.pull_request)).number }}/head",
+        "refs/pull/${{ fromJSON(toJSON(github.event)).number }}/merge",
+        "refs/pull/${{ fromJSON(toJSON(github)).event.pull_request.number }}/head",
+        "refs/pull/${{ fromJSON(toJSON(github.event.workflow_run.pull_requests))[0].number }}/head",
+        "${{ format('refs/pull/{0}/head', fromJSON(toJSON(github.event.pull_request)).number) }}",
+        "${{ fromJSON(toJSON(format('refs/pull/{0}/head', github.event.number))) }}",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            revision,
+        )));
+    }
+}
+
+#[test]
 fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
     for revision in [
         "${{ github.event.pull_request.base.sha }}",
@@ -172,6 +189,8 @@ fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
         "refs/pull/${{ fromJSON(toJSON('github.event.pull_request.number')) }}/head",
         "refs/pull/${{ prefixFromJSON(github.event.pull_request.number) }}/head",
         "${{ format('refs/pull/{0}/head', format('{0}', 42, github.event.number)) }}",
+        "${{ fromJSON(toJSON(format('refs/pull/{0}/head', 42, github.event.number))) }}",
+        "refs/pull/${{ fromJSON(toJSON('github.event.pull_request')).number }}/head",
     ] {
         for trigger in ["pull_request_target", "workflow_run"] {
             assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(

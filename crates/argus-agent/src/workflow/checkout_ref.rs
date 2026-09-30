@@ -88,13 +88,25 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
     static ATOM: OnceLock<Regex> = OnceLock::new();
     let pattern = ATOM.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>(?:(?:fromjson|tojson)?\s*\(\s*)*github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)(?:\s*\))*))$")
+        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)))$")
             .expect("ref atom pattern compiles")
     });
     let expression = expression.trim();
-    let captures = pattern.captures(expression)?;
+    static JSON_WRAPPERS: OnceLock<Regex> = OnceLock::new();
+    let wrappers = JSON_WRAPPERS.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?i)\b(?:fromjson|tojson)\s*\(|[()\s]+")
+            .expect("JSON wrapper pattern compiles")
+    });
+    let quoted = expression.starts_with('\'');
+    let normalized = if quoted {
+        expression.to_string()
+    } else {
+        wrappers.replace_all(expression, "").into_owned()
+    };
+    let captures = pattern.captures(&normalized)?;
     if let Some(literal) = captures.name("literal") {
-        return Some(literal.as_str().replace("''", "'"));
+        return quoted.then(|| literal.as_str().replace("''", "'"));
     }
     Some("\0".to_string())
 }
@@ -130,6 +142,19 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 // Unknown expression values remain opaque. Existing head/SHA
                 // and unresolved-context checks inspect the original ref.
                 let expression = expression.trim();
+                // A fromJSON(toJSON(value)) round trip preserves strings as
+                // well as numbers, including a reconstructed format result.
+                let roundtrip = expression
+                    .split_once('(')
+                    .filter(|(function, _)| function.trim().eq_ignore_ascii_case("fromjson"))
+                    .and_then(|(_, arguments)| arguments.strip_suffix(')'))
+                    .and_then(|inner| inner.trim().split_once('('))
+                    .filter(|(function, _)| function.trim().eq_ignore_ascii_case("tojson"))
+                    .and_then(|(_, arguments)| arguments.strip_suffix(')'));
+                if let Some(inner) = roundtrip {
+                    work.push(Work::Expression(inner));
+                    continue;
+                }
                 let format = expression
                     .split_once('(')
                     .and_then(|(function, arguments)| {
