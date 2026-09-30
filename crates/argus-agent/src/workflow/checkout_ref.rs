@@ -115,6 +115,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
     enum Work<'a> {
         Expression(&'a str),
         Format { template: String, count: usize },
+        Logical { count: usize, is_or: bool },
     }
     // Rendering supported formats only appends argument values. A chunk longer
     // than the target ref cannot later fit that ref; keep it opaque and bounded
@@ -134,6 +135,22 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 let arguments = values.split_off(values.len() - count);
                 values.push(bounded(render_ref_format(&template, &arguments)));
             }
+            Work::Logical { count, is_or } => {
+                let arguments = values.split_off(values.len() - count);
+                let mut selected = "\x01".to_string();
+                for value in arguments {
+                    if value.contains('\x01') {
+                        selected = "\x01".to_string();
+                        break;
+                    }
+                    let truthy = !value.is_empty();
+                    selected = value;
+                    if truthy == is_or {
+                        break;
+                    }
+                }
+                values.push(selected);
+            }
             Work::Expression(expression) => {
                 if let Some(atom) = symbolic_ref_atom(expression) {
                     values.push(bounded(atom));
@@ -142,6 +159,21 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 // Unknown expression values remain opaque. Existing head/SHA
                 // and unresolved-context checks inspect the original ref.
                 let expression = expression.trim();
+                if let Some((arguments, is_or)) = split_logical_operands(expression) {
+                    work.push(Work::Logical {
+                        count: arguments.len(),
+                        is_or,
+                    });
+                    work.extend(arguments.into_iter().rev().map(Work::Expression));
+                    continue;
+                }
+                if let Some(inner) = expression
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.strip_suffix(')'))
+                {
+                    work.push(Work::Expression(inner));
+                    continue;
+                }
                 // A fromJSON(toJSON(value)) round trip preserves strings as
                 // well as numbers, including a reconstructed format result.
                 let roundtrip = expression
@@ -165,12 +197,12 @@ fn symbolic_ref_expression(expression: &str) -> String {
                             .flatten()
                     });
                 let Some(arguments) = format else {
-                    values.push(bounded(expression.to_string()));
+                    values.push("\x01".to_string());
                     continue;
                 };
                 let mut arguments = split_format_arguments(arguments).into_iter();
                 let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
-                    values.push(bounded(expression.to_string()));
+                    values.push("\x01".to_string());
                     continue;
                 };
                 let arguments: Vec<&str> = arguments.collect();
@@ -205,6 +237,54 @@ fn render_ref_format(template: &str, values: &[String]) -> String {
             }
         })
         .into_owned()
+}
+
+/// Split top-level OR before AND to preserve precedence; quoted strings and
+/// grouped or function arguments are evaluated as separate operand nodes.
+fn split_logical_operands(expression: &str) -> Option<(Vec<&str>, bool)> {
+    let mut or_positions = Vec::new();
+    let mut and_positions = Vec::new();
+    let mut quoted = false;
+    let mut depth: usize = 0;
+    let mut chars = expression.char_indices().peekable();
+    while let Some((offset, character)) = chars.next() {
+        if character == '\'' {
+            if quoted && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            quoted = !quoted;
+        } else if !quoted {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                '|' | '&'
+                    if depth == 0 && chars.peek().is_some_and(|(_, next)| *next == character) =>
+                {
+                    chars.next();
+                    if character == '|' {
+                        or_positions.push(offset);
+                    } else {
+                        and_positions.push(offset);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let is_or = !or_positions.is_empty();
+    let positions = if is_or { or_positions } else { and_positions };
+    if positions.is_empty() {
+        return None;
+    }
+    let mut operands = Vec::new();
+    let mut start = 0;
+    for offset in positions {
+        operands.push(expression[start..offset].trim());
+        start = offset + 2;
+    }
+    operands.push(expression[start..].trim());
+    Some((operands, is_or))
 }
 
 /// Commas in quoted strings or nested function arguments are not separators.
