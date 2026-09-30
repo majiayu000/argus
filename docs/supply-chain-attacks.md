@@ -581,7 +581,7 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    and `/merge` built from event PR numbers with interpolation or `format`,
    including numeric formats parsed with `fromJSON`. JSON serialization
    preserves string quotes, so serializing a number twice does not match
-   these pull refs.
+   these pull refs. Rendered refs are trimmed the same way as checkout inputs.
    A reviewed full SHA removes tag retargeting but does not prove the upstream
    Action code is benign; exact-SHA intelligence remains a feed problem.
 

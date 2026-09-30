@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numbers, including `format(...)` templates, parsed numeric formats, and
   mixed input/env bindings. Repeated JSON serialization keeps string quotes
   and does not falsely match a pull-number ref.
+  Rendered refs use the same surrounding-whitespace trimming as checkout.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text
   remain allowed.

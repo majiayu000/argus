@@ -97,6 +97,28 @@ fn privileged_pull_number_refs_with_empty_expressions_block() {
 }
 
 #[test]
+fn privileged_pull_number_refs_with_rendered_whitespace_block() {
+    for revision in [
+        "refs/pull/${{ github.event.number }}/head${{ ' ' }}",
+        "refs/pull/${{ github.event.pull_request.number }}/head${{ ' ' }}",
+        "${{ ' ' }}refs/pull/${{ github.event.number }}/merge",
+        "${{ format(' refs/pull/{0}/head ', github.event.number) }}",
+        "refs/pull/${{ github.event.number }}/head${{ '\u{feff}' }}",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+    // JavaScript's getInput trim keeps NEL, unlike Rust's str::trim.
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "refs/pull/${{ github.event.number }}/head${{ '\u{0085}' }}",
+    )));
+}
+
+#[test]
 fn privileged_pull_number_format_constructions_block() {
     for revision in [
         "${{ format('refs/pull/{0}/{1}', github.event.pull_request.number, 'head') }}",
@@ -363,7 +385,6 @@ fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
         "${{ format('refs/pull/{0}/head', 42, github.event.number) }}",
         "${{ 'refs/pull/github.event.number/head' }}",
         "refs/pull/${{ github.event.pull_request.number }}/head${{ 'suffix' }}",
-        "refs/pull/${{ github.event.pull_request.number }}/head${{ ' ' }}",
         "${{ format('refs/pull/{0}/{1}', github.event.pull_request.number, 'head-suffix') }}",
         "${{ format('refs/pull/{1}/head', github.event.pull_request.number, 42) }}",
         "${{ format('refs/pull/{{0}}/head', github.event.pull_request.number) }}",

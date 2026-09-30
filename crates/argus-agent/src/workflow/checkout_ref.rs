@@ -76,10 +76,12 @@ fn contains_pull_number_ref(revision: &str) -> bool {
         remaining = &after_open[end + 2..];
     }
     symbolic.push_str(remaining);
-    matches!(
-        symbolic.as_str(),
-        "refs/pull/\0/head" | "refs/pull/\0/merge"
-    )
+    // actions/checkout reads ref through core.getInput's JavaScript trim.
+    // JavaScript retains NEL and trims BOM, unlike Rust's str::trim.
+    let symbolic = symbolic.trim_matches(|character: char| {
+        (character.is_whitespace() && character != '\u{0085}') || character == '\u{feff}'
+    });
+    matches!(symbolic, "refs/pull/\0/head" | "refs/pull/\0/merge")
 }
 
 fn symbolic_ref_atom(expression: &str) -> Option<String> {
