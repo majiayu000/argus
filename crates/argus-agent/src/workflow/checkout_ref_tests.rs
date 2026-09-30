@@ -207,6 +207,19 @@ fn privileged_boolean_number_or_refs_block() {
 }
 
 #[test]
+fn privileged_conditional_number_ref_blocks() {
+    for revision in [
+        "refs/pull/${{ github.event.action == 'opened' && github.event.number }}/head",
+        "${{ format('refs/pull/{0}/merge', github.event.action == 'opened' && github.event.pull_request.number) }}",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "{ pull_request_target: { types: [opened] } }",
+            revision,
+        )));
+    }
+}
+
+#[test]
 fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
     for revision in [
         "${{ github.event.pull_request.base.sha }}",
@@ -241,6 +254,9 @@ fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
         "refs/pull/${{ 'false' && '42' }}/head",
         "refs/pull/${{ github.event.number }}/head${{ false }}",
         "${{ format('refs/pull/{0}/head{1}', github.event.number, false) }}",
+        "refs/pull/${{ github.event.action == 'opened' && '42' }}/head",
+        "refs/pull/${{ github.event.number && github.event.action == 'opened' }}/head",
+        "refs/pull/${{ github.event.action == 'opened' && github.event.number && '42' }}/head",
     ] {
         for trigger in ["pull_request_target", "workflow_run"] {
             assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(

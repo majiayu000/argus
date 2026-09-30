@@ -28,3 +28,9 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: refs/pull/${{ github.event.number }}/head${{ false }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.action == 'opened' && '42' }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.action == 'opened' && github.event.number && '42' }}/head

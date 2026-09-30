@@ -149,7 +149,9 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 for value in arguments {
                     if value.0.contains('\x01') {
                         selected = ("\x01".to_string(), false);
-                        break;
+                        // An unknown condition can select a later operand;
+                        // continue through the possible returned values.
+                        continue;
                     }
                     let truthy = value.1;
                     selected = value;
