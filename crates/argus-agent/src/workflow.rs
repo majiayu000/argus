@@ -2464,18 +2464,41 @@ fn replace_context_identifier_in_region(
 /// GitHub does not re-parse input/env/output values as expression syntax: a
 /// plain YAML literal such as `github.event.pull_request.head.sha` remains that
 /// branch name. Whole `${{ ... }}` bindings unwrap to their inner expression so
-/// attacker-controlled context paths stay visible to the detector. Other plain
-/// literals are quoted as expression strings.
+/// attacker-controlled context paths stay visible to the detector. Mixed
+/// bindings become `format` calls so interpolation does not create nested
+/// expression delimiters. Other plain literals are quoted as expression strings.
 fn embed_binding_in_expression(replacement: &str) -> String {
     let trimmed = replacement.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("${{")
-        .and_then(|value| value.strip_suffix("}}"))
-    {
-        return inner.trim().to_string();
+    if let Some(after_open) = trimmed.strip_prefix("${{") {
+        if let Some(end) = find_expression_close(after_open) {
+            if after_open[end + 2..].trim().is_empty() {
+                return after_open[..end].trim().to_string();
+            }
+        }
     }
     if trimmed.contains("${{") {
-        return replacement.to_string();
+        let escape_literal = |value: &str| {
+            value
+                .replace('{', "{{")
+                .replace('}', "}}")
+                .replace('\'', "''")
+        };
+        let mut template = String::new();
+        let mut arguments = Vec::new();
+        let mut remaining = replacement;
+        while let Some(start) = remaining.find("${{") {
+            let after_open = &remaining[start + 3..];
+            let Some(end) = find_expression_close(after_open) else {
+                // Preserve malformed regions, as expression mapping does.
+                return replacement.to_string();
+            };
+            template.push_str(&escape_literal(&remaining[..start]));
+            template.push_str(&format!("{{{}}}", arguments.len()));
+            arguments.push(after_open[..end].trim());
+            remaining = &after_open[end + 2..];
+        }
+        template.push_str(&escape_literal(remaining));
+        return format!("format('{template}', {})", arguments.join(", "));
     }
     format!("'{}'", trimmed.replace('\'', "''"))
 }

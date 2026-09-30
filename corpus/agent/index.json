@@ -259,7 +259,7 @@
       "rules": [
         "workflow-untrusted-checkout"
       ],
-      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. The four issue #224 expressions, an empty-expression suffix, multi-placeholder and nested formats, JSON-wrapped numbers, reconstructed PR objects, computed array indexes, joined pull-number arrays, and logical expressions with boolean, number, or unknown conditional operands must yield Critical checkout findings and block."
+      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly, through local composite inputs, and with format. The four issue #224 expressions, an empty-expression suffix, multi-placeholder and nested formats, JSON-wrapped numbers, reconstructed PR objects, computed array indexes, joined pull-number arrays, and logical expressions with boolean, number, or unknown conditional operands must yield Critical checkout findings and block."
     },
     {
       "id": "workflow-number-ref-benign",

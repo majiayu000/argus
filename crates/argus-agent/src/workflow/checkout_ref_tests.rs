@@ -246,6 +246,46 @@ fn privileged_joined_pull_number_refs_block() {
 }
 
 #[test]
+fn privileged_composite_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ github.event.number }}/head",
+        "${{ 'refs/pull/' }}${{ github.event.number }}${{ '/head' }}",
+    ] {
+        for expression in [
+            "${{ inputs.ref }}",
+            "${{ inputs.ref || github.sha }}",
+            "${{ format('{0}', inputs.ref) }}",
+        ] {
+            let mut files = head_serialization_composite_files(revision);
+            files[1].content = files[1].content.replace("${{ inputs.ref }}", expression);
+            assert_untrusted_checkout_blocks(&findings_for_files(&files));
+        }
+    }
+}
+
+#[test]
+fn privileged_env_number_ref_blocks() {
+    let workflow = pinned_checkout_workflow("pull_request_target", "${{ env.TARGET }}")
+        .replace("jobs:", "env:\n  TARGET: refs/pull/${{ github.event.number }}/head\njobs:");
+    assert_untrusted_checkout_blocks(&findings_for(&workflow));
+}
+
+#[test]
+fn trusted_composite_number_refs_remain_allowed() {
+    for revision in [
+        "refs/heads/${{ github.event.number }}",
+        "refs/pull/${{ 'github.event.number' }}/head",
+        "refs/pull/${{ github.event.number }}/head${{ 'suffix' }}",
+        "refs/pull/{${{ github.event.number }}}/head",
+        "refs/pull/'${{ github.event.number }}'/head",
+    ] {
+        assert_no_untrusted_checkout(&findings_for_files(
+            &head_serialization_composite_files(revision),
+        ));
+    }
+}
+
+#[test]
 fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
     for revision in [
         "${{ github.event.pull_request.base.sha }}",
