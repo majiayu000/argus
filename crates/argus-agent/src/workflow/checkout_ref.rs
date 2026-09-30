@@ -129,6 +129,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
         Format { count: usize },
         Logical { count: usize, is_or: bool },
         Json { parse: bool },
+        Access { property: Option<&'a str> },
         Join,
     }
     let mut work = vec![Work::Expression(expression)];
@@ -138,6 +139,32 @@ fn symbolic_ref_expression(expression: &str) -> String {
     let mut values: Vec<(String, bool, bool)> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
+            Work::Access { property } => {
+                let key = property
+                    .map(str::to_string)
+                    .unwrap_or_else(|| values.pop().expect("JSON access key is rendered").0);
+                let (source, _, is_string) = values.pop().expect("JSON access source is rendered");
+                let selected = if is_string {
+                    None
+                } else {
+                    match serde_json::from_str(&source) {
+                        Ok(serde_json::Value::Array(elements)) => key
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| elements.get(index).cloned()),
+                        Ok(serde_json::Value::Object(properties)) => properties
+                            .into_iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case(&key))
+                            .map(|(_, value)| value),
+                        _ => None,
+                    }
+                };
+                values.push(
+                    selected
+                        .map(render_ref_json_value)
+                        .unwrap_or_else(|| ("\x01".to_string(), false, false)),
+                );
+            }
             Work::Join => {
                 let (separator, _, _) = values.pop().expect("join separator is rendered");
                 let (source, _, is_string) = values.pop().expect("join argument is rendered");
@@ -146,11 +173,10 @@ fn symbolic_ref_expression(expression: &str) -> String {
                         Ok(serde_json::Value::Array(elements)) => elements
                             .into_iter()
                             .map(|element| match element {
-                                serde_json::Value::String(value) => value,
-                                serde_json::Value::Number(value) => value.to_string(),
-                                serde_json::Value::Bool(value) => value.to_string(),
-                                serde_json::Value::Null => String::new(),
-                                _ => "\x01".to_string(),
+                                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                                    "\x01".to_string()
+                                }
+                                value => render_ref_json_value(value).0,
                             })
                             .collect::<Vec<_>>()
                             .join(&separator),
@@ -211,29 +237,25 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     // was converted to a string by format or toJSON.
                     values.push((value, true, false));
                 } else {
-                    // Within JSON strings, escape the symbolic number marker
-                    // so serde preserves it when decoding quoted formats.
-                    let parsed = serde_json::from_str(&value.replace('\0', "\\u0000"));
-                    let decoded = match parsed {
-                        Ok(serde_json::Value::String(value)) => {
-                            let truthy = !value.is_empty();
-                            (value, truthy, true)
+                    // Distinguish numeric markers from markers inside JSON
+                    // strings so selected numbers still serialize unquoted.
+                    let mut json = String::new();
+                    let mut quoted = false;
+                    let mut escaped = false;
+                    for character in value.chars() {
+                        if character == '\0' {
+                            json.push_str(if quoted { "\\u0000" } else { "\"\\u0002\"" });
+                        } else {
+                            json.push(character);
                         }
-                        Ok(serde_json::Value::Number(value)) => {
-                            let truthy = value.as_f64().is_some_and(|number| number != 0.0);
-                            (value.to_string(), truthy, false)
+                        if character == '"' && !escaped {
+                            quoted = !quoted;
                         }
-                        Ok(serde_json::Value::Bool(value)) => (value.to_string(), value, false),
-                        Ok(serde_json::Value::Null) => (String::new(), false, false),
-                        Ok(value @ serde_json::Value::Array(_)) => {
-                            // Retain the parsed elements and number markers
-                            // for join, without treating the array as a string.
-                            let array = serde_json::to_string(&value)
-                                .expect("ref array serializes as JSON");
-                            (array, true, false)
-                        }
-                        _ => ("\x01".to_string(), false, false),
-                    };
+                        escaped = character == '\\' && !escaped;
+                    }
+                    let decoded = serde_json::from_str(&json)
+                        .map(render_ref_json_value)
+                        .unwrap_or_else(|_| ("\x01".to_string(), false, false));
                     values.push(decoded);
                 }
             }
@@ -272,6 +294,16 @@ fn symbolic_ref_expression(expression: &str) -> String {
                         is_or,
                     });
                     work.extend(arguments.into_iter().rev().map(Work::Expression));
+                    continue;
+                }
+                if let Some((source, key, computed)) = split_ref_access(expression) {
+                    work.push(Work::Access {
+                        property: (!computed).then_some(key),
+                    });
+                    if computed {
+                        work.push(Work::Expression(key));
+                    }
+                    work.push(Work::Expression(source));
                     continue;
                 }
                 if let Some(inner) = expression
@@ -349,6 +381,67 @@ fn symbolic_ref_expression(expression: &str) -> String {
     values.pop().expect("root ref expression is rendered").0
 }
 
+fn render_ref_json_value(value: serde_json::Value) -> (String, bool, bool) {
+    match value {
+        // The numeric marker is internal JSON storage, not a quoted ref value.
+        serde_json::Value::String(value) if value == "\x02" => ("\0".to_string(), true, false),
+        serde_json::Value::String(value) => {
+            let truthy = !value.is_empty();
+            (value, truthy, true)
+        }
+        serde_json::Value::Number(value) => {
+            let truthy = value.as_f64().is_some_and(|number| number != 0.0);
+            (value.to_string(), truthy, false)
+        }
+        serde_json::Value::Bool(value) => (value.to_string(), value, false),
+        serde_json::Value::Null => (String::new(), false, false),
+        value => (
+            serde_json::to_string(&value).expect("ref JSON container serializes"),
+            true,
+            false,
+        ),
+    }
+}
+
+/// Split only the final top-level selector; quoted JSON and nested calls stay
+/// intact and are rendered by the existing expression work stack.
+fn split_ref_access(expression: &str) -> Option<(&str, &str, bool)> {
+    let mut selector = None;
+    let mut quoted = false;
+    let mut depth: usize = 0;
+    let mut chars = expression.char_indices().peekable();
+    while let Some((offset, character)) = chars.next() {
+        if character == '\'' {
+            if quoted && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            quoted = !quoted;
+        } else if !quoted {
+            if depth == 0 && matches!(character, '.' | '[') {
+                selector = Some((offset, character == '['));
+            }
+            match character {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    let (offset, computed) = selector?;
+    let source = expression[..offset].trim();
+    let key = expression[offset + 1..].trim();
+    let key = if computed {
+        key.strip_suffix(']')?.trim()
+    } else {
+        if !key.chars().all(is_expression_ident_char) {
+            return None;
+        }
+        key
+    };
+    (!source.is_empty() && !key.is_empty()).then_some((source, key, computed))
+}
+
 fn render_ref_format(template: &str, values: &[String], max_length: usize) -> String {
     static FORMAT_FIELD: OnceLock<Regex> = OnceLock::new();
     let pattern = FORMAT_FIELD.get_or_init(|| {
@@ -410,8 +503,8 @@ fn split_logical_operands(expression: &str) -> Option<(Vec<&str>, bool)> {
             quoted = !quoted;
         } else if !quoted {
             match character {
-                '(' => depth += 1,
-                ')' => depth = depth.saturating_sub(1),
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
                 '|' | '&'
                     if depth == 0 && chars.peek().is_some_and(|(_, next)| *next == character) =>
                 {
@@ -457,8 +550,8 @@ fn split_format_arguments(arguments: &str) -> Vec<&str> {
             quoted = !quoted;
         } else if !quoted {
             match character {
-                '(' => depth += 1,
-                ')' => depth = depth.saturating_sub(1),
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth = depth.saturating_sub(1),
                 ',' if depth == 0 => {
                     result.push(arguments[start..offset].trim());
                     start = offset + 1;

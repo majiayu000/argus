@@ -13,3 +13,12 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: ${{ join(fromJSON(format('["refs/pull/","{0}","/head"]', github.event.number)), '') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('[{0}]', github.event.pull_request.number))[0] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"number":{0}}}', github.event.number)).number }}/merge
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"pull":[{{"number":{0}}}]}}', github.event.number)).pull[0].number }}/head
