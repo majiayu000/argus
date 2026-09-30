@@ -64,27 +64,38 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
 /// PR-number taint is checked at the pull-ref position rather than by source
 /// spelling. NUL cannot occur in a Git ref; it marks an event-derived number.
 fn contains_pull_number_ref(revision: &str) -> bool {
-    let mut symbolic = String::with_capacity(revision.len());
+    let mut symbolic = vec![String::new()];
     let mut remaining = revision.trim();
     while let Some(start) = remaining.find("${{") {
         let after_open = &remaining[start + 3..];
         let Some(end) = find_expression_close(after_open) else {
             break;
         };
-        symbolic.push_str(&remaining[..start]);
-        symbolic.push_str(&symbolic_ref_expression(&after_open[..end]));
+        let alternatives = symbolic_ref_expression(&after_open[..end]);
+        symbolic = symbolic
+            .into_iter()
+            .flat_map(|prefix| {
+                alternatives
+                    .iter()
+                    .map(move |value| format!("{prefix}{}{value}", &remaining[..start]))
+            })
+            .collect();
+        symbolic.sort_unstable();
+        symbolic.dedup();
         remaining = &after_open[end + 2..];
     }
-    symbolic.push_str(remaining);
-    // actions/checkout reads ref through core.getInput's JavaScript trim.
-    // JavaScript retains NEL and trims BOM, unlike Rust's str::trim.
-    let symbolic = symbolic.trim_matches(|character: char| {
-        (character.is_whitespace() && character != '\u{0085}') || character == '\u{feff}'
-    });
-    matches!(symbolic, "refs/pull/\0/head" | "refs/pull/\0/merge")
+    symbolic.into_iter().any(|mut value| {
+        value.push_str(remaining);
+        // actions/checkout reads ref through core.getInput's JavaScript trim.
+        // JavaScript retains NEL and trims BOM, unlike Rust's str::trim.
+        let value = value.trim_matches(|character: char| {
+            (character.is_whitespace() && character != '\u{0085}') || character == '\u{feff}'
+        });
+        matches!(value, "refs/pull/\0/head" | "refs/pull/\0/merge")
+    })
 }
 
-fn symbolic_ref_atom(expression: &str) -> Option<String> {
+fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String> {
     // PR-number taint survives parentheses and identity JSON round trips.
     // Quoted context text remains a literal atom.
     static ATOM: OnceLock<Regex> = OnceLock::new();
@@ -101,7 +112,7 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
             .expect("JSON round trip pattern compiles")
     });
     let quoted = expression.starts_with('\'');
-    let normalized = if quoted {
+    let normalized = if quoted || !source_expression {
         expression.to_string()
     } else {
         let mut normalized = expression.to_string();
@@ -123,7 +134,7 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
     Some("\0".to_string())
 }
 
-fn symbolic_ref_expression(expression: &str) -> String {
+fn symbolic_ref_expression(expression: &str) -> Vec<String> {
     enum Work<'a> {
         Expression(&'a str),
         Format { count: usize },
@@ -136,154 +147,215 @@ fn symbolic_ref_expression(expression: &str) -> String {
     // Keep logical truthiness separate from rendered text: boolean false is
     // falsy, while the quoted string 'false' is truthy and both render as false.
     // Track strings separately because toJSON quotes strings, but not numbers.
-    let mut values: Vec<(String, bool, bool)> = Vec::new();
+    // Each stack slot retains possible logical results; None is unknown truthiness.
+    let mut values: Vec<Vec<(String, Option<bool>, bool)>> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
             Work::Access { property } => {
-                let key = property
-                    .map(str::to_string)
-                    .unwrap_or_else(|| values.pop().expect("JSON access key is rendered").0);
-                let (source, _, is_string) = values.pop().expect("JSON access source is rendered");
-                let selected = if is_string {
-                    None
-                } else {
-                    match serde_json::from_str(&source) {
-                        Ok(serde_json::Value::Array(elements)) => key
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|index| elements.get(index).cloned()),
-                        Ok(serde_json::Value::Object(properties)) => properties
-                            .into_iter()
-                            .find(|(name, _)| name.eq_ignore_ascii_case(&key))
-                            .map(|(_, value)| value),
-                        _ => None,
+                let keys = property
+                    .map(|key| vec![(key.to_string(), Some(true), true)])
+                    .unwrap_or_else(|| values.pop().expect("ref access key is rendered"));
+                let sources = values.pop().expect("ref access source is rendered");
+                let mut selected = Vec::new();
+                for (source, _, is_string) in sources {
+                    for (key, _, _) in &keys {
+                        if !is_string && source.starts_with('\x03') {
+                            // Keep event identity separate from quoted context text.
+                            // The existing number atom matcher owns the taint paths.
+                            let context = &source[1..];
+                            let path = if context.ends_with(".pull_requests") {
+                                format!("{context}[{}]", key.to_ascii_lowercase())
+                            } else {
+                                format!("{context}.{}", key.to_ascii_lowercase())
+                            };
+                            selected.push(
+                                symbolic_ref_atom(&path, false)
+                                    .map(|value| (value, Some(true), false))
+                                    .unwrap_or_else(|| (format!("\x03{path}"), None, false)),
+                            );
+                            continue;
+                        }
+                        let value = if is_string {
+                            None
+                        } else {
+                            match serde_json::from_str(&source) {
+                                Ok(serde_json::Value::Array(elements)) => key
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|index| elements.get(index).cloned()),
+                                Ok(serde_json::Value::Object(properties)) => properties
+                                    .into_iter()
+                                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                                    .map(|(_, value)| value),
+                                _ => None,
+                            }
+                        };
+                        selected.push(
+                            value
+                                .map(render_ref_json_value)
+                                .unwrap_or_else(|| ("\x01".to_string(), None, false)),
+                        );
                     }
-                };
-                values.push(
-                    selected
-                        .map(render_ref_json_value)
-                        .unwrap_or_else(|| ("\x01".to_string(), false, false)),
-                );
+                }
+                values.push(selected);
             }
             Work::Join => {
-                let (separator, _, _) = values.pop().expect("join separator is rendered");
-                let (source, _, is_string) = values.pop().expect("join argument is rendered");
-                let value = if !is_string {
-                    match serde_json::from_str(&source) {
-                        Ok(serde_json::Value::Array(elements)) => elements
-                            .into_iter()
-                            .map(|element| match element {
-                                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                                    "\x01".to_string()
-                                }
-                                value => render_ref_json_value(value).0,
-                            })
-                            .collect::<Vec<_>>()
-                            .join(&separator),
-                        _ => source,
+                let separators = values.pop().expect("join separator is rendered");
+                let sources = values.pop().expect("join argument is rendered");
+                let mut joined = Vec::new();
+                for (source, _, is_string) in sources {
+                    for (separator, _, _) in &separators {
+                        let value = if !is_string {
+                            match serde_json::from_str(&source) {
+                                Ok(serde_json::Value::Array(elements)) => elements
+                                    .into_iter()
+                                    .map(|element| match element {
+                                        serde_json::Value::Array(_)
+                                        | serde_json::Value::Object(_) => "\x01".to_string(),
+                                        value => render_ref_json_value(value).0,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(separator),
+                                _ => source.clone(),
+                            }
+                        } else {
+                            source.clone()
+                        };
+                        let truthy = !value.is_empty();
+                        joined.push((value, Some(truthy), true));
                     }
-                } else {
-                    source
-                };
-                let truthy = !value.is_empty();
-                values.push((value, truthy, true));
+                }
+                values.push(joined);
             }
             Work::Format { count } => {
-                let arguments: Vec<String> = values
-                    .split_off(values.len() - count)
-                    .into_iter()
-                    .map(|(value, _, _)| value)
-                    .collect();
-                let (template, arguments) = arguments
-                    .split_first()
-                    .expect("format argument splitting includes a template slot");
-                let value = render_ref_format(template, arguments, expression.len());
-                let truthy = !value.is_empty();
-                values.push((value, truthy, true));
+                let arguments = values.split_off(values.len() - count);
+                let mut combinations = vec![Vec::new()];
+                for alternatives in arguments {
+                    combinations = combinations
+                        .into_iter()
+                        .flat_map(|arguments: Vec<String>| {
+                            alternatives.iter().map(move |(value, _, _)| {
+                                let mut arguments = arguments.clone();
+                                arguments.push(value.clone());
+                                arguments
+                            })
+                        })
+                        .collect();
+                    combinations.sort_unstable();
+                    combinations.dedup();
+                }
+                values.push(
+                    combinations
+                        .into_iter()
+                        .map(|arguments| {
+                            let (template, arguments) = arguments
+                                .split_first()
+                                .expect("format argument splitting includes a template slot");
+                            let value = render_ref_format(template, arguments, expression.len());
+                            let truthy = !value.is_empty();
+                            (value, Some(truthy), true)
+                        })
+                        .collect(),
+                );
             }
             Work::Logical { count, is_or } => {
                 let arguments = values.split_off(values.len() - count);
-                let mut selected = ("\x01".to_string(), false, false);
-                for value in arguments {
-                    if value.0.contains('\x01') {
-                        selected = ("\x01".to_string(), false, false);
-                        // An unknown condition can select a later operand;
-                        // continue through the possible returned values.
-                        continue;
+                let mut selected = Vec::new();
+                for (index, alternatives) in arguments.into_iter().enumerate() {
+                    let mut can_continue = false;
+                    for value in alternatives {
+                        if index == count - 1 {
+                            selected.push(value);
+                        } else {
+                            if value.1.is_none() || value.1 == Some(is_or) {
+                                // Short-circuiting constrains this returned outcome's
+                                // truthiness, even when its text remains unknown.
+                                let mut stopped = value.clone();
+                                stopped.1 = Some(is_or);
+                                selected.push(stopped);
+                            }
+                            can_continue |= value.1.is_none() || value.1 != Some(is_or);
+                        }
                     }
-                    let truthy = value.1;
-                    selected = value;
-                    if truthy == is_or {
+                    if !can_continue {
                         break;
                     }
                 }
                 values.push(selected);
             }
             Work::Json { parse } => {
-                let (value, _, is_string) = values.pop().expect("JSON argument is rendered");
-                if value.contains('\x01') {
-                    values.push(("\x01".to_string(), false, false));
-                } else if !parse {
-                    let json = if is_string {
-                        serde_json::to_string(&value).expect("ref string serializes as JSON")
-                    } else if value.is_empty() {
-                        "null".to_string()
-                    } else {
-                        value
-                    };
-                    values.push((json, true, true));
-                } else if value == "\0" {
-                    // A rendered event number is decimal JSON, even when it
-                    // was converted to a string by format or toJSON.
-                    values.push((value, true, false));
-                } else {
-                    // Distinguish numeric markers from markers inside JSON
-                    // strings so selected numbers still serialize unquoted.
-                    let mut json = String::new();
-                    let mut quoted = false;
-                    let mut escaped = false;
-                    for character in value.chars() {
-                        if character == '\0' {
-                            json.push_str(if quoted { "\\u0000" } else { "\"\\u0002\"" });
+                let arguments = values.pop().expect("JSON argument is rendered");
+                let mut decoded_values = Vec::new();
+                for (value, _, is_string) in arguments {
+                    if value.contains('\x01') || value.contains('\x03') {
+                        decoded_values.push(("\x01".to_string(), None, false));
+                    } else if !parse {
+                        let json = if is_string {
+                            serde_json::to_string(&value).expect("ref string serializes as JSON")
+                        } else if value.is_empty() {
+                            "null".to_string()
                         } else {
-                            json.push(character);
+                            value
+                        };
+                        decoded_values.push((json, Some(true), true));
+                    } else if value == "\0" {
+                        // A rendered event number is decimal JSON, even when it
+                        // was converted to a string by format or toJSON.
+                        decoded_values.push((value, Some(true), false));
+                    } else {
+                        // Distinguish numeric markers from markers inside JSON
+                        // strings so selected numbers still serialize unquoted.
+                        let mut json = String::new();
+                        let mut quoted = false;
+                        let mut escaped = false;
+                        for character in value.chars() {
+                            if character == '\0' {
+                                json.push_str(if quoted { "\\u0000" } else { "\"\\u0002\"" });
+                            } else {
+                                json.push(character);
+                            }
+                            if character == '"' && !escaped {
+                                quoted = !quoted;
+                            }
+                            escaped = character == '\\' && !escaped;
                         }
-                        if character == '"' && !escaped {
-                            quoted = !quoted;
-                        }
-                        escaped = character == '\\' && !escaped;
+                        let decoded = serde_json::from_str(&json)
+                            .map(render_ref_json_value)
+                            .unwrap_or_else(|_| ("\x01".to_string(), None, false));
+                        decoded_values.push(decoded);
                     }
-                    let decoded = serde_json::from_str(&json)
-                        .map(render_ref_json_value)
-                        .unwrap_or_else(|_| ("\x01".to_string(), false, false));
-                    values.push(decoded);
                 }
+                values.push(decoded_values);
             }
             Work::Expression(expression) => {
                 let expression = expression.trim();
                 if expression.eq_ignore_ascii_case("true")
                     || expression.eq_ignore_ascii_case("false")
                 {
-                    values.push((
+                    values.push(vec![(
                         expression.to_ascii_lowercase(),
-                        expression.eq_ignore_ascii_case("true"),
+                        Some(expression.eq_ignore_ascii_case("true")),
                         false,
-                    ));
+                    )]);
                     continue;
                 }
                 if expression.eq_ignore_ascii_case("null") {
-                    values.push((String::new(), false, false));
+                    values.push(vec![(String::new(), Some(false), false)]);
                     continue;
                 }
                 if let Ok(number) = serde_json::from_str::<serde_json::Number>(expression) {
                     let truthy = number.as_f64().is_some_and(|value| value != 0.0);
-                    values.push((number.to_string(), truthy, false));
+                    values.push(vec![(number.to_string(), Some(truthy), false)]);
                     continue;
                 }
-                if let Some(atom) = symbolic_ref_atom(expression) {
+                if let Some(atom) = symbolic_ref_atom(expression, true) {
                     let truthy = !atom.is_empty();
                     let is_string = atom != "\0";
-                    values.push((atom, truthy, is_string));
+                    values.push(vec![(atom, Some(truthy), is_string)]);
+                    continue;
+                }
+                if expression.eq_ignore_ascii_case("github") {
+                    values.push(vec![("\x03github".to_string(), Some(true), false)]);
                     continue;
                 }
                 // Unknown expression values remain opaque. Existing head/SHA
@@ -367,7 +439,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
                             .flatten()
                     });
                 let Some(arguments) = format else {
-                    values.push(("\x01".to_string(), false, false));
+                    values.push(vec![("\x01".to_string(), None, false)]);
                     continue;
                 };
                 let arguments = split_format_arguments(arguments);
@@ -377,27 +449,38 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 work.extend(arguments.into_iter().rev().map(Work::Expression));
             }
         }
+        if let Some(alternatives) = values.last_mut() {
+            alternatives.sort_unstable();
+            alternatives.dedup();
+        }
     }
-    values.pop().expect("root ref expression is rendered").0
+    values
+        .pop()
+        .expect("root ref expression is rendered")
+        .into_iter()
+        .map(|(value, _, _)| value)
+        .collect()
 }
 
-fn render_ref_json_value(value: serde_json::Value) -> (String, bool, bool) {
+fn render_ref_json_value(value: serde_json::Value) -> (String, Option<bool>, bool) {
     match value {
         // The numeric marker is internal JSON storage, not a quoted ref value.
-        serde_json::Value::String(value) if value == "\x02" => ("\0".to_string(), true, false),
+        serde_json::Value::String(value) if value == "\x02" => {
+            ("\0".to_string(), Some(true), false)
+        }
         serde_json::Value::String(value) => {
             let truthy = !value.is_empty();
-            (value, truthy, true)
+            (value, Some(truthy), true)
         }
         serde_json::Value::Number(value) => {
             let truthy = value.as_f64().is_some_and(|number| number != 0.0);
-            (value.to_string(), truthy, false)
+            (value.to_string(), Some(truthy), false)
         }
-        serde_json::Value::Bool(value) => (value.to_string(), value, false),
-        serde_json::Value::Null => (String::new(), false, false),
+        serde_json::Value::Bool(value) => (value.to_string(), Some(value), false),
+        serde_json::Value::Null => (String::new(), Some(false), false),
         value => (
             serde_json::to_string(&value).expect("ref JSON container serializes"),
-            true,
+            Some(true),
             false,
         ),
     }

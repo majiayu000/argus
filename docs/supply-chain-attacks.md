@@ -580,7 +580,8 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    and unsafe privileged-trigger checkout, including `refs/pull/<number>/head`
    and `/merge` built from event PR numbers with interpolation or `format`,
    including numeric formats and array/object element access parsed with
-   `fromJSON`. JSON serialization
+   `fromJSON`, computed event-number property selectors, and all possible
+   outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs.
    A reviewed full SHA removes tag retargeting but does not prove the upstream

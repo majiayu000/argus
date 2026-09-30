@@ -25,3 +25,9 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: ${{ toJSON(fromJSON(format('["refs/pull/{0}/head"]', github.event.number))[0]) }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ (github.event.action != 'opened' && '42' || '43') || github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ 'github.event'[format('num{0}', 'ber')] }}/head
