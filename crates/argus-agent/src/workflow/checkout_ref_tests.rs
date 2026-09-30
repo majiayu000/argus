@@ -233,6 +233,19 @@ fn privileged_computed_pull_number_index_ref_blocks() {
 }
 
 #[test]
+fn privileged_joined_pull_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ join(github.event.workflow_run.pull_requests.*.number, '') }}/head",
+        "${{ format('refs/pull/{0}/merge', join(github.event.workflow_run.pull_requests.*.number)) }}",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            revision,
+        )));
+    }
+}
+
+#[test]
 fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
     for revision in [
         "${{ github.event.pull_request.base.sha }}",
@@ -272,6 +285,8 @@ fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
         "refs/pull/${{ github.event.action == 'opened' && github.event.number && '42' }}/head",
         "refs/pull/${{ 'github.event.workflow_run.pull_requests[fromJSON(''0'')].number' }}/head",
         "refs/pull/${{ github.event.workflow_run.pull_requests[fromJSON('0')].title }}/head",
+        "refs/pull/${{ join('github.event.workflow_run.pull_requests.*.number', '') }}/head",
+        "refs/pull/${{ join('42', github.event.number) }}/head",
     ] {
         for trigger in ["pull_request_target", "workflow_run"] {
             assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(

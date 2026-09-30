@@ -207,6 +207,20 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     work.push(Work::Expression(inner));
                     continue;
                 }
+                let joined = expression
+                    .split_once('(')
+                    .filter(|(function, _)| function.trim().eq_ignore_ascii_case("join"))
+                    .and_then(|(_, arguments)| arguments.strip_suffix(')'));
+                if let Some(arguments) = joined {
+                    // A string or singleton pull-number array keeps its value;
+                    // the separator does not supply the selected PR number.
+                    let source = split_format_arguments(arguments)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default();
+                    work.push(Work::Expression(source));
+                    continue;
+                }
                 let format = expression
                     .split_once('(')
                     .and_then(|(function, arguments)| {

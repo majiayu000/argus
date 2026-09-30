@@ -37,3 +37,6 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: refs/pull/${{ 'github.event.workflow_run.pull_requests[fromJSON(''0'')].number' }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join('42', github.event.number) }}/head
