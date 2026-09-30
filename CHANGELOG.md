@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
   `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
-  numbers, including `format(...)` templates, parsed numeric formats, and
-  mixed input/env bindings. Repeated JSON serialization keeps string quotes
-  and does not falsely match a pull-number ref.
+  numbers, including `format(...)` templates, parsed numeric formats, joined
+  parsed JSON arrays, and mixed input/env bindings. Repeated JSON serialization
+  keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use the same surrounding-whitespace trimming as checkout.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text

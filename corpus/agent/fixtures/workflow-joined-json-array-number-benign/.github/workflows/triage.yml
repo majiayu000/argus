@@ -1,0 +1,18 @@
+name: Joined parsed JSON array controls
+on: pull_request_target
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON(format('["refs","pull","{0}","head"]', github.event.number)), '-') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON('["refs/pull/github.event.number/head"]'), '') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON(format('["refs/pull/{0}/head"]', 42, github.event.number)), '') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ toJSON(join(fromJSON(format('["refs/pull/{0}/head"]', github.event.number)), '')) }}

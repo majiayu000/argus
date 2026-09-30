@@ -309,6 +309,43 @@ fn privileged_joined_pull_number_refs_block() {
 }
 
 #[test]
+fn privileged_joined_json_array_number_refs_block() {
+    for revision in [
+        "${{ join(fromJSON(format('[\"refs/pull/{0}/head\"]', github.event.pull_request.number)), '') }}",
+        "${{ join(fromJSON(format('[\"refs/pull/{0}/merge\"]', github.event.number))) }}",
+        "${{ join(fromJSON(format('[\"refs\",\"pull\",\"{0}\",\"head\"]', github.event.number)), '/') }}",
+        "${{ join(fromJSON(format('[\"refs/pull/\",\"{0}\",\"/merge\"]', github.event.number)), '') }}",
+        "${{ join(fromJSON(toJSON(fromJSON(format('[\"refs/pull/{0}/head\"]', github.event.number)))), ',') }}",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn joined_json_array_number_ref_controls_remain_allowed() {
+    for revision in [
+        "${{ join(fromJSON(format('[\"refs\",\"pull\",\"{0}\",\"head\"]', github.event.number)), '-') }}",
+        "${{ join(fromJSON(format('[\"refs/pull/\",\"{0}\",\"/head\"]', github.event.number))) }}",
+        "${{ join(fromJSON(format('[\"refs/pull/{0}/head\",\"suffix\"]', github.event.number)), '') }}",
+        "${{ join(fromJSON('[\"refs/pull/github.event.number/head\"]'), '') }}",
+        "${{ join(fromJSON(format('[\"refs/pull/{0}/head\"]', 42, github.event.number)), '') }}",
+        "${{ toJSON(join(fromJSON(format('[\"refs/pull/{0}/head\"]', github.event.number)), '')) }}",
+        "${{ join(toJSON(fromJSON(format('[\"refs/pull/{0}/head\"]', github.event.number))), '') }}",
+        "${{ join(fromJSON('[]'), github.event.number) }}",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
 fn privileged_computed_number_ref_templates_block() {
     assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
         "pull_request_target",

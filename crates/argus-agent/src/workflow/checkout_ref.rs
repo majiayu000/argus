@@ -139,9 +139,28 @@ fn symbolic_ref_expression(expression: &str) -> String {
     while let Some(item) = work.pop() {
         match item {
             Work::Join => {
-                let value = values.last_mut().expect("join argument is rendered");
-                value.1 = !value.0.is_empty();
-                value.2 = true;
+                let (separator, _, _) = values.pop().expect("join separator is rendered");
+                let (source, _, is_string) = values.pop().expect("join argument is rendered");
+                let value = if !is_string {
+                    match serde_json::from_str(&source) {
+                        Ok(serde_json::Value::Array(elements)) => elements
+                            .into_iter()
+                            .map(|element| match element {
+                                serde_json::Value::String(value) => value,
+                                serde_json::Value::Number(value) => value.to_string(),
+                                serde_json::Value::Bool(value) => value.to_string(),
+                                serde_json::Value::Null => String::new(),
+                                _ => "\x01".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&separator),
+                        _ => source,
+                    }
+                } else {
+                    source
+                };
+                let truthy = !value.is_empty();
+                values.push((value, truthy, true));
             }
             Work::Format { count } => {
                 let arguments: Vec<String> = values
@@ -206,6 +225,13 @@ fn symbolic_ref_expression(expression: &str) -> String {
                         }
                         Ok(serde_json::Value::Bool(value)) => (value.to_string(), value, false),
                         Ok(serde_json::Value::Null) => (String::new(), false, false),
+                        Ok(value @ serde_json::Value::Array(_)) => {
+                            // Retain the parsed elements and number markers
+                            // for join, without treating the array as a string.
+                            let array = serde_json::to_string(&value)
+                                .expect("ref array serializes as JSON");
+                            (array, true, false)
+                        }
                         _ => ("\x01".to_string(), false, false),
                     };
                     values.push(decoded);
@@ -289,13 +315,13 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     .filter(|(function, _)| function.trim().eq_ignore_ascii_case("join"))
                     .and_then(|(_, arguments)| arguments.strip_suffix(')'));
                 if let Some(arguments) = joined {
-                    // A string or singleton pull-number array keeps its value;
-                    // the separator does not supply the selected PR number.
-                    let source = split_format_arguments(arguments)
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default();
+                    // Strings keep their value; parsed arrays use the actual
+                    // separator, which is irrelevant for a singleton array.
+                    let arguments = split_format_arguments(arguments);
+                    let source = arguments.first().copied().unwrap_or_default();
+                    let separator = arguments.get(1).copied().unwrap_or("','");
                     work.push(Work::Join);
+                    work.push(Work::Expression(separator));
                     work.push(Work::Expression(source));
                     continue;
                 }
