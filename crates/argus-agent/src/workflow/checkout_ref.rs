@@ -3,7 +3,10 @@
 //! Bracket normalization stays in the caller.
 //! Pull-number ref templates are checked before expression literals are stripped.
 
-use super::{is_expression_ident_char, map_expression_regions, remove_expression_string_literals};
+use super::{
+    find_expression_close, is_expression_ident_char, map_expression_regions,
+    remove_expression_string_literals,
+};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -74,7 +77,25 @@ fn contains_pull_number_ref(revision: &str) -> bool {
         Regex::new(&format!(r"(?i)^(?:{interpolated}|{formatted})$"))
             .expect("pull number ref pattern compiles")
     });
-    pattern.is_match(revision.trim())
+    // A separate `${{ '' }}` contributes no ref characters. Omit whole empty
+    // regions so they cannot hide the construction at its start, middle, or
+    // end; use the existing quote-aware delimiter parser to preserve literals
+    // inside other expressions and leave nonempty suffixes intact.
+    let mut normalized = String::with_capacity(revision.len());
+    let mut remaining = revision;
+    while let Some(start) = remaining.find("${{") {
+        let after_open = &remaining[start + 3..];
+        let Some(end) = find_expression_close(after_open) else {
+            break;
+        };
+        normalized.push_str(&remaining[..start]);
+        if after_open[..end].trim() != "''" {
+            normalized.push_str(&remaining[start..start + 3 + end + 2]);
+        }
+        remaining = &after_open[end + 2..];
+    }
+    normalized.push_str(remaining);
+    pattern.is_match(normalized.trim())
 }
 
 /// True when `toJSON` is called on `github.event.pull_request.head` itself.
