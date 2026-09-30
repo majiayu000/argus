@@ -215,3 +215,60 @@ fn checkout_ref_state_products_report_operational_errors() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn parsed_checkout_numbers_preserve_taint() -> Result<()> {
+    for (revision, tainted) in [
+        (
+            "refs/pull/${{ fromJSON(format('{0}.0', github.event.number)) }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('[{0}]', github.event.number))[0.5] }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('\"{0}.0\"', github.event.number)) }}/head",
+            false,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[0.5] }}/head",
+            false,
+        ),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let fixture = tempfile::tempdir()?;
+            let workflows = fixture.path().join(".github/workflows");
+            std::fs::create_dir_all(&workflows)?;
+            std::fs::write(
+                workflows.join("triage.yml"),
+                format!(
+                    "name: Numeric checkout\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: {revision}\n"
+                ),
+            )?;
+            let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                .args(["agent", "scan"])
+                .arg(fixture.path())
+                .args(["--format", "json"])
+                .output()?;
+            let blocks = tainted && trigger != "pull_request";
+            assert_eq!(output.status.code(), Some(i32::from(blocks)));
+            assert!(output.stderr.is_empty());
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(report["decision"], if blocks { "block" } else { "allow" });
+            assert_eq!(
+                report["findings"]
+                    .as_array()
+                    .expect("scan findings")
+                    .iter()
+                    .filter(|finding| {
+                        finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                            && finding["severity"] == "critical"
+                    })
+                    .count(),
+                usize::from(blocks)
+            );
+        }
+    }
+    Ok(())
+}

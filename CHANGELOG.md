@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
   `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
-  numbers, including `format(...)` templates, parsed numeric formats, joined
+  numbers, including `format(...)` templates, equivalent JSON numerals, joined
   parsed JSON arrays, parsed array/object element access, computed event-number
   selectors, unknown logical branch outcomes, and mixed input/env bindings.
   Repeated JSON serialization
   keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use the same surrounding-whitespace trimming as checkout.
-  Computed workflow-run indexes and constant negation preserve actual logical
-  selection. Symbolic products exceeding 1,024 alternatives fail with an
+  Computed workflow-run and parsed-array indexes use primitive numeric coercion.
+  Constant negation preserves known truthiness. Symbolic products exceeding
+  1,024 alternatives fail with an
   explicit operational error before allocation.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text

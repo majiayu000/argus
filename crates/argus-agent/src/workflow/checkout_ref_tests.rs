@@ -167,6 +167,53 @@ fn privileged_parsed_format_number_refs_block() {
 }
 
 #[test]
+fn privileged_equivalent_json_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ fromJSON(format('{0}.0', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}.000', github.event.number)) }}/merge",
+        "refs/pull/${{ fromJSON(format('{0}e0', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}E+00', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}.00e-00', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('[{0}.0]', github.event.number))[0] }}/head",
+        "refs/pull/${{ fromJSON(format('{{\"number\":{0}e0}}', github.event.number)).number }}/head",
+        "refs/pull/${{ join(fromJSON(format('[{0}.0]', github.event.number)), '') }}/head",
+        "refs/pull/${{ toJSON(fromJSON(format('{0}.0', github.event.number))) }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn equivalent_json_number_controls_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ fromJSON(format('{0}.5', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}e1', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}.0e-1', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('-{0}.0', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('0{0}.0', github.event.number)) }}/head",
+        "refs/pull/${{ fromJSON(format('\"{0}.0\"', github.event.number)) }}/head",
+        "refs/pull/${{ toJSON(toJSON(fromJSON(format('{0}.0', github.event.number)))) }}/head",
+        "refs/pull/${{ fromJSON(format('[42,{0}.0]', github.event.number))[0] }}/head",
+        "refs/pull/${{ fromJSON('42.0') }}/head",
+        "refs/pull/${{ fromJSON(format('{0}.0', '42', github.event.number)) }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request",
+        "refs/pull/${{ fromJSON(format('{0}.0', github.event.number)) }}/head",
+    )));
+}
+
+#[test]
 fn serialized_number_strings_remain_allowed() {
     for revision in [
         "refs/pull/${{ toJSON(toJSON(github.event.number)) }}/head",
@@ -365,6 +412,57 @@ fn privileged_parsed_json_number_access_refs_block() {
             )));
         }
     }
+}
+
+#[test]
+fn privileged_parsed_json_number_index_coercions_block() {
+    for key in ["0.5", "format('{0}', '0.5')", "false", "null", "''", "5e-1"] {
+        let revision = format!(
+            "refs/pull/${{{{ fromJSON(format('[{{0}}]', github.event.number))[{key}] }}}}/head"
+        );
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, &revision,
+            )));
+        }
+    }
+    for trigger in ["pull_request_target", "workflow_run"] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            trigger,
+            "refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[true] }}/head",
+        )));
+    }
+}
+
+#[test]
+fn parsed_json_number_index_controls_remain_allowed() {
+    for key in [
+        "-1",
+        "'missing'",
+        "'NaN'",
+        "'Infinity'",
+        "2147483648",
+        "1.5",
+    ] {
+        let revision = format!(
+            "refs/pull/${{{{ fromJSON(format('[{{0}}]', github.event.number))[{key}] }}}}/head"
+        );
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, &revision,
+            )));
+        }
+    }
+    for trigger in ["pull_request_target", "workflow_run"] {
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            trigger,
+            "refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[0.5] }}/head",
+        )));
+    }
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request",
+        "refs/pull/${{ fromJSON(format('[{0}]', github.event.number))[0.5] }}/head",
+    )));
 }
 
 #[test]

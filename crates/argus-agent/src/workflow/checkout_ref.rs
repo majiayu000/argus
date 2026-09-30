@@ -152,6 +152,13 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
 }
 
 fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
+    static JSON_NUMBER: OnceLock<Regex> = OnceLock::new();
+    let json_number = JSON_NUMBER.get_or_init(|| {
+        // Zero fractions and exponents preserve the PR number.
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"^\x00(?:\.0+)?(?:[eE][+-]?0+)?")
+            .expect("symbolic JSON number pattern compiles")
+    });
     enum Work<'a> {
         Expression(&'a str),
         Format { count: usize },
@@ -186,21 +193,10 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                 // Resolve computed array selectors before number taint.
                                 // The runner converts primitive indexes to numbers,
                                 // floors nonnegative values, and rejects NaN/range errors.
-                                let number = if !key_is_string && key == "true" {
-                                    Some(1.0)
-                                } else if key.is_empty() || (!key_is_string && key == "false") {
-                                    Some(0.0)
-                                } else {
-                                    key.trim().parse::<f64>().ok()
-                                };
                                 if property == Some("*") {
                                     format!("{context}.*")
-                                } else if let Some(index) = number.filter(|index| {
-                                    index.is_finite()
-                                        && *index >= 0.0
-                                        && index.floor() <= i32::MAX as f64
-                                }) {
-                                    format!("{context}[{}]", index.floor() as i32)
+                                } else if let Some(index) = ref_array_index(key, *key_is_string) {
+                                    format!("{context}[{index}]")
                                 } else if key.contains('\x01')
                                     || key.contains('\x03')
                                     || key == "\0"
@@ -225,10 +221,10 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             None
                         } else {
                             match serde_json::from_str(&source) {
-                                Ok(serde_json::Value::Array(elements)) => key
-                                    .parse::<usize>()
-                                    .ok()
-                                    .and_then(|index| elements.get(index).cloned()),
+                                Ok(serde_json::Value::Array(elements)) => {
+                                    ref_array_index(key, *key_is_string)
+                                        .and_then(|index| elements.get(index).cloned())
+                                }
                                 Ok(serde_json::Value::Object(properties)) => properties
                                     .into_iter()
                                     .find(|(name, _)| name.eq_ignore_ascii_case(key))
@@ -370,9 +366,20 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         let mut json = String::new();
                         let mut quoted = false;
                         let mut escaped = false;
-                        for character in value.chars() {
+                        let mut characters = value.char_indices().peekable();
+                        while let Some((offset, character)) = characters.next() {
                             if character == '\0' {
                                 json.push_str(if quoted { "\\u0000" } else { "\"\\u0002\"" });
+                                if !quoted {
+                                    let end = offset
+                                        + json_number
+                                            .find(&value[offset..])
+                                            .expect("number marker matches")
+                                            .end();
+                                    while characters.peek().is_some_and(|(next, _)| *next < end) {
+                                        characters.next();
+                                    }
+                                }
                             } else {
                                 json.push(character);
                             }
@@ -527,6 +534,18 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
         .into_iter()
         .map(|(value, _, _)| value)
         .collect())
+}
+
+fn ref_array_index(key: &str, is_string: bool) -> Option<usize> {
+    let number = if !is_string && key == "true" {
+        1.0
+    } else if key.is_empty() || (!is_string && key == "false") {
+        0.0
+    } else {
+        key.trim().parse::<f64>().ok()?
+    };
+    (number.is_finite() && number >= 0.0 && number.floor() <= i32::MAX as f64)
+        .then(|| number.floor() as usize)
 }
 
 fn render_ref_json_value(value: serde_json::Value) -> (String, Option<bool>, bool) {

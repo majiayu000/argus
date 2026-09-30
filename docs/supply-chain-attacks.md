@@ -579,13 +579,14 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    YAML for mutable dependencies, direct untrusted-context script injection,
    and unsafe privileged-trigger checkout, including `refs/pull/<number>/head`
    and `/merge` built from event PR numbers with interpolation or `format`,
-   including numeric formats and array/object element access parsed with
+   including equivalent JSON numeric representations and array/object access with
    `fromJSON`, computed event-number property selectors, and all possible
    outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs.
-   Computed workflow-run indexes resolve before number taint; unary negation
-   preserves known truthiness. Symbolic products are limited to 1,024
+   Computed workflow-run and parsed-array indexes apply numeric coercion before
+   number taint; unary negation preserves known truthiness. Symbolic products
+   are limited to 1,024
    alternatives before allocation; exceeding that boundary fails the scan
    with an operational error (CLI exit 2) instead of an incomplete allow.
    A reviewed full SHA removes tag retargeting but does not prove the upstream
