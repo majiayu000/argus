@@ -114,32 +114,25 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
 fn symbolic_ref_expression(expression: &str) -> String {
     enum Work<'a> {
         Expression(&'a str),
-        Format { template: String, count: usize },
+        Format { count: usize },
         Logical { count: usize, is_or: bool },
     }
-    // Rendering supported formats only appends argument values. A chunk longer
-    // than the target ref cannot later fit that ref; keep it opaque and bounded
-    // so nested formats cannot expand strings exponentially.
-    let bounded = |value: String| {
-        if value.len() <= "refs/pull/\0/merge".len() {
-            value
-        } else {
-            "\x01".to_string()
-        }
-    };
     let mut work = vec![Work::Expression(expression)];
     // Keep logical truthiness separate from rendered text: boolean false is
     // falsy, while the quoted string 'false' is truthy and both render as false.
     let mut values: Vec<(String, bool)> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
-            Work::Format { template, count } => {
+            Work::Format { count } => {
                 let arguments: Vec<String> = values
                     .split_off(values.len() - count)
                     .into_iter()
                     .map(|(value, _)| value)
                     .collect();
-                let value = bounded(render_ref_format(&template, &arguments));
+                let (template, arguments) = arguments
+                    .split_first()
+                    .expect("format argument splitting includes a template slot");
+                let value = render_ref_format(template, arguments, expression.len());
                 let truthy = !value.is_empty();
                 values.push((value, truthy));
             }
@@ -172,9 +165,18 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     ));
                     continue;
                 }
+                if expression.eq_ignore_ascii_case("null") {
+                    values.push((String::new(), false));
+                    continue;
+                }
+                if let Ok(number) = serde_json::from_str::<serde_json::Number>(expression) {
+                    let truthy = number.as_f64().is_some_and(|value| value != 0.0);
+                    values.push((number.to_string(), truthy));
+                    continue;
+                }
                 if let Some(atom) = symbolic_ref_atom(expression) {
                     let truthy = !atom.is_empty();
-                    values.push((bounded(atom), truthy));
+                    values.push((atom, truthy));
                     continue;
                 }
                 // Unknown expression values remain opaque. Existing head/SHA
@@ -234,14 +236,8 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     values.push(("\x01".to_string(), false));
                     continue;
                 };
-                let mut arguments = split_format_arguments(arguments).into_iter();
-                let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
-                    values.push(("\x01".to_string(), false));
-                    continue;
-                };
-                let arguments: Vec<&str> = arguments.collect();
+                let arguments = split_format_arguments(arguments);
                 work.push(Work::Format {
-                    template,
                     count: arguments.len(),
                 });
                 work.extend(arguments.into_iter().rev().map(Work::Expression));
@@ -251,15 +247,23 @@ fn symbolic_ref_expression(expression: &str) -> String {
     values.pop().expect("root ref expression is rendered").0
 }
 
-fn render_ref_format(template: &str, values: &[String]) -> String {
+fn render_ref_format(template: &str, values: &[String], max_length: usize) -> String {
     static FORMAT_FIELD: OnceLock<Regex> = OnceLock::new();
     let pattern = FORMAT_FIELD.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
         Regex::new(r"\{\{|\}\}|\{([0-9]+)\}").expect("format field pattern compiles")
     });
-    pattern
+    // Computed templates can contain placeholders that later shrink. Bound
+    // their expansion by source length while producing the rendered value,
+    // so repeated nested fields cannot allocate exponentially growing strings.
+    let mut length = template.len();
+    let mut exceeded = false;
+    let rendered = pattern
         .replace_all(template, |captures: &regex::Captures<'_>| {
-            match &captures[0] {
+            if exceeded {
+                return String::new();
+            }
+            let replacement = match &captures[0] {
                 "{{" => "{".to_string(),
                 "}}" => "}".to_string(),
                 field => captures
@@ -268,9 +272,23 @@ fn render_ref_format(template: &str, values: &[String]) -> String {
                     .and_then(|index| values.get(index))
                     .cloned()
                     .unwrap_or_else(|| field.to_string()),
+            };
+            length = length
+                .saturating_sub(captures[0].len())
+                .saturating_add(replacement.len());
+            if length > max_length {
+                exceeded = true;
+                String::new()
+            } else {
+                replacement
             }
         })
-        .into_owned()
+        .into_owned();
+    if exceeded {
+        "\x01".to_string()
+    } else {
+        rendered
+    }
 }
 
 /// Split top-level OR before AND to preserve precedence; quoted strings and

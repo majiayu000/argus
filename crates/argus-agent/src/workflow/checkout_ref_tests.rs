@@ -172,6 +172,9 @@ fn privileged_logical_pull_number_refs_block() {
         "refs/pull/${{ (github.event.number && github.event.pull_request.number) }}/merge",
         "${{ format('refs/pull/{0}/head', github.event.number || '') }}",
         "refs/pull/${{ '' || github.event.number }}/head",
+        "refs/pull/${{ 0 || github.event.number }}/head",
+        "refs/pull/${{ null || github.event.number }}/head",
+        "refs/pull/${{ '0' && github.event.number }}/head",
     ] {
         assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
             "pull_request_target",
@@ -243,6 +246,28 @@ fn privileged_joined_pull_number_refs_block() {
             revision,
         )));
     }
+}
+
+#[test]
+fn privileged_computed_number_ref_templates_block() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "${{ format(format('{0}', 'refs/pull/{0}/head'), github.event.pull_request.number) }}",
+    )));
+}
+
+#[test]
+fn falsy_number_ref_conditions_remain_allowed() {
+    for condition in ["0", "-0", "0.0", "0e2", "null"] {
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            &format!("refs/pull/${{{{ {condition} && github.event.number }}}}/head"),
+        )));
+    }
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "refs/pull/${{ 42 || github.event.number }}/head",
+    )));
 }
 
 #[test]
