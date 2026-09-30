@@ -83,10 +83,12 @@ fn contains_pull_number_ref(revision: &str) -> bool {
 }
 
 fn symbolic_ref_atom(expression: &str) -> Option<String> {
+    // PR-number taint survives parentheses and JSON wrappers. Quoted context
+    // text remains a literal atom.
     static ATOM: OnceLock<Regex> = OnceLock::new();
     let pattern = ATOM.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)))$")
+        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>(?:(?:fromjson|tojson)?\s*\(\s*)*github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)(?:\s*\))*))$")
             .expect("ref atom pattern compiles")
     });
     let expression = expression.trim();
