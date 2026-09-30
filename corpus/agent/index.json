@@ -259,7 +259,7 @@
       "rules": [
         "workflow-untrusted-checkout"
       ],
-      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. The four issue #224 expressions and an equivalent ref with an empty-expression suffix must yield Critical checkout findings and block."
+      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. The four issue #224 expressions, an empty-expression suffix, and a multi-placeholder format equivalent must yield Critical checkout findings and block."
     },
     {
       "id": "workflow-number-ref-benign",

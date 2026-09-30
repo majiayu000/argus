@@ -60,42 +60,116 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || pull_request_head_has_checkout_property(&haystack)
 }
 
-/// Match event-derived PR numbers only when they construct a pull head/merge
-/// ref. A number used as a normal branch name, or quoted as literal text, is
-/// not an attacker-controlled checkout. Keep the `format` template here: the
-/// head/SHA matcher intentionally strips expression string literals.
+/// Render literal ref segments and flat `format` arguments symbolically, so
+/// PR-number taint is checked at the pull-ref position rather than by source
+/// spelling. NUL cannot occur in a Git ref; it marks an event-derived number.
 fn contains_pull_number_ref(revision: &str) -> bool {
-    static PULL_NUMBER_REF: OnceLock<Regex> = OnceLock::new();
-    let pattern = PULL_NUMBER_REF.get_or_init(|| {
-        let number = r"github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)";
-        let interpolated =
-            format!(r"refs/pull/\$\{{\{{\s*{number}\s*\}}\}}/(?:head|merge)");
-        let formatted = format!(
-            r"\$\{{\{{\s*format\s*\(\s*'refs/pull/\{{0\}}/(?:head|merge)'\s*,\s*{number}\s*\)\s*\}}\}}"
-        );
-        // vibeguard-disable-next-line RS-03 -- compile-time-constant patterns
-        Regex::new(&format!(r"(?i)^(?:{interpolated}|{formatted})$"))
-            .expect("pull number ref pattern compiles")
-    });
-    // A separate `${{ '' }}` contributes no ref characters. Omit whole empty
-    // regions so they cannot hide the construction at its start, middle, or
-    // end; use the existing quote-aware delimiter parser to preserve literals
-    // inside other expressions and leave nonempty suffixes intact.
-    let mut normalized = String::with_capacity(revision.len());
-    let mut remaining = revision;
+    let mut symbolic = String::with_capacity(revision.len());
+    let mut remaining = revision.trim();
     while let Some(start) = remaining.find("${{") {
         let after_open = &remaining[start + 3..];
         let Some(end) = find_expression_close(after_open) else {
             break;
         };
-        normalized.push_str(&remaining[..start]);
-        if after_open[..end].trim() != "''" {
-            normalized.push_str(&remaining[start..start + 3 + end + 2]);
-        }
+        symbolic.push_str(&remaining[..start]);
+        symbolic.push_str(&symbolic_ref_expression(&after_open[..end]));
         remaining = &after_open[end + 2..];
     }
-    normalized.push_str(remaining);
-    pattern.is_match(normalized.trim())
+    symbolic.push_str(remaining);
+    matches!(
+        symbolic.as_str(),
+        "refs/pull/\0/head" | "refs/pull/\0/merge"
+    )
+}
+
+fn symbolic_ref_atom(expression: &str) -> Option<String> {
+    static ATOM: OnceLock<Regex> = OnceLock::new();
+    let pattern = ATOM.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?is)^(?:'(?P<literal>(?:[^']|'')*)'|(?P<number>github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)))$")
+            .expect("ref atom pattern compiles")
+    });
+    let expression = expression.trim();
+    let captures = pattern.captures(expression)?;
+    if let Some(literal) = captures.name("literal") {
+        return Some(literal.as_str().replace("''", "'"));
+    }
+    Some("\0".to_string())
+}
+
+fn symbolic_ref_expression(expression: &str) -> String {
+    if let Some(atom) = symbolic_ref_atom(expression) {
+        return atom;
+    }
+    // Unknown expression values remain opaque. Existing head/SHA and
+    // unresolved-context checks still inspect the original ref afterwards.
+    let expression = expression.trim();
+    let Some((function, arguments)) = expression.split_once('(') else {
+        return expression.to_string();
+    };
+    let Some(arguments) = arguments.strip_suffix(')') else {
+        return expression.to_string();
+    };
+    if !function.trim().eq_ignore_ascii_case("format") {
+        return expression.to_string();
+    }
+    let mut arguments = split_format_arguments(arguments).into_iter();
+    let Some(template) = symbolic_ref_atom(arguments.next().unwrap_or_default()) else {
+        return expression.to_string();
+    };
+    let values: Vec<String> = arguments
+        .map(|argument| symbolic_ref_atom(argument).unwrap_or_else(|| argument.to_string()))
+        .collect();
+    static FORMAT_FIELD: OnceLock<Regex> = OnceLock::new();
+    let pattern = FORMAT_FIELD.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"\{\{|\}\}|\{([0-9]+)\}").expect("format field pattern compiles")
+    });
+    pattern
+        .replace_all(
+            &template,
+            |captures: &regex::Captures<'_>| match &captures[0] {
+                "{{" => "{".to_string(),
+                "}}" => "}".to_string(),
+                field => captures
+                    .get(1)
+                    .and_then(|index| index.as_str().parse::<usize>().ok())
+                    .and_then(|index| values.get(index))
+                    .cloned()
+                    .unwrap_or_else(|| field.to_string()),
+            },
+        )
+        .into_owned()
+}
+
+/// Commas in quoted strings or nested function arguments are not separators.
+fn split_format_arguments(arguments: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut depth: usize = 0;
+    let mut chars = arguments.char_indices().peekable();
+    while let Some((offset, character)) = chars.next() {
+        if character == '\'' {
+            if quoted && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            quoted = !quoted;
+        } else if !quoted {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    result.push(arguments[start..offset].trim());
+                    start = offset + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    result.push(arguments[start..].trim());
+    result
 }
 
 /// True when `toJSON` is called on `github.event.pull_request.head` itself.
