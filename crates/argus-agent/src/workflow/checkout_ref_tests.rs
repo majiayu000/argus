@@ -128,6 +128,44 @@ fn privileged_wrapped_pull_number_refs_block() {
 }
 
 #[test]
+fn privileged_parsed_format_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ fromJSON(format('{0}', github.event.pull_request.number)) }}/head",
+        "${{ format('refs/pull/{0}/merge', fromJSON(format('{0}', github.event.number))) }}",
+        "refs/pull/${{ FromJSON( format('{0}', GitHub.Event.Number) ) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}', toJSON(github.event.number))) }}/head",
+        "refs/pull/${{ fromJSON(toJSON(toJSON(github.event.number))) }}/head",
+        "refs/pull/${{ fromJSON(format('\"{0}\"', github.event.number)) }}/head",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            revision,
+        )));
+    }
+}
+
+#[test]
+fn serialized_number_strings_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ toJSON(toJSON(github.event.number)) }}/head",
+        "refs/pull/${{ toJSON(format('{0}', github.event.number)) }}/head",
+        "refs/pull/${{ toJSON(join(github.event.workflow_run.pull_requests.*.number, '')) }}/head",
+        "refs/pull/${{ toJSON(fromJSON(toJSON(toJSON(github.event.number)))) }}/head",
+        "refs/pull/${{ toJSON(fromJSON(format('\"{0}\"', github.event.number))) }}/head",
+        "refs/pull/${{ fromJSON(format('{0}', '42', github.event.number)) }}/head",
+        "refs/pull/${{ toJSON(false) && '42' || github.event.number }}/head",
+        "refs/pull/${{ fromJSON('false') && github.event.number }}/head",
+        "refs/pull/${{ fromJSON('0') && github.event.number }}/head",
+        "refs/pull/${{ fromJSON('null') && github.event.number }}/head",
+    ] {
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            revision,
+        )));
+    }
+}
+
+#[test]
 fn privileged_nested_pull_number_format_refs_block() {
     for revision in [
         "${{ format('refs/pull/{0}/head', format('{0}', github.event.pull_request.number)) }}",

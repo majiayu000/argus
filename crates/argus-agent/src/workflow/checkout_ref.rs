@@ -83,8 +83,8 @@ fn contains_pull_number_ref(revision: &str) -> bool {
 }
 
 fn symbolic_ref_atom(expression: &str) -> Option<String> {
-    // PR-number taint survives parentheses and JSON wrappers. Quoted context
-    // text remains a literal atom.
+    // PR-number taint survives parentheses and identity JSON round trips.
+    // Quoted context text remains a literal atom.
     static ATOM: OnceLock<Regex> = OnceLock::new();
     let pattern = ATOM.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
@@ -92,17 +92,27 @@ fn symbolic_ref_atom(expression: &str) -> Option<String> {
             .expect("ref atom pattern compiles")
     });
     let expression = expression.trim();
-    static JSON_WRAPPERS: OnceLock<Regex> = OnceLock::new();
-    let wrappers = JSON_WRAPPERS.get_or_init(|| {
+    static JSON_ROUNDTRIP: OnceLock<Regex> = OnceLock::new();
+    let roundtrip = JSON_ROUNDTRIP.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"(?i)\b(?:fromjson|tojson)\s*\(|[()\s]+")
-            .expect("JSON wrapper pattern compiles")
+        Regex::new(r"(?i)\bfromjson\s*\(\s*tojson\s*\(\s*([^()]*)\)\s*\)")
+            .expect("JSON round trip pattern compiles")
     });
     let quoted = expression.starts_with('\'');
     let normalized = if quoted {
         expression.to_string()
     } else {
-        wrappers.replace_all(expression, "").into_owned()
+        let mut normalized = expression.to_string();
+        loop {
+            let unwrapped = roundtrip.replace_all(&normalized, "$1");
+            if unwrapped == normalized {
+                break;
+            }
+            normalized = unwrapped.into_owned();
+        }
+        normalized
+            .retain(|character| character != '(' && character != ')' && !character.is_whitespace());
+        normalized
     };
     let captures = pattern.captures(&normalized)?;
     if let Some(literal) = captures.name("literal") {
@@ -116,32 +126,40 @@ fn symbolic_ref_expression(expression: &str) -> String {
         Expression(&'a str),
         Format { count: usize },
         Logical { count: usize, is_or: bool },
+        Json { parse: bool },
+        Join,
     }
     let mut work = vec![Work::Expression(expression)];
     // Keep logical truthiness separate from rendered text: boolean false is
     // falsy, while the quoted string 'false' is truthy and both render as false.
-    let mut values: Vec<(String, bool)> = Vec::new();
+    // Track strings separately because toJSON quotes strings, but not numbers.
+    let mut values: Vec<(String, bool, bool)> = Vec::new();
     while let Some(item) = work.pop() {
         match item {
+            Work::Join => {
+                let value = values.last_mut().expect("join argument is rendered");
+                value.1 = !value.0.is_empty();
+                value.2 = true;
+            }
             Work::Format { count } => {
                 let arguments: Vec<String> = values
                     .split_off(values.len() - count)
                     .into_iter()
-                    .map(|(value, _)| value)
+                    .map(|(value, _, _)| value)
                     .collect();
                 let (template, arguments) = arguments
                     .split_first()
                     .expect("format argument splitting includes a template slot");
                 let value = render_ref_format(template, arguments, expression.len());
                 let truthy = !value.is_empty();
-                values.push((value, truthy));
+                values.push((value, truthy, true));
             }
             Work::Logical { count, is_or } => {
                 let arguments = values.split_off(values.len() - count);
-                let mut selected = ("\x01".to_string(), false);
+                let mut selected = ("\x01".to_string(), false, false);
                 for value in arguments {
                     if value.0.contains('\x01') {
-                        selected = ("\x01".to_string(), false);
+                        selected = ("\x01".to_string(), false, false);
                         // An unknown condition can select a later operand;
                         // continue through the possible returned values.
                         continue;
@@ -154,6 +172,43 @@ fn symbolic_ref_expression(expression: &str) -> String {
                 }
                 values.push(selected);
             }
+            Work::Json { parse } => {
+                let (value, _, is_string) = values.pop().expect("JSON argument is rendered");
+                if value.contains('\x01') {
+                    values.push(("\x01".to_string(), false, false));
+                } else if !parse {
+                    let json = if is_string {
+                        serde_json::to_string(&value).expect("ref string serializes as JSON")
+                    } else if value.is_empty() {
+                        "null".to_string()
+                    } else {
+                        value
+                    };
+                    values.push((json, true, true));
+                } else if value == "\0" {
+                    // A rendered event number is decimal JSON, even when it
+                    // was converted to a string by format or toJSON.
+                    values.push((value, true, false));
+                } else {
+                    // Within JSON strings, escape the symbolic number marker
+                    // so serde preserves it when decoding quoted formats.
+                    let parsed = serde_json::from_str(&value.replace('\0', "\\u0000"));
+                    let decoded = match parsed {
+                        Ok(serde_json::Value::String(value)) => {
+                            let truthy = !value.is_empty();
+                            (value, truthy, true)
+                        }
+                        Ok(serde_json::Value::Number(value)) => {
+                            let truthy = value.as_f64().is_some_and(|number| number != 0.0);
+                            (value.to_string(), truthy, false)
+                        }
+                        Ok(serde_json::Value::Bool(value)) => (value.to_string(), value, false),
+                        Ok(serde_json::Value::Null) => (String::new(), false, false),
+                        _ => ("\x01".to_string(), false, false),
+                    };
+                    values.push(decoded);
+                }
+            }
             Work::Expression(expression) => {
                 let expression = expression.trim();
                 if expression.eq_ignore_ascii_case("true")
@@ -162,21 +217,23 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     values.push((
                         expression.to_ascii_lowercase(),
                         expression.eq_ignore_ascii_case("true"),
+                        false,
                     ));
                     continue;
                 }
                 if expression.eq_ignore_ascii_case("null") {
-                    values.push((String::new(), false));
+                    values.push((String::new(), false, false));
                     continue;
                 }
                 if let Ok(number) = serde_json::from_str::<serde_json::Number>(expression) {
                     let truthy = number.as_f64().is_some_and(|value| value != 0.0);
-                    values.push((number.to_string(), truthy));
+                    values.push((number.to_string(), truthy, false));
                     continue;
                 }
                 if let Some(atom) = symbolic_ref_atom(expression) {
                     let truthy = !atom.is_empty();
-                    values.push((atom, truthy));
+                    let is_string = atom != "\0";
+                    values.push((atom, truthy, is_string));
                     continue;
                 }
                 // Unknown expression values remain opaque. Existing head/SHA
@@ -209,6 +266,22 @@ fn symbolic_ref_expression(expression: &str) -> String {
                     work.push(Work::Expression(inner));
                     continue;
                 }
+                let json = expression
+                    .split_once('(')
+                    .filter(|(function, _)| {
+                        function.trim().eq_ignore_ascii_case("fromjson")
+                            || function.trim().eq_ignore_ascii_case("tojson")
+                    })
+                    .and_then(|(function, arguments)| {
+                        arguments.strip_suffix(')').map(|inner| (function, inner))
+                    });
+                if let Some((function, inner)) = json {
+                    work.push(Work::Json {
+                        parse: function.trim().eq_ignore_ascii_case("fromjson"),
+                    });
+                    work.push(Work::Expression(inner));
+                    continue;
+                }
                 let joined = expression
                     .split_once('(')
                     .filter(|(function, _)| function.trim().eq_ignore_ascii_case("join"))
@@ -220,6 +293,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
                         .into_iter()
                         .next()
                         .unwrap_or_default();
+                    work.push(Work::Join);
                     work.push(Work::Expression(source));
                     continue;
                 }
@@ -233,7 +307,7 @@ fn symbolic_ref_expression(expression: &str) -> String {
                             .flatten()
                     });
                 let Some(arguments) = format else {
-                    values.push(("\x01".to_string(), false));
+                    values.push(("\x01".to_string(), false, false));
                     continue;
                 };
                 let arguments = split_format_arguments(arguments);
