@@ -2630,14 +2630,8 @@ fn is_untrusted_context(expression: &str) -> bool {
         .filter(|character| !character.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect();
-    if compact.contains("github.head_ref")
-        || compact.contains("tojson(github)")
-        || compact.contains("tojson(github.event)")
-    {
+    if compact.contains("github.head_ref") {
         return true;
-    }
-    if !compact.contains("github.event.") {
-        return false;
     }
     const UNTRUSTED_FIELDS: &[&str] = &[
         "issue.title",
@@ -2659,6 +2653,35 @@ fn is_untrusted_context(expression: &str) -> bool {
         "pull_request.head.label",
         "pull_request.head.repo.default_branch",
     ];
+    // Serializing any ancestor of an untrusted field carries that field too.
+    // Match the JSON argument itself so nested calls cannot hide the field by
+    // splitting its dotted path, e.g. `fromJSON(toJSON(...issue)).title`.
+    static JSON_CONTEXT: OnceLock<Regex> = OnceLock::new();
+    let json_context = JSON_CONTEXT.get_or_init(|| {
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
+        Regex::new(r"(?:^|[^a-z0-9_.-])(?:tojson|fromjson)\((github(?:\.[a-z0-9_*-]+)*)\)")
+            .expect("JSON context pattern compiles")
+    });
+    if json_context.captures_iter(&compact).any(|captures| {
+        let path = &captures[1];
+        path == "github"
+            || path == "github.event"
+            || path
+                .strip_prefix("github.event.")
+                .is_some_and(|event_path| {
+                    event_path == "commits"
+                        || UNTRUSTED_FIELDS.iter().any(|field| {
+                            field
+                                .strip_prefix(event_path)
+                                .is_some_and(|suffix| suffix.starts_with('.'))
+                        })
+                })
+    }) {
+        return true;
+    }
+    if !compact.contains("github.event.") {
+        return false;
+    }
     UNTRUSTED_FIELDS.iter().any(|field| compact.contains(field))
         || (compact.contains("commits")
             && (compact.contains(".message")

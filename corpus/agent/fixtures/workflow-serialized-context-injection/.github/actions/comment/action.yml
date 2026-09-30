@@ -1,0 +1,12 @@
+name: Comment
+inputs:
+  value:
+    required: true
+runs:
+  using: composite
+  steps:
+    - run: echo "${{ inputs.value }}"
+      shell: bash
+    - uses: actions/github-script@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      with:
+        script: console.log("${{ inputs.value }}")

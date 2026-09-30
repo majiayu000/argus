@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 context-injection bypass where nested `toJSON` / `fromJSON`
+  calls serialize untrusted GitHub event objects and split their field paths.
+  Inline `run:` and `actions/github-script` interpolation now blocks these
+  forms, including values propagated through env and composite inputs.
 - Close the AGT-06 context-injection bypass where `actions/github-script`
   puts executable JavaScript in `with.script`. Workflow scans now inspect
   that input the same way as inline `run:` scripts, including env-indirection

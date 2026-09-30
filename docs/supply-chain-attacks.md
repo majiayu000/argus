@@ -577,7 +577,10 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 
 1. **Compromised immutable GitHub Action commits.** AGT-06 now scans workflow
    YAML for mutable dependencies, direct untrusted-context script injection,
-   and unsafe privileged-trigger checkout. A reviewed full SHA removes tag
+   and unsafe privileged-trigger checkout. Script injection includes nested
+   JSON serialization of untrusted event objects in `run:` and
+   `actions/github-script`, including env and composite input aliases.
+   A reviewed full SHA removes tag
    retargeting but does not prove the upstream Action code is benign; exact-SHA
    intelligence remains a feed problem.
 

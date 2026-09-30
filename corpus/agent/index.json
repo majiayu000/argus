@@ -150,6 +150,17 @@
       "notes": "actions/github-script interpolates github.event.issue.title into with.script using dotted and bracket access. The untrusted context never appears under run:, so scanners that only inspect run: would miss Critical script injection."
     },
     {
+      "id": "workflow-serialized-context-injection",
+      "kind": "fixture",
+      "path": "fixtures/workflow-serialized-context-injection",
+      "packageName": "workflow-serialized-context-injection",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "Nested toJSON/fromJSON serializes untrusted event objects and splits field paths in run and pinned github-script scripts, directly and through env and local composite inputs."
+    },
+    {
       "id": "workflow-local-composite-untrusted-checkout",
       "kind": "fixture",
       "path": "fixtures/workflow-local-composite-untrusted-checkout",
