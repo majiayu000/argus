@@ -1,10 +1,11 @@
 //! Checkout `ref` token matching for attacker-controlled GitHub event refs.
 //!
-//! Bracket normalization and expression-literal stripping stay in the caller.
-//! This module sees the lowercased, literal-stripped haystack and the normalized
-//! expression text.
+//! Bracket normalization stays in the caller.
+//! Pull-number ref templates are checked before expression literals are stripped.
 
 use super::{is_expression_ident_char, map_expression_regions, remove_expression_string_literals};
+use regex::Regex;
+use std::sync::OnceLock;
 
 /// True when `revision` names an attacker-controlled GitHub event ref, including
 /// computed forms such as `fromJSON(toJSON(github.event.pull_request)).head.sha`,
@@ -15,6 +16,9 @@ use super::{is_expression_ident_char, map_expression_regions, remove_expression_
 /// serialization `fromJSON(toJSON(github)).event.pull_request.head.sha` where
 /// the classic contiguous dotted path is split by function calls.
 pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
+    if contains_pull_number_ref(revision) {
+        return true;
+    }
     let mut haystack = String::new();
     let _ = map_expression_regions(revision, |inner| {
         haystack.push_str(&remove_expression_string_literals(inner));
@@ -51,6 +55,26 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> bool {
         || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
         || serializes_pull_request_head_object(&haystack)
         || pull_request_head_has_checkout_property(&haystack)
+}
+
+/// Match event-derived PR numbers only when they construct a pull head/merge
+/// ref. A number used as a normal branch name, or quoted as literal text, is
+/// not an attacker-controlled checkout. Keep the `format` template here: the
+/// head/SHA matcher intentionally strips expression string literals.
+fn contains_pull_number_ref(revision: &str) -> bool {
+    static PULL_NUMBER_REF: OnceLock<Regex> = OnceLock::new();
+    let pattern = PULL_NUMBER_REF.get_or_init(|| {
+        let number = r"github\.event\.(?:number|pull_request\.number|workflow_run\.pull_requests(?:\[\s*[0-9]+\s*\]|\.\*)\.number)";
+        let interpolated =
+            format!(r"refs/pull/\$\{{\{{\s*{number}\s*\}}\}}/(?:head|merge)");
+        let formatted = format!(
+            r"\$\{{\{{\s*format\s*\(\s*'refs/pull/\{{0\}}/(?:head|merge)'\s*,\s*{number}\s*\)\s*\}}\}}"
+        );
+        // vibeguard-disable-next-line RS-03 -- compile-time-constant patterns
+        Regex::new(&format!(r"(?i)^(?:{interpolated}|{formatted})$"))
+            .expect("pull number ref pattern compiles")
+    });
+    pattern.is_match(revision.trim())
 }
 
 /// True when `toJSON` is called on `github.event.pull_request.head` itself.

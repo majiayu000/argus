@@ -34,6 +34,90 @@ fn assert_no_untrusted_checkout(findings: &[Finding]) {
     assert_eq!(crate::decision::derive(findings), Decision::Allow);
 }
 
+#[test]
+fn privileged_pull_request_number_head_ref_blocks() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "refs/pull/${{ github.event.pull_request.number }}/head",
+    )));
+}
+
+#[test]
+fn privileged_event_number_merge_ref_blocks() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "refs/pull/${{ github.event.number }}/merge",
+    )));
+}
+
+#[test]
+fn privileged_formatted_pull_number_ref_blocks() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        "${{ format('refs/pull/{0}/head', github.event.pull_request.number) }}",
+    )));
+}
+
+#[test]
+fn privileged_workflow_run_pull_number_ref_blocks() {
+    assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+        "workflow_run",
+        "refs/pull/${{ github.event.workflow_run.pull_requests[0].number }}/head",
+    )));
+}
+
+#[test]
+fn privileged_pull_number_ref_notation_variants_block() {
+    for revision in [
+        "refs/pull/${{ github['event']['pull_request']['number'] }}/merge",
+        "refs/pull/${{ GitHub.Event.Number }}/head",
+        "${{ format( 'refs/pull/{0}/merge', github.event.workflow_run.pull_requests[2].number ) }}",
+        "refs/pull/${{ github.event.workflow_run.pull_requests.*.number }}/head",
+    ] {
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            revision,
+        )));
+    }
+}
+
+#[test]
+fn trusted_number_refs_and_literal_pull_refs_remain_allowed() {
+    for revision in [
+        "${{ github.event.pull_request.base.sha }}",
+        "${{ github.sha }}",
+        "refs/heads/${{ github.event.number }}",
+        "refs/pull/${{ 'github.event.pull_request.number' }}/head",
+        "refs/pull/${{ github.run_number }}/head",
+        "refs/pull/${{ github.event.pull_request.number_suffix }}/head",
+        "${{ format('refs/heads/{0}', github.event.pull_request.number) }}",
+        "${{ format('refs/pull/{0}/head', github.run_number) }}",
+        "${{ format('refs/pull/{0}/head', 'github.event.number') }}",
+        "${{ format('refs/pull/{0}/head', 42, github.event.number) }}",
+        "${{ 'refs/pull/github.event.number/head' }}",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn pull_number_refs_on_pull_request_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ github.event.pull_request.number }}/head",
+        "refs/pull/${{ github.event.number }}/merge",
+        "${{ format('refs/pull/{0}/head', github.event.pull_request.number) }}",
+    ] {
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request",
+            revision,
+        )));
+    }
+}
+
 fn head_serialization_composite_files(caller_ref: &str) -> Vec<SurfaceFile> {
     vec![
         SurfaceFile {

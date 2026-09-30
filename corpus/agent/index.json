@@ -251,6 +251,26 @@
       "notes": "A pull_request_target workflow checks out fromJSON(toJSON(github.event.pull_request.head)).sha and .ref directly and through one local composite inputs.ref alias. Head-object serialization must still yield Critical\u2192block for a pinned checkout."
     },
     {
+      "id": "workflow-pull-number-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-pull-number-checkout",
+      "packageName": "workflow-pull-number-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "Pinned checkouts under pull_request_target and workflow_run build refs/pull/N/head or merge from event PR numbers, directly and with format. All four issue #224 expressions must yield Critical checkout findings and block."
+    },
+    {
+      "id": "workflow-number-ref-benign",
+      "kind": "fixture",
+      "path": "fixtures/workflow-number-ref-benign",
+      "packageName": "workflow-number-ref-benign",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "Privileged pinned checkouts use the trusted base SHA, ordinary branch names built from numbers, and quoted context text. Numbers alone must not become untrusted pull refs."
+    },
+    {
       "id": "workflow-dangerous-permissions",
       "kind": "fixture",
       "path": "fixtures/workflow-dangerous-permissions",

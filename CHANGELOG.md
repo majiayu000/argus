@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
+  `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
+  numbers, including `format(...)` templates. These checkouts now block;
+  trusted base refs, ordinary numbered branch names, and quoted context text
+  remain allowed.
 - Close the AGT-06 context-injection bypass where `actions/github-script`
   puts executable JavaScript in `with.script`. Workflow scans now inspect
   that input the same way as inline `run:` scripts, including env-indirection
