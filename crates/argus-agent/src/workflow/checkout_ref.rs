@@ -191,6 +191,16 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             // Keep event identity separate from quoted context text.
                             // The existing number atom matcher owns the taint paths.
                             let context = &source[1..];
+                            if context == "github.event" && property == Some("*") {
+                                // Preserve the PR child context in the filtered array.
+                                // Later selectors address children, not array positions.
+                                selected.push((
+                                    "\x04[\"\\u0003github.event.pull_request\"]".to_string(),
+                                    Some(true),
+                                    false,
+                                ));
+                                continue;
+                            }
                             let path = if context.ends_with(".pull_requests") {
                                 // Resolve computed array selectors before number taint.
                                 // The runner converts primitive indexes to numbers,
@@ -242,6 +252,18 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         let mut results = Vec::new();
                         for input in inputs {
                             match input {
+                                serde_json::Value::String(context)
+                                    if context.starts_with('\x03') && !project =>
+                                {
+                                    // Only a recognized number property on a live
+                                    // child becomes numeric taint; other projections
+                                    // do not stand in for the PR number.
+                                    let path =
+                                        format!("{}.{}", &context[1..], key.to_ascii_lowercase());
+                                    if symbolic_ref_atom(&path, false).is_some() {
+                                        results.push(serde_json::Value::String("\x02".to_string()));
+                                    }
+                                }
                                 serde_json::Value::Array(elements) if project => {
                                     results.extend(elements);
                                 }

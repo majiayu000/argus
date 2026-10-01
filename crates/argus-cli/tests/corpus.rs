@@ -252,6 +252,26 @@ fn checkout_ref_format_length_overflow_reports_an_operational_error() -> Result<
 fn parsed_checkout_numbers_preserve_taint() -> Result<()> {
     for (revision, tainted) in [
         (
+            "refs/pull/${{ join(github.event.*.number, '') }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ join(fromJSON(toJSON(github.event.*)).*.number, '') }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ join(github.event.*.number[0], '') }}/head",
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github.event['*'].number, '') }}/head",
+            false,
+        ),
+        (
+            "refs/pull/${{ toJSON(join(github.event.*.number, '')) }}/head",
+            false,
+        ),
+        (
             "refs/pull/${{ fromJSON(format('{0}.0', github.event.number)) }}/head",
             true,
         ),

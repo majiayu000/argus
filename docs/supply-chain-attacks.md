@@ -581,6 +581,7 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    and `/merge` built from event PR numbers with interpolation or `format`,
    including equivalent JSON numeric representations with cancelling decimal
    shifts, array/object access and wildcard projections with `fromJSON`,
+   and PR event-object number projection with `github.event.*.number`,
    computed event-number property selectors, and all possible
    outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match

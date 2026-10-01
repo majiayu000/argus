@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
   numbers, including `format(...)` templates, equivalent JSON numerals with
   decimal shifts, joined parsed JSON arrays, parsed array/object element access
-  and wildcard projections, computed event-number
-  selectors, unknown logical branch outcomes, and mixed input/env bindings.
+  and wildcard projections, including the live PR event object, computed
+  event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
   Repeated JSON serialization
   keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use the same surrounding-whitespace trimming as checkout.
