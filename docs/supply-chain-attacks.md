@@ -589,6 +589,8 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    outcomes of unknown logical conditions. Absent parsed object properties
    and array indexes return known null/falsy values; filtered projections
    remain arrays, and unresolved sources or selectors remain conservative.
+   Bracket normalization preserves expression string literals, including
+   JSON arrays in format templates and doubled-quote escapes.
    JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs,

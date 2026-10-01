@@ -1006,3 +1006,48 @@ fn checkout_ref_missing_parsed_properties_preserve_truthiness() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_json_templates_preserve_bracket_literals() -> Result<()> {
+    for (expression, tainted) in [
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number)).selected", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github['event']['number']))['selected']", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"text\":\"don''t\",\"selected\":{0}}}', github.event.number)).selected", true),
+        ("fromJSON(format('{{\"padding\":[[\"number\"]],\"selected\":{{\"numbers\":[{0}]}}}}', github.event.number)).selected.numbers[0]", true),
+        ("join(fromJSON(format('[{{\"padding\":[\"number\"],\"selected\":{0}}}]', github.event.number)).*.selected, '')", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.workflow_run.pull_requests[0].number)).selected", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number))['selected']", true),
+        ("fromJSON('[\"number\"]')[0] && github['event']['number']", true),
+        ("fromJSON('[\"number\"]')[0] || github.event.number", false),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":false}}', github.event.number)).selected && github.event.number", false),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', 42, github.event.number)).selected", false),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":\"github.event.number\"}}', github.event.number)).selected", false),
+        ("'github[''event''][''number'']'", false),
+        ("'don''t [\"number\"]' || github.event.number", false),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":null}}', github.event.number)).selected && github.event.number", false),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number)).missing && github.event.number", false),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("name: Quoted JSON template\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: refs/pull/${{{{ {expression} }}}}/{suffix}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(output.status.code(), Some(i32::from(blocked)), "{trigger}: {expression}");
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(report["findings"].as_array().expect("findings").iter().any(|finding|
+                    finding["rule_id"] == "AGT-06-workflow-untrusted-checkout" && finding["severity"] == "critical"
+                ), blocked);
+            }
+        }
+    }
+    Ok(())
+}

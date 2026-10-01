@@ -2320,15 +2320,23 @@ fn is_github_ident(value: &str) -> bool {
 }
 
 /// Rewrite `['id']` / `["id"]` (with optional whitespace) to `.id` so bracket
-/// and mixed property access share the dotted-token input replacer.
+/// and mixed property access share the dotted-token input replacer. Quoted
+/// expression literals, including doubled-quote escapes, remain unchanged.
 fn normalize_bracket_property_access(expression: &str) -> String {
     static BRACKET_PROPERTY: OnceLock<Regex> = OnceLock::new();
     let pattern = BRACKET_PROPERTY.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r#"\[\s*['"]([A-Za-z_][A-Za-z0-9_-]*)['"]\s*\]"#)
+        Regex::new(r#"'(?:[^']|'')*'|\[\s*['"]([A-Za-z_][A-Za-z0-9_-]*)['"]\s*\]"#)
             .expect("bracket property access pattern compiles")
     });
-    pattern.replace_all(expression, ".$1").into_owned()
+    pattern
+        .replace_all(expression, |captures: &regex::Captures<'_>| {
+            captures.get(1).map_or_else(
+                || captures[0].to_string(),
+                |property| format!(".{}", property.as_str()),
+            )
+        })
+        .into_owned()
 }
 
 /// GitHub Action input names are case-insensitive; store one canonical key.

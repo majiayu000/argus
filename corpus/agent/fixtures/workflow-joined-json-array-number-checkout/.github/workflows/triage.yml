@@ -58,3 +58,6 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: refs/pull/${{ join(fromJSON(toJSON(github.event.*)).*.number, '') }}/merge
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"padding":["number"],"selected":{0}}}', github.event.number)).selected }}/head

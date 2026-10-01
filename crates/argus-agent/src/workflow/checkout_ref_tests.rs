@@ -1780,3 +1780,62 @@ fn parsed_missing_number_controls_preserve_projection_and_unknown_values() {
         }
     }
 }
+
+#[test]
+fn number_json_template_bracket_access_retains_taint() {
+    for expression in [
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number)).selected",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github['event']['number']))['selected']",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"text\":\"don''t\",\"selected\":{0}}}', github.event.number)).selected",
+        "fromJSON(format('{{\"padding\":[[\"number\"]],\"selected\":{{\"numbers\":[{0}]}}}}', github.event.number)).selected.numbers[0]",
+        "join(fromJSON(format('[{{\"padding\":[\"number\"],\"selected\":{0}}}]', github.event.number)).*.selected, '')",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.workflow_run.pull_requests[0].number)).selected",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number))['selected']",
+        "fromJSON('[\"number\"]')[0] && github['event']['number']",
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+            if trigger == "pull_request" {
+                assert_no_untrusted_checkout(&findings);
+            } else {
+                assert_untrusted_checkout_blocks(&findings);
+            }
+        }
+    }
+}
+
+#[test]
+fn number_json_template_bracket_controls_remain_allowed() {
+    for expression in [
+        "fromJSON('[\"number\"]')[0] || github.event.number",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":false}}', github.event.number)).selected && github.event.number",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', 42, github.event.number)).selected",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":\"github.event.number\"}}', github.event.number)).selected",
+        "'github[''event''][''number'']'",
+        "'don''t [\"number\"]' || github.event.number",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":null}}', github.event.number)).selected && github.event.number",
+        "fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', github.event.number)).missing && github.event.number",
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/merge");
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(trigger, &revision)));
+        }
+    }
+}
+
+#[test]
+fn number_json_template_normalization_preserves_quoted_bytes() {
+    for literal in [
+        r#"'["number"]'"#,
+        "'github[''event''][''number'']'",
+        r#"'don''t ["number"]'"#,
+    ] {
+        assert_eq!(normalize_bracket_property_access(literal), literal);
+        let expression = format!("format({literal}, github['event']['number'])");
+        assert_eq!(
+            normalize_bracket_property_access(&expression),
+            format!("format({literal}, github.event.number)")
+        );
+    }
+}

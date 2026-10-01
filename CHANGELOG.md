@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
   Constant negation and hexadecimal literals preserve known truthiness.
+  Bracket-like content in quoted JSON templates stays intact, including
+  doubled-quote escapes; real bracket property access is still normalized.
   Missing parsed object properties and array indexes are known null/falsy,
   so logical operands cannot spuriously select a pull-request number.
   Root GitHub wildcard projections, including `github.*.*.number` and named
