@@ -932,6 +932,28 @@ fn pull_number_state_products_fail_as_operational_errors() {
 }
 
 #[test]
+fn pull_number_format_length_overflow_is_an_operational_error() {
+    let revision = "${{ format(format('refs/pull/{{0}}/head{0}', format('{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}', '{1}{1}{1}{1}{1}{1}{1}{1}{1}{1}')), github.event.number, '') }}";
+    for trigger in ["pull_request_target", "workflow_run"] {
+        let error = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: pinned_checkout_workflow(trigger, revision),
+            kind: SurfaceKind::Workflow,
+        }])
+        .expect_err("an incomplete format render must fail");
+        assert!(format!("{error:#}").contains("checkout ref format exceeds"));
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            trigger,
+            "${{ format(format('refs/pull/{{0}}/head{0}', format('{0}', '{1}')), github.event.number, '') }}",
+        )));
+    }
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request",
+        revision,
+    )));
+}
+
+#[test]
 fn computed_workflow_run_number_indexes_resolve_before_taint() {
     assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
         "workflow_run",

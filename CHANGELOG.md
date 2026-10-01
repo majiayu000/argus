@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
   Constant negation preserves known truthiness. Symbolic products exceeding
   1,024 alternatives fail with an
-  explicit operational error before allocation.
+  explicit operational error before allocation. Format output exceeding the
+  expression-length bound also fails with an operational error, including
+  intermediate templates that would shrink in a later format call.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text
   remain allowed.

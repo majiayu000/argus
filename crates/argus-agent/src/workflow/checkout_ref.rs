@@ -295,11 +295,11 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             let (template, arguments) = arguments
                                 .split_first()
                                 .expect("format argument splitting includes a template slot");
-                            let value = render_ref_format(template, arguments, expression.len());
+                            let value = render_ref_format(template, arguments, expression.len())?;
                             let truthy = !value.is_empty();
-                            (value, Some(truthy), true)
+                            Ok((value, Some(truthy), true))
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>>>()?,
                 );
             }
             Work::Logical { count, is_or } => {
@@ -611,7 +611,7 @@ fn split_ref_access(expression: &str) -> Option<(&str, &str, bool)> {
     (!source.is_empty() && !key.is_empty()).then_some((source, key, computed))
 }
 
-fn render_ref_format(template: &str, values: &[String], max_length: usize) -> String {
+fn render_ref_format(template: &str, values: &[String], max_length: usize) -> Result<String> {
     static FORMAT_FIELD: OnceLock<Regex> = OnceLock::new();
     let pattern = FORMAT_FIELD.get_or_init(|| {
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
@@ -648,11 +648,11 @@ fn render_ref_format(template: &str, values: &[String], max_length: usize) -> St
             }
         })
         .into_owned();
-    if exceeded {
-        "\x01".to_string()
-    } else {
-        rendered
-    }
+    ensure!(
+        !exceeded,
+        "checkout ref format exceeds {max_length} bytes of symbolic output"
+    );
+    Ok(rendered)
 }
 
 /// Split top-level OR before AND to preserve precedence; quoted strings and

@@ -589,6 +589,8 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    are limited to 1,024
    alternatives before allocation; exceeding that boundary fails the scan
    with an operational error (CLI exit 2) instead of an incomplete allow.
+   Format output exceeding the expression-length bound also produces this
+   operational error, even if an outer format call would shrink the result.
    A reviewed full SHA removes tag retargeting but does not prove the upstream
    Action code is benign; exact-SHA intelligence remains a feed problem.
 
