@@ -65,6 +65,11 @@ The three report decisions mean:
 - `block`: reject the change. Fetch, scan, integrity, intelligence, or required
   comparison failures never become a clean report.
 
+`cargo install argus-cli` installs the unrelated
+[cognitive-engineering-lab/argus trait debugger](https://crates.io/crates/argus-cli),
+not this scanner. Use this repository's pinned Action or verified GitHub Release
+below.
+
 For local investigation, download the asset for the exact platform, verify its
 GitHub attestation, and extract the archive:
 
