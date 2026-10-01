@@ -1706,3 +1706,77 @@ fn number_json_growth_is_bounded_before_discarding_the_value() {
         }
     }
 }
+
+#[test]
+fn parsed_missing_number_operands_short_circuit_as_null() {
+    for missing in [
+        "fromJSON('{}').missing",
+        "fromJSON('{\"present\":1}').MISSING",
+        "fromJSON('{}')['missing']",
+        "fromJSON('{}')[format('mis{0}', 'sing')]",
+        "fromJSON('[]')[0]",
+        "fromJSON('[42]')[1]",
+        "fromJSON('[42]')['missing']",
+        "fromJSON('[42]')[-1]",
+        "fromJSON('{\"child\":{}}').child.missing",
+        "fromJSON('[{}]')[0].missing",
+        "fromJSON('{}').missing.more",
+        "fromJSON('[[]]')[0][0]",
+        "fromJSON('[null]')[0]",
+        "fromJSON('{\"value\":null}').value",
+        "fromJSON('{\"value\":false}').value",
+        "fromJSON('{\"value\":0}').value",
+        "fromJSON('{\"value\":\"\"}').value",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for expression in [
+                format!("{missing} && github.event.number"),
+                format!("{missing} || '42'"),
+            ] {
+                let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+                assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                    trigger, &revision,
+                )));
+            }
+            let revision = format!("refs/pull/${{{{ {missing} || github.event.number }}}}/merge");
+            let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+            if trigger == "pull_request" {
+                assert_no_untrusted_checkout(&findings);
+            } else {
+                assert_untrusted_checkout_blocks(&findings);
+            }
+        }
+    }
+}
+
+#[test]
+fn parsed_missing_number_controls_preserve_projection_and_unknown_values() {
+    for (expression, blocked) in [
+        ("fromJSON('[{}]').*.missing && github.event.number", true),
+        ("fromJSON('[{}]').*.missing || github.event.number", false),
+        ("join(fromJSON('[{}]').*.missing, '') && github.event.number", false),
+        ("join(fromJSON('[{}]').*.missing, '') || github.event.number", true),
+        ("fromJSON('{}').* && github.event.number", true),
+        ("fromJSON('{}').* || github.event.number", false),
+        ("!fromJSON('{}').missing && github.event.number", true),
+        ("fromJSON(format('{{\"number\":{0}}}', github.event.number)).number", true),
+        ("fromJSON(format('[{0}]', github.event.number))[0]", true),
+        ("fromJSON(format('{{\"child\":{{\"number\":{0}}}}}', github.event.number)).child.number", true),
+        ("join(fromJSON(format('[{{\"number\":{0}}}]', github.event.number)).*.number, '')", true),
+        ("inputs.unknown.missing && github.event.number", true),
+        ("fromJSON('[42]')[inputs.index] && github.event.number", true),
+        ("fromJSON('{\"present\":true}')[inputs.key] && github.event.number", true),
+        ("fromJSON('{\"present\":true}')[inputs.key] || github.event.number", true),
+        ("fromJSON(inputs.json).missing && github.event.number", true),
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+            if blocked && trigger != "pull_request" {
+                assert_untrusted_checkout_blocks(&findings);
+            } else {
+                assert_no_untrusted_checkout(&findings);
+            }
+        }
+    }
+}

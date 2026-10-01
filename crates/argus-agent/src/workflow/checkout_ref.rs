@@ -326,6 +326,11 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                 .ok()
                             })
                             .flatten();
+                        // Concrete JSON lookup failure returns null. Keep unknown
+                        // sources/selectors conservative; null stays known through
+                        // a subsequent access instead of acquiring unknown truthiness.
+                        let known_missing = (parsed.is_some() || (!is_string && source.is_empty()))
+                            && !key.contains(['\0', '\x01', '\x03']);
                         let project = property == Some("*");
                         let inputs = if filtered {
                             match parsed {
@@ -409,10 +414,13 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                 render_ref_json_value(serde_json::Value::Array(results));
                             (format!("\x04{array}"), truthy, false)
                         } else {
-                            results
-                                .pop()
-                                .map(render_ref_json_value)
-                                .unwrap_or_else(|| ("\x01".to_string(), None, false))
+                            results.pop().map(render_ref_json_value).unwrap_or_else(|| {
+                                if known_missing {
+                                    render_ref_json_value(serde_json::Value::Null)
+                                } else {
+                                    ("\x01".to_string(), None, false)
+                                }
+                            })
                         });
                     }
                 }

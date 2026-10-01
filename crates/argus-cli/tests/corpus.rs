@@ -922,3 +922,87 @@ fn checkout_ref_workflow_run_wildcard_and_json_bytes() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_missing_parsed_properties_preserve_truthiness() -> Result<()> {
+    let mut cases = Vec::new();
+    for missing in [
+        "fromJSON('{}').missing",
+        "fromJSON('{\"present\":1}').MISSING",
+        "fromJSON('{}')['missing']",
+        "fromJSON('{}')[format('mis{0}', 'sing')]",
+        "fromJSON('[]')[0]",
+        "fromJSON('[42]')[1]",
+        "fromJSON('[42]')['missing']",
+        "fromJSON('[42]')[-1]",
+        "fromJSON('{\"child\":{}}').child.missing",
+        "fromJSON('[{}]')[0].missing",
+        "fromJSON('{}').missing.more",
+        "fromJSON('[[]]')[0][0]",
+        "fromJSON('[null]')[0]",
+        "fromJSON('{\"value\":null}').value",
+        "fromJSON('{\"value\":false}').value",
+        "fromJSON('{\"value\":0}').value",
+        "fromJSON('{\"value\":\"\"}').value",
+    ] {
+        cases.push((format!("{missing} && github.event.number"), false));
+        cases.push((format!("{missing} || github.event.number"), true));
+        cases.push((format!("{missing} || '42'"), false));
+    }
+    for (expression, blocked) in [
+        ("fromJSON('[{}]').*.missing && github.event.number", true),
+        ("fromJSON('[{}]').*.missing || github.event.number", false),
+        ("join(fromJSON('[{}]').*.missing, '') && github.event.number", false),
+        ("join(fromJSON('[{}]').*.missing, '') || github.event.number", true),
+        ("fromJSON('{}').* && github.event.number", true),
+        ("fromJSON('{}').* || github.event.number", false),
+        ("!fromJSON('{}').missing && github.event.number", true),
+        ("fromJSON(format('{{\"number\":{0}}}', github.event.number)).number", true),
+        ("fromJSON(format('[{0}]', github.event.number))[0]", true),
+        ("fromJSON(format('{{\"child\":{{\"number\":{0}}}}}', github.event.number)).child.number", true),
+        ("join(fromJSON(format('[{{\"number\":{0}}}]', github.event.number)).*.number, '')", true),
+        ("inputs.unknown.missing && github.event.number", true),
+        ("fromJSON('[42]')[inputs.index] && github.event.number", true),
+        ("fromJSON('{\"present\":true}')[inputs.key] && github.event.number", true),
+        ("fromJSON('{\"present\":true}')[inputs.key] || github.event.number", true),
+        ("fromJSON(inputs.json).missing && github.event.number", true),
+    ] {
+        cases.push((expression.to_string(), blocked));
+    }
+    for (expression, tainted) in cases {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("name: Missing parsed property\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: refs/pull/${{{{ {expression} }}}}/{suffix}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(blocked)),
+                    "{trigger}: {expression}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}

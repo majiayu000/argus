@@ -586,7 +586,10 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    `github.*.pull_request.number` projections,
    workflow-run PR children through `github.event.*.pull_requests.*.number`,
    computed event-number property selectors, and all possible
-   outcomes of unknown logical conditions. JSON serialization
+   outcomes of unknown logical conditions. Absent parsed object properties
+   and array indexes return known null/falsy values; filtered projections
+   remain arrays, and unresolved sources or selectors remain conservative.
+   JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs,
    preserving YAML-decoded NEL at either edge.
