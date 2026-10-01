@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Root GitHub wildcard projections, including `github.*.*.number` and named
   `github.*.pull_request.number`, retain event-number taint. Join products check cumulative bytes before cloning
   strings or expanding array separators. Expressions over
-  256 combined levels of parentheses, brackets and unary negation fail with an
-  explicit operational error before evaluation.
+  256 combined levels of parentheses, brackets, unary negation and access
+  selectors fail with an explicit operational error before evaluation. Numeric
+  literals and recognized event-number atoms retain their existing boundary.
   Symbolic products exceeding
   1,024 alternatives or 1 MiB of cumulative string bytes fail with an
   explicit operational error before allocation, including cloned format arguments.

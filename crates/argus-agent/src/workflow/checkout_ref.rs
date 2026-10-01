@@ -175,32 +175,61 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
 
 fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
     // Check once before normalization or evaluation can repeatedly rescan input.
-    // Unary operators share the nesting limit with parentheses and brackets.
-    // Delimiters retain their parent's depth; sibling operands start afresh.
-    // Operators and delimiters inside Actions string literals are inert.
+    // Access selectors, unary operators and delimiters share the nesting limit.
+    // Keep each group's peak for selectors that follow its closing delimiter;
+    // sibling operands start afresh. Quoted characters are inert, and numeric
+    // literals / recognized number atoms need no access evaluation.
     let mut depth = 0usize;
-    let mut delimiters = Vec::new();
+    let mut delimiters: Vec<(usize, usize)> = Vec::new();
     let mut quoted = false;
-    let mut characters = expression.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut characters = expression.char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
         if character == '\'' {
-            if quoted && characters.peek() == Some(&'\'') {
+            if quoted && characters.peek().is_some_and(|(_, next)| *next == '\'') {
                 characters.next();
             } else {
                 quoted = !quoted;
             }
         } else if !quoted {
-            match character {
-                '(' | '[' => {
-                    delimiters.push(depth);
-                    depth += 1;
+            if is_expression_ident_char(character) || matches!(character, '.' | '*') {
+                let mut end = offset + character.len_utf8();
+                while let Some(&(next_offset, next)) = characters.peek() {
+                    if !is_expression_ident_char(next) && !matches!(next, '.' | '*') {
+                        break;
+                    }
+                    end = next_offset + next.len_utf8();
+                    characters.next();
                 }
-                ')' | ']' => depth = delimiters.pop().unwrap_or(0),
-                '!' if characters.peek() != Some(&'=') => depth += 1,
-                ',' | '|' | '&' | '=' | '<' | '>' => {
-                    depth = delimiters.last().map_or(0, |parent| parent + 1);
+                let atom = &expression[offset..end];
+                if symbolic_ref_atom(atom, false).is_none()
+                    && serde_json::from_str::<serde_json::Number>(atom).is_err()
+                {
+                    depth += atom.bytes().filter(|character| *character == b'.').count();
                 }
-                _ => {}
+            } else {
+                match character {
+                    '(' | '[' => {
+                        delimiters.push((depth, depth + 1));
+                        depth += 1;
+                    }
+                    ')' | ']' => {
+                        if let Some((_, peak)) = delimiters.pop() {
+                            depth = depth.max(peak);
+                        }
+                    }
+                    '!' if !characters.peek().is_some_and(|(_, next)| *next == '=') => {
+                        depth += 1;
+                    }
+                    ',' | '|' | '&' | '=' | '<' | '>' => {
+                        if let Some((parent, peak)) = delimiters.last_mut() {
+                            *peak = (*peak).max(depth);
+                            depth = *parent + 1;
+                        } else {
+                            depth = 0;
+                        }
+                    }
+                    _ => {}
+                }
             }
             ensure!(
                 depth <= MAX_REF_EXPRESSION_DEPTH,

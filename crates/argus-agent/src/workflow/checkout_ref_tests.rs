@@ -1561,3 +1561,82 @@ fn unary_number_literals_and_sibling_branches_keep_their_depth() {
         )));
     }
 }
+
+#[test]
+fn pull_number_access_chain_depth_is_bounded_before_evaluation() {
+    for depth in [255, 256, 257] {
+        for expression in [
+            format!("github{}", ".a".repeat(depth)),
+            format!("github{}", ".*".repeat(depth)),
+            format!("github{}", "['a']".repeat(depth)),
+            format!("{}github{}", "!".repeat(128), ".a".repeat(depth - 128)),
+            format!(
+                "{}github{}{}",
+                "(".repeat(128),
+                ".a".repeat(depth - 128),
+                ")".repeat(128)
+            ),
+            format!("(github{}){}", ".a".repeat(128), ".a".repeat(depth - 129)),
+            format!("fromJSON(toJSON(github)){}", ".a".repeat(depth - 2)),
+            format!(
+                "github{}[github{}]",
+                ".a".repeat(128),
+                ".a".repeat(depth - 129)
+            ),
+            format!("(github{} || true).a", ".a".repeat(depth - 2)),
+        ] {
+            let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+            for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+                let result = try_scan(&[SurfaceFile {
+                    rel: ".github/workflows/triage.yml".into(),
+                    content: pinned_checkout_workflow(trigger, &revision),
+                    kind: SurfaceKind::Workflow,
+                }]);
+                if depth > 256 && trigger != "pull_request" {
+                    assert!(
+                        format!("{:#}", result.expect_err("above access-chain boundary"))
+                            .contains("checkout ref exceeds 256 levels of expression nesting")
+                    );
+                } else {
+                    assert_no_untrusted_checkout(&result.expect("within access-chain boundary"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn access_chain_number_literals_and_siblings_preserve_the_boundary() {
+    for expression in [
+        format!("'{}'", ".![]()".repeat(1024)),
+        format!("'{}''{}'", ".a".repeat(256), ".a".repeat(256)),
+        format!("{}0.5", "!".repeat(256)),
+        format!("{}0xff", "!".repeat(256)),
+        format!("{}1.25e-3{}", "(".repeat(256), ")".repeat(256)),
+        format!("github{} || github{}", ".a".repeat(256), ".b".repeat(256)),
+        format!(
+            "format('{{0}}{{1}}', github{}, github{})",
+            ".a".repeat(255),
+            ".b".repeat(255)
+        ),
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, &revision,
+            )));
+        }
+    }
+    for expression in [
+        format!("{}github.event.number{}", "(".repeat(256), ")".repeat(256)),
+        format!("github{} || github.event.number", ".a".repeat(256)),
+        format!("{}false || github.event.number", "!".repeat(256)),
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, &revision,
+            )));
+        }
+    }
+}

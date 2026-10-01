@@ -714,3 +714,107 @@ fn checkout_ref_named_projection_and_unary_depth() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_access_chain_depth() -> Result<()> {
+    let mut cases = Vec::new();
+    for depth in [255, 256, 257] {
+        for expression in [
+            format!("github{}", ".a".repeat(depth)),
+            format!("github{}", ".*".repeat(depth)),
+            format!("github{}", "['a']".repeat(depth)),
+            format!("{}github{}", "!".repeat(128), ".a".repeat(depth - 128)),
+            format!(
+                "{}github{}{}",
+                "(".repeat(128),
+                ".a".repeat(depth - 128),
+                ")".repeat(128)
+            ),
+            format!("(github{}){}", ".a".repeat(128), ".a".repeat(depth - 129)),
+            format!("fromJSON(toJSON(github)){}", ".a".repeat(depth - 2)),
+            format!(
+                "github{}[github{}]",
+                ".a".repeat(128),
+                ".a".repeat(depth - 129)
+            ),
+            format!("(github{} || true).a", ".a".repeat(depth - 2)),
+        ] {
+            cases.push((
+                format!("refs/pull/${{{{ {expression} }}}}/head"),
+                false,
+                depth > 256,
+            ));
+        }
+    }
+    for expression in [
+        format!("'{}'", ".![]()".repeat(1024)),
+        format!("'{}''{}'", ".a".repeat(256), ".a".repeat(256)),
+        format!("{}0.5", "!".repeat(256)),
+        format!("{}0xff", "!".repeat(256)),
+        format!("{}1.25e-3{}", "(".repeat(256), ")".repeat(256)),
+        format!("github{} || github{}", ".a".repeat(256), ".b".repeat(256)),
+        format!(
+            "format('{{0}}{{1}}', github{}, github{})",
+            ".a".repeat(255),
+            ".b".repeat(255)
+        ),
+    ] {
+        cases.push((
+            format!("refs/pull/${{{{ {expression} }}}}/head"),
+            false,
+            false,
+        ));
+    }
+    for expression in [
+        format!("{}github.event.number{}", "(".repeat(256), ")".repeat(256)),
+        format!("github{} || github.event.number", ".a".repeat(256)),
+        format!("{}false || github.event.number", "!".repeat(256)),
+    ] {
+        cases.push((
+            format!("refs/pull/${{{{ {expression} }}}}/head"),
+            true,
+            false,
+        ));
+    }
+    for (revision, tainted, oversized) in cases {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let root = tempfile::tempdir()?;
+            let workflows = root.path().join(".github/workflows");
+            std::fs::create_dir_all(&workflows)?;
+            std::fs::write(workflows.join("test.yml"), format!("name: Named and unary boundary\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: {revision}\n"))?;
+            let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                .args(["agent", "scan"])
+                .arg(root.path())
+                .args(["--format", "json"])
+                .output()?;
+            if oversized && trigger != "pull_request" {
+                assert_eq!(output.status.code(), Some(2));
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8(output.stderr)?
+                    .contains("checkout ref exceeds 256 levels of expression nesting"));
+            } else {
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(blocked)),
+                    "{trigger}: {revision}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}

@@ -591,8 +591,10 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    preserving YAML-decoded NEL at either edge.
    Computed workflow-run and parsed-array indexes apply numeric coercion before
    number taint; unary negation preserves known truthiness. Symbolic products
-   are checked for a maximum combined depth of 256 for parentheses, brackets
-   and unary negation before evaluation and are limited to 1,024 alternatives and 1 MiB of cumulative string bytes
+   are checked for a maximum combined depth of 256 for parentheses, brackets,
+   unary negation and access selectors before evaluation. Numeric literals and
+   recognized event-number atoms do not require selector evaluation. Products
+   are limited to 1,024 alternatives and 1 MiB of cumulative string bytes
    before allocation, including join string clones, array separator expansion,
    cloned format arguments and trailing literals;
    exceeding either boundary fails the scan
