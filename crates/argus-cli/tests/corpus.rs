@@ -267,6 +267,26 @@ fn parsed_checkout_numbers_preserve_taint() -> Result<()> {
             "refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[0.5] }}/head",
             false,
         ),
+        (
+            "refs/pull/${{ join(fromJSON(format('{{\"n\":{0}}}', github.event.number)).*, '') }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ join(fromJSON(format('[{0}]', github.event.number)).*, '') }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number)).*[0] }}/head",
+            false,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('{0}0e-1', github.event.number)) }}/head",
+            true,
+        ),
+        (
+            "refs/pull/${{ fromJSON(format('{0}0e-2', github.event.number)) }}/head",
+            false,
+        ),
     ] {
         for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
             let fixture = tempfile::tempdir()?;

@@ -579,8 +579,9 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    YAML for mutable dependencies, direct untrusted-context script injection,
    and unsafe privileged-trigger checkout, including `refs/pull/<number>/head`
    and `/merge` built from event PR numbers with interpolation or `format`,
-   including equivalent JSON numeric representations and array/object access with
-   `fromJSON`, computed event-number property selectors, and all possible
+   including equivalent JSON numeric representations with cancelling decimal
+   shifts, array/object access and wildcard projections with `fromJSON`,
+   computed event-number property selectors, and all possible
    outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs.

@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
   `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
-  numbers, including `format(...)` templates, equivalent JSON numerals, joined
-  parsed JSON arrays, parsed array/object element access, computed event-number
+  numbers, including `format(...)` templates, equivalent JSON numerals with
+  decimal shifts, joined parsed JSON arrays, parsed array/object element access
+  and wildcard projections, computed event-number
   selectors, unknown logical branch outcomes, and mixed input/env bindings.
   Repeated JSON serialization
   keeps string quotes and does not falsely match a pull-number ref.

@@ -154,9 +154,10 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
 fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
     static JSON_NUMBER: OnceLock<Regex> = OnceLock::new();
     let json_number = JSON_NUMBER.get_or_init(|| {
-        // Zero fractions and exponents preserve the PR number.
+        // Appended zero digits preserve the number only when the exponent
+        // cancels their decimal shift; a zero fraction does not change it.
         // vibeguard-disable-next-line RS-03 -- compile-time-constant pattern
-        Regex::new(r"^\x00(?:\.0+)?(?:[eE][+-]?0+)?")
+        Regex::new(r"^\x00(?P<zeros>0*)(?:\.0+)?(?:[eE](?P<exponent>[+-]?[0-9]+))?")
             .expect("symbolic JSON number pattern compiles")
     });
     enum Work<'a> {
@@ -164,6 +165,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
         Format { count: usize },
         Logical { count: usize, is_or: bool },
         Json { parse: bool },
+        JsonRoundtrip,
         Access { property: Option<&'a str> },
         Join,
         Not,
@@ -217,26 +219,63 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             );
                             continue;
                         }
-                        let value = if is_string {
-                            None
-                        } else {
-                            match serde_json::from_str(&source) {
-                                Ok(serde_json::Value::Array(elements)) => {
-                                    ref_array_index(key, *key_is_string)
-                                        .and_then(|index| elements.get(index).cloned())
-                                }
-                                Ok(serde_json::Value::Object(properties)) => properties
-                                    .into_iter()
-                                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
-                                    .map(|(_, value)| value),
-                                _ => None,
+                        // A wildcard returns a filtered array: later selectors
+                        // apply to each child rather than indexing the result.
+                        let filtered = source.starts_with('\x04');
+                        let parsed = (!is_string)
+                            .then(|| {
+                                serde_json::from_str::<serde_json::Value>(
+                                    source.strip_prefix('\x04').unwrap_or(&source),
+                                )
+                                .ok()
+                            })
+                            .flatten();
+                        let project = property == Some("*");
+                        let inputs = if filtered {
+                            match parsed {
+                                Some(serde_json::Value::Array(elements)) => elements,
+                                _ => Vec::new(),
                             }
+                        } else {
+                            parsed.into_iter().collect()
                         };
-                        selected.push(
-                            value
+                        let mut results = Vec::new();
+                        for input in inputs {
+                            match input {
+                                serde_json::Value::Array(elements) if project => {
+                                    results.extend(elements);
+                                }
+                                serde_json::Value::Object(properties) if project => {
+                                    results.extend(properties.into_values());
+                                }
+                                serde_json::Value::Array(elements) => {
+                                    if let Some(value) = ref_array_index(key, *key_is_string)
+                                        .and_then(|index| elements.get(index).cloned())
+                                    {
+                                        results.push(value);
+                                    }
+                                }
+                                serde_json::Value::Object(properties) => {
+                                    if let Some((_, value)) = properties
+                                        .into_iter()
+                                        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                                    {
+                                        results.push(value);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        selected.push(if filtered || project {
+                            let (array, truthy, _) =
+                                render_ref_json_value(serde_json::Value::Array(results));
+                            (format!("\x04{array}"), truthy, false)
+                        } else {
+                            results
+                                .pop()
                                 .map(render_ref_json_value)
-                                .unwrap_or_else(|| ("\x01".to_string(), None, false)),
-                        );
+                                .unwrap_or_else(|| ("\x01".to_string(), None, false))
+                        });
                     }
                 }
                 values.push(selected);
@@ -249,7 +288,9 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 for (source, _, is_string) in sources {
                     for (separator, _, _) in &separators {
                         let value = if !is_string {
-                            match serde_json::from_str(&source) {
+                            match serde_json::from_str(
+                                source.strip_prefix('\x04').unwrap_or(&source),
+                            ) {
                                 Ok(serde_json::Value::Array(elements)) => elements
                                     .into_iter()
                                     .map(|element| match element {
@@ -341,6 +382,16 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 }
                 values.push(negated);
             }
+            Work::JsonRoundtrip => {
+                let mut arguments = values.pop().expect("JSON round trip is rendered");
+                for (value, _, is_string) in &mut arguments {
+                    if !*is_string && value.starts_with('\x04') {
+                        // Serialization reconstructs an ordinary JSON array.
+                        value.remove(0);
+                    }
+                }
+                values.push(arguments);
+            }
             Work::Json { parse } => {
                 let arguments = values.pop().expect("JSON argument is rendered");
                 let mut decoded_values = Vec::new();
@@ -353,7 +404,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         } else if value.is_empty() {
                             "null".to_string()
                         } else {
-                            value
+                            value.strip_prefix('\x04').unwrap_or(&value).to_string()
                         };
                         decoded_values.push((json, Some(true), true));
                     } else if value == "\0" {
@@ -369,13 +420,30 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         let mut characters = value.char_indices().peekable();
                         while let Some((offset, character)) = characters.next() {
                             if character == '\0' {
-                                json.push_str(if quoted { "\\u0000" } else { "\"\\u0002\"" });
-                                if !quoted {
-                                    let end = offset
-                                        + json_number
-                                            .find(&value[offset..])
-                                            .expect("number marker matches")
-                                            .end();
+                                if quoted {
+                                    json.push_str("\\u0000");
+                                } else {
+                                    let captures = json_number
+                                        .captures(&value[offset..])
+                                        .expect("number marker matches");
+                                    let zeros = captures
+                                        .name("zeros")
+                                        .expect("zero suffix is captured")
+                                        .len();
+                                    let exponent =
+                                        captures.name("exponent").map_or(Some(0), |value| {
+                                            value.as_str().parse::<i64>().ok()
+                                        });
+                                    let equivalent = exponent.is_some_and(|exponent| {
+                                        i64::try_from(zeros).is_ok_and(|zeros| exponent == -zeros)
+                                    });
+                                    json.push_str(if equivalent {
+                                        "\"\\u0002\""
+                                    } else {
+                                        "\"\\u0001\""
+                                    });
+                                    let end =
+                                        offset + captures.get(0).expect("number is captured").end();
                                     while characters.peek().is_some_and(|(next, _)| *next < end) {
                                         characters.next();
                                     }
@@ -469,6 +537,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                     .filter(|(function, _)| function.trim().eq_ignore_ascii_case("tojson"))
                     .and_then(|(_, arguments)| arguments.strip_suffix(')'));
                 if let Some(inner) = roundtrip {
+                    work.push(Work::JsonRoundtrip);
                     work.push(Work::Expression(inner));
                     continue;
                 }
