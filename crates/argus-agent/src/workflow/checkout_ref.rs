@@ -7,17 +7,26 @@ use super::{
     find_expression_close, is_expression_ident_char, map_expression_regions,
     remove_expression_string_literals,
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use regex::Regex;
 use std::sync::OnceLock;
 
 // Bound products before allocation: workflows are untrusted scan input.
 const MAX_REF_ALTERNATIVES: usize = 1024;
+const MAX_REF_BYTES: usize = 1024 * 1024;
 
 fn ensure_ref_alternatives(count: usize) -> Result<()> {
     ensure!(
         count <= MAX_REF_ALTERNATIVES,
         "checkout ref exceeds {MAX_REF_ALTERNATIVES} symbolic alternatives"
+    );
+    Ok(())
+}
+
+fn ensure_ref_bytes(bytes: Option<usize>) -> Result<()> {
+    ensure!(
+        bytes.is_some_and(|bytes| bytes <= MAX_REF_BYTES),
+        "checkout ref exceeds {MAX_REF_BYTES} bytes of symbolic output"
     );
     Ok(())
 }
@@ -77,7 +86,7 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> Result<boo
 /// spelling. NUL cannot occur in a Git ref; it marks an event-derived number.
 fn contains_pull_number_ref(revision: &str) -> Result<bool> {
     let mut symbolic = vec![String::new()];
-    let mut remaining = revision.trim();
+    let mut remaining = revision;
     while let Some(start) = remaining.find("${{") {
         let after_open = &remaining[start + 3..];
         let Some(end) = find_expression_close(after_open) else {
@@ -85,6 +94,15 @@ fn contains_pull_number_ref(revision: &str) -> Result<bool> {
         };
         let alternatives = symbolic_ref_expression(&after_open[..end])?;
         ensure_ref_alternatives(symbolic.len().saturating_mul(alternatives.len()))?;
+        // Sum the complete product before cloning even one literal prefix.
+        ensure_ref_bytes(symbolic.iter().try_fold(0usize, |bytes, prefix| {
+            alternatives.iter().try_fold(bytes, |bytes, value| {
+                bytes
+                    .checked_add(prefix.len())?
+                    .checked_add(start)?
+                    .checked_add(value.len())
+            })
+        }))?;
         symbolic = symbolic
             .into_iter()
             .flat_map(|prefix| {
@@ -97,6 +115,9 @@ fn contains_pull_number_ref(revision: &str) -> Result<bool> {
         symbolic.dedup();
         remaining = &after_open[end + 2..];
     }
+    ensure_ref_bytes(symbolic.iter().try_fold(0usize, |bytes, value| {
+        bytes.checked_add(value.len())?.checked_add(remaining.len())
+    }))?;
     Ok(symbolic.into_iter().any(|mut value| {
         value.push_str(remaining);
         // actions/checkout reads ref through core.getInput's JavaScript trim.
@@ -338,6 +359,19 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 let mut combinations = vec![Vec::new()];
                 for alternatives in arguments {
                     ensure_ref_alternatives(combinations.len().saturating_mul(alternatives.len()))?;
+                    // Argument products clone earlier strings too, including
+                    // templates and arguments unused by the final format.
+                    ensure_ref_bytes(combinations.iter().try_fold(
+                        0usize,
+                        |bytes, arguments: &Vec<String>| {
+                            let length = arguments.iter().try_fold(0usize, |length, value| {
+                                length.checked_add(value.len())
+                            })?;
+                            alternatives.iter().try_fold(bytes, |bytes, (value, _, _)| {
+                                bytes.checked_add(length)?.checked_add(value.len())
+                            })
+                        },
+                    ))?;
                     combinations = combinations
                         .into_iter()
                         .flat_map(|arguments: Vec<String>| {
@@ -351,6 +385,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                     combinations.sort_unstable();
                     combinations.dedup();
                 }
+                let mut bytes = 0usize;
                 values.push(
                     combinations
                         .into_iter()
@@ -358,7 +393,14 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             let (template, arguments) = arguments
                                 .split_first()
                                 .expect("format argument splitting includes a template slot");
-                            let value = render_ref_format(template, arguments, expression.len())?;
+                            let value = render_ref_format(
+                                template,
+                                arguments,
+                                expression.len().min(MAX_REF_BYTES - bytes),
+                            )?;
+                            bytes = bytes
+                                .checked_add(value.len())
+                                .context("checkout ref symbolic byte count overflow")?;
                             let truthy = !value.is_empty();
                             Ok((value, Some(truthy), true))
                         })
@@ -740,7 +782,7 @@ fn render_ref_format(template: &str, values: &[String], max_length: usize) -> Re
         })
         .into_owned();
     ensure!(
-        !exceeded,
+        !exceeded && length <= max_length,
         "checkout ref format exceeds {max_length} bytes of symbolic output"
     );
     Ok(rendered)

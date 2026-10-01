@@ -217,6 +217,93 @@ fn checkout_ref_state_products_report_operational_errors() -> Result<()> {
 }
 
 #[test]
+fn checkout_ref_symbolic_bytes_and_yaml_trim() -> Result<()> {
+    let regions = "${{ github.event.action && github.event.number }}".repeat(10);
+    let arguments = std::iter::repeat_n("github.event.action && github.event.number", 10)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut cases = Vec::new();
+    for size in [919, 920, 8192] {
+        let literal = "x".repeat(size);
+        for revision in [
+            format!("{literal}{regions}"),
+            format!("{regions}{literal}"),
+            format!("${{{{ format('{literal}', {arguments}) }}}}"),
+        ] {
+            cases.push((revision, false, size != 919));
+        }
+    }
+    for (escape, tainted) in [
+        ("\\N", false),
+        ("\\x1c", false),
+        ("\\x1d", false),
+        ("\\x1e", false),
+        ("\\x1f", false),
+        (" ", true),
+        ("\\t", true),
+        ("\\r", true),
+        ("\\n", true),
+        ("\\uFEFF", true),
+        ("\\u00A0", true),
+        ("\\u2028", true),
+        ("\\u2029", true),
+    ] {
+        cases.push((
+            format!("\"{escape}refs/pull/${{{{ github.event.number }}}}/head\""),
+            tainted,
+            false,
+        ));
+        cases.push((
+            format!("\"refs/pull/${{{{ github.event.number }}}}/head{escape}\""),
+            tainted,
+            false,
+        ));
+    }
+    for (revision, tainted, oversized) in cases {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let root = tempfile::tempdir()?;
+            let workflows = root.path().join(".github/workflows");
+            std::fs::create_dir_all(&workflows)?;
+            std::fs::write(
+                workflows.join("test.yml"),
+                format!(
+                    "name: Byte and trim boundary\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: {revision}\n"
+                ),
+            )?;
+            let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                .args(["agent", "scan"])
+                .arg(root.path())
+                .args(["--format", "json"])
+                .output()?;
+            if oversized && trigger != "pull_request" {
+                assert_eq!(output.status.code(), Some(2), "{trigger}: {revision}");
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8(output.stderr)?
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            } else {
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(output.status.code(), Some(i32::from(blocked)));
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn checkout_ref_format_length_overflow_reports_an_operational_error() -> Result<()> {
     let revision = "${{ format(format('refs/pull/{{0}}/head{0}', format('{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}', '{1}{1}{1}{1}{1}{1}{1}{1}{1}{1}')), github.event.number, '') }}";
     for trigger in ["pull_request_target", "workflow_run", "pull_request"] {

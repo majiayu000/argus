@@ -585,11 +585,13 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    computed event-number property selectors, and all possible
    outcomes of unknown logical conditions. JSON serialization
    preserves string quotes, so serializing a number twice does not match
-   these pull refs. Rendered refs are trimmed the same way as checkout inputs.
+   these pull refs. Rendered refs are trimmed the same way as checkout inputs,
+   preserving YAML-decoded NEL at either edge.
    Computed workflow-run and parsed-array indexes apply numeric coercion before
    number taint; unary negation preserves known truthiness. Symbolic products
-   are limited to 1,024
-   alternatives before allocation; exceeding that boundary fails the scan
+   are limited to 1,024 alternatives and 1 MiB of cumulative string bytes
+   before allocation, including cloned format arguments and trailing literals;
+   exceeding either boundary fails the scan
    with an operational error (CLI exit 2) instead of an incomplete allow.
    Format output exceeding the expression-length bound also produces this
    operational error, even if an outer format call would shrink the result.

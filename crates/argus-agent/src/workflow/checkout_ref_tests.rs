@@ -1061,6 +1061,95 @@ fn pull_number_state_products_fail_as_operational_errors() {
 }
 
 #[test]
+fn pull_number_symbolic_byte_products_fail_as_operational_errors() {
+    let regions = "${{ github.event.action && github.event.number }}".repeat(10);
+    let arguments = std::iter::repeat_n("github.event.action && github.event.number", 10)
+        .collect::<Vec<_>>()
+        .join(", ");
+    for size in [919, 920, 8192] {
+        let literal = "x".repeat(size);
+        for revision in [
+            format!("{literal}{regions}"),
+            format!("{regions}{literal}"),
+            format!("${{{{ format('{literal}', {arguments}) }}}}"),
+        ] {
+            for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+                let result = try_scan(&[SurfaceFile {
+                    rel: ".github/workflows/test.yml".to_string(),
+                    content: pinned_checkout_workflow(trigger, &revision),
+                    kind: SurfaceKind::Workflow,
+                }]);
+                if size == 919 || trigger == "pull_request" {
+                    assert_no_untrusted_checkout(&result.expect("bounded scan completes"));
+                } else {
+                    let error = result.expect_err("oversized symbolic bytes must fail");
+                    assert!(format!("{error:#}")
+                        .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+                }
+            }
+        }
+    }
+    // Literal refs at the byte boundary remain valid without alternatives.
+    assert!(
+        !is_untrusted_ref_expression(&"x".repeat(1024 * 1024)).expect("literal at byte boundary")
+    );
+}
+
+#[test]
+fn pull_number_format_total_bytes_fail_as_operational_errors() {
+    let condition = "x".repeat(3000);
+    let literal = "x".repeat(1024);
+    let arguments = std::iter::repeat_n("github.event.action && github.event.number", 9)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let revision = format!(
+        "${{{{ format('{{0}}{{0}}{{0}}{{0}}', github.event.action == '{condition}' && '{literal}', {arguments}) }}}}"
+    );
+    for trigger in ["pull_request_target", "workflow_run"] {
+        let error = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/test.yml".to_string(),
+            content: pinned_checkout_workflow(trigger, &revision),
+            kind: SurfaceKind::Workflow,
+        }])
+        .expect_err("total format output must remain bounded");
+        assert!(format!("{error:#}").contains("checkout ref format exceeds"));
+    }
+}
+
+#[test]
+fn pull_number_yaml_trim_matches_checkout_inputs() {
+    for (escape, tainted) in [
+        ("\\N", false),
+        ("\\x1c", false),
+        ("\\x1d", false),
+        ("\\x1e", false),
+        ("\\x1f", false),
+        (" ", true),
+        ("\\t", true),
+        ("\\r", true),
+        ("\\n", true),
+        ("\\uFEFF", true),
+        ("\\u00A0", true),
+        ("\\u2028", true),
+        ("\\u2029", true),
+    ] {
+        for revision in [
+            format!("\"{escape}refs/pull/${{{{ github.event.number }}}}/head\""),
+            format!("\"refs/pull/${{{{ github.event.number }}}}/head{escape}\""),
+        ] {
+            for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+                let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+                if tainted && trigger != "pull_request" {
+                    assert_untrusted_checkout_blocks(&findings);
+                } else {
+                    assert_no_untrusted_checkout(&findings);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn pull_number_format_length_overflow_is_an_operational_error() {
     let revision = "${{ format(format('refs/pull/{{0}}/head{0}', format('{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}', '{1}{1}{1}{1}{1}{1}{1}{1}{1}{1}')), github.event.number, '') }}";
     for trigger in ["pull_request_target", "workflow_run"] {

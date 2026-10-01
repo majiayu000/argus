@@ -15,12 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
   Repeated JSON serialization
   keeps string quotes and does not falsely match a pull-number ref.
-  Rendered refs use the same surrounding-whitespace trimming as checkout.
+  Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
   Constant negation preserves known truthiness. Symbolic products exceeding
-  1,024 alternatives fail with an
-  explicit operational error before allocation. Format output exceeding the
-  expression-length bound also fails with an operational error, including
+  1,024 alternatives or 1 MiB of cumulative string bytes fail with an
+  explicit operational error before allocation, including cloned format arguments.
+  Format output exceeding the expression-length bound also fails with an operational error, including
   intermediate templates that would shrink in a later format call.
   These checkouts now block;
   trusted base refs, ordinary numbered branch names, and quoted context text

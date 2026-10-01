@@ -55,3 +55,9 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: refs/pull/${{ toJSON(format('{0}', github.event.number)) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: "refs/pull/${{ github.event.number }}/head\N"
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: "\Nrefs/pull/${{ github.event.number }}/head"
