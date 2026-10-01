@@ -270,6 +270,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 let sources = values.pop().expect("ref access source is rendered");
                 ensure_ref_alternatives(sources.len().saturating_mul(keys.len()))?;
                 let mut selected = Vec::new();
+                let mut bytes = Some(0usize);
                 for (source, _, is_string) in sources {
                     for (key, _, key_is_string) in &keys {
                         if !is_string && source.starts_with('\x03') {
@@ -284,30 +285,47 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                 } else {
                                     "\x04[\"\\u0003github.event.pull_request\",\"\\u0003github.event.workflow_run\"]"
                                 };
+                                bytes = bytes.and_then(|bytes| bytes.checked_add(children.len()));
+                                ensure_ref_bytes(bytes)?;
                                 selected.push((children.to_string(), Some(true), false));
                                 continue;
                             }
-                            let path = if context.ends_with(".pull_requests") {
+                            let suffix = if context.ends_with(".pull_requests") {
                                 // Resolve computed array selectors before number taint.
                                 // The runner converts primitive indexes to numbers,
                                 // floors nonnegative values, and rejects NaN/range errors.
                                 if property == Some("*") {
-                                    format!("{context}.*")
+                                    ".*".to_string()
                                 } else if let Some(index) = ref_array_index(key, *key_is_string) {
-                                    format!("{context}[{index}]")
+                                    format!("[{index}]")
                                 } else if key.contains('\x01')
                                     || key.contains('\x03')
                                     || key == "\0"
                                 {
                                     // An unresolved selector may still select a PR.
-                                    format!("{context}.*")
+                                    ".*".to_string()
                                 } else {
                                     selected.push((String::new(), Some(false), false));
                                     continue;
                                 }
                             } else {
-                                format!("{context}.{}", key.to_ascii_lowercase())
+                                // Check before copying the potentially long key.
+                                bytes = bytes.and_then(|bytes| {
+                                    bytes
+                                        .checked_add(source.len())?
+                                        .checked_add(1)?
+                                        .checked_add(key.len())
+                                });
+                                ensure_ref_bytes(bytes)?;
+                                format!(".{}", key.to_ascii_lowercase())
                             };
+                            if context.ends_with(".pull_requests") {
+                                bytes = bytes.and_then(|bytes| {
+                                    bytes.checked_add(source.len())?.checked_add(suffix.len())
+                                });
+                                ensure_ref_bytes(bytes)?;
+                            }
+                            let path = format!("{context}{suffix}");
                             selected.push(
                                 symbolic_ref_atom(&path, false)
                                     .map(|value| (value, Some(true), false))
@@ -375,6 +393,13 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                     // Preserve intermediate context paths through
                                     // named projections. Only the existing number
                                     // atom matcher turns a selected path into taint.
+                                    bytes = bytes.and_then(|bytes| {
+                                        bytes
+                                            .checked_add(context.len())?
+                                            .checked_add(1)?
+                                            .checked_add(key.len())
+                                    });
+                                    ensure_ref_bytes(bytes)?;
                                     let path =
                                         format!("{}.{}", &context[1..], key.to_ascii_lowercase());
                                     results.push(serde_json::Value::String(
@@ -588,9 +613,9 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                     if !parse {
                         // Count the exact JSON string escapes before serialization,
                         // including outputs later discarded by a logical operator.
-                        let length = if value.contains('\x01') || value.contains('\x03') {
+                        let length = if value.contains('\x01') {
                             Some(1)
-                        } else if is_string {
+                        } else if is_string || value.starts_with('\x03') {
                             value.bytes().try_fold(2usize, |length, byte| {
                                 length.checked_add(match byte {
                                     b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
@@ -606,10 +631,12 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         bytes = bytes.and_then(|bytes| bytes.checked_add(length?));
                         ensure_ref_bytes(bytes)?;
                     }
-                    if value.contains('\x01') || value.contains('\x03') {
+                    if value.contains('\x01') {
                         decoded_values.push(("\x01".to_string(), None, false));
                     } else if !parse {
-                        let json = if is_string {
+                        let json = if is_string || value.starts_with('\x03') {
+                            // Encode the existing live-context identity as an
+                            // internal JSON string so format/fromJSON can retain it.
                             serde_json::to_string(&value).expect("ref string serializes as JSON")
                         } else if value.is_empty() {
                             "null".to_string()
@@ -849,6 +876,10 @@ fn render_ref_json_value(value: serde_json::Value) -> (String, Option<bool>, boo
         // The numeric marker is internal JSON storage, not a quoted ref value.
         serde_json::Value::String(value) if value == "\x02" => {
             ("\0".to_string(), Some(true), false)
+        }
+        serde_json::Value::String(value) if value.starts_with('\x03') => {
+            let truthy = (value == "\x03github").then_some(true);
+            (value, truthy, false)
         }
         serde_json::Value::String(value) => {
             let truthy = !value.is_empty();

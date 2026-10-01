@@ -1839,3 +1839,98 @@ fn number_json_template_normalization_preserves_quoted_bytes() {
         );
     }
 }
+
+#[test]
+fn number_serialized_context_format_retains_identity() {
+    for (expression, tainted) in [
+        ("fromJSON(format('{0}', toJSON(github))).event.number", true),
+        ("fromJSON(format('{0}', toJSON(github.event))).number", true),
+        ("fromJSON(format('{0}', toJSON(github.event.pull_request))).number", true),
+        ("fromJSON(format('{0}', toJSON(github.event.workflow_run))).pull_requests[0].number", true),
+        ("fromJSON(format('{0}', toJSON(GitHub['Event'])))['pull_request']['number']", true),
+        ("fromJSON(format('{0}', toJSON(github))).event[format('num{0}', 'ber')]", true),
+        ("fromJSON(format('{{\"selected\":{0}}}', toJSON(github))).selected.event.number", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', toJSON(github.event))).selected.number", true),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*), 'unused padding for the existing format bound')).*.number, '')", true),
+        ("join(fromJSON(format('{0}', toJSON(github.*))).*.pull_request.number, '')", true),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*))).*.pull_requests.*.number, '')", true),
+        ("fromJSON(fromJSON(format('{0}', toJSON(toJSON(github))))).event.number", true),
+        ("fromJSON(format('{0}', join(toJSON(github), ''))).event.number", true),
+        ("fromJSON(format('{0}', toJSON(fromJSON('{\"event\":{\"number\":42}}')))).event.number", false),
+        ("fromJSON(format('{0}', toJSON('github.event.number')))", false),
+        ("fromJSON(format('{0}', toJSON(github.event))).workflow_run.number", false),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*))).*.numbered, '')", false),
+        ("fromJSON(format('{{\"selected\":42}}', toJSON(github.event))).selected", false),
+        ("fromJSON(format('{{\"selected\":\"github.event.number\"}}', toJSON(github.event))).selected", false),
+        ("fromJSON(format('{0}', toJSON(github))) && '42'", false),
+        ("fromJSON(format('{0}', toJSON(github))) || github.event.number", false),
+        ("fromJSON(format('{{\"text\":\"don''t [\\\"number\\\"]\",\"number\":42}}', toJSON(github.event))).number", false),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let revision = format!("refs/pull/${{{{ {expression} }}}}/{suffix}");
+                let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+                if tainted && trigger != "pull_request" {
+                    assert_untrusted_checkout_blocks(&findings);
+                } else {
+                    assert_no_untrusted_checkout(&findings);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn number_access_path_bytes_are_bounded_before_discarding() {
+    let sources = (0..64)
+        .map(|index| format!("github.a{index:02}"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    // 64 live paths of 12 bytes plus the property give exactly 1 MiB.
+    for delta in [-1isize, 0, 1] {
+        let property = "x".repeat((16372isize + delta) as usize);
+        let access = format!("({sources}).{property}");
+        for expression in [
+            access.clone(),
+            format!("!({access})"),
+            format!("!({access}) && github.event.number"),
+            format!("({sources})[format('{{0}}', '{property}')]"),
+            format!("!(({sources})[format('{{0}}', '{property}')])"),
+        ] {
+            let revision = format!("${{{{ {expression} }}}}");
+            let result = is_untrusted_ref_expression(&revision);
+            if delta > 0 {
+                assert!(
+                    result.is_err(),
+                    "access bytes above limit must fail before an enclosing operator discards them"
+                );
+                assert!(format!("{:#}", result.unwrap_err())
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            } else {
+                assert!(!result.expect("access paths at byte boundary remain supported"));
+            }
+        }
+    }
+}
+
+#[test]
+fn number_serialized_context_format_keeps_existing_length_error() {
+    let revision =
+        "refs/pull/${{ join(fromJSON(format('{0}', toJSON(github.event.*))).*.number, '') }}/head";
+    for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+        let result = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/test.yml".into(),
+            content: pinned_checkout_workflow(trigger, revision),
+            kind: SurfaceKind::Workflow,
+        }]);
+        if trigger == "pull_request" {
+            assert_no_untrusted_checkout(&result.expect("ordinary trigger"));
+        } else {
+            assert!(
+                result.is_err(),
+                "existing format-length bound must remain explicit"
+            );
+            assert!(format!("{:#}", result.unwrap_err()).contains("checkout ref format exceeds"));
+        }
+    }
+}

@@ -591,7 +591,8 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    remain arrays, and unresolved sources or selectors remain conservative.
    Bracket normalization preserves expression string literals, including
    JSON arrays in format templates and doubled-quote escapes.
-   JSON serialization
+   Live context identity survives serialized JSON passed through `format`,
+   including bracket and filtered projections. JSON serialization
    preserves string quotes, so serializing a number twice does not match
    these pull refs. Rendered refs are trimmed the same way as checkout inputs,
    preserving YAML-decoded NEL at either edge.
@@ -602,7 +603,7 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    recognized event-number atoms do not require selector evaluation. Products
    are limited to 1,024 alternatives and 1 MiB of cumulative string bytes
    before allocation, including join string clones, array separator expansion,
-   cloned format arguments, JSON string escaping and trailing literals;
+   cloned format arguments, access-path products, JSON string escaping and trailing literals;
    exceeding either boundary fails the scan
    with an operational error (CLI exit 2) instead of an incomplete allow.
    Format output exceeding the expression-length bound also produces this

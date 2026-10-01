@@ -1051,3 +1051,122 @@ fn checkout_ref_json_templates_preserve_bracket_literals() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_serialized_context_format_retains_identity() -> Result<()> {
+    for (expression, tainted) in [
+        ("fromJSON(format('{0}', toJSON(github))).event.number", true),
+        ("fromJSON(format('{0}', toJSON(github.event))).number", true),
+        ("fromJSON(format('{0}', toJSON(github.event.pull_request))).number", true),
+        ("fromJSON(format('{0}', toJSON(github.event.workflow_run))).pull_requests[0].number", true),
+        ("fromJSON(format('{0}', toJSON(GitHub['Event'])))['pull_request']['number']", true),
+        ("fromJSON(format('{0}', toJSON(github))).event[format('num{0}', 'ber')]", true),
+        ("fromJSON(format('{{\"selected\":{0}}}', toJSON(github))).selected.event.number", true),
+        ("fromJSON(format('{{\"padding\":[\"number\"],\"selected\":{0}}}', toJSON(github.event))).selected.number", true),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*), 'unused padding for the existing format bound')).*.number, '')", true),
+        ("join(fromJSON(format('{0}', toJSON(github.*))).*.pull_request.number, '')", true),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*))).*.pull_requests.*.number, '')", true),
+        ("fromJSON(fromJSON(format('{0}', toJSON(toJSON(github))))).event.number", true),
+        ("fromJSON(format('{0}', join(toJSON(github), ''))).event.number", true),
+        ("fromJSON(format('{0}', toJSON(fromJSON('{\"event\":{\"number\":42}}')))).event.number", false),
+        ("fromJSON(format('{0}', toJSON('github.event.number')))", false),
+        ("fromJSON(format('{0}', toJSON(github.event))).workflow_run.number", false),
+        ("join(fromJSON(format('{0}', toJSON(github.event.*))).*.numbered, '')", false),
+        ("fromJSON(format('{{\"selected\":42}}', toJSON(github.event))).selected", false),
+        ("fromJSON(format('{{\"selected\":\"github.event.number\"}}', toJSON(github.event))).selected", false),
+        ("fromJSON(format('{0}', toJSON(github))) && '42'", false),
+        ("fromJSON(format('{0}', toJSON(github))) || github.event.number", false),
+        ("fromJSON(format('{{\"text\":\"don''t [\\\"number\\\"]\",\"number\":42}}', toJSON(github.event))).number", false),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("name: Serialized context\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: refs/pull/${{{{ {expression} }}}}/{suffix}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"]).arg(root.path()).args(["--format", "json"]).output()?;
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(output.status.code(), Some(i32::from(blocked)), "{trigger}: {expression}");
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(report["findings"].as_array().expect("findings").iter().any(|finding|
+                    finding["rule_id"] == "AGT-06-workflow-untrusted-checkout" && finding["severity"] == "critical"
+                ), blocked);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checkout_ref_access_path_bytes_fail_before_discarding() -> Result<()> {
+    let sources = (0..64)
+        .map(|index| format!("github.a{index:02}"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    for delta in [-1isize, 0, 1] {
+        let property = "x".repeat((16372isize + delta) as usize);
+        let access = format!("({sources}).{property}");
+        for expression in [
+            access.clone(),
+            format!("!({access})"),
+            format!("!({access}) && github.event.number"),
+            format!("({sources})[format('{{0}}', '{property}')]"),
+            format!("!(({sources})[format('{{0}}', '{property}')])"),
+        ] {
+            for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("name: Access byte boundary\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: ${{{{ {expression} }}}}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                if delta > 0 && trigger != "pull_request" {
+                    assert_eq!(output.status.code(), Some(2), "oversized access: {trigger}");
+                    assert!(output.stdout.is_empty());
+                    assert!(String::from_utf8(output.stderr)?
+                        .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+                } else {
+                    assert_eq!(output.status.code(), Some(0));
+                    assert!(output.stderr.is_empty());
+                    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                    assert_eq!(report["decision"], "allow");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checkout_ref_serialized_context_keeps_existing_length_error() -> Result<()> {
+    for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+        for suffix in ["head", "merge"] {
+            let root = tempfile::tempdir()?;
+            let workflows = root.path().join(".github/workflows");
+            std::fs::create_dir_all(&workflows)?;
+            std::fs::write(workflows.join("test.yml"), format!("name: Existing format bound\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: refs/pull/${{{{ join(fromJSON(format('{{0}}', toJSON(github.event.*))).*.number, '') }}}}/{suffix}\n"))?;
+            let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                .args(["agent", "scan"])
+                .arg(root.path())
+                .args(["--format", "json"])
+                .output()?;
+            if trigger == "pull_request" {
+                assert_eq!(output.status.code(), Some(0));
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], "allow");
+            } else {
+                assert_eq!(output.status.code(), Some(2));
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8(output.stderr)?.contains("checkout ref format exceeds"));
+            }
+        }
+    }
+    Ok(())
+}

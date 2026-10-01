@@ -61,3 +61,27 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           ref: refs/pull/${{ fromJSON(format('{{"padding":["number"],"selected":{0}}}', github.event.number)).selected }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github))).event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github.event))).number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github.event.pull_request))).number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github.event.workflow_run))).pull_requests[0].number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(GitHub['Event'])))['pull_request']['number'] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github))).event[format('num{0}', 'ber')] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"selected":{0}}}', toJSON(github))).selected.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"padding":["number"],"selected":{0}}}', toJSON(github.event))).selected.number }}/head

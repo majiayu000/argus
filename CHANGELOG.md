@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Event wildcards retain workflow-run PR children through `pull_requests.*.number`.
   Repeated JSON serialization checks the existing cumulative byte budget before
   escaping strings, including intermediate values later discarded by logical operators.
+  Serialized live contexts retain their identity through formatting and JSON
+  parsing. Access-path products check cumulative bytes before appending a
+  property, even when an enclosing operator later discards the result.
   Serialization keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
