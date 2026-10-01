@@ -431,3 +431,111 @@ fn parsed_checkout_numbers_preserve_taint() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_root_projection_hex_and_nesting() -> Result<()> {
+    let mut cases = vec![
+        (
+            "refs/pull/${{ join(github.*.number, '') }}/head".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(fromJSON(toJSON(github.*)).*.number, '') }}/head".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github.*.missing, '') }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github['*'].number, '') }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ toJSON(join(github.*.number, '')) }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ 0x0 && github.event.number }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ 0X00 && github.event.number }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ 0xff && github.event.number }}/head".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ !0x0 && github.event.number }}/head".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ '0x0' && github.event.number }}/head".to_string(),
+            true,
+            false,
+        ),
+    ];
+    for depth in [256, 257, 2048] {
+        cases.push((
+            format!(
+                "refs/pull/${{{{ {}github.event.number || github.event.number{} }}}}/head",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            ),
+            true,
+            depth > 256,
+        ));
+    }
+    for (revision, tainted, oversized) in cases {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let root = tempfile::tempdir()?;
+            let workflows = root.path().join(".github/workflows");
+            std::fs::create_dir_all(&workflows)?;
+            std::fs::write(workflows.join("test.yml"), format!("name: Root and literal boundary\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: {revision}\n"))?;
+            let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                .args(["agent", "scan"])
+                .arg(root.path())
+                .args(["--format", "json"])
+                .output()?;
+            if oversized && trigger != "pull_request" {
+                assert_eq!(output.status.code(), Some(2));
+                assert!(output.stdout.is_empty());
+                assert!(String::from_utf8(output.stderr)?
+                    .contains("checkout ref exceeds 256 levels of expression nesting"));
+            } else {
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(blocked)),
+                    "{trigger}: {revision}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}

@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 // Bound products before allocation: workflows are untrusted scan input.
 const MAX_REF_ALTERNATIVES: usize = 1024;
 const MAX_REF_BYTES: usize = 1024 * 1024;
+const MAX_REF_EXPRESSION_DEPTH: usize = 256;
 
 fn ensure_ref_alternatives(count: usize) -> Result<()> {
     ensure!(
@@ -173,6 +174,30 @@ fn symbolic_ref_atom(expression: &str, source_expression: bool) -> Option<String
 }
 
 fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
+    // Check once before normalization or evaluation can repeatedly rescan input.
+    // Parentheses and brackets inside Actions string literals are inert.
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut characters = expression.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\'' {
+            if quoted && characters.peek() == Some(&'\'') {
+                characters.next();
+            } else {
+                quoted = !quoted;
+            }
+        } else if !quoted {
+            match character {
+                '(' | '[' => {
+                    depth += 1;
+                    ensure!(depth <= MAX_REF_EXPRESSION_DEPTH,
+                        "checkout ref exceeds {MAX_REF_EXPRESSION_DEPTH} levels of expression nesting");
+                }
+                ')' | ']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
     static JSON_NUMBER: OnceLock<Regex> = OnceLock::new();
     let json_number = JSON_NUMBER.get_or_init(|| {
         // Appended zero digits preserve the number only when the exponent
@@ -212,11 +237,17 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             // Keep event identity separate from quoted context text.
                             // The existing number atom matcher owns the taint paths.
                             let context = &source[1..];
-                            if context == "github.event" && property == Some("*") {
-                                // Preserve the PR child context in the filtered array.
+                            if matches!(context, "github" | "github.event") && property == Some("*")
+                            {
+                                // Preserve the event or PR child in the filtered array.
                                 // Later selectors address children, not array positions.
+                                let child = if context == "github" {
+                                    "github.event"
+                                } else {
+                                    "github.event.pull_request"
+                                };
                                 selected.push((
-                                    "\x04[\"\\u0003github.event.pull_request\"]".to_string(),
+                                    format!("\x04[\"\\u0003{child}\"]"),
                                     Some(true),
                                     false,
                                 ));
@@ -547,6 +578,23 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 if let Ok(number) = serde_json::from_str::<serde_json::Number>(expression) {
                     let truthy = number.as_f64().is_some_and(|value| value != 0.0);
                     values.push(vec![(number.to_string(), Some(truthy), false)]);
+                    continue;
+                }
+                // Actions also accepts hexadecimal numeric literals. Accumulate
+                // as f64, matching its numeric type without a fixed integer width.
+                let hexadecimal = expression
+                    .strip_prefix("0x")
+                    .or_else(|| expression.strip_prefix("0X"))
+                    .filter(|digits| !digits.is_empty())
+                    .and_then(|digits| {
+                        digits.chars().try_fold(0.0, |value, digit| {
+                            digit
+                                .to_digit(16)
+                                .map(|digit| value * 16.0 + f64::from(digit))
+                        })
+                    });
+                if let Some(number) = hexadecimal {
+                    values.push(vec![(number.to_string(), Some(number != 0.0), false)]);
                     continue;
                 }
                 if let Some(atom) = symbolic_ref_atom(expression, true) {

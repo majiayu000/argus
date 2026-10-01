@@ -1246,3 +1246,90 @@ fn privileged_negated_number_branches_still_block() {
         }
     }
 }
+
+#[test]
+fn privileged_root_projected_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ join(github.*.number, '') }}/head",
+        "refs/pull/${{ join(GitHub.*[format('num{0}', 'ber')], '') }}/merge",
+        "refs/pull/${{ join(fromJSON(toJSON(github.*)).*.number, '') }}/head",
+        "refs/pull/${{ false || join(github.*.number, '') }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request",
+            revision,
+        )));
+    }
+}
+
+#[test]
+fn root_projected_number_and_hex_controls_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ join(github.*.missing, '') }}/head",
+        "refs/pull/${{ join(github['*'].number, '') }}/head",
+        "refs/pull/${{ toJSON(join(github.*.number, '')) }}/head",
+        "refs/pull/${{ true && '42' || join(github.*.number, '') }}/head",
+        "refs/pull/${{ 0x0 && github.event.number }}/head",
+        "refs/pull/${{ 0X00 && github.event.number }}/head",
+        "refs/pull/${{ !!0x0 && github.event.number }}/head",
+        "refs/pull/${{ 0xff || github.event.number }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+    for expression in [
+        "0xff && github.event.number",
+        "0x0 || github.event.number",
+        "!0x0 && github.event.number",
+        "'0x0' && github.event.number",
+        "0xffffffffffffffff && github.event.number",
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "pull_request_target",
+            &revision,
+        )));
+    }
+}
+
+#[test]
+fn pull_number_expression_nesting_fails_as_an_operational_error() {
+    for inner in [
+        "github.event.number",
+        "github.event.number || github.event.number",
+    ] {
+        for depth in [256, 257] {
+            let revision = format!(
+                "refs/pull/${{{{ {}{inner}{} }}}}/head",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            );
+            for trigger in ["pull_request_target", "workflow_run"] {
+                let result = try_scan(&[SurfaceFile {
+                    rel: ".github/workflows/triage.yml".into(),
+                    content: pinned_checkout_workflow(trigger, &revision),
+                    kind: SurfaceKind::Workflow,
+                }]);
+                if depth == 256 {
+                    assert_untrusted_checkout_blocks(&result.expect("at nesting boundary"));
+                } else {
+                    assert!(format!("{:#}", result.expect_err("above nesting boundary"))
+                        .contains("checkout ref exceeds 256 levels of expression nesting"));
+                }
+            }
+        }
+    }
+    let revision = format!("refs/pull/${{{{ '{}' }}}}/head", "(".repeat(1024));
+    assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+        "pull_request_target",
+        &revision,
+    )));
+}
