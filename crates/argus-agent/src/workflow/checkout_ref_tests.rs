@@ -1333,3 +1333,121 @@ fn pull_number_expression_nesting_fails_as_an_operational_error() {
         &revision,
     )));
 }
+
+#[test]
+fn privileged_nested_root_projected_number_refs_block() {
+    for revision in [
+        "refs/pull/${{ join(github.*.*.number, '') }}/head",
+        "refs/pull/${{ join(GitHub.*.*[format('num{0}', 'ber')], '') }}/merge",
+        "refs/pull/${{ false || join(github.*.*.number, '') }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request",
+            revision,
+        )));
+    }
+}
+
+#[test]
+fn nested_root_projected_number_controls_remain_allowed() {
+    for revision in [
+        "refs/pull/${{ join(github.*.*.missing, '') }}/head",
+        "refs/pull/${{ join(github['*'].*.number, '') }}/head",
+        "refs/pull/${{ join(github.*['*'].number, '') }}/head",
+        "refs/pull/${{ toJSON(join(github.*.*.number, '')) }}/head",
+        "refs/pull/${{ join(github.*.*.number[0], '') }}/head",
+        "refs/pull/${{ join('github.*.*.number', '') }}/head",
+        "refs/pull/${{ join(fromJSON('[{\"number\":42}]').*.number, '') }}/head",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+                trigger, revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn pull_number_join_bytes_are_bounded_before_materialization() {
+    let separators = "github.event.action == 'a' && 'a' || github.event.action == 'b' && 'b' || github.event.action == 'c' && 'c' || 'd'";
+    for delta in [-1isize, 0, 1] {
+        let source = "x".repeat((262144isize + delta) as usize);
+        let array_source = "x".repeat((262143isize + delta) as usize);
+        let array_separators = ['a', 'b', 'c', 'd']
+            .into_iter()
+            .enumerate()
+            .map(|(index, character)| {
+                let value = format!(
+                    "'{}'",
+                    character.to_string().repeat((131072isize + delta) as usize)
+                );
+                if index == 3 {
+                    value
+                } else {
+                    format!("github.event.action == '{index}' && {value}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        for revision in [
+            format!("${{{{ join('{source}', {separators}) }}}}"),
+            format!("${{{{ join(fromJSON('[\"{array_source}\",\"\"]'), {separators}) }}}}"),
+            format!("${{{{ join(fromJSON('[\"\",\"\",\"\"]'), {array_separators}) }}}}"),
+        ] {
+            let result = is_untrusted_ref_expression(&revision);
+            if delta > 0 {
+                assert!(
+                    format!("{:#}", result.expect_err("join product exceeds budget"))
+                        .contains("checkout ref exceeds 1048576 bytes of symbolic output")
+                );
+            } else {
+                assert!(!result.expect("join product within budget"));
+            }
+        }
+    }
+    let source = "é".repeat(131072);
+    for suffix in ["", "x"] {
+        let revision = format!("${{{{ join('{source}{suffix}', {separators}) }}}}");
+        let result = is_untrusted_ref_expression(&revision);
+        if suffix.is_empty() {
+            assert!(!result.expect("UTF-8 bytes at budget"));
+        } else {
+            assert!(
+                format!("{:#}", result.expect_err("UTF-8 byte product above budget"))
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output")
+            );
+        }
+    }
+}
+
+#[test]
+fn pull_number_join_alternative_count_is_preserved() {
+    for count in [1024, 1025] {
+        let separators = (0..count)
+            .map(|index| {
+                if index == count - 1 {
+                    format!("'{index}'")
+                } else {
+                    format!("github.event.action == '{index}' && '{index}'")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let revision = format!("${{{{ join('x', {separators}) }}}}");
+        let result = is_untrusted_ref_expression(&revision);
+        if count == 1024 {
+            assert!(!result.expect("join at alternative-count boundary"));
+        } else {
+            assert!(format!(
+                "{:#}",
+                result.expect_err("above alternative-count boundary")
+            )
+            .contains("checkout ref exceeds 1024 symbolic alternatives"));
+        }
+    }
+}

@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
   Constant negation and hexadecimal literals preserve known truthiness.
-  Root GitHub wildcard projections retain event-number taint. Expressions over
+  Root GitHub wildcard projections, including `github.*.*.number`, retain
+  event-number taint. Join products check cumulative bytes before cloning
+  strings or expanding array separators. Expressions over
   256 levels of nesting fail with an explicit operational error before evaluation.
   Symbolic products exceeding
   1,024 alternatives or 1 MiB of cumulative string bytes fail with an

@@ -305,8 +305,18 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                         for input in inputs {
                             match input {
                                 serde_json::Value::String(context)
-                                    if context.starts_with('\x03') && !project =>
+                                    if context.starts_with('\x03') =>
                                 {
+                                    if project {
+                                        // A further root wildcard projects the live
+                                        // event's PR child, just like direct event access.
+                                        if context == "\x03github.event" {
+                                            results.push(serde_json::Value::String(
+                                                "\x03github.event.pull_request".to_string(),
+                                            ));
+                                        }
+                                        continue;
+                                    }
                                     // Only a recognized number property on a live
                                     // child becomes numeric taint; other projections
                                     // do not stand in for the PR number.
@@ -359,26 +369,47 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                 let sources = values.pop().expect("join argument is rendered");
                 ensure_ref_alternatives(sources.len().saturating_mul(separators.len()))?;
                 let mut joined = Vec::new();
+                let mut bytes = Some(0usize);
                 for (source, _, is_string) in sources {
-                    for (separator, _, _) in &separators {
-                        let value = if !is_string {
-                            match serde_json::from_str(
-                                source.strip_prefix('\x04').unwrap_or(&source),
-                            ) {
-                                Ok(serde_json::Value::Array(elements)) => elements
+                    let elements = if !is_string {
+                        match serde_json::from_str(source.strip_prefix('\x04').unwrap_or(&source)) {
+                            Ok(serde_json::Value::Array(elements)) => Some(
+                                elements
                                     .into_iter()
                                     .map(|element| match element {
                                         serde_json::Value::Array(_)
                                         | serde_json::Value::Object(_) => "\x01".to_string(),
                                         value => render_ref_json_value(value).0,
                                     })
-                                    .collect::<Vec<_>>()
-                                    .join(separator),
-                                _ => source.clone(),
-                            }
-                        } else {
-                            source.clone()
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    for (separator, _, _) in &separators {
+                        let length = match &elements {
+                            Some(elements) => elements
+                                .iter()
+                                .try_fold(0usize, |length, element| {
+                                    length.checked_add(element.len())
+                                })
+                                .and_then(|length| {
+                                    separator
+                                        .len()
+                                        .checked_mul(elements.len().saturating_sub(1))?
+                                        .checked_add(length)
+                                }),
+                            None => Some(source.len()),
                         };
+                        bytes = bytes.and_then(|bytes| length?.checked_add(bytes));
+                        // Check the cumulative product before cloning a string
+                        // or expanding array separators, even for duplicate outputs.
+                        ensure_ref_bytes(bytes)?;
+                        let value = elements
+                            .as_ref()
+                            .map_or_else(|| source.clone(), |elements| elements.join(separator));
                         let truthy = !value.is_empty();
                         joined.push((value, Some(truthy), true));
                     }

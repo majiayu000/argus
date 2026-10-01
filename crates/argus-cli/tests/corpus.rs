@@ -223,6 +223,38 @@ fn checkout_ref_symbolic_bytes_and_yaml_trim() -> Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     let mut cases = Vec::new();
+    let separators = "github.event.action == 'a' && 'a' || github.event.action == 'b' && 'b' || github.event.action == 'c' && 'c' || 'd'";
+    for delta in [-1isize, 0, 1] {
+        let source = "x".repeat((262144isize + delta) as usize);
+        let array_source = "x".repeat((262143isize + delta) as usize);
+        let array_separators = ['a', 'b', 'c', 'd']
+            .into_iter()
+            .enumerate()
+            .map(|(index, character)| {
+                let value = format!(
+                    "'{}'",
+                    character.to_string().repeat((131072isize + delta) as usize)
+                );
+                if index == 3 {
+                    value
+                } else {
+                    format!("github.event.action == '{index}' && {value}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        for revision in [
+            format!("${{{{ join('{source}', {separators}) }}}}"),
+            format!("${{{{ join(fromJSON('[\"{array_source}\",\"\"]'), {separators}) }}}}"),
+            format!("${{{{ join(fromJSON('[\"\",\"\",\"\"]'), {array_separators}) }}}}"),
+            format!(
+                "${{{{ join(github.event.action && '{source}' || '{}', github.event.action && 'a' || 'b') }}}}",
+                "y".repeat((262144isize + delta) as usize)
+            ),
+        ] {
+            cases.push((revision, false, delta > 0));
+        }
+    }
     for size in [919, 920, 8192] {
         let literal = "x".repeat(size);
         for revision in [
@@ -435,6 +467,41 @@ fn parsed_checkout_numbers_preserve_taint() -> Result<()> {
 #[test]
 fn checkout_ref_root_projection_hex_and_nesting() -> Result<()> {
     let mut cases = vec![
+        (
+            "refs/pull/${{ join(github.*.*.number, '') }}/head".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(GitHub.*.*[format('num{0}', 'ber')], '') }}/merge".to_string(),
+            true,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github.*.*.missing, '') }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github['*'].*.number, '') }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github.*['*'].number, '') }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ toJSON(join(github.*.*.number, '')) }}/head".to_string(),
+            false,
+            false,
+        ),
+        (
+            "refs/pull/${{ join(github.*.*.number[0], '') }}/head".to_string(),
+            false,
+            false,
+        ),
         (
             "refs/pull/${{ join(github.*.number, '') }}/head".to_string(),
             true,
