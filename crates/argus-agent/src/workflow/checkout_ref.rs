@@ -278,18 +278,13 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             let context = &source[1..];
                             if matches!(context, "github" | "github.event") && property == Some("*")
                             {
-                                // Preserve the event or PR child in the filtered array.
-                                // Later selectors address children, not array positions.
-                                let child = if context == "github" {
-                                    "github.event"
+                                // Later selectors address each live event child.
+                                let children = if context == "github" {
+                                    "\x04[\"\\u0003github.event\"]"
                                 } else {
-                                    "github.event.pull_request"
+                                    "\x04[\"\\u0003github.event.pull_request\",\"\\u0003github.event.workflow_run\"]"
                                 };
-                                selected.push((
-                                    format!("\x04[\"\\u0003{child}\"]"),
-                                    Some(true),
-                                    false,
-                                ));
+                                selected.push((children.to_string(), Some(true), false));
                                 continue;
                             }
                             let path = if context.ends_with(".pull_requests") {
@@ -353,7 +348,23 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                             results.push(serde_json::Value::String(
                                                 "\x03github.event.pull_request".to_string(),
                                             ));
+                                            results.push(serde_json::Value::String(
+                                                "\x03github.event.workflow_run".to_string(),
+                                            ));
+                                        } else if context
+                                            == "\x03github.event.workflow_run.pull_requests"
+                                        {
+                                            results.push(serde_json::Value::String(format!(
+                                                "{context}.*"
+                                            )));
                                         }
+                                        continue;
+                                    }
+                                    // workflow_run has no PR number of its own;
+                                    // filtered projections omit absent properties.
+                                    if context == "\x03github.event.workflow_run"
+                                        && key.eq_ignore_ascii_case("number")
+                                    {
                                         continue;
                                     }
                                     // Preserve intermediate context paths through
@@ -564,7 +575,29 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
             Work::Json { parse } => {
                 let arguments = values.pop().expect("JSON argument is rendered");
                 let mut decoded_values = Vec::new();
+                let mut bytes = Some(0usize);
                 for (value, _, is_string) in arguments {
+                    if !parse {
+                        // Count the exact JSON string escapes before serialization,
+                        // including outputs later discarded by a logical operator.
+                        let length = if value.contains('\x01') || value.contains('\x03') {
+                            Some(1)
+                        } else if is_string {
+                            value.bytes().try_fold(2usize, |length, byte| {
+                                length.checked_add(match byte {
+                                    b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+                                    0..=0x1f => 6,
+                                    _ => 1,
+                                })
+                            })
+                        } else if value.is_empty() {
+                            Some(4)
+                        } else {
+                            Some(value.strip_prefix('\x04').unwrap_or(&value).len())
+                        };
+                        bytes = bytes.and_then(|bytes| bytes.checked_add(length?));
+                        ensure_ref_bytes(bytes)?;
+                    }
                     if value.contains('\x01') || value.contains('\x03') {
                         decoded_values.push(("\x01".to_string(), None, false));
                     } else if !parse {
@@ -1097,4 +1130,81 @@ fn strip_whole_function_token<'a>(value: &'a str, token: &str) -> Option<&'a str
         return None;
     }
     Some(after)
+}
+
+#[cfg(test)]
+mod json_budget_tests {
+    use super::*;
+
+    #[test]
+    fn number_json_serialization_preserves_exact_allowed_values() {
+        for value in [
+            "",
+            "\\\"/",
+            "\u{0008}\t\n\u{000c}\r",
+            "\u{0007}\u{001f}",
+            "é😀\u{0085}\u{feff}",
+            "single'quote",
+        ] {
+            let expression = format!("toJSON('{}')", value.replace('\'', "''"));
+            assert_eq!(
+                symbolic_ref_expression(&expression).unwrap(),
+                vec![serde_json::to_string(value).unwrap()]
+            );
+        }
+        for extra in [0, 1, 2] {
+            let value = format!(
+                "{}{}",
+                "\\".repeat((MAX_REF_BYTES - 4) / 2),
+                "a".repeat(extra + 1)
+            );
+            let expected = serde_json::to_string(&value).unwrap();
+            assert_eq!(expected.len(), MAX_REF_BYTES - 1 + extra);
+            let result = symbolic_ref_expression(&format!("toJSON('{value}')"));
+            if extra < 2 {
+                assert_eq!(result.unwrap(), vec![expected]);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "JSON must fail before oversized serialization"
+                );
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            }
+        }
+    }
+
+    #[test]
+    fn number_json_serialization_bounds_the_cumulative_alternatives() {
+        let first = "\\".repeat((MAX_REF_BYTES - 4) / 4);
+        for suffix in ["a", "ab", "abc"] {
+            let second = format!("{}{suffix}", &first[..first.len() - 1]);
+            let expected = [
+                serde_json::to_string(&first).unwrap(),
+                serde_json::to_string(&second).unwrap(),
+            ];
+            assert_eq!(
+                expected.iter().map(String::len).sum::<usize>(),
+                MAX_REF_BYTES - 2 + suffix.len()
+            );
+            let expression = format!("toJSON(inputs.x && '{first}' || '{second}')");
+            let result = symbolic_ref_expression(&expression);
+            if suffix.len() < 3 {
+                let mut expected = expected.to_vec();
+                expected.sort_unstable();
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "JSON must fail before oversized serialization"
+                );
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            }
+        }
+    }
 }

@@ -1640,3 +1640,69 @@ fn access_chain_number_literals_and_siblings_preserve_the_boundary() {
         }
     }
 }
+
+#[test]
+fn workflow_run_number_event_wildcards_preserve_children() {
+    for expression in [
+        "join(github.event.*.pull_requests.*.number, '')",
+        "join(github.*.*.pull_requests.*.number, '')",
+        "join(github.event.*['pull_requests'].*['number'], '')",
+        "join(fromJSON(toJSON(github.event)).*.pull_requests.*.number, '')",
+        "join(github.event.*.pull_requests.*.number, '-')",
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        assert_untrusted_checkout_blocks(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            &revision,
+        )));
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "pull_request",
+            &revision,
+        )));
+    }
+    for expression in [
+        "join(github.event.*.pull_requests.*.missing, '')",
+        "join(github.event.*.wrong.*.number, '')",
+        "join(github.event.*.pull_requests.*.numbered, '')",
+        "join(github.event.*.pull_requests.*.title, '')",
+        "join(fromJSON('[{\"number\":42}]').*.number, '')",
+        "'github.event.*.pull_requests.*.number'",
+    ] {
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        assert_no_untrusted_checkout(&findings_for(&pinned_checkout_workflow(
+            "workflow_run",
+            &revision,
+        )));
+    }
+}
+
+#[test]
+fn number_json_growth_is_bounded_before_discarding_the_value() {
+    for levels in [3, 4, 5] {
+        let expression = format!(
+            "{}'{}'{} && github.event.number",
+            "toJSON(".repeat(levels),
+            "\\".repeat(64 * 1024),
+            ")".repeat(levels)
+        );
+        let revision = format!("refs/pull/${{{{ {expression} }}}}/head");
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            let result = try_scan(&[SurfaceFile {
+                rel: ".github/workflows/triage.yml".into(),
+                content: pinned_checkout_workflow(trigger, &revision),
+                kind: SurfaceKind::Workflow,
+            }]);
+            if trigger == "pull_request" {
+                assert_no_untrusted_checkout(&result.expect("ordinary trigger"));
+            } else if levels == 3 {
+                assert_untrusted_checkout_blocks(&result.expect("within symbolic byte limit"));
+            } else {
+                assert!(format!(
+                    "{:#}",
+                    result.expect_err("JSON exceeds byte budget before logical result")
+                )
+                .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            }
+        }
+    }
+}

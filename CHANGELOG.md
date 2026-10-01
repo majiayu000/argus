@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decimal shifts, joined parsed JSON arrays, parsed array/object element access
   and wildcard projections, including the live PR event object, computed
   event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
-  Repeated JSON serialization
-  keeps string quotes and does not falsely match a pull-number ref.
+  Event wildcards retain workflow-run PR children through `pull_requests.*.number`.
+  Repeated JSON serialization checks the existing cumulative byte budget before
+  escaping strings, including intermediate values later discarded by logical operators.
+  Serialization keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
   Constant negation and hexadecimal literals preserve known truthiness.
