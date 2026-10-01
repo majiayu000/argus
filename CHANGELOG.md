@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
+  `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
+  numbers, including `format(...)` templates, equivalent JSON numerals with
+  decimal shifts, joined parsed JSON arrays, parsed array/object element access
+  and wildcard projections, including the live PR event object, computed
+  event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
+  Repeated JSON serialization
+  keeps string quotes and does not falsely match a pull-number ref.
+  Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
+  Computed workflow-run and parsed-array indexes use primitive numeric coercion.
+  Constant negation and hexadecimal literals preserve known truthiness.
+  Root GitHub wildcard projections, including `github.*.*.number` and named
+  `github.*.pull_request.number`, retain event-number taint. Join products check cumulative bytes before cloning
+  strings or expanding array separators. Expressions over
+  256 combined levels of parentheses, brackets and unary negation fail with an
+  explicit operational error before evaluation.
+  Symbolic products exceeding
+  1,024 alternatives or 1 MiB of cumulative string bytes fail with an
+  explicit operational error before allocation, including cloned format arguments.
+  Format output exceeding the expression-length bound also fails with an operational error, including
+  intermediate templates that would shrink in a later format call.
+  These checkouts now block;
+  trusted base refs, ordinary numbered branch names, and quoted context text
+  remain allowed.
 - Close the AGT-06 context-injection bypass where `actions/github-script`
   puts executable JavaScript in `with.script`. Workflow scans now inspect
   that input the same way as inline `run:` scripts, including env-indirection
