@@ -1237,3 +1237,72 @@ fn checkout_ref_bracket_wildcard_selectors_match_dot_projections() -> Result<()>
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_concrete_access_bytes_fail_before_discarding() -> Result<()> {
+    let keys = (0..64)
+        .map(|bits| {
+            let key = (0..6)
+                .map(|bit| if bits & (1 << bit) == 0 { 'x' } else { 'X' })
+                .collect::<String>();
+            format!("'{key}'")
+        })
+        .collect::<Vec<_>>();
+    let keys = keys[..63]
+        .iter()
+        .rev()
+        .enumerate()
+        .fold(keys[63].clone(), |rest, (index, key)| {
+            format!("github.condition{index} && {key} || ({rest})")
+        });
+    for delta in [-1isize, 0, 1] {
+        let value = "v".repeat((16384isize + delta) as usize);
+        let access = format!("fromJSON('{{\"xxxxxx\":\"{value}\"}}')[{keys}]");
+        for expression in [access.clone(), format!("!({access})")] {
+            for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("on: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: ${{{{ {expression} }}}}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                if delta > 0 && trigger != "pull_request" {
+                    assert_eq!(output.status.code(), Some(2));
+                    assert!(output.stdout.is_empty());
+                    assert!(String::from_utf8(output.stderr)?
+                        .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+                } else {
+                    assert_eq!(output.status.code(), Some(0));
+                    assert!(output.stderr.is_empty());
+                    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                    assert_eq!(report["decision"], "allow");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checkout_ref_many_empty_format_arguments_remain_allowed() -> Result<()> {
+    let arguments = std::iter::repeat_n("''", 32768)
+        .collect::<Vec<_>>()
+        .join(",");
+    let root = tempfile::tempdir()?;
+    let workflows = root.path().join(".github/workflows");
+    std::fs::create_dir_all(&workflows)?;
+    std::fs::write(workflows.join("test.yml"), format!("on: pull_request_target\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: ${{{{ format({arguments}) }}}}\n"))?;
+    let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+        .args(["agent", "scan"])
+        .arg(root.path())
+        .args(["--format", "json"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["decision"], "allow");
+    Ok(())
+}

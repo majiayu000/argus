@@ -359,6 +359,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                             parsed.into_iter().collect()
                         };
                         let mut results = Vec::new();
+                        let mut projected_bytes = Some(0usize);
                         for input in inputs {
                             match input {
                                 serde_json::Value::String(context)
@@ -393,13 +394,15 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                     // Preserve intermediate context paths through
                                     // named projections. Only the existing number
                                     // atom matcher turns a selected path into taint.
-                                    bytes = bytes.and_then(|bytes| {
-                                        bytes
+                                    projected_bytes = projected_bytes.and_then(|length| {
+                                        length
                                             .checked_add(context.len())?
                                             .checked_add(1)?
                                             .checked_add(key.len())
                                     });
-                                    ensure_ref_bytes(bytes)?;
+                                    ensure_ref_bytes(
+                                        bytes.and_then(|bytes| bytes.checked_add(projected_bytes?)),
+                                    )?;
                                     let path =
                                         format!("{}.{}", &context[1..], key.to_ascii_lowercase());
                                     results.push(serde_json::Value::String(
@@ -434,7 +437,7 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                 _ => {}
                             }
                         }
-                        selected.push(if filtered || project {
+                        let selection = if filtered || project {
                             let (array, truthy, _) =
                                 render_ref_json_value(serde_json::Value::Array(results));
                             (format!("\x04{array}"), truthy, false)
@@ -446,7 +449,12 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                                     ("\x01".to_string(), None, false)
                                 }
                             })
-                        });
+                        };
+                        // Charge each concrete output before retaining it, even
+                        // when case-insensitive keys later deduplicate the copies.
+                        bytes = bytes.and_then(|bytes| bytes.checked_add(selection.0.len()));
+                        ensure_ref_bytes(bytes)?;
+                        selected.push(selection);
                     }
                 }
                 values.push(selected);
@@ -505,40 +513,44 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
             }
             Work::Format { count } => {
                 let arguments = values.split_off(values.len() - count);
-                let mut combinations = vec![Vec::new()];
+                let mut combinations = vec![(Vec::new(), 0usize)];
                 for alternatives in arguments {
                     ensure_ref_alternatives(combinations.len().saturating_mul(alternatives.len()))?;
-                    // Argument products clone earlier strings too, including
-                    // templates and arguments unused by the final format.
+                    // Keep cached lengths so unused empty arguments do not
+                    // repeatedly scan or clone the entire argument prefix.
                     ensure_ref_bytes(combinations.iter().try_fold(
                         0usize,
-                        |bytes, arguments: &Vec<String>| {
-                            let length = arguments.iter().try_fold(0usize, |length, value| {
-                                length.checked_add(value.len())
-                            })?;
+                        |bytes, (_, length)| {
                             alternatives.iter().try_fold(bytes, |bytes, (value, _, _)| {
-                                bytes.checked_add(length)?.checked_add(value.len())
+                                bytes.checked_add(*length)?.checked_add(value.len())
                             })
                         },
                     ))?;
-                    combinations = combinations
-                        .into_iter()
-                        .flat_map(|arguments: Vec<String>| {
-                            alternatives.iter().map(move |(value, _, _)| {
-                                let mut arguments = arguments.clone();
-                                arguments.push(value.clone());
-                                arguments
-                            })
-                        })
-                        .collect();
-                    combinations.sort_unstable();
-                    combinations.dedup();
+                    let mut expanded = Vec::new();
+                    if let Some((last, earlier)) = alternatives.split_last() {
+                        for (mut arguments, length) in combinations {
+                            for (value, _, _) in earlier {
+                                let mut copied = arguments.clone();
+                                copied.push(value.clone());
+                                expanded.push((copied, length + value.len()));
+                            }
+                            // Only additional alternatives need a prefix copy.
+                            arguments.push(last.0.clone());
+                            expanded.push((arguments, length + last.0.len()));
+                        }
+                    }
+                    // Appending one value preserves unique prefixes and order.
+                    if alternatives.len() > 1 {
+                        expanded.sort_unstable();
+                        expanded.dedup();
+                    }
+                    combinations = expanded;
                 }
                 let mut bytes = 0usize;
                 values.push(
                     combinations
                         .into_iter()
-                        .map(|arguments| {
+                        .map(|(arguments, _)| {
                             let (template, arguments) = arguments
                                 .split_first()
                                 .expect("format argument splitting includes a template slot");

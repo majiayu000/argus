@@ -1978,3 +1978,48 @@ fn number_bracket_wildcard_selectors_match_dot_projections() {
         }
     }
 }
+
+#[test]
+fn number_concrete_access_results_obey_the_byte_budget() {
+    let keys = (0..64)
+        .map(|bits| {
+            let key = (0..6)
+                .map(|bit| if bits & (1 << bit) == 0 { 'x' } else { 'X' })
+                .collect::<String>();
+            format!("'{key}'")
+        })
+        .collect::<Vec<_>>();
+    let keys = keys[..63]
+        .iter()
+        .rev()
+        .enumerate()
+        .fold(keys[63].clone(), |rest, (index, key)| {
+            format!("github.condition{index} && {key} || ({rest})")
+        });
+    for delta in [-1isize, 0, 1] {
+        let value = "v".repeat((16384isize + delta) as usize);
+        let access = format!("fromJSON('{{\"xxxxxx\":\"{value}\"}}')[{keys}]");
+        for expression in [access.clone(), format!("!({access})")] {
+            let result = is_untrusted_ref_expression(&format!("${{{{ {expression} }}}}"));
+            if delta > 0 {
+                assert!(
+                    result.is_err(),
+                    "concrete result product must exceed existing byte limit"
+                );
+                assert!(format!("{:#}", result.unwrap_err())
+                    .contains("checkout ref exceeds 1048576 bytes of symbolic output"));
+            } else {
+                assert!(!result.expect("boundary remains supported"));
+            }
+        }
+    }
+}
+
+#[test]
+fn number_empty_format_arguments_do_not_clone_quadratically() {
+    let arguments = std::iter::repeat_n("''", 32768)
+        .collect::<Vec<_>>()
+        .join(",");
+    let revision = format!("${{{{ format({arguments}) }}}}");
+    assert!(!is_untrusted_ref_expression(&revision).expect("unused empty args render empty"));
+}

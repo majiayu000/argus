@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Serialized live contexts retain their identity through formatting and JSON
   parsing. Access-path products check cumulative bytes before appending a
   property, even when an enclosing operator later discards the result.
+  Concrete access results also count toward that budget before deduplication.
+  Single-valued format arguments extend existing products without copying
+  or rescanning growing prefixes, including empty unused arguments.
   Serialization keeps string quotes and does not falsely match a pull-number ref.
   Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
   Computed workflow-run and parsed-array indexes use primitive numeric coercion.
