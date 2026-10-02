@@ -1170,3 +1170,70 @@ fn checkout_ref_serialized_context_keeps_existing_length_error() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn checkout_ref_bracket_wildcard_selectors_match_dot_projections() -> Result<()> {
+    for (expression, tainted) in [
+        ("join(github.event[*].number, '')", true),
+        ("join(GitHub[ * ].number, '')", true),
+        ("join(github[*][*].number, '')", true),
+        (
+            "join(github.event.workflow_run.pull_requests[*].number, '')",
+            true,
+        ),
+        ("join(github.event[*].pull_requests[*].number, '')", true),
+        ("join(fromJSON(toJSON(github.event))[*].number, '')", true),
+        (
+            "join(fromJSON(format('[{{\"n\":{0}}}]', github.event.number))[*].n, '')",
+            true,
+        ),
+        ("join(github.event['*'].number, '')", false),
+        ("join(github.event[format('{0}', '*')].number, '')", false),
+        ("join(github.event[*].missing, '')", false),
+        (
+            "join(github.event.workflow_run.pull_requests['*'].number, '')",
+            false,
+        ),
+        ("join(fromJSON('[{\"number\":42}]')[*].number, '')", false),
+        (
+            "join(fromJSON('{\"*\":{\"number\":42}}')['*'].number, '')",
+            false,
+        ),
+        ("'github.event[*].number'", false),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                std::fs::write(workflows.join("test.yml"), format!("name: Bracket wildcard\non: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          ref: refs/pull/${{{{ {expression} }}}}/{suffix}\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(blocked)),
+                    "{trigger}: {expression}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}

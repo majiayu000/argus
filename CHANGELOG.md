@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and wildcard projections, including the live PR event object, computed
   event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
   Event wildcards retain workflow-run PR children through `pull_requests.*.number`.
+  Bare bracket wildcards (`[*]`) use the same projections as `.*`; quoted
+  or computed string `'*'` selectors remain ordinary property lookups.
   Repeated JSON serialization checks the existing cumulative byte budget before
   escaping strings, including intermediate values later discarded by logical operators.
   Serialized live contexts retain their identity through formatting and JSON

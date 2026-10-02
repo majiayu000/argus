@@ -765,6 +765,9 @@ fn symbolic_ref_expression(expression: &str) -> Result<Vec<String>> {
                     continue;
                 }
                 if let Some((source, key, computed)) = split_ref_access(expression) {
+                    // A bare bracket star is the same projection as a dot star.
+                    // Quoted/computed '*' keys remain ordinary property lookups.
+                    let computed = computed && key != "*";
                     work.push(Work::Access {
                         property: (!computed).then_some(key),
                     });

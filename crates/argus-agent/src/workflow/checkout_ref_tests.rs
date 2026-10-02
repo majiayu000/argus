@@ -1934,3 +1934,47 @@ fn number_serialized_context_format_keeps_existing_length_error() {
         }
     }
 }
+
+#[test]
+fn number_bracket_wildcard_selectors_match_dot_projections() {
+    for (expression, tainted) in [
+        ("join(github.event[*].number, '')", true),
+        ("join(GitHub[ * ].number, '')", true),
+        ("join(github[*][*].number, '')", true),
+        (
+            "join(github.event.workflow_run.pull_requests[*].number, '')",
+            true,
+        ),
+        ("join(github.event[*].pull_requests[*].number, '')", true),
+        ("join(fromJSON(toJSON(github.event))[*].number, '')", true),
+        (
+            "join(fromJSON(format('[{{\"n\":{0}}}]', github.event.number))[*].n, '')",
+            true,
+        ),
+        ("join(github.event['*'].number, '')", false),
+        ("join(github.event[format('{0}', '*')].number, '')", false),
+        ("join(github.event[*].missing, '')", false),
+        (
+            "join(github.event.workflow_run.pull_requests['*'].number, '')",
+            false,
+        ),
+        ("join(fromJSON('[{\"number\":42}]')[*].number, '')", false),
+        (
+            "join(fromJSON('{\"*\":{\"number\":42}}')['*'].number, '')",
+            false,
+        ),
+        ("'github.event[*].number'", false),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for suffix in ["head", "merge"] {
+                let revision = format!("refs/pull/${{{{ {expression} }}}}/{suffix}");
+                let findings = findings_for(&pinned_checkout_workflow(trigger, &revision));
+                if tainted && trigger != "pull_request" {
+                    assert_untrusted_checkout_blocks(&findings);
+                } else {
+                    assert_no_untrusted_checkout(&findings);
+                }
+            }
+        }
+    }
+}
