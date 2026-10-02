@@ -517,6 +517,130 @@ jobs:
         );
     }
 
+    const SERIALIZED_UNTRUSTED_CONTEXTS: &[&str] = &[
+        "fromJSON(toJSON(github.event.issue)).title",
+        "toJSON(github.event.issue)",
+        "toJSON(github.event.pull_request)",
+        "fromJSON(toJSON(github.event.comment)).body",
+        "fromJSON(toJSON(github.event.head_commit)).message",
+        "toJSON(github.event.commits)",
+        "fromJSON(toJSON(github.event['issue'])).title",
+        "toJSON(github.event.discussion)",
+        "toJSON(github.event.review)",
+        "toJSON(github.event.review_comment)",
+        "toJSON(github.event.blocked_user)",
+        "fromJSON(toJSON(github.event.head_commit.author)).email",
+        "fromJSON(toJSON(github.event.pull_request.head)).ref",
+        "fromJSON(toJSON(github.event.pull_request.head.repo)).default_branch",
+        "fromJSON(github.event.issue).body",
+        "fromJSON(toJSON(github)).event.issue.title",
+        "fromJSON(toJSON(github.event)).issue.title",
+        "fromJSON ( toJSON ( GitHub.Event.Comment ) ).body",
+    ];
+
+    fn serialized_context_workflow(expression: &str, github_script: bool) -> String {
+        if github_script {
+            let script = format!(r#"console.log("${{{{ {expression} }}}}")"#);
+            return github_script_workflow(&script).replace(
+                "actions/github-script@v7",
+                "actions/github-script@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            );
+        }
+        let script = format!(r#"echo "${{{{ {expression} }}}}""#);
+        format!(
+            r#"
+on: issues
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          {script}
+        shell: bash
+"#
+        )
+    }
+
+    #[test]
+    fn serialized_contexts_block_in_both_inline_script_sinks() {
+        for expression in SERIALIZED_UNTRUSTED_CONTEXTS {
+            for github_script in [false, true] {
+                let workflow = serialized_context_workflow(expression, github_script);
+                assert_context_injection_blocks(&findings_for(&workflow), expression);
+            }
+        }
+    }
+
+    #[test]
+    fn serialized_contexts_block_through_env_and_composite_inputs() {
+        for expression in SERIALIZED_UNTRUSTED_CONTEXTS {
+            for github_script in [false, true] {
+                let workflow = serialized_context_workflow("env.VALUE", github_script).replace(
+                    "    steps:",
+                    &format!("    env:\n      VALUE: ${{{{ {expression} }}}}\n    steps:"),
+                );
+                assert_context_injection_blocks(&findings_for(&workflow), expression);
+
+                let composite = serialized_context_workflow("inputs.value", github_script);
+                let steps = composite.split_once("    steps:").unwrap().1;
+                let files = [
+                    SurfaceFile {
+                        rel: ".github/workflows/test.yml".to_string(),
+                        content: format!(
+                            r#"
+on: issues
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/comment
+        with:
+          value: ${{{{ {expression} }}}}
+"#
+                        ),
+                        kind: SurfaceKind::Workflow,
+                    },
+                    SurfaceFile {
+                        rel: ".github/actions/comment/action.yml".to_string(),
+                        content: format!(
+                            "name: comment\ninputs:\n  value:\n    required: true\nruns:\n  using: composite\n  steps:{steps}"
+                        ),
+                        kind: SurfaceKind::ActionMetadata,
+                    },
+                ];
+                let mut findings = Vec::new();
+                run(&files, &mut findings).expect("scan composite input fixture");
+                assert_context_injection_blocks(&findings, expression);
+            }
+        }
+    }
+
+    #[test]
+    fn serialized_trusted_fields_and_literals_are_allowed() {
+        for expression in [
+            "toJSON(github.event.issue.number)",
+            "toJSON(github.event.pull_request.id)",
+            "toJSON(github.event.head_commit.id)",
+            "toJSON(github.event.repository)",
+            "toJSON(github.event.issues)",
+            "fromJSON(toJSON(github.event.repository)).name",
+            "'toJSON(github.event.issue)'",
+            r#"fromJSON('{"body":"toJSON(github.event.issue)"}').body"#,
+        ] {
+            for github_script in [false, true] {
+                let findings =
+                    findings_for(&serialized_context_workflow(expression, github_script));
+                assert!(
+                    findings
+                        .iter()
+                        .all(|finding| finding.rule_id != RULE_CONTEXT_INJECTION),
+                    "unexpected context injection for {expression}: {findings:?}"
+                );
+                assert_eq!(crate::decision::derive(&findings), Decision::Allow);
+            }
+        }
+    }
+
     #[test]
     fn github_script_with_script_context_injection_blocks() {
         let scripts = [

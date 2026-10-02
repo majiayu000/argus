@@ -1,0 +1,32 @@
+name: Serialized comment data
+on: issues
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    env:
+      COMMENT: ${{ fromJSON(toJSON(github.event.comment)).body }}
+    steps:
+      - run: |
+          echo "${{ fromJSON(toJSON(github.event.issue)).title }}"
+          echo "${{ toJSON(github.event.issue) }}"
+          echo "${{ toJSON(github.event.pull_request) }}"
+          echo "${{ fromJSON(toJSON(github.event.comment)).body }}"
+          echo "${{ fromJSON(toJSON(github.event.head_commit)).message }}"
+          echo "${{ toJSON(github.event.commits) }}"
+          echo "${{ fromJSON(toJSON(github.event['issue'])).title }}"
+          echo "${{ env.COMMENT }}"
+      - uses: actions/github-script@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        with:
+          script: |
+            console.log("${{ fromJSON(toJSON(github.event.issue)).title }}")
+            console.log("${{ toJSON(github.event.issue) }}")
+            console.log("${{ toJSON(github.event.pull_request) }}")
+            console.log("${{ fromJSON(toJSON(github.event.comment)).body }}")
+            console.log("${{ fromJSON(toJSON(github.event.head_commit)).message }}")
+            console.log("${{ toJSON(github.event.commits) }}")
+            console.log("${{ fromJSON(toJSON(github.event['issue'])).title }}")
+            console.log("${{ env.COMMENT }}")
+      - uses: ./.github/actions/comment
+        with:
+          value: ${{ fromJSON(toJSON(github.event.issue)).title }}
