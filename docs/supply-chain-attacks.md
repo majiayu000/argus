@@ -608,8 +608,11 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    with an operational error (CLI exit 2) instead of an incomplete allow.
    Format output exceeding the expression-length bound also produces this
    operational error, even if an outer format call would shrink the result.
-   A reviewed full SHA removes tag retargeting but does not prove the upstream
-   Action code is benign; exact-SHA intelligence remains a feed problem.
+   Script injection includes nested JSON serialization of untrusted event
+   objects in `run:` and `actions/github-script`, including env and composite
+   input aliases. A reviewed full SHA removes tag retargeting but does not
+   prove the upstream Action code is benign; exact-SHA intelligence remains
+   a feed problem.
 
 2. **Advanced CI trust flows.** AGT-06 blocks the highest-confidence
    pwn-request shapes, but cache topology, permission necessity, environment
