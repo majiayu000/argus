@@ -1,0 +1,99 @@
+name: Joined parsed JSON array controls
+on: pull_request_target
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON(format('["refs","pull","{0}","head"]', github.event.number)), '-') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON('["refs/pull/github.event.number/head"]'), '') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ join(fromJSON(format('["refs/pull/{0}/head"]', 42, github.event.number)), '') }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ toJSON(join(fromJSON(format('["refs/pull/{0}/head"]', github.event.number)), '')) }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[0] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"number":42,"other":{0}}}', github.event.number)).number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: ${{ toJSON(fromJSON(format('["refs/pull/{0}/head"]', github.event.number))[0]) }}
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ (github.event.action != 'opened' && '42' || '43') || github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ 'github.event'[format('num{0}', 'ber')] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ !false && '42' || github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.workflow_run.pull_requests[format('{0}', 'missing')].number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('"{0}.0"', github.event.number)) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('[42,{0}]', github.event.number))[0.5] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(fromJSON(format('[{0}]', github.event.number)).*[0], '') }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"*":42,"n":{0}}}', github.event.number))['*'] }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}0e-2', github.event.number)) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('"{0}0e-1"', github.event.number)) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(github.event.*.number[0], '') }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(github.event['*'].number, '') }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ toJSON(join(github.event.*.number, '')) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"padding":["number"],"selected":false}}', github.event.number)).selected && github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(fromJSON('{"event":{"number":42}}')))).event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON('github.event.number'))) }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github.event))).workflow_run.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(fromJSON(format('{0}', toJSON(github.event.*))).*.numbered, '') }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"selected":42}}', toJSON(github.event))).selected }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"selected":"github.event.number"}}', toJSON(github.event))).selected }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github))) && '42' }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{0}', toJSON(github))) || github.event.number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ fromJSON(format('{{"text":"don''t [\"number\"]","number":42}}', toJSON(github.event))).number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(github.event['*'].number, '') }}/head

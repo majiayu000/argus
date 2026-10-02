@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
+  `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
+  numbers, including `format(...)` templates, equivalent JSON numerals with
+  decimal shifts, joined parsed JSON arrays, parsed array/object element access
+  and wildcard projections, including the live PR event object, computed
+  event-number selectors, unknown logical branch outcomes, and mixed input/env bindings.
+  Event wildcards retain workflow-run PR children through `pull_requests.*.number`.
+  Bare bracket wildcards (`[*]`) use the same projections as `.*`; quoted
+  or computed string `'*'` selectors remain ordinary property lookups.
+  Repeated JSON serialization checks the existing cumulative byte budget before
+  escaping strings, including intermediate values later discarded by logical operators.
+  Serialized live contexts retain their identity through formatting and JSON
+  parsing. Access-path products check cumulative bytes before appending a
+  property, even when an enclosing operator later discards the result.
+  Concrete access results also count toward that budget before deduplication.
+  Single-valued format arguments extend existing products without copying
+  or rescanning growing prefixes, including empty unused arguments.
+  Serialization keeps string quotes and does not falsely match a pull-number ref.
+  Rendered refs use checkout-compatible trimming, preserving YAML-decoded NEL.
+  Computed workflow-run and parsed-array indexes use primitive numeric coercion.
+  Constant negation and hexadecimal literals preserve known truthiness.
+  Bracket-like content in quoted JSON templates stays intact, including
+  doubled-quote escapes; real bracket property access is still normalized.
+  Missing parsed object properties and array indexes are known null/falsy,
+  so logical operands cannot spuriously select a pull-request number.
+  Root GitHub wildcard projections, including `github.*.*.number` and named
+  `github.*.pull_request.number`, retain event-number taint. Join products check cumulative bytes before cloning
+  strings or expanding array separators. Expressions over
+  256 combined levels of parentheses, brackets, unary negation and access
+  selectors fail with an explicit operational error before evaluation. Numeric
+  literals and recognized event-number atoms retain their existing boundary.
+  Symbolic products exceeding
+  1,024 alternatives or 1 MiB of cumulative string bytes fail with an
+  explicit operational error before allocation, including cloned format arguments.
+  Format output exceeding the expression-length bound also fails with an operational error, including
+  intermediate templates that would shrink in a later format call.
+  These checkouts now block;
+  trusted base refs, ordinary numbered branch names, and quoted context text
+  remain allowed.
 - Close the AGT-06 context-injection bypass where `actions/github-script`
   puts executable JavaScript in `with.script`. Workflow scans now inspect
   that input the same way as inline `run:` scripts, including env-indirection

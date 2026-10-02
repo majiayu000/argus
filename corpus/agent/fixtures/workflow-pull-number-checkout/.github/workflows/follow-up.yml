@@ -1,0 +1,18 @@
+name: Follow up pull number
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.workflow_run.pull_requests[0].number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ github.event.workflow_run.pull_requests[fromJSON('0')].number }}/head
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: refs/pull/${{ join(github.event.workflow_run.pull_requests.*.number, '') }}/head

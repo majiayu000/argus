@@ -577,9 +577,39 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
 
 1. **Compromised immutable GitHub Action commits.** AGT-06 now scans workflow
    YAML for mutable dependencies, direct untrusted-context script injection,
-   and unsafe privileged-trigger checkout. A reviewed full SHA removes tag
-   retargeting but does not prove the upstream Action code is benign; exact-SHA
-   intelligence remains a feed problem.
+   and unsafe privileged-trigger checkout, including `refs/pull/<number>/head`
+   and `/merge` built from event PR numbers with interpolation or `format`,
+   including equivalent JSON numeric representations with cancelling decimal
+   shifts, array/object access and wildcard projections with `fromJSON`,
+   and root/event-object number projections with `github.*.number` and
+   `github.event.*.number`, consecutive `github.*.*.number`, and named
+   `github.*.pull_request.number` projections,
+   workflow-run PR children through `github.event.*.pull_requests.*.number`,
+   computed event-number property selectors, and all possible
+   outcomes of unknown logical conditions. Absent parsed object properties
+   and array indexes return known null/falsy values; filtered projections
+   remain arrays, and unresolved sources or selectors remain conservative.
+   Bracket normalization preserves expression string literals, including
+   JSON arrays in format templates and doubled-quote escapes.
+   Live context identity survives serialized JSON passed through `format`,
+   including bracket and filtered projections. JSON serialization
+   preserves string quotes, so serializing a number twice does not match
+   these pull refs. Rendered refs are trimmed the same way as checkout inputs,
+   preserving YAML-decoded NEL at either edge.
+   Computed workflow-run and parsed-array indexes apply numeric coercion before
+   number taint; unary negation preserves known truthiness. Symbolic products
+   are checked for a maximum combined depth of 256 for parentheses, brackets,
+   unary negation and access selectors before evaluation. Numeric literals and
+   recognized event-number atoms do not require selector evaluation. Products
+   are limited to 1,024 alternatives and 1 MiB of cumulative string bytes
+   before allocation, including join string clones, array separator expansion,
+   cloned format arguments, access-path products, JSON string escaping and trailing literals;
+   exceeding either boundary fails the scan
+   with an operational error (CLI exit 2) instead of an incomplete allow.
+   Format output exceeding the expression-length bound also produces this
+   operational error, even if an outer format call would shrink the result.
+   A reviewed full SHA removes tag retargeting but does not prove the upstream
+   Action code is benign; exact-SHA intelligence remains a feed problem.
 
 2. **Advanced CI trust flows.** AGT-06 blocks the highest-confidence
    pwn-request shapes, but cache topology, permission necessity, environment
