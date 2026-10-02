@@ -172,11 +172,11 @@ fn agent_fixture_eval_reports_scoped_confusion_matrix() -> Result<()> {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["dataset_type"], "synthetic-fixtures");
-    assert_eq!(report["sample_count"], 43);
-    assert_eq!(report["true_positives"], 33);
+    assert_eq!(report["sample_count"], 45);
+    assert_eq!(report["true_positives"], 34);
     assert_eq!(report["false_positives"], 0);
     assert_eq!(report["false_negatives"], 0);
-    assert_eq!(report["true_negatives"], 10);
+    assert_eq!(report["true_negatives"], 11);
     assert_eq!(report["precision"], 1.0);
     assert_eq!(report["recall"], 1.0);
     Ok(())
@@ -1559,5 +1559,123 @@ fn reusable_checkout_errors_keep_empty_stdout() -> Result<()> {
             assert!(String::from_utf8(output.stderr)?.contains("checkout ref format exceeds"));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn shell_expression_direct_and_env_paths_block_and_keep_controls() -> Result<()> {
+    for trigger in ["issues", "pull_request_target", "pull_request"] {
+        for (expression, tainted) in [
+            ("github.event.issue.title", true),
+            ("GitHub['Event']['Issue']['Body']", true),
+            ("fromJSON(toJSON(github.event)).issue.title", true),
+            ("toJSON(toJSON(github.event.issue))", true),
+            ("github.sha", false),
+            ("'github.event.issue.title'", false),
+            ("'bash'", false),
+        ] {
+            for indirect in [false, true] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                let value = format!("${{{{ {expression} }}}}");
+                let env = if indirect {
+                    format!("    env:\n      TARGET: {value}\n")
+                } else {
+                    String::new()
+                };
+                let value = if indirect {
+                    "${{ env.TARGET }}"
+                } else {
+                    &value
+                };
+                std::fs::write(workflows.join("test.yml"), format!("on: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n{env}    steps:\n      - shell: bash -c \"{value}\" {{0}}\n        run: 'true'\n"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(tainted)),
+                    "{expression} indirect={indirect}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if tainted { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-context-injection"
+                                && finding["severity"] == "critical"
+                        ),
+                    tainted
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_expression_composite_inputs_match_run_resolution() -> Result<()> {
+    for (command, expected) in [
+        ("bash -c \"${{ github.event.issue.title }}\" {0}", 1),
+        ("bash {0}", 0),
+        ("bash -c \"${{ github.event.issue.title\" {0}", 1),
+    ] {
+        let root = tempfile::tempdir()?;
+        let workflows = root.path().join(".github/workflows");
+        let action = root.path().join(".github/actions/shell");
+        std::fs::create_dir_all(&workflows)?;
+        std::fs::create_dir_all(&action)?;
+        std::fs::write(workflows.join("test.yml"), format!("on: issues\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/shell\n        with:\n          command: {}\n", serde_json::to_string(command)?))?;
+        std::fs::write(action.join("action.yml"), "name: shell\ninputs:\n  command:\n    required: true\nruns:\n  using: composite\n  steps:\n    - shell: ${{ inputs.command }}\n      run: 'true'\n")?;
+        let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+            .args(["agent", "scan"])
+            .arg(root.path())
+            .args(["--format", "json"])
+            .output()?;
+        assert_eq!(output.status.code(), Some(expected));
+        // Resolve the same input through the existing run path to preserve
+        // its behavior for literals, tainted values and incomplete aliases.
+        std::fs::write(action.join("action.yml"), "name: shell\ninputs:\n  command:\n    required: true\nruns:\n  using: composite\n  steps:\n    - run: ${{ inputs.command }}\n")?;
+        let run_output = Command::new(env!("CARGO_BIN_EXE_argus"))
+            .args(["agent", "scan"])
+            .arg(root.path())
+            .args(["--format", "json"])
+            .output()?;
+        assert_eq!(output.status.code(), run_output.status.code());
+        assert_eq!(output.stdout.is_empty(), run_output.stdout.is_empty());
+        assert_eq!(output.stderr.is_empty(), run_output.stderr.is_empty());
+        assert!(output.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let run_report: serde_json::Value = serde_json::from_slice(&run_output.stdout)?;
+        assert_eq!(report["decision"], run_report["decision"]);
+        assert_eq!(
+            report["decision"],
+            if expected == 1 { "block" } else { "allow" }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_expression_direct_error_keeps_empty_stdout() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let workflows = root.path().join(".github/workflows");
+    std::fs::create_dir_all(&workflows)?;
+    std::fs::write(workflows.join("test.yml"), "on: issues\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c \"${{ github.event.issue.title\" {0}\n        run: 'true'\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+        .args(["agent", "scan"])
+        .arg(root.path())
+        .args(["--format", "json"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8(output.stderr)?.contains("unterminated expression"));
     Ok(())
 }

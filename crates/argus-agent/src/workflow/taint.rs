@@ -224,7 +224,7 @@ fn scan_workflow_jobs(
     Ok(next_job_outputs)
 }
 
-/// Scan inline `run:` and first-party `actions/github-script` `with.script`.
+/// Scan inline `run:`, the step shell command and first-party `github-script` scripts.
 pub(super) fn scan_step_scripts(
     step: &Hash,
     rel: &str,
@@ -232,8 +232,10 @@ pub(super) fn scan_step_scripts(
     step_env: &EnvBindings,
     findings: &mut Vec<argus_core::Finding>,
 ) -> Result<()> {
-    if let Some(script) = get_string(step, "run") {
-        scan_run_script(script, rel, ctx, step_env, findings)?;
+    for input in ["run", "shell"] {
+        if let Some(script) = get_string(step, input) {
+            scan_run_script(script, rel, ctx, step_env, findings)?;
+        }
     }
     if let Some(action) = get_string(step, "uses") {
         if is_github_script(action) {

@@ -1,0 +1,13 @@
+on: issues
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      SHELL: bash
+    steps:
+      - shell: bash --noprofile --norc -eo pipefail {0}
+        run: 'true'
+      - shell: ${{ env.SHELL }}
+        run: 'true'
+      - shell: bash -c "${{ 'github.event.issue.title' }}" {0}
+        run: 'true'

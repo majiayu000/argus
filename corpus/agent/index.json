@@ -481,6 +481,26 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. Ordinary PR/push callers invoke the same pinned reusable PR-head checkouts without inventing a privileged trigger."
+    },
+    {
+      "id": "workflow-shell-context-injection",
+      "kind": "fixture",
+      "path": "fixtures/workflow-shell-context-injection",
+      "packageName": "workflow-shell-context-injection",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-context-injection"
+      ],
+      "notes": "An issues workflow directly and via env interpolates an attacker-controlled title into the step shell command while run is constant."
+    },
+    {
+      "id": "workflow-shell-trusted-command",
+      "kind": "fixture",
+      "path": "fixtures/workflow-shell-trusted-command",
+      "packageName": "workflow-shell-trusted-command",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. Constant shell commands, a literal env shell alias and quoted context text stay allowed."
     }
   ]
 }

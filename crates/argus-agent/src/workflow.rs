@@ -8045,5 +8045,64 @@ jobs:
             "toJSON(github.event)"
         );
     }
+
+    #[test]
+    fn shell_expression_direct_and_env_taint_blocks_on_all_triggers() {
+        for trigger in ["issues", "pull_request_target", "pull_request"] {
+            for expression in [
+                "github.event.issue.title",
+                "GitHub['Event']['Issue']['Body']",
+                "github.head_ref",
+                "fromJSON(toJSON(github.event)).issue.title",
+                "toJSON(toJSON(github.event.issue))",
+            ] {
+                let value = format!("${{{{ {expression} }}}}");
+                for indirect in [false, true] {
+                    let env = if indirect {
+                        format!("    env:\n      TARGET: {value}\n")
+                    } else {
+                        String::new()
+                    };
+                    let value = if indirect {
+                        "${{ env.TARGET }}"
+                    } else {
+                        &value
+                    };
+                    let workflow = format!("on: {trigger}\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n{env}    steps:\n      - shell: bash -c \"{value}\" {{0}}\n        run: 'true'\n");
+                    let findings = findings_for(&workflow);
+                    assert!(
+                        findings
+                            .iter()
+                            .any(|finding| finding.rule_id == RULE_CONTEXT_INJECTION
+                                && finding.severity == Severity::Critical),
+                        "{expression} indirect={indirect}: {findings:?}"
+                    );
+                    assert_eq!(crate::decision::derive(&findings), Decision::Block);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_expression_constants_and_trusted_contexts_remain_allowed() {
+        for shell in [
+            "bash",
+            "bash --noprofile --norc -eo pipefail {0}",
+            "bash -c \"${{ 'github.event.issue.title' }}\" {0}",
+            "${{ 'bash' }}",
+            "bash -c \"${{ github.sha }}\" {0}",
+            "bash -c \"${{ github.event.repository.default_branch }}\" {0}",
+        ] {
+            let findings = findings_for(&format!("on: issues\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: {shell}\n        run: 'true'\n"));
+            assert!(findings.is_empty(), "{shell}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn shell_expression_unterminated_input_is_an_operational_error() {
+        let error = try_scan(&[SurfaceFile { rel: ".github/workflows/test.yml".into(), content: "on: issues\njobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash -c \"${{ github.event.issue.title\" {0}\n        run: 'true'\n".into(), kind: SurfaceKind::Workflow }]).expect_err("incomplete shell expression must not allow");
+        assert!(format!("{error:#}").contains("unterminated expression"));
+    }
+
     include!("workflow/checkout_ref_tests.rs");
 }

@@ -1,0 +1,11 @@
+on: issues
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      TITLE: ${{ github.event.issue.title }}
+    steps:
+      - shell: bash -c "${{ github.event.issue.title }}" {0}
+        run: 'true'
+      - shell: bash -c "${{ env.TITLE }}" {0}
+        run: 'true'

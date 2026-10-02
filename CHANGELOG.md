@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 context-injection bypass in step `shell:` commands.
+  Shell expressions now use the same checks and input/env/output resolution
+  as `run:`, including nested local composites and reusable workflows.
+  Constant shells, trusted contexts and quoted context text remain allowed.
+
 - Keep caller privileged-trigger context through same-repo reusable workflow
   calls, including nested calls and input-forwarded checkout refs/repositories.
   PR-target and workflow-run callers now block untrusted checkout in
