@@ -461,6 +461,26 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. Pinned privileged checkouts use literal or trusted base repositories; literal names containing event-context text are not expressions."
+    },
+    {
+      "id": "workflow-reusable-privileged-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-reusable-privileged-checkout",
+      "packageName": "workflow-reusable-privileged-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "A privileged PR-target caller invokes a workflow_call callee with direct and input-forwarded PR-head checkouts; the callee retains caller privilege."
+    },
+    {
+      "id": "workflow-reusable-ordinary-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-reusable-ordinary-checkout",
+      "packageName": "workflow-reusable-ordinary-checkout",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. Ordinary PR/push callers invoke the same pinned reusable PR-head checkouts without inventing a privileged trigger."
     }
   ]
 }

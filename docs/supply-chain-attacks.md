@@ -613,6 +613,10 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    `github.head_ref` / `main`, including bracket/JSON forms, env and composite
    aliases. Literal repository names and trusted base repositories remain quiet.
    Both checkout inputs retain the existing expression limits and error contract.
+   Same-repo reusable workflow calls retain caller privilege through nested
+   `workflow_call` callees, including input-forwarded refs and repositories.
+   A callee's own privileged triggers remain effective; ordinary PR/push
+   callers do not introduce privilege.
    Script injection includes nested JSON serialization of untrusted event
    objects in `run:` and `actions/github-script`, including env and composite
    input aliases. A reviewed full SHA removes tag retargeting but does not

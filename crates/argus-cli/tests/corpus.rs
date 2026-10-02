@@ -172,11 +172,11 @@ fn agent_fixture_eval_reports_scoped_confusion_matrix() -> Result<()> {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["dataset_type"], "synthetic-fixtures");
-    assert_eq!(report["sample_count"], 41);
-    assert_eq!(report["true_positives"], 32);
+    assert_eq!(report["sample_count"], 43);
+    assert_eq!(report["true_positives"], 33);
     assert_eq!(report["false_positives"], 0);
     assert_eq!(report["false_negatives"], 0);
-    assert_eq!(report["true_negatives"], 9);
+    assert_eq!(report["true_negatives"], 10);
     assert_eq!(report["precision"], 1.0);
     assert_eq!(report["recall"], 1.0);
     Ok(())
@@ -1400,6 +1400,164 @@ fn checkout_fork_repository_operational_errors_keep_empty_stdout() -> Result<()>
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8(output.stderr)?.contains("checkout ref format exceeds"));
+    }
+    Ok(())
+}
+
+fn scan_reusable_checkout_cli(
+    trigger: &str,
+    repository: Option<&str>,
+    revision: Option<&str>,
+    forwarded: bool,
+    nested: bool,
+) -> Result<std::process::Output> {
+    let root = tempfile::tempdir()?;
+    let workflows = root.path().join(".github/workflows");
+    std::fs::create_dir_all(&workflows)?;
+    let arguments = |source_inputs: bool| {
+        let mut arguments = String::new();
+        for (key, value) in [("repository", repository), ("ref", revision)] {
+            if let Some(value) = value {
+                let value = if source_inputs {
+                    format!("${{{{ inputs.{key} }}}}")
+                } else {
+                    value.to_string()
+                };
+                arguments.push_str(&format!("      {key}: {value}\n"));
+            }
+        }
+        if arguments.is_empty() {
+            arguments
+        } else {
+            format!("    with:\n{arguments}")
+        }
+    };
+    let caller_with = if forwarded {
+        arguments(false)
+    } else {
+        String::new()
+    };
+    std::fs::write(workflows.join("caller.yml"), format!("on: {trigger}\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n{caller_with}"))?;
+    let header = "on:\n  workflow_call:\n    inputs:\n      repository:\n        type: string\n      ref:\n        type: string\n";
+    if nested {
+        let relay_with = if forwarded {
+            arguments(true)
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            workflows.join("reusable.yml"),
+            format!(
+                "{header}jobs:\n  relay:\n    uses: ./.github/workflows/leaf.yml\n{relay_with}"
+            ),
+        )?;
+    }
+    let mut inputs = String::new();
+    for (key, value) in [("repository", repository), ("ref", revision)] {
+        if let Some(value) = value {
+            let value = if forwarded {
+                format!("${{{{ inputs.{key} }}}}")
+            } else {
+                value.to_string()
+            };
+            inputs.push_str(&format!("          {key}: {value}\n"));
+        }
+    }
+    let inputs = if inputs.is_empty() {
+        inputs
+    } else {
+        format!("        with:\n{inputs}")
+    };
+    std::fs::write(workflows.join(if nested { "leaf.yml" } else { "reusable.yml" }), format!("{header}jobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n{inputs}"))?;
+    Ok(Command::new(env!("CARGO_BIN_EXE_argus"))
+        .args(["agent", "scan"])
+        .arg(root.path())
+        .args(["--format", "json"])
+        .output()?)
+}
+
+#[test]
+fn reusable_checkout_privileged_calls_block_and_keep_controls() -> Result<()> {
+    for trigger in [
+        "pull_request_target",
+        "workflow_run",
+        "pull_request",
+        "push",
+    ] {
+        for (repository, revision, tainted) in [
+            (
+                None,
+                Some("${{ github.event.pull_request.head.sha }}"),
+                true,
+            ),
+            (
+                None,
+                Some("refs/pull/${{ github.event.pull_request.number }}/merge"),
+                true,
+            ),
+            (
+                Some("${{ github.event.pull_request.head.repo.full_name }}"),
+                None,
+                true,
+            ),
+            (
+                Some(
+                    "${{ fromJSON(toJSON(github.event.workflow_run)).head_repository.full_name }}",
+                ),
+                Some("${{ github.head_ref }}"),
+                true,
+            ),
+            (Some("trusted/project"), Some("main"), false),
+            (
+                Some("${{ github.event.pull_request.base.repo.full_name }}"),
+                Some("${{ github.event.pull_request.base.sha }}"),
+                false,
+            ),
+        ] {
+            for forwarded in [false, true] {
+                for nested in [false, true] {
+                    let output = scan_reusable_checkout_cli(
+                        trigger, repository, revision, forwarded, nested,
+                    )?;
+                    let blocked =
+                        tainted && matches!(trigger, "pull_request_target" | "workflow_run");
+                    assert_eq!(output.status.code(), Some(i32::from(blocked)), "{trigger} {repository:?} {revision:?} forwarded={forwarded} nested={nested}");
+                    assert!(output.stderr.is_empty());
+                    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                    assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                    assert_eq!(
+                        report["findings"]
+                            .as_array()
+                            .expect("findings")
+                            .iter()
+                            .any(|finding| finding["rule_id"]
+                                == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"),
+                        blocked
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn reusable_checkout_errors_keep_empty_stdout() -> Result<()> {
+    let revision = format!("${{{{ format('{{0}}{{0}}', '{}') }}}}", "x".repeat(256));
+    for forwarded in [false, true] {
+        for nested in [false, true] {
+            let output = scan_reusable_checkout_cli(
+                "pull_request_target",
+                None,
+                Some(&revision),
+                forwarded,
+                nested,
+            )?;
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8(output.stderr)?.contains("checkout ref format exceeds"));
+        }
     }
     Ok(())
 }

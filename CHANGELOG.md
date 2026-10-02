@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep caller privileged-trigger context through same-repo reusable workflow
+  calls, including nested calls and input-forwarded checkout refs/repositories.
+  PR-target and workflow-run callers now block untrusted checkout in
+  `workflow_call` callees; ordinary PR/push callers retain their existing behavior.
+
 - Close the AGT-06 fork-repository checkout bypass: privileged workflows now
   inspect `with.repository` alongside `with.ref`, including PR head repositories,
   workflow-run head repositories, bracket/JSON forms, env and composite inputs.
