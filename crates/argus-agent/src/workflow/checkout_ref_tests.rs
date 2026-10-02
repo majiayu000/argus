@@ -2023,3 +2023,131 @@ fn number_empty_format_arguments_do_not_clone_quadratically() {
     let revision = format!("${{{{ format({arguments}) }}}}");
     assert!(!is_untrusted_ref_expression(&revision).expect("unused empty args render empty"));
 }
+
+const FORK_REPOSITORY_EXPRESSIONS: &[&str] = &[
+    "${{ github.event.pull_request.head.repo.full_name }}",
+    "${{ GitHub['Event']['Pull_Request']['Head']['Repo']['Full_Name'] }}",
+    "${{ fromJSON(toJSON(github.event.pull_request.head.repo)).full_name }}",
+    "${{ fromJSON(toJSON(github.event.pull_request.head)).repo.full_name }}",
+    "${{ fromJSON(toJSON(github.event.pull_request)).head.repo.full_name }}",
+    "${{ fromJSON(toJSON(github.event)).pull_request.head.repo.full_name }}",
+    "${{ fromJSON(toJSON(github)).event.pull_request.head.repo.full_name }}",
+    "${{ format('{0}/{1}', github.event.pull_request.head.repo.owner.login, github.event.pull_request.head.repo.name) }}",
+    "${{ github.event.workflow_run.head_repository.full_name }}",
+    "${{ GitHub['Event']['Workflow_Run']['Head_Repository']['Full_Name'] }}",
+    "${{ fromJSON(toJSON(github.event.workflow_run.head_repository)).full_name }}",
+    "${{ fromJSON(toJSON(github.event.workflow_run)).head_repository.full_name }}",
+    "${{ fromJSON(toJSON(github.event)).workflow_run.head_repository.full_name }}",
+    "${{ fromJSON(toJSON(github)).event.workflow_run.head_repository.full_name }}",
+];
+
+fn fork_repository_workflow(trigger: &str, repository: &str, revision: Option<&str>) -> String {
+    let revision = revision
+        .map(|value| format!("          ref: {value}\n"))
+        .unwrap_or_default();
+    format!(
+        "on: {trigger}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          repository: {repository}\n{revision}"
+    )
+}
+
+#[test]
+fn fork_repository_checkout_blocks_with_omitted_or_supplied_refs() {
+    for repository in FORK_REPOSITORY_EXPRESSIONS {
+        for revision in [None, Some("${{ github.head_ref }}"), Some("main")] {
+            for trigger in ["pull_request_target", "workflow_run"] {
+                assert_untrusted_checkout_blocks(&findings_for(&fork_repository_workflow(
+                    trigger, repository, revision,
+                )));
+            }
+            assert_no_untrusted_checkout(&findings_for(&fork_repository_workflow(
+                "pull_request",
+                repository,
+                revision,
+            )));
+        }
+    }
+}
+
+#[test]
+fn fork_repository_checkout_trusted_inputs_remain_allowed() {
+    for repository in [
+        "trusted/project",
+        "trusted/github.event.pull_request.head.repo.full_name",
+        "trusted/github.event.workflow_run.head_repository.full_name",
+        "${{ github.repository }}",
+        "${{ github.event.repository.full_name }}",
+        "${{ github.event.pull_request.base.repo.full_name }}",
+        "${{ fromJSON(toJSON(github.event.pull_request.base.repo)).full_name }}",
+        "${{ 'github.event.pull_request.head.repo.full_name' }}",
+        "${{ fromJSON('{\"full_name\":\"trusted/project\"}').full_name }}",
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for revision in [None, Some("${{ github.head_ref }}"), Some("main")] {
+                assert_no_untrusted_checkout(&findings_for(&fork_repository_workflow(
+                    trigger, repository, revision,
+                )));
+                let workflow = fork_repository_workflow(trigger, "${{ env.REPOSITORY }}", revision)
+                    .replace(
+                        "    steps:",
+                        &format!("    env:\n      REPOSITORY: {repository}\n    steps:"),
+                    );
+                assert_no_untrusted_checkout(&findings_for(&workflow));
+            }
+        }
+    }
+}
+
+#[test]
+fn fork_repository_checkout_env_and_composite_inputs_retain_taint() {
+    for repository in FORK_REPOSITORY_EXPRESSIONS {
+        for trigger in ["pull_request_target", "workflow_run"] {
+            for revision in [None, Some("${{ github.head_ref }}")] {
+                let workflow = fork_repository_workflow(trigger, "${{ env.REPOSITORY }}", revision)
+                    .replace(
+                        "    steps:",
+                        &format!("    env:\n      REPOSITORY: {repository}\n    steps:"),
+                    );
+                assert_untrusted_checkout_blocks(&findings_for(&workflow));
+
+                let supplied_ref = revision
+                    .map(|value| format!("          ref: {value}\n"))
+                    .unwrap_or_default();
+                let consumed_ref = revision
+                    .map(|_| "          ref: ${{ inputs.ref }}\n")
+                    .unwrap_or_default();
+                let files = [
+                    SurfaceFile {
+                        rel: ".github/workflows/test.yml".into(),
+                        content: format!("on: {trigger}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/fork\n        with:\n          repository: {repository}\n{supplied_ref}"),
+                        kind: SurfaceKind::Workflow,
+                    },
+                    SurfaceFile {
+                        rel: ".github/actions/fork/action.yml".into(),
+                        content: format!("name: fork\ninputs:\n  repository:\n    required: true\n  ref:\n    required: false\nruns:\n  using: composite\n  steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          repository: ${{{{ inputs.repository }}}}\n{consumed_ref}"),
+                        kind: SurfaceKind::ActionMetadata,
+                    },
+                ];
+                assert_untrusted_checkout_blocks(
+                    &try_scan(&files).expect("scan composite repository"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fork_repository_checkout_expression_errors_propagate() {
+    let repository = format!("${{{{ format('{{0}}{{0}}', '{}') }}}}", "x".repeat(256));
+    for revision in [None, Some("${{ github.event.pull_request.head.sha }}")] {
+        let result = try_scan(&[SurfaceFile {
+            rel: ".github/workflows/test.yml".into(),
+            content: fork_repository_workflow("pull_request_target", &repository, revision),
+            kind: SurfaceKind::Workflow,
+        }]);
+        assert!(
+            result.is_err(),
+            "repository assessment must preserve operational errors"
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("checkout ref format exceeds"));
+    }
+}

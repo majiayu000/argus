@@ -441,6 +441,26 @@
       "expectedDecision": "allow",
       "rules": [],
       "notes": "NEGATIVE / FP-trap. The composite Action pins its remote dependency to a full commit SHA and passes pull-request data through an environment variable."
+    },
+    {
+      "id": "workflow-fork-repository-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-fork-repository-checkout",
+      "packageName": "workflow-fork-repository-checkout",
+      "expectedDecision": "block",
+      "rules": [
+        "workflow-untrusted-checkout"
+      ],
+      "notes": "Privileged PR-target and workflow-run checkouts select event-derived fork repositories with omitted refs, github.head_ref or main, including bracket and serialized contexts."
+    },
+    {
+      "id": "workflow-trusted-repository-checkout",
+      "kind": "fixture",
+      "path": "fixtures/workflow-trusted-repository-checkout",
+      "packageName": "workflow-trusted-repository-checkout",
+      "expectedDecision": "allow",
+      "rules": [],
+      "notes": "NEGATIVE / FP-trap. Pinned privileged checkouts use literal or trusted base repositories; literal names containing event-context text are not expressions."
     }
   ]
 }

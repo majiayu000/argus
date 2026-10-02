@@ -1,4 +1,4 @@
-//! Checkout `ref` token matching for attacker-controlled GitHub event refs.
+//! Checkout `ref` / `repository` token matching for attacker-controlled GitHub event refs.
 //!
 //! Bracket normalization stays in the caller.
 //! Pull-number ref templates are checked before expression literals are stripped.
@@ -68,7 +68,8 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> Result<boo
         || haystack.contains(".head.ref")
         || haystack.contains(".head.repo")
         || haystack.contains(".merge_commit_sha");
-    let has_workflow_run_head = haystack.contains(".head_sha")
+    let has_workflow_run_head = haystack.contains(".head_repository")
+        || haystack.contains(".head_sha")
         || haystack.contains(".head_branch")
         || haystack.contains(".head.sha")
         || haystack.contains(".head.ref");
@@ -76,6 +77,7 @@ pub(super) fn contains_untrusted_github_ref_tokens(revision: &str) -> Result<boo
         || haystack.contains("github.event.pull_request.merge_commit_sha")
         || haystack.contains("github.event.workflow_run.head_sha")
         || haystack.contains("github.event.workflow_run.head_branch")
+        || haystack.contains("github.event.workflow_run.head_repository")
         || (has_github_event && haystack.contains("pull_request") && has_pr_head)
         || (has_github_event && haystack.contains("workflow_run") && has_workflow_run_head)
         || serializes_pull_request_head_object(&haystack)

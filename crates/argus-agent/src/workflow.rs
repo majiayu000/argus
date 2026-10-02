@@ -381,7 +381,7 @@ fn scan_step(
                 Finding::new(
                     RULE_UNTRUSTED_CHECKOUT,
                     Severity::Critical,
-                    "privileged workflow trigger checks out an attacker-controlled pull request ref",
+                    "privileged workflow trigger checks out an attacker-controlled repository or ref",
                 )
                 .at(rel),
             );
@@ -2755,19 +2755,27 @@ fn has_untrusted_checkout_ref(
     env_bindings: &EnvBindings,
     step_outputs: &StepOutputBindings,
 ) -> Result<bool> {
-    let Some(revision) = get(step, "with")
-        .and_then(Yaml::as_hash)
-        .and_then(|with| get_string(with, "ref"))
-    else {
+    let Some(with) = get(step, "with").and_then(Yaml::as_hash) else {
         return Ok(false);
     };
-    let resolved =
-        resolve_context_expressions(revision, input_bindings, env_bindings, step_outputs);
-    Ok(is_untrusted_ref_expression(&resolved)?
-        || has_unresolved_step_output_ref(&resolved)
-        || has_unresolved_needs_output_ref(&resolved)
-        || has_unresolved_env_ref(&resolved)
-        || has_unresolved_inputs_access(&resolved))
+    let mut untrusted = false;
+    for input in ["ref", "repository"] {
+        let Some(value) = get_string(with, input) else {
+            continue;
+        };
+        let resolved =
+            resolve_context_expressions(value, input_bindings, env_bindings, step_outputs);
+        // Literal repository names, including resolved aliases, are not event context.
+        if input == "repository" && !resolved.contains("${{") {
+            continue;
+        }
+        untrusted |= is_untrusted_ref_expression(&resolved)?
+            || has_unresolved_step_output_ref(&resolved)
+            || has_unresolved_needs_output_ref(&resolved)
+            || has_unresolved_env_ref(&resolved)
+            || has_unresolved_inputs_access(&resolved);
+    }
+    Ok(untrusted)
 }
 
 mod checkout_ref;

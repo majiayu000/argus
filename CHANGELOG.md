@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close the AGT-06 fork-repository checkout bypass: privileged workflows now
+  inspect `with.repository` alongside `with.ref`, including PR head repositories,
+  workflow-run head repositories, bracket/JSON forms, env and composite inputs.
+  Omitting a ref or selecting `github.head_ref` or `main` no longer hides
+  the untrusted repository. Literal and trusted base repositories remain allowed.
+  Existing expression limits preserve operational errors for both inputs.
+
 - Close the AGT-06 untrusted-checkout bypass where `pull_request_target` or
   `workflow_run` builds `refs/pull/<number>/head` or `/merge` from event PR
   numbers, including `format(...)` templates, equivalent JSON numerals with
