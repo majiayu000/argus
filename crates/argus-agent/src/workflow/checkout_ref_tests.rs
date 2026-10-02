@@ -2151,3 +2151,203 @@ fn fork_repository_checkout_expression_errors_propagate() {
         assert!(format!("{:#}", result.unwrap_err()).contains("checkout ref format exceeds"));
     }
 }
+
+fn reusable_checkout_files(
+    caller_trigger: &str,
+    callee_trigger: &str,
+    repository: Option<&str>,
+    revision: Option<&str>,
+    forwarded: bool,
+    hops: usize,
+) -> Vec<SurfaceFile> {
+    let mut files = Vec::new();
+    for index in 0..=hops {
+        let trigger = if index == 0 {
+            format!("on: {caller_trigger}\n")
+        } else {
+            let extra = if index == hops && callee_trigger != "workflow_call" {
+                format!("  {callee_trigger}:\n")
+            } else {
+                String::new()
+            };
+            format!("on:\n  workflow_call:\n    inputs:\n      repository:\n        type: string\n      ref:\n        type: string\n{extra}")
+        };
+        let content = if index < hops {
+            let bindings = if forwarded {
+                let mut bindings = String::new();
+                for (key, value) in [("repository", repository), ("ref", revision)] {
+                    if let Some(value) = value {
+                        let value = if index == 0 {
+                            value.to_string()
+                        } else {
+                            format!("${{{{ inputs.{key} }}}}")
+                        };
+                        bindings.push_str(&format!("      {key}: {value}\n"));
+                    }
+                }
+                if bindings.is_empty() {
+                    bindings
+                } else {
+                    format!("    with:\n{bindings}")
+                }
+            } else {
+                String::new()
+            };
+            format!(
+                "{trigger}jobs:\n  call:\n    uses: ./.github/workflows/call-{}.yml\n{bindings}",
+                index + 1
+            )
+        } else {
+            let mut inputs = String::new();
+            for (key, value) in [("repository", repository), ("ref", revision)] {
+                if let Some(value) = value {
+                    let value = if forwarded {
+                        format!("${{{{ inputs.{key} }}}}")
+                    } else {
+                        value.to_string()
+                    };
+                    inputs.push_str(&format!("          {key}: {value}\n"));
+                }
+            }
+            let inputs = if inputs.is_empty() {
+                inputs
+            } else {
+                format!("        with:\n{inputs}")
+            };
+            format!("{trigger}jobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n{inputs}")
+        };
+        files.push(SurfaceFile {
+            rel: format!(".github/workflows/call-{index}.yml"),
+            content,
+            kind: SurfaceKind::Workflow,
+        });
+    }
+    files
+}
+
+#[test]
+fn reusable_checkout_inherits_privilege_and_keeps_trusted_controls() {
+    for caller in [
+        "pull_request_target",
+        "workflow_run",
+        "pull_request",
+        "push",
+    ] {
+        for callee in ["workflow_call", "pull_request_target", "workflow_run"] {
+            for (repository, revision, tainted) in [
+                (
+                    None,
+                    Some("${{ github.event.pull_request.head.sha }}"),
+                    true,
+                ),
+                (
+                    None,
+                    Some("${{ github.event.workflow_run.head_sha }}"),
+                    true,
+                ),
+                (
+                    None,
+                    Some("${{ fromJSON(toJSON(github['event']['pull_request'])).head.sha }}"),
+                    true,
+                ),
+                (
+                    None,
+                    Some("refs/pull/${{ github.event.pull_request.number }}/head"),
+                    true,
+                ),
+                (
+                    Some("${{ github.event.pull_request.head.repo.full_name }}"),
+                    None,
+                    true,
+                ),
+                (
+                    Some("${{ github.event.workflow_run.head_repository.full_name }}"),
+                    Some("${{ github.head_ref }}"),
+                    true,
+                ),
+                (Some("trusted/project"), Some("main"), false),
+                (
+                    Some("${{ github.event.pull_request.base.repo.full_name }}"),
+                    Some("${{ github.base_ref }}"),
+                    false,
+                ),
+                (
+                    None,
+                    Some("${{ github.event.pull_request.base.sha }}"),
+                    false,
+                ),
+            ] {
+                for forwarded in [false, true] {
+                    for hops in [1, 2] {
+                        let files = reusable_checkout_files(
+                            caller, callee, repository, revision, forwarded, hops,
+                        );
+                        let findings = try_scan(&files).expect("scan reusable checkout");
+                        let privileged = matches!(caller, "pull_request_target" | "workflow_run")
+                            || callee != "workflow_call";
+                        // A callee with its own privileged trigger is also scanned
+                        // independently, where inputs are unknown and fail closed.
+                        let standalone_unknown_inputs = forwarded && callee != "workflow_call";
+                        if (tainted && privileged) || standalone_unknown_inputs {
+                            assert_untrusted_checkout_blocks(&findings);
+                        } else {
+                            assert_no_untrusted_checkout(&findings);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn reusable_checkout_different_callers_do_not_share_privilege() {
+    let safe = reusable_checkout_files(
+        "pull_request",
+        "workflow_call",
+        None,
+        Some("${{ github.event.pull_request.head.sha }}"),
+        false,
+        2,
+    );
+    assert_no_untrusted_checkout(&try_scan(&safe).expect("ordinary caller"));
+    let mut files = reusable_checkout_files(
+        "pull_request",
+        "workflow_call",
+        None,
+        Some("${{ github.event.pull_request.head.sha }}"),
+        false,
+        2,
+    );
+    files.push(SurfaceFile {
+        rel: ".github/workflows/privileged.yml".into(),
+        content:
+            "on: pull_request_target\njobs:\n  call:\n    uses: ./.github/workflows/call-1.yml\n"
+                .into(),
+        kind: SurfaceKind::Workflow,
+    });
+    assert_untrusted_checkout_blocks(&try_scan(&files).expect("shared callee"));
+    files.reverse();
+    assert_untrusted_checkout_blocks(&try_scan(&files).expect("reversed shared callee"));
+    assert_no_untrusted_checkout(&try_scan(&safe).expect("ordinary caller after privileged scan"));
+}
+
+#[test]
+fn reusable_checkout_preserves_expression_operational_errors() {
+    let too_large = format!("${{{{ format('{{0}}{{0}}', '{}') }}}}", "x".repeat(256));
+    for forwarded in [false, true] {
+        for hops in [1, 2] {
+            let files = reusable_checkout_files(
+                "pull_request_target",
+                "workflow_call",
+                None,
+                Some(&too_large),
+                forwarded,
+                hops,
+            );
+            let error =
+                try_scan(&files).expect_err("reusable checkout must retain the expression budget");
+            assert!(format!("{error:#}").contains("checkout ref format exceeds"));
+        }
+    }
+}

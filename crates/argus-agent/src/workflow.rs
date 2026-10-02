@@ -168,6 +168,7 @@ pub(super) fn run(files: &[SurfaceFile], findings: &mut Vec<Finding>) -> Result<
                 &actions,
                 &workflows,
                 &empty_inputs,
+                false,
                 &mut visiting,
                 findings,
             )

@@ -20,13 +20,22 @@ pub(super) fn scan_workflow(
     actions: &ActionIndex<'_>,
     workflows: &WorkflowIndex<'_>,
     input_bindings: &InputBindings,
+    inherited_privileged_trigger: bool,
     visiting: &mut std::collections::BTreeSet<String>,
     findings: &mut Vec<argus_core::Finding>,
 ) -> Result<JobOutputBindings> {
     if !visiting.insert(file.rel.clone()) {
         return Ok(JobOutputBindings::new());
     }
-    let result = scan_workflow_inner(file, actions, workflows, input_bindings, visiting, findings);
+    let result = scan_workflow_inner(
+        file,
+        actions,
+        workflows,
+        input_bindings,
+        inherited_privileged_trigger,
+        visiting,
+        findings,
+    );
     visiting.remove(&file.rel);
     result
 }
@@ -36,6 +45,7 @@ fn scan_workflow_inner(
     actions: &ActionIndex<'_>,
     workflows: &WorkflowIndex<'_>,
     input_bindings: &InputBindings,
+    inherited_privileged_trigger: bool,
     visiting: &mut std::collections::BTreeSet<String>,
     findings: &mut Vec<argus_core::Finding>,
 ) -> Result<JobOutputBindings> {
@@ -50,8 +60,9 @@ fn scan_workflow_inner(
     let root = documents[0]
         .as_hash()
         .with_context(|| format!("workflow `{}` root must be a mapping", file.rel))?;
-    let privileged_trigger =
-        has_trigger(root, "pull_request_target") || has_trigger(root, "workflow_run");
+    let privileged_trigger = inherited_privileged_trigger
+        || has_trigger(root, "pull_request_target")
+        || has_trigger(root, "workflow_run");
     check_permissions(root, "workflow", privileged_trigger, &file.rel, findings);
 
     let Some(jobs) = get(root, "jobs").and_then(Yaml::as_hash) else {
@@ -133,6 +144,7 @@ fn scan_workflow_jobs(
                     actions,
                     workflows,
                     &nested_inputs,
+                    privileged_trigger,
                     visiting,
                     findings,
                 )?;

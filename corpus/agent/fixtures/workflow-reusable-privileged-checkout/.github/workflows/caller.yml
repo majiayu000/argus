@@ -1,0 +1,6 @@
+on: pull_request_target
+jobs:
+  inspect:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      head: ${{ github.event.pull_request.head.sha }}
