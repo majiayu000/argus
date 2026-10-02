@@ -608,6 +608,11 @@ Each gap below is a real candidate for an argus follow-up issue or a sibling too
    with an operational error (CLI exit 2) instead of an incomplete allow.
    Format output exceeding the expression-length bound also produces this
    operational error, even if an outer format call would shrink the result.
+   Checkout repository selection is also checked: PR head repositories and
+   workflow-run head repositories remain untrusted with an omitted ref or
+   `github.head_ref` / `main`, including bracket/JSON forms, env and composite
+   aliases. Literal repository names and trusted base repositories remain quiet.
+   Both checkout inputs retain the existing expression limits and error contract.
    Script injection includes nested JSON serialization of untrusted event
    objects in `run:` and `actions/github-script`, including env and composite
    input aliases. A reviewed full SHA removes tag retargeting but does not

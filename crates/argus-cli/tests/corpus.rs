@@ -172,11 +172,11 @@ fn agent_fixture_eval_reports_scoped_confusion_matrix() -> Result<()> {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["dataset_type"], "synthetic-fixtures");
-    assert_eq!(report["sample_count"], 39);
-    assert_eq!(report["true_positives"], 31);
+    assert_eq!(report["sample_count"], 41);
+    assert_eq!(report["true_positives"], 32);
     assert_eq!(report["false_positives"], 0);
     assert_eq!(report["false_negatives"], 0);
-    assert_eq!(report["true_negatives"], 8);
+    assert_eq!(report["true_negatives"], 9);
     assert_eq!(report["precision"], 1.0);
     assert_eq!(report["recall"], 1.0);
     Ok(())
@@ -1304,5 +1304,102 @@ fn checkout_ref_many_empty_format_arguments_remain_allowed() -> Result<()> {
     assert!(output.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["decision"], "allow");
+    Ok(())
+}
+
+#[test]
+fn checkout_fork_repository_inputs_block_and_keep_literal_controls() -> Result<()> {
+    for (repository, tainted) in [
+        ("${{ github.event.pull_request.head.repo.full_name }}", true),
+        (
+            "${{ fromJSON(toJSON(github.event.pull_request.head.repo)).full_name }}",
+            true,
+        ),
+        (
+            "${{ github.event.workflow_run.head_repository.full_name }}",
+            true,
+        ),
+        (
+            "${{ fromJSON(toJSON(github.event.workflow_run)).head_repository.full_name }}",
+            true,
+        ),
+        ("trusted/project", false),
+        (
+            "trusted/github.event.pull_request.head.repo.full_name",
+            false,
+        ),
+        (
+            "trusted/github.event.workflow_run.head_repository.full_name",
+            false,
+        ),
+        (
+            "${{ github.event.pull_request.base.repo.full_name }}",
+            false,
+        ),
+        (
+            "${{ 'github.event.pull_request.head.repo.full_name' }}",
+            false,
+        ),
+    ] {
+        for trigger in ["pull_request_target", "workflow_run", "pull_request"] {
+            for revision in [None, Some("${{ github.head_ref }}"), Some("main")] {
+                let root = tempfile::tempdir()?;
+                let workflows = root.path().join(".github/workflows");
+                std::fs::create_dir_all(&workflows)?;
+                let revision = revision
+                    .map(|value| format!("          ref: {value}\n"))
+                    .unwrap_or_default();
+                std::fs::write(workflows.join("test.yml"), format!("on: {trigger}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          repository: {repository}\n{revision}"))?;
+                let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+                    .args(["agent", "scan"])
+                    .arg(root.path())
+                    .args(["--format", "json"])
+                    .output()?;
+                let blocked = tainted && trigger != "pull_request";
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(blocked)),
+                    "{trigger}: {repository}"
+                );
+                assert!(output.stderr.is_empty());
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                assert_eq!(report["decision"], if blocked { "block" } else { "allow" });
+                assert_eq!(
+                    report["findings"]
+                        .as_array()
+                        .expect("findings")
+                        .iter()
+                        .any(
+                            |finding| finding["rule_id"] == "AGT-06-workflow-untrusted-checkout"
+                                && finding["severity"] == "critical"
+                        ),
+                    blocked
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checkout_fork_repository_operational_errors_keep_empty_stdout() -> Result<()> {
+    let repository = format!("${{{{ format('{{0}}{{0}}', '{}') }}}}", "x".repeat(256));
+    for revision in [None, Some("${{ github.event.pull_request.head.sha }}")] {
+        let root = tempfile::tempdir()?;
+        let workflows = root.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows)?;
+        let revision = revision
+            .map(|value| format!("          ref: {value}\n"))
+            .unwrap_or_default();
+        std::fs::write(workflows.join("test.yml"), format!("on: pull_request_target\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8\n        with:\n          repository: {repository}\n{revision}"))?;
+        let output = Command::new(env!("CARGO_BIN_EXE_argus"))
+            .args(["agent", "scan"])
+            .arg(root.path())
+            .args(["--format", "json"])
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)?.contains("checkout ref format exceeds"));
+    }
     Ok(())
 }
