@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn default_scan_command_covers_text_json_and_update_modes() {
-        cmd_agent_scan(
+        let _ = cmd_agent_scan(
             &[agent_fixture("skill-benign-installer")],
             Format::Text,
             None,
@@ -638,7 +638,7 @@ mod tests {
             &execution(),
         )
         .expect("text agent scan");
-        cmd_agent_scan(
+        let _ = cmd_agent_scan(
             &[agent_fixture("skill-benign-net-tool")],
             Format::Json,
             None,
@@ -659,7 +659,7 @@ mod tests {
         )
         .expect("write baseline surface");
         let baseline = surface.path().join("baseline.json");
-        cmd_agent_scan(
+        let _ = cmd_agent_scan(
             &[surface.path().to_path_buf()],
             Format::Text,
             None,
@@ -744,7 +744,7 @@ mod tests {
         let (_dir, path) = judge_script(
             "cat >/dev/null; printf '%s' '{\"schema_version\":1,\"decision\":\"block\",\"rationale\":\"semantic mismatch\"}'",
         );
-        cmd_agent_scan(
+        let _ = cmd_agent_scan(
             &[agent_fixture("skill-benign-installer")],
             Format::Json,
             None,
