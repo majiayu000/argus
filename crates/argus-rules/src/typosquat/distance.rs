@@ -88,8 +88,14 @@ impl EditWorkspace {
         let infinity = (maximum + 1) as u16;
         self.previous[0] = 0;
         let initial_end = right.len().min(maximum);
-        for column in 1..=initial_end {
-            self.previous[column] = column as u16;
+        for (column, cell) in self
+            .previous
+            .iter_mut()
+            .enumerate()
+            .take(initial_end + 1)
+            .skip(1)
+        {
+            *cell = column as u16;
         }
         if initial_end < right.len() {
             self.previous[initial_end + 1] = infinity;
