@@ -72,7 +72,10 @@ pub fn extract_zip_to_memory(
             file.take(cap)
                 .read_to_end(&mut buf)
                 .with_context(|| format!("read {label} `{}`", path.display()))? as u64;
-        let zip_name = file.name().replace('\\', "/");
+        let zip_name = file
+            .name()
+            .with_context(|| format!("decode {label} entry name `{}`", path.display()))?
+            .replace('\\', "/");
         files.push(ExtractedZipFile {
             zip_name,
             bytes: buf,
@@ -90,7 +93,7 @@ fn for_each_entry(
     zip_bytes: &[u8],
     max_extracted_bytes: u64,
     label: &str,
-    mut sink: impl FnMut(&Path, &mut zip::read::ZipFile<'_>, u64) -> Result<u64>,
+    mut sink: impl FnMut(&Path, &mut zip::read::ZipFile<'_, std::io::Cursor<&[u8]>>, u64) -> Result<u64>,
 ) -> Result<u64> {
     let reader = std::io::Cursor::new(zip_bytes);
     let mut archive =
@@ -112,11 +115,18 @@ fn for_each_entry(
         // Path safety: reject any entry path that is absolute or contains
         // `..`. ZIP names are not necessarily UTF-8, but `enclosed_name`
         // returns `Some` only if the path is safe to extract under a root.
-        let path: PathBuf = match file.enclosed_name() {
-            Some(p) => p.to_owned(),
+        // It rewrites rooted names and folds inner `..` rather than failing,
+        // so those are refused on the raw name first.
+        let enclosed = if raw_name_is_rooted_or_traversing(file.name_raw()) {
+            None
+        } else {
+            file.enclosed_name()
+        };
+        let path: PathBuf = match enclosed {
+            Some(p) => p,
             None => bail!(
                 "{label} {} has an unsafe path; refusing to extract",
-                file.name()
+                String::from_utf8_lossy(file.name_raw())
             ),
         };
         budget.observe(&path, label)?;
@@ -153,6 +163,15 @@ fn for_each_entry(
             .ok_or_else(|| anyhow!("{label} size accounting overflow"))?;
     }
     Ok(total)
+}
+
+/// True when a raw entry name starts at a root or drive, or has a `..`
+/// component, under either separator.
+fn raw_name_is_rooted_or_traversing(raw: &[u8]) -> bool {
+    let is_separator = |byte: &u8| matches!(byte, b'/' | b'\\');
+    raw.first().is_some_and(is_separator)
+        || matches!(raw, [drive, b':', ..] if drive.is_ascii_alphabetic())
+        || raw.split(is_separator).any(|part| part == b"..")
 }
 
 #[cfg(test)]
@@ -195,6 +214,22 @@ mod tests {
     #[test]
     fn rejects_absolute_path() {
         let zip = make_zip(&[("/abs.txt", b"x")]);
+        let dir = tempfile::tempdir().unwrap();
+        let err = extract_zip(&zip, dir.path(), 1024, "test entry").unwrap_err();
+        assert!(format!("{err:#}").contains("unsafe path"), "got: {err:#}");
+    }
+
+    #[test]
+    fn rejects_inner_parent_dir() {
+        let zip = make_zip(&[("a/../b.txt", b"x")]);
+        let dir = tempfile::tempdir().unwrap();
+        let err = extract_zip(&zip, dir.path(), 1024, "test entry").unwrap_err();
+        assert!(format!("{err:#}").contains("unsafe path"), "got: {err:#}");
+    }
+
+    #[test]
+    fn rejects_drive_prefix() {
+        let zip = make_zip(&[("C:/abs.txt", b"x")]);
         let dir = tempfile::tempdir().unwrap();
         let err = extract_zip(&zip, dir.path(), 1024, "test entry").unwrap_err();
         assert!(format!("{err:#}").contains("unsafe path"), "got: {err:#}");

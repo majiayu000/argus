@@ -139,7 +139,7 @@ pub fn verify_dsse_signature(
     leaf_cert_der: &[u8],
 ) -> Result<DsseVerdict> {
     let cert = Certificate::from_der(leaf_cert_der).context("parse leaf certificate DER")?;
-    let spki = &cert.tbs_certificate.subject_public_key_info;
+    let spki = cert.tbs_certificate().subject_public_key_info();
     let spki_der = spki.to_der().context("re-encode certificate SPKI to DER")?;
 
     // Only EC keys (id-ecPublicKey) carry a named-curve OID we can match.

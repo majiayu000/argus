@@ -25,4 +25,4 @@ regex = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
-rand_core = { workspace = true }
+p256 = { workspace = true, features = ["getrandom"] }

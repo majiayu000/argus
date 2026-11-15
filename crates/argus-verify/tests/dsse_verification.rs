@@ -9,8 +9,8 @@ use argus_verify::{verify_bundle_dsse, verify_dsse_signature, DsseVerdict};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::EncodePrivateKey;
-use rand_core::OsRng;
 
 /// Independent reimplementation of the DSSE PAE so a bug in the library's
 /// own PAE construction cannot be masked by sharing the same code.
@@ -30,7 +30,7 @@ fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
 /// Generate a P-256 signing key and a self-signed DER certificate whose
 /// embedded public key matches that key.
 fn keypair_and_cert() -> (SigningKey, Vec<u8>) {
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::generate();
     let pkcs8 = signing_key
         .to_pkcs8_der()
         .expect("export P-256 key to PKCS#8");
@@ -60,7 +60,7 @@ fn signature_from_wrong_key_is_invalid() {
     // Cert embeds key A; signature is produced by key B. This is the
     // forged-attestation case: a valid subject digest but a bogus signing key.
     let (_key_a, cert_der) = keypair_and_cert();
-    let key_b = SigningKey::random(&mut OsRng);
+    let key_b = SigningKey::generate();
     let sig: Signature = key_b.sign(&pae(PAYLOAD_TYPE, PAYLOAD));
     let sig_der = sig.to_der();
 
