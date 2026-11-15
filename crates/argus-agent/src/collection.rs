@@ -121,6 +121,7 @@ pub(super) fn collect_surface_files(
             .with_context(|| format!("read agent scan root {}", root.display()))?;
         let walker = walkdir::WalkDir::new(root)
             .follow_links(false)
+            .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
                 let name = entry.file_name().to_string_lossy();
