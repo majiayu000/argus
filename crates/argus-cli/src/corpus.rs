@@ -452,10 +452,10 @@ mod tests {
     #[test]
     fn corpus_commands_execute_the_frozen_agent_dataset() {
         let execution = ExecutionContext::serial().unwrap();
-        cmd_test(&agent_corpus(), &execution).expect("corpus test command");
-        cmd_eval(&agent_corpus(), EvaluationFormat::Json, &execution)
+        let _ = cmd_test(&agent_corpus(), &execution).expect("corpus test command");
+        let _ = cmd_eval(&agent_corpus(), EvaluationFormat::Json, &execution)
             .expect("JSON corpus eval command");
-        cmd_eval(&agent_corpus(), EvaluationFormat::Text, &execution)
+        let _ = cmd_eval(&agent_corpus(), EvaluationFormat::Text, &execution)
             .expect("text corpus eval command");
     }
 
