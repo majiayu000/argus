@@ -3,6 +3,12 @@
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # chrono is unmaintained (no fixed release; jiff or time recommended). This is
+    # not a vulnerability; seven workspace crates use it, so migrating is its own
+    # change. Remove this entry once chrono is gone from the workspace.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; migration to jiff or time tracked separately" },
+]
 
 [bans]
 # The workspace pulls several crates at multiple versions via transitive
