@@ -4,7 +4,7 @@ use crate::cache::{
 use crate::client::{CompleteSnapshot, OsvClient, OsvTransport};
 use crate::model::{CoordinateQuery, CoordinateSet, NormalizedAdvisory, OsvError, OsvErrorKind};
 use argus_core::{ExecutionContext, VulnerabilitySourceMode};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ pub struct ResolveRequest<'a> {
     pub offline: bool,
     pub allow_stale: bool,
     pub max_age_seconds: u64,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub enum CoordinateSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCoordinate {
     pub query: CoordinateQuery,
-    pub fetched_at: DateTime<Utc>,
+    pub fetched_at: Timestamp,
     pub query_summaries: Vec<CacheQuerySummary>,
     pub advisories: Vec<NormalizedAdvisory>,
     pub source: CoordinateSource,
@@ -38,7 +38,7 @@ pub struct ResolvedSnapshot {
     pub results: Vec<ResolvedCoordinate>,
     pub source_mode: VulnerabilitySourceMode,
     pub authorized_stale: bool,
-    pub resolved_at: DateTime<Utc>,
+    pub resolved_at: Timestamp,
 }
 
 pub trait AdvisoryResolver {
@@ -80,7 +80,7 @@ impl OsvResolver {
         &self,
         refresh: Vec<CoordinateQuery>,
         transport: &dyn OsvTransport,
-        now: DateTime<Utc>,
+        now: Timestamp,
         execution: &ExecutionContext,
     ) -> Result<(CompleteSnapshot, Vec<CacheEntry>), OsvError> {
         let refresh_set = CoordinateSet::new(refresh, 0)?;

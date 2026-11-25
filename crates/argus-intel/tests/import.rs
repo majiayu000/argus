@@ -4,20 +4,17 @@ use argus_intel::{
     archive_url, import_snapshot, load_snapshot, ArchiveTransport, HttpArchiveTransport,
     ImportLimits, ImportRequest, CANONICAL_SOURCE,
 };
-use chrono::{TimeZone, Utc};
 use fixtures::{
     archive, archive_for_revision, archive_typed, exact_record, MockArchiveTransport, REVISION,
 };
+use jiff::Timestamp;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::Ordering;
 use std::thread;
 
-fn request<'a>(
-    output: &'a std::path::Path,
-    imported_at: chrono::DateTime<Utc>,
-) -> ImportRequest<'a> {
+fn request<'a>(output: &'a std::path::Path, imported_at: Timestamp) -> ImportRequest<'a> {
     ImportRequest {
         source: CANONICAL_SOURCE,
         revision: REVISION,
@@ -50,7 +47,7 @@ fn deterministic_snapshot() {
     let first = import_snapshot(
         &request(
             &first_path,
-            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
         ),
         &transport,
     )
@@ -58,7 +55,7 @@ fn deterministic_snapshot() {
     let second = import_snapshot(
         &request(
             &second_path,
-            Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            "2026-01-02T00:00:00Z".parse::<Timestamp>().unwrap(),
         ),
         &transport,
     )
@@ -82,7 +79,7 @@ fn snapshot_integrity() {
     let dir = tempfile::tempdir().unwrap();
     let path = fs::canonicalize(dir.path()).unwrap().join("intel.json");
     import_snapshot(
-        &request(&path, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+        &request(&path, "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()),
         &transport,
     )
     .unwrap();
@@ -100,7 +97,7 @@ fn atomic_import() {
     let path = root.join("intel.json");
     fs::write(&path, b"old snapshot").unwrap();
     let error = import_snapshot(
-        &request(&path, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+        &request(&path, "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()),
         &MockArchiveTransport::failing(),
     )
     .unwrap_err();
@@ -128,7 +125,7 @@ fn import_limits() {
     };
     let request = ImportRequest {
         limits,
-        ..request(&path, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap())
+        ..request(&path, "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap())
     };
     assert!(import_snapshot(&request, &transport)
         .unwrap_err()
@@ -147,7 +144,7 @@ fn snapshot_metadata_tamper_matrix() {
     import_snapshot(
         &request(
             &valid_path,
-            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
         ),
         &transport,
     )
@@ -273,7 +270,10 @@ fn archive_safety_and_numeric_limit_matrix() {
         let result = import_snapshot(
             &ImportRequest {
                 limits,
-                ..request(&output, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap())
+                ..request(
+                    &output,
+                    "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
+                )
             },
             &MockArchiveTransport::new(bytes),
         );
@@ -289,7 +289,10 @@ fn archive_safety_and_numeric_limit_matrix() {
     assert!(import_snapshot(
         &ImportRequest {
             limits: zero_limits,
-            ..request(&output, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap())
+            ..request(
+                &output,
+                "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
+            )
         },
         &MockArchiveTransport::new(Vec::new())
     )
@@ -315,7 +318,7 @@ fn symlink_and_non_regular_snapshot_paths_fail_closed() {
     assert!(import_snapshot(
         &request(
             &output_dir,
-            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+            "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
         ),
         &MockArchiveTransport::new(archive(&[("osv/malicious/path.json", &body)]))
     )
@@ -329,7 +332,7 @@ fn symlink_and_non_regular_snapshot_paths_fail_closed() {
     assert!(import_snapshot(
         &request(
             &parent_link.join("db.json"),
-            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+            "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap()
         ),
         &transport
     )

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -20,7 +20,8 @@ pub struct SnapshotEnvelope {
     pub schema_versions: Vec<String>,
     pub archive_sha256: String,
     pub records_sha256: String,
-    pub imported_at: DateTime<Utc>,
+    #[serde(with = "argus_core::timestamp")]
+    pub imported_at: Timestamp,
     pub records: Vec<SnapshotRecord>,
     pub snapshot_sha256: String,
 }
@@ -67,7 +68,8 @@ pub struct SnapshotRecord {
     pub advisory_id: String,
     pub aliases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub withdrawn: Option<DateTime<Utc>>,
+    #[serde(default, with = "argus_core::timestamp::optional")]
+    pub withdrawn: Option<Timestamp>,
     pub affected: Vec<SnapshotAffected>,
 }
 
@@ -110,7 +112,8 @@ struct SnapshotPayload<'a> {
     schema_versions: &'a [String],
     archive_sha256: &'a str,
     records_sha256: &'a str,
-    imported_at: DateTime<Utc>,
+    #[serde(serialize_with = "argus_core::timestamp::serialize")]
+    imported_at: Timestamp,
     records: &'a [SnapshotRecord],
 }
 
@@ -236,7 +239,6 @@ pub(crate) fn write_atomic(
 mod tests {
     use super::*;
     use crate::import::CANONICAL_SOURCE;
-    use chrono::TimeZone;
 
     fn snapshot_with_record() -> SnapshotEnvelope {
         finalize_snapshot(SnapshotEnvelope {
@@ -246,7 +248,7 @@ mod tests {
             schema_versions: vec!["1.7.4".to_string()],
             archive_sha256: "0".repeat(64),
             records_sha256: String::new(),
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             records: vec![SnapshotRecord {
                 advisory_id: "MAL-SNAPSHOT-INVARIANT".to_string(),
                 aliases: vec!["CVE-2026-1".to_string()],
@@ -263,6 +265,23 @@ mod tests {
             snapshot_sha256: String::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn snapshot_digests_use_canonical_fractional_timestamps() {
+        let mut snapshot = snapshot_with_record();
+        snapshot.imported_at = "2026-01-01T00:00:00.1Z".parse().unwrap();
+        snapshot.records[0].withdrawn = Some("2025-12-31T00:00:00.1234Z".parse().unwrap());
+        // Version 1 digests cover .100Z and .123400Z, with trailing zeroes.
+        snapshot.records_sha256 =
+            "b831888f54ba312468d9fc5c3d59e2700c004f41fc2eb58369dcf7739bdf2d58".to_string();
+        snapshot.snapshot_sha256 =
+            "69c7e779e4d953e2a39f4ad8fe242c1f36c789cbc548fc44b75ebb4ed7514825".to_string();
+        validate_snapshot(&snapshot).unwrap();
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let decoded: SnapshotEnvelope = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(decoded, snapshot);
+        validate_snapshot(&decoded).unwrap();
     }
 
     #[test]

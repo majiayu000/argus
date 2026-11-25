@@ -13,7 +13,7 @@ argus-osv-schema = { workspace = true }
 argus-lockfile = { workspace = true }
 argus-transport = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 hex = { workspace = true }
 polycvss = { workspace = true }
 rustix = { workspace = true }

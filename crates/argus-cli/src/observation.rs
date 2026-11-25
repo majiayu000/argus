@@ -2,7 +2,7 @@ use crate::lockfile_scan::LockfileScanOutcome;
 use anyhow::{bail, Context, Result};
 use argus_core::{Decision, Finding, PackageCoordinate};
 use argus_lockfile::{IntegrityEvidence, LockfileScanTarget};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 use std::path::Path;
 
@@ -10,7 +10,8 @@ use std::path::Path;
 #[serde(rename_all = "camelCase")]
 struct ObservationExport<'a> {
     schema_version: u8,
-    generated_at: DateTime<Utc>,
+    #[serde(serialize_with = "argus_core::timestamp::serialize")]
+    generated_at: Timestamp,
     lockfile: &'a Path,
     decision: Decision,
     artifacts: Vec<ObservedArtifact<'a>>,
@@ -39,7 +40,7 @@ pub(crate) fn export(
     path: &Path,
     outcome: &LockfileScanOutcome,
     targets: &[LockfileScanTarget],
-    generated_at: DateTime<Utc>,
+    generated_at: Timestamp,
 ) -> Result<()> {
     let artifacts = outcome
         .reports

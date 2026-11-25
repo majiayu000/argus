@@ -4,8 +4,8 @@ use crate::snapshot::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use argus_osv_schema::{parse_record, OsvRecord};
-use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
+use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
@@ -44,7 +44,7 @@ pub struct ImportRequest<'a> {
     pub source: &'a str,
     pub revision: &'a str,
     pub output: &'a Path,
-    pub imported_at: DateTime<Utc>,
+    pub imported_at: Timestamp,
     pub limits: ImportLimits,
 }
 

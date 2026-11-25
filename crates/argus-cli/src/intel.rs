@@ -4,8 +4,8 @@ use argus_intel::{
     import_snapshot, AtomicCleanupState, AtomicWriteOutcome, HttpArchiveTransport, ImportLimits,
     ImportOutcome, ImportRequest, IntelDatabase, MatchResult, SnapshotEnvelope,
 };
-use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
+use jiff::Timestamp;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -46,7 +46,7 @@ pub(crate) fn cmd_intel(op: IntelOp) -> Result<ExitCode> {
                 source: &source,
                 revision: &revision,
                 output: &output,
-                imported_at: Utc::now(),
+                imported_at: Timestamp::now(),
                 limits: ImportLimits::default(),
             };
             let outcome = import_snapshot(&request, &HttpArchiveTransport::new())
@@ -106,7 +106,7 @@ pub(crate) fn render_import_cleanup_warning(outcome: &AtomicWriteOutcome) -> Opt
 pub(crate) fn apply_malicious_snapshot(
     report: &mut ScanReport,
     database_path: Option<&Path>,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
 ) -> Result<()> {
     apply_malicious_snapshot_to_reports(
         std::slice::from_mut(report),
@@ -123,7 +123,7 @@ pub(crate) fn apply_malicious_snapshot(
 pub(crate) fn apply_malicious_snapshot_to_reports(
     reports: &mut [ScanReport],
     database_path: Option<&Path>,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
 ) -> Result<()> {
     let Some(database_path) = database_path else {
         return Ok(());
@@ -171,8 +171,12 @@ pub(crate) fn render_status_text(status: &IntelSnapshotStatus) -> String {
         .expect("writing an intelligence status to String cannot fail");
     writeln!(output, "  revision: {}", status.revision)
         .expect("writing an intelligence status to String cannot fail");
-    writeln!(output, "  imported_at: {}", status.imported_at.to_rfc3339())
-        .expect("writing an intelligence status to String cannot fail");
+    writeln!(
+        output,
+        "  imported_at: {}",
+        argus_core::timestamp::format_with_utc_offset(status.imported_at)
+    )
+    .expect("writing an intelligence status to String cannot fail");
     writeln!(output, "  age_seconds: {}", status.age_seconds)
         .expect("writing an intelligence status to String cannot fail");
     writeln!(output, "  archive_sha256: {}", status.archive_sha256)
@@ -214,7 +218,7 @@ pub(crate) fn render_snapshot_status(snapshot: &SnapshotEnvelope, path: Option<&
            withdrawn_records: {}\n",
         snapshot.source,
         snapshot.revision,
-        snapshot.imported_at.to_rfc3339(),
+        argus_core::timestamp::format_with_utc_offset(snapshot.imported_at),
         snapshot.archive_sha256,
         snapshot.records_sha256,
         snapshot.snapshot_sha256,

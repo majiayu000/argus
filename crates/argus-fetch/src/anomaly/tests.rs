@@ -125,12 +125,12 @@ fn version_shape_evidence_names_versions_times_and_policy() {
 
 #[test]
 fn cache_ttl_boundary_is_inclusive() {
-    let now = DateTime::parse_from_rfc3339("2025-02-21T00:15:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let fetched = now - Duration::minutes(15);
+    let now = "2025-02-21T00:15:00Z".parse::<Timestamp>().unwrap();
+    let fetched = now - SignedDuration::from_mins(15);
     assert!(cache_entry_is_reusable(fetched, now, fetched).unwrap());
-    assert!(!cache_entry_is_reusable(fetched, now + Duration::nanoseconds(1), fetched).unwrap());
+    assert!(
+        !cache_entry_is_reusable(fetched, now + SignedDuration::from_nanos(1), fetched).unwrap()
+    );
 }
 
 #[test]
