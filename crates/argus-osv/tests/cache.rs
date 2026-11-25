@@ -12,7 +12,7 @@ use argus_osv::model::{
     OsvError, OsvErrorKind,
 };
 use argus_osv::severity::{NormalizedSeverity, SeverityLevel};
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -46,15 +46,15 @@ impl Drop for TempRoot {
     }
 }
 
-fn time(second: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 7, 19, 10, 0, second).unwrap()
+fn time(second: u32) -> Timestamp {
+    format!("2026-07-19T10:00:{second:02}Z").parse().unwrap()
 }
 
 fn coordinate(name: &str) -> PackageCoordinate {
     PackageCoordinate::new(Ecosystem::Npm, name, "1.2.3").unwrap()
 }
 
-fn entry(name: &str, advisory_id: &str, fetched_at: DateTime<Utc>) -> CacheEntry {
+fn entry(name: &str, advisory_id: &str, fetched_at: Timestamp) -> CacheEntry {
     let coordinate = coordinate(name);
     let advisory = NormalizedAdvisory {
         coordinate: coordinate.clone(),
@@ -120,10 +120,16 @@ fn noncanonical(envelope: &CacheEnvelope) -> Vec<u8> {
 #[test]
 fn cache_contract_digest_domains_canonical_order_and_bounds() {
     let now = time(5);
-    let first = finalize_entry(entry("zeta", "GHSA-Z", time(1))).unwrap();
+    let fractional = "2026-07-19T10:00:01.1Z".parse().unwrap();
+    let mut first = entry("zeta", "GHSA-Z", fractional);
+    first.advisories[0].published = Some("2026-07-18T10:00:00.1234Z".parse().unwrap());
+    let first = finalize_entry(first).unwrap();
     let second = finalize_entry(entry("alpha", "GHSA-A", time(2))).unwrap();
     let envelope = merge_envelope(None, [first, second], now).unwrap();
     let bytes = encode_envelope(&envelope).unwrap();
+    let encoded = std::str::from_utf8(&bytes).unwrap();
+    assert!(encoded.contains("\"fetched_at\":\"2026-07-19T10:00:01.100Z\""));
+    assert!(encoded.contains("\"published\":\"2026-07-18T10:00:00.123400Z\""));
     let decoded = decode_envelope(&bytes, now).unwrap();
     assert_eq!(decoded, envelope);
     assert_eq!(encode_envelope(&decoded).unwrap(), bytes);
@@ -249,7 +255,7 @@ fn cache_contract_fresh_offline_and_authorized_stale_matrix() {
     let fractional_stale = lookup_cache(
         Some(&envelope),
         &query_set(&["fresh"]),
-        time(5) + chrono::Duration::nanoseconds(1),
+        time(5) + SignedDuration::from_nanos(1),
         1,
         false,
         false,

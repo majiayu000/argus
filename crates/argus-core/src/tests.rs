@@ -142,10 +142,10 @@ fn coordinate_matrix() {
 
 #[test]
 fn intelligence_status() {
-    use chrono::TimeZone as _;
+    use jiff::Timestamp;
 
-    let imported_at = Utc.with_ymd_and_hms(2026, 7, 19, 1, 2, 3).single().unwrap();
-    let scan_started_at = Utc.with_ymd_and_hms(2026, 7, 19, 1, 4, 8).single().unwrap();
+    let imported_at = "2026-07-19T01:02:03Z".parse::<Timestamp>().unwrap();
+    let scan_started_at = "2026-07-19T01:04:08Z".parse::<Timestamp>().unwrap();
     let age_seconds = IntelSnapshotStatus::age_seconds(imported_at, scan_started_at).unwrap();
     assert_eq!(age_seconds, 125);
     assert_eq!(

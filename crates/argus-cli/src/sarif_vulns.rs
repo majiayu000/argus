@@ -82,7 +82,9 @@ pub(crate) fn render_report(report: &VulnerabilityReport, cache_label: &str) -> 
             );
             properties.insert(
                 "database_modified".to_string(),
-                json!(advisory.database_modified),
+                json!(argus_core::timestamp::format_utc(
+                    advisory.database_modified
+                )),
             );
             properties.insert("source_url".to_string(), json!(advisory.source_url));
             properties.insert("evidence".to_string(), json!(advisory.evidence));

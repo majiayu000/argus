@@ -121,7 +121,7 @@ impl IntelDatabase {
 
     pub fn status(
         &self,
-        scan_started_at: chrono::DateTime<chrono::Utc>,
+        scan_started_at: jiff::Timestamp,
         status: IntelMatchStatus,
     ) -> Result<IntelSnapshotStatus> {
         Ok(IntelSnapshotStatus {

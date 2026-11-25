@@ -24,7 +24,7 @@ use argus_core::{
 use argus_intel::{
     AtomicCleanupState, AtomicWriteOutcome, ImportOutcome, IntelDatabase as SnapshotDatabase,
 };
-use chrono::{TimeZone as _, Utc};
+use jiff::Timestamp;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,10 +57,8 @@ fn local_tempdir() -> tempfile::TempDir {
         .expect("local tempdir")
 }
 
-fn scan_started_at() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2020, 1, 2, 0, 0, 0)
-        .single()
-        .expect("fixed scan clock")
+fn scan_started_at() -> Timestamp {
+    "2020-01-02T00:00:00Z".parse().expect("fixed scan clock")
 }
 
 fn synthetic_report(ecosystem: Ecosystem, name: &str, version: &str) -> ScanReport {

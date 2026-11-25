@@ -3,9 +3,10 @@
 use crate::packument::Packument;
 use anyhow::{anyhow, bail, Context, Result};
 use argus_core::rules::{NpmRapidPublishParameters, NpmVersionShapeParameters};
+use argus_core::timestamp::{format_with_utc_offset, parse_rfc3339};
 use argus_core::{Finding, Severity};
 use argus_transport::Transport;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,7 +53,7 @@ impl std::fmt::Display for NormalizedVersion {
 #[derive(Debug, Clone)]
 struct VersionEvent {
     version: NormalizedVersion,
-    published_at: DateTime<Utc>,
+    published_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +95,7 @@ fn version_shape_findings_with_parameters(
         }
     };
 
-    let mut normalized_events = BTreeMap::<NormalizedVersion, DateTime<Utc>>::new();
+    let mut normalized_events = BTreeMap::<NormalizedVersion, Timestamp>::new();
     for raw_version in packument.versions.keys() {
         let Some(version) = NormalizedVersion::parse(raw_version) else {
             continue;
@@ -108,8 +109,8 @@ fn version_shape_findings_with_parameters(
             Entry::Occupied(entry) => {
                 bail!(
                     "normalized version `{version}` has conflicting publication times: {} and {}",
-                    entry.get().to_rfc3339(),
-                    published_at.to_rfc3339()
+                    format_with_utc_offset(*entry.get()),
+                    format_with_utc_offset(published_at)
                 );
             }
         }
@@ -147,8 +148,9 @@ fn version_shape_findings_with_parameters(
     }
 
     let history_days = target_time
-        .signed_duration_since(predecessors[0].published_at)
-        .num_days();
+        .duration_since(predecessors[0].published_at)
+        .as_secs()
+        / 86_400;
     if history_days < i64::from(parameters.minimum_history_days()) {
         return Ok(vec![unassessed_finding(
             packument,
@@ -167,9 +169,9 @@ fn version_shape_findings_with_parameters(
         return Ok(Vec::new());
     }
 
-    let delay = target_time.signed_duration_since(predecessor.published_at);
-    if delay <= Duration::zero()
-        || delay > Duration::hours(i64::from(parameters.maximum_jump_delay_hours()))
+    let delay = target_time.duration_since(predecessor.published_at);
+    if delay <= SignedDuration::ZERO
+        || delay > SignedDuration::from_hours(i64::from(parameters.maximum_jump_delay_hours()))
     {
         return Ok(Vec::new());
     }
@@ -201,10 +203,10 @@ fn version_shape_findings_with_parameters(
         format!(
             "policy={POLICY_ID}; target={target}@{}; predecessor={}@{}; delay_hours={}; \
              threshold={threshold}; baseline_transitions={}",
-            target_time.to_rfc3339(),
+            format_with_utc_offset(target_time),
             predecessor.version,
-            predecessor.published_at.to_rfc3339(),
-            delay.num_hours(),
+            format_with_utc_offset(predecessor.published_at),
+            delay.as_hours(),
             parameters.baseline_transitions()
         ),
     );
@@ -212,24 +214,25 @@ fn version_shape_findings_with_parameters(
         format!("policy={POLICY_ID}"),
         format!("package_name={}", packument.name),
         format!("target_version={target}"),
-        format!("target_published_at={}", target_time.to_rfc3339()),
+        format!(
+            "target_published_at={}",
+            format_with_utc_offset(target_time)
+        ),
         format!("predecessor_version={}", predecessor.version),
         format!(
             "predecessor_published_at={}",
-            predecessor.published_at.to_rfc3339()
+            format_with_utc_offset(predecessor.published_at)
         ),
         format!("threshold={threshold}"),
     ]);
     Ok(vec![finding])
 }
 
-fn required_time(times: &BTreeMap<String, String>, version: &str) -> Result<DateTime<Utc>> {
+fn required_time(times: &BTreeMap<String, String>, version: &str) -> Result<Timestamp> {
     let raw = times
         .get(version)
         .ok_or_else(|| anyhow!("packument `time` is missing version `{version}`"))?;
-    DateTime::parse_from_rfc3339(raw)
-        .map(|value| value.with_timezone(&Utc))
-        .with_context(|| format!("packument `time[{version}]` is not RFC3339"))
+    parse_rfc3339(raw).with_context(|| format!("packument `time[{version}]` is not RFC3339"))
 }
 
 fn jump_class(
@@ -297,7 +300,8 @@ struct SearchPublisher {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
-    fetched_at: DateTime<Utc>,
+    #[serde(with = "argus_core::timestamp")]
+    fetched_at: Timestamp,
     body: String,
 }
 
@@ -315,7 +319,7 @@ pub(crate) fn metadata_findings(
         registry,
         cache_dir,
         transport,
-        Utc::now(),
+        Timestamp::now(),
         rules.npm_version_shape_parameters()?,
         rules.npm_rapid_publish_parameters()?,
     )
@@ -328,7 +332,7 @@ fn metadata_findings_with_parameters_at(
     registry: &str,
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
-    now: DateTime<Utc>,
+    now: Timestamp,
     version_parameters: NpmVersionShapeParameters,
     rapid_parameters: NpmRapidPublishParameters,
 ) -> Result<Vec<Finding>> {
@@ -370,11 +374,11 @@ fn rapid_publish_findings(
     packument: &Packument,
     target_version: &str,
     publisher: &str,
-    target_published_at: DateTime<Utc>,
+    target_published_at: Timestamp,
     registry: &str,
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
-    now: DateTime<Utc>,
+    now: Timestamp,
     parameters: NpmRapidPublishParameters,
 ) -> Result<Vec<Finding>> {
     let registry_base = normalized_registry_base(registry)?;
@@ -386,7 +390,8 @@ fn rapid_publish_findings(
         transport,
         now,
     )?;
-    let window_start = target_published_at - Duration::hours(i64::from(parameters.window_hours()));
+    let window_start =
+        target_published_at - SignedDuration::from_hours(i64::from(parameters.window_hours()));
     let mut events = BTreeSet::new();
 
     for object in response.objects {
@@ -394,14 +399,12 @@ fn rapid_publish_findings(
         if package.publisher.username != publisher {
             continue;
         }
-        let published_at = DateTime::parse_from_rfc3339(&package.date)
-            .map(|value| value.with_timezone(&Utc))
-            .with_context(|| {
-                format!(
-                    "npm search date for {}@{} is not RFC3339",
-                    package.name, package.version
-                )
-            })?;
+        let published_at = parse_rfc3339(&package.date).with_context(|| {
+            format!(
+                "npm search date for {}@{} is not RFC3339",
+                package.name, package.version
+            )
+        })?;
         if published_at < window_start || published_at > target_published_at {
             continue;
         }
@@ -435,7 +438,10 @@ fn rapid_publish_findings(
             format!("target_version={target_version}"),
             "status=unassessed".to_string(),
             format!("publisher={publisher}"),
-            format!("target_published_at={}", target_published_at.to_rfc3339()),
+            format!(
+                "target_published_at={}",
+                format_with_utc_offset(target_published_at)
+            ),
             format!("observed_distinct_packages={observed}"),
         ]);
         return Ok(vec![finding]);
@@ -449,7 +455,7 @@ fn rapid_publish_findings(
             "policy={POLICY_ID}; publisher={publisher}; target_published_at={}; \
              window_hours={}; distinct_packages={observed}; \
              threshold={}; packages={}",
-            target_published_at.to_rfc3339(),
+            format_with_utc_offset(target_published_at),
             parameters.window_hours(),
             parameters.package_threshold(),
             package_list
@@ -460,7 +466,10 @@ fn rapid_publish_findings(
         format!("package_name={}", packument.name),
         format!("target_version={target_version}"),
         format!("publisher={publisher}"),
-        format!("target_published_at={}", target_published_at.to_rfc3339()),
+        format!(
+            "target_published_at={}",
+            format_with_utc_offset(target_published_at)
+        ),
         format!("distinct_packages={observed}"),
         format!("packages={package_list}"),
     ]);
@@ -526,10 +535,10 @@ fn validate_search_url(base: &Url, candidate: &str) -> Result<()> {
 fn load_search_response(
     registry_base: &Url,
     publisher: &str,
-    target_published_at: DateTime<Utc>,
+    target_published_at: Timestamp,
     cache_dir: Option<&Path>,
     transport: &dyn Transport,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<SearchResponse> {
     let cache_path = cache_dir.map(|dir| {
         dir.join(format!(
@@ -584,11 +593,11 @@ fn parse_search_response(body: &[u8]) -> Result<SearchResponse> {
     Ok(response)
 }
 
-fn cache_key(base: &Url, publisher: &str, target_published_at: DateTime<Utc>) -> String {
+fn cache_key(base: &Url, publisher: &str, target_published_at: Timestamp) -> String {
     let identity = format!(
         "{}\n{publisher}\n{}\n{POLICY_ID}",
         base.as_str(),
-        target_published_at.to_rfc3339()
+        format_with_utc_offset(target_published_at)
     );
     let digest = Sha256::digest(identity.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -596,8 +605,8 @@ fn cache_key(base: &Url, publisher: &str, target_published_at: DateTime<Utc>) ->
 
 fn read_cache(
     path: &Path,
-    now: DateTime<Utc>,
-    target_published_at: DateTime<Utc>,
+    now: Timestamp,
+    target_published_at: Timestamp,
 ) -> Result<Option<Vec<u8>>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -635,18 +644,18 @@ fn read_cache(
 }
 
 fn cache_entry_is_reusable(
-    fetched_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    target_published_at: DateTime<Utc>,
+    fetched_at: Timestamp,
+    now: Timestamp,
+    target_published_at: Timestamp,
 ) -> Result<bool> {
-    let age = now.signed_duration_since(fetched_at);
-    if age < Duration::zero() {
+    let age = now.duration_since(fetched_at);
+    if age < SignedDuration::ZERO {
         bail!("metadata cache fetched_at is in the future");
     }
-    Ok(age <= Duration::minutes(CACHE_TTL_MINUTES) && fetched_at >= target_published_at)
+    Ok(age <= SignedDuration::from_mins(CACHE_TTL_MINUTES) && fetched_at >= target_published_at)
 }
 
-fn write_cache(path: &Path, fetched_at: DateTime<Utc>, body: &[u8]) -> Result<()> {
+fn write_cache(path: &Path, fetched_at: Timestamp, body: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("metadata cache path has no parent: {}", path.display()))?;

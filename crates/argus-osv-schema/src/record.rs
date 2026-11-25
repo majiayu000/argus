@@ -1,7 +1,7 @@
 use crate::profile::{profile, SchemaProfile};
 use anyhow::{bail, Context, Result};
 use argus_core::{canonicalize_package_name, Ecosystem, PackageCoordinate};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
@@ -19,11 +19,11 @@ pub struct OsvRecord {
     pub schema_version: String,
     pub id: String,
     #[serde(deserialize_with = "deserialize_utc")]
-    pub modified: DateTime<Utc>,
+    pub modified: Timestamp,
     #[serde(default, deserialize_with = "deserialize_present_optional_utc")]
-    pub published: Option<DateTime<Utc>>,
+    pub published: Option<Timestamp>,
     #[serde(default, deserialize_with = "deserialize_present_optional_utc")]
-    pub withdrawn: Option<DateTime<Utc>>,
+    pub withdrawn: Option<Timestamp>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub aliases: Vec<String>,
     #[serde(default)]
@@ -739,7 +739,7 @@ where
     }
 }
 
-fn deserialize_utc<'de, D>(deserializer: D) -> std::result::Result<DateTime<Utc>, D::Error>
+fn deserialize_utc<'de, D>(deserializer: D) -> std::result::Result<Timestamp, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -749,7 +749,7 @@ where
 
 fn deserialize_present_optional_utc<'de, D>(
     deserializer: D,
-) -> std::result::Result<Option<DateTime<Utc>>, D::Error>
+) -> std::result::Result<Option<Timestamp>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -767,11 +767,11 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-fn parse_utc(raw: &str) -> Result<DateTime<Utc>> {
+fn parse_utc(raw: &str) -> Result<Timestamp> {
     if !raw.ends_with('Z') {
         bail!("OSV timestamp must use UTC `Z` form");
     }
-    raw.parse::<DateTime<Utc>>()
+    argus_core::timestamp::parse_rfc3339(raw)
         .with_context(|| format!("parse OSV UTC timestamp `{raw}`"))
 }
 

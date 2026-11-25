@@ -4,7 +4,7 @@ use crate::model::{
 };
 use crate::normalize::validate_normalized_advisory;
 use argus_core::PackageCoordinate;
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +35,8 @@ pub struct CacheQuerySummary {
 #[serde(deny_unknown_fields)]
 pub struct CacheEntry {
     pub coordinate: PackageCoordinate,
-    pub fetched_at: DateTime<Utc>,
+    #[serde(with = "argus_core::timestamp")]
+    pub fetched_at: Timestamp,
     pub query_summaries: Vec<CacheQuerySummary>,
     pub advisories: Vec<NormalizedAdvisory>,
     pub response_sha256: String,
@@ -94,7 +95,7 @@ pub fn encode_envelope(envelope: &CacheEnvelope) -> Result<Vec<u8>, OsvError> {
     Ok(bytes)
 }
 
-pub fn decode_envelope(bytes: &[u8], now: DateTime<Utc>) -> Result<CacheEnvelope, OsvError> {
+pub fn decode_envelope(bytes: &[u8], now: Timestamp) -> Result<CacheEnvelope, OsvError> {
     ensure_cache_size(bytes.len())?;
     let envelope: CacheEnvelope = serde_json::from_slice(bytes)
         .map_err(|error| cache_error(format!("parse cache envelope: {error}")))?;
@@ -128,7 +129,7 @@ fn ensure_limit(label: &str, actual: usize, maximum: usize) -> Result<(), OsvErr
 pub fn merge_envelope(
     existing: Option<CacheEnvelope>,
     incoming: impl IntoIterator<Item = CacheEntry>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<CacheEnvelope, OsvError> {
     let mut envelope = match existing {
         Some(envelope) => {
@@ -184,7 +185,7 @@ pub fn merge_envelope(
 pub fn lookup_cache(
     envelope: Option<&CacheEnvelope>,
     coordinates: &CoordinateSet,
-    now: DateTime<Utc>,
+    now: Timestamp,
     max_age_seconds: u64,
     offline: bool,
     allow_stale: bool,
@@ -217,11 +218,11 @@ pub fn lookup_cache(
             refresh.push(query.clone());
             continue;
         };
-        let age = now.signed_duration_since(entry.fetched_at);
-        if age < chrono::TimeDelta::zero() {
+        let age = now.duration_since(entry.fetched_at);
+        if age < SignedDuration::ZERO {
             return Err(cache_error("cache entry fetched_at is in the future"));
         }
-        if age <= chrono::TimeDelta::seconds(max_age_seconds as i64) {
+        if age <= SignedDuration::from_secs(max_age_seconds as i64) {
             hits.insert(key, entry.clone());
         } else if offline && allow_stale {
             authorized_stale = true;
@@ -468,7 +469,7 @@ impl SecureCache {
     pub fn load_at(
         &self,
         cache_dir: &Path,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Option<CacheEnvelope>, OsvError> {
         self.with_locked_directory(cache_dir, false, |directory| {
             unix::read_target(directory, &*self.hooks)?
@@ -480,7 +481,7 @@ impl SecureCache {
         &self,
         cache_dir: &Path,
         entries: impl IntoIterator<Item = CacheEntry>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CacheEnvelope, OsvError> {
         let entries = entries.into_iter().collect::<Vec<_>>();
         self.with_locked_directory(cache_dir, true, |directory| {
@@ -526,12 +527,12 @@ impl CacheStore for SecureCache {
             let Some(bytes) = unix::read_target(directory, &*self.hooks)? else {
                 return Ok(None);
             };
-            let envelope = decode_envelope(&bytes, Utc::now())?;
+            let envelope = decode_envelope(&bytes, Timestamp::now())?;
             encode_envelope(&envelope).map(Some)
         })
     }
     fn replace(&self, cache_dir: &Path, canonical_envelope: &[u8]) -> Result<(), OsvError> {
-        let envelope = decode_envelope(canonical_envelope, Utc::now())?;
+        let envelope = decode_envelope(canonical_envelope, Timestamp::now())?;
         if encode_envelope(&envelope)? != canonical_envelope {
             return Err(cache_error(
                 "replacement cache bytes are not RFC 8785 canonical",

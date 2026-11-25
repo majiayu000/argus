@@ -5,8 +5,8 @@ use argus_intel::{
     import_snapshot, load_snapshot, ArchiveTransport, DownloadMetadata, HttpArchiveTransport,
     ImportLimits, ImportRequest, IntelDatabase, CANONICAL_SOURCE,
 };
-use chrono::{TimeZone, Utc};
 use fixtures::{archive, archive_raw, exact_record, MockArchiveTransport, REVISION};
+use jiff::Timestamp;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -43,7 +43,7 @@ fn import_bytes(bytes: Vec<u8>, limits: ImportLimits) -> anyhow::Result<()> {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits,
         },
         &MockArchiveTransport::new(bytes),
@@ -218,7 +218,7 @@ fn importer_enforces_its_own_cap_and_actual_length() {
         source: CANONICAL_SOURCE,
         revision: REVISION,
         output: &capped_output,
-        imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
         limits: ImportLimits {
             compressed_bytes: bytes.len() as u64 - 1,
             ..ImportLimits::default()
@@ -297,7 +297,7 @@ fn load_and_match_are_zero_network_paths() {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &transport,

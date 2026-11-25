@@ -8,7 +8,7 @@ use argus_osv::{
     collect_lockfile_coordinates, AdvisoryEvidence, AffectedEvidence, NormalizedAdvisory,
     RangeEvidence,
 };
-use chrono::{Duration, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::fs;
@@ -39,7 +39,7 @@ fn coordinate(ecosystem: Ecosystem, name: &str, version: &str) -> PackageCoordin
 
 fn cache_entry(
     coordinate: PackageCoordinate,
-    fetched_at: chrono::DateTime<Utc>,
+    fetched_at: Timestamp,
     advisories: Vec<NormalizedAdvisory>,
 ) -> CacheEntry {
     CacheEntry {
@@ -66,8 +66,8 @@ fn advisory_with_id(
     primary_id: &str,
     level: SeverityLevel,
 ) -> NormalizedAdvisory {
-    let now = Utc::now() - Duration::hours(1);
-    let modified = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let now = Timestamp::now() - SignedDuration::from_hours(1);
+    let modified = format!("{now:.9}");
     let severity = match level {
         SeverityLevel::High => NormalizedSeverity {
             level,
@@ -144,7 +144,7 @@ fn advisory_with_id(
 
 fn seed_cache(
     root: &Path,
-    fetched_at: chrono::DateTime<Utc>,
+    fetched_at: Timestamp,
     entries: Vec<(PackageCoordinate, Vec<NormalizedAdvisory>)>,
 ) -> PathBuf {
     SecureCache::new(root)
@@ -153,7 +153,7 @@ fn seed_cache(
             entries
                 .into_iter()
                 .map(|(coordinate, advisories)| cache_entry(coordinate, fetched_at, advisories)),
-            Utc::now(),
+            Timestamp::now(),
         )
         .expect("seed secure cache");
     root.join("cache")
@@ -197,7 +197,7 @@ fn package_eight_ecosystems_use_the_shared_coordinate_contract() {
         .iter()
         .map(|(_, ecosystem, name, version)| (coordinate(*ecosystem, name, version), Vec::new()))
         .collect();
-    let cache = seed_cache(root.path(), Utc::now(), entries);
+    let cache = seed_cache(root.path(), Timestamp::now(), entries);
     for (ecosystem, _, name, version) in cases {
         let mut args = package_args(ecosystem, name, version, &cache);
         args.extend(["--format".to_string(), "json".to_string()]);
@@ -351,7 +351,7 @@ fn result_states_and_exit_codes_are_distinct() {
     let clean_coordinate = coordinate(Ecosystem::Npm, "clean-demo", "1.0.0");
     let clean_cache = seed_cache(
         clean_root.path(),
-        Utc::now(),
+        Timestamp::now(),
         vec![(clean_coordinate, Vec::new())],
     );
     let clean = argus(package_args("npm", "clean-demo", "1.0.0", &clean_cache));
@@ -361,7 +361,7 @@ fn result_states_and_exit_codes_are_distinct() {
     let active_coordinate = coordinate(Ecosystem::Npm, "active-demo", "1.0.0");
     let active_cache = seed_cache(
         active_root.path(),
-        Utc::now(),
+        Timestamp::now(),
         vec![(
             active_coordinate.clone(),
             vec![advisory(&active_coordinate, SeverityLevel::High)],
@@ -418,7 +418,7 @@ fn active_unknown_and_multi_advisory_evidence_is_complete_in_every_renderer() {
     let raw_modified = high.batch_summary_modified.clone();
     let cache = seed_cache(
         root.path(),
-        Utc::now(),
+        Timestamp::now(),
         vec![(package, vec![high, unknown])],
     );
 
@@ -548,7 +548,7 @@ fn offline_matrix_is_fail_closed_and_hides_cache_path() {
     let stale_coordinate = coordinate(Ecosystem::Npm, "stale-demo", "1.0.0");
     let stale_cache = seed_cache(
         stale_root.path(),
-        Utc::now() - Duration::hours(2),
+        Timestamp::now() - SignedDuration::from_hours(2),
         vec![(stale_coordinate, Vec::new())],
     );
     let mut unauthorized_args = package_args("npm", "stale-demo", "1.0.0", &stale_cache);
@@ -567,7 +567,7 @@ fn offline_matrix_is_fail_closed_and_hides_cache_path() {
     let corrupt_coordinate = coordinate(Ecosystem::Npm, "corrupt-demo", "1.0.0");
     let corrupt_cache = seed_cache(
         corrupt_root.path(),
-        Utc::now(),
+        Timestamp::now(),
         vec![(corrupt_coordinate, Vec::new())],
     );
     fs::write(corrupt_cache.join(CACHE_FILE_NAME), b"{not-json").expect("corrupt cache");
@@ -603,7 +603,7 @@ fn authorized_stale_cache_evidence_is_visible_in_every_renderer() {
     let package = coordinate(Ecosystem::Npm, "stale-render-demo", "1.0.0");
     let cache = seed_cache(
         root.path(),
-        Utc::now() - Duration::hours(2),
+        Timestamp::now() - SignedDuration::from_hours(2),
         vec![(package, Vec::new())],
     );
     for format in ["text", "json", "sarif"] {
@@ -666,7 +666,7 @@ fn authorized_stale_cache_evidence_is_visible_in_every_renderer() {
 fn all_renderers_expose_source_age_and_stable_cache_label() {
     let root = tempfile::tempdir().expect("tempdir");
     let package = coordinate(Ecosystem::Npm, "render-demo", "1.0.0");
-    let cache = seed_cache(root.path(), Utc::now(), vec![(package, Vec::new())]);
+    let cache = seed_cache(root.path(), Timestamp::now(), vec![(package, Vec::new())]);
     for format in ["text", "json", "sarif"] {
         let mut args = package_args("npm", "render-demo", "1.0.0", &cache);
         args.extend(["--format".to_string(), format.to_string()]);
@@ -750,7 +750,7 @@ fn nine_lockfile_families_query_without_network_or_package_managers() {
             .into_iter()
             .map(|query| (query.coordinate, Vec::new()))
             .collect();
-        let cache = seed_cache(root.path(), Utc::now(), entries);
+        let cache = seed_cache(root.path(), Timestamp::now(), entries);
         let output = argus([
             "vulns",
             "lockfile",

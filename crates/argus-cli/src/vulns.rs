@@ -12,7 +12,7 @@ use argus_osv::resolver::{AdvisoryResolver, OsvResolver, ResolveRequest};
 use argus_osv::severity::SeveritySource;
 use argus_osv::{collect_lockfile_coordinates, CoordinateQuery, CoordinateSet};
 use argus_rules::RuleSession;
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -113,7 +113,7 @@ fn resolve_snapshot(
 ) -> Result<argus_osv::resolver::ResolvedSnapshot> {
     let trusted_root = trusted_cache_root(cache_dir)?;
     let cache = SecureCache::new(trusted_root);
-    let now = Utc::now();
+    let now = Timestamp::now();
     if offline
         && cache
             .load_at(cache_dir, now)
@@ -309,8 +309,8 @@ fn render_text(report: &VulnerabilityReport) -> Result<String> {
         output,
         "advisories: active={} oldest_fetched_at={} newest_fetched_at={} maximum_age_seconds={}",
         evidence.active_advisories,
-        evidence.oldest_fetched_at.to_rfc3339(),
-        evidence.newest_fetched_at.to_rfc3339(),
+        argus_core::timestamp::format_with_utc_offset(evidence.oldest_fetched_at),
+        argus_core::timestamp::format_with_utc_offset(evidence.newest_fetched_at),
         evidence.maximum_age_seconds
     )
     .expect("write String");
@@ -407,9 +407,7 @@ fn render_advisory_text(
     writeln!(
         output,
         "    database_modified: {}",
-        advisory
-            .database_modified
-            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+        argus_core::timestamp::format_utc(advisory.database_modified)
     )
     .expect("write String");
     writeln!(

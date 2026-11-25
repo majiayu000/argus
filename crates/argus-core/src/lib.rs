@@ -10,6 +10,7 @@ pub mod execution;
 pub mod fs;
 pub mod rules;
 pub mod scan;
+pub mod timestamp;
 pub mod url;
 
 pub use execution::{
@@ -18,7 +19,7 @@ pub use execution::{
 pub use scan::ArtifactScan;
 
 use anyhow::{bail, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -466,7 +467,8 @@ pub enum IntelMatchStatus {
 pub struct IntelSnapshotStatus {
     pub source: String,
     pub revision: String,
-    pub imported_at: DateTime<Utc>,
+    #[serde(with = "crate::timestamp")]
+    pub imported_at: Timestamp,
     pub age_seconds: u64,
     pub archive_sha256: String,
     pub records_sha256: String,
@@ -477,10 +479,8 @@ pub struct IntelSnapshotStatus {
 impl IntelSnapshotStatus {
     /// Compute snapshot age once at scan start. A snapshot timestamp in the
     /// future is invalid input, not a zero-age fallback.
-    pub fn age_seconds(imported_at: DateTime<Utc>, scan_started_at: DateTime<Utc>) -> Result<u64> {
-        let seconds = scan_started_at
-            .signed_duration_since(imported_at)
-            .num_seconds();
+    pub fn age_seconds(imported_at: Timestamp, scan_started_at: Timestamp) -> Result<u64> {
+        let seconds = scan_started_at.duration_since(imported_at).as_secs();
         if seconds < 0 {
             bail!("snapshot imported_at {imported_at} is later than scan start {scan_started_at}");
         }
@@ -537,8 +537,10 @@ pub struct VulnerabilityQueryEvidence {
     pub queried_coordinates: usize,
     pub excluded_local_records: usize,
     pub active_advisories: usize,
-    pub oldest_fetched_at: DateTime<Utc>,
-    pub newest_fetched_at: DateTime<Utc>,
+    #[serde(with = "crate::timestamp")]
+    pub oldest_fetched_at: Timestamp,
+    #[serde(with = "crate::timestamp")]
+    pub newest_fetched_at: Timestamp,
     pub maximum_age_seconds: u64,
     pub advisories: Vec<VulnerabilityAdvisoryEvidence>,
 }

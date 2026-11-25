@@ -5,8 +5,8 @@ use argus_intel::{
     import_snapshot, ImportLimits, ImportRequest, IntelDatabase, CANONICAL_SOURCE,
     RULE_KNOWN_MALICIOUS,
 };
-use chrono::{TimeZone, Utc};
 use fixtures::{archive, exact_record, range_record, MockArchiveTransport, REVISION};
+use jiff::Timestamp;
 
 const MODIFIED: &str = "2026-01-01T00:00:00Z";
 
@@ -21,7 +21,7 @@ fn database(entries: &[(&str, &[u8])]) -> (tempfile::TempDir, IntelDatabase) {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &path,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &MockArchiveTransport::new(bytes),
@@ -127,7 +127,7 @@ fn malicious_finding() {
     assert!(evidence.contains("match_basis=exact:1.0.0"));
     let status = db
         .status(
-            Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            "2026-01-02T00:00:00Z".parse::<Timestamp>().unwrap(),
             result.status,
         )
         .unwrap();
@@ -199,7 +199,7 @@ fn malformed_matrix() {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &MockArchiveTransport::new(archive(&[("osv/malicious/bad.json", &malformed)])),
@@ -527,7 +527,7 @@ fn malformed_event_and_record_matrix() {
                 source: CANONICAL_SOURCE,
                 revision: REVISION,
                 output: &output,
-                imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
                 limits: ImportLimits::default(),
             },
             &MockArchiveTransport::new(archive(&[("osv/malicious/bad.json", &body)])),
@@ -677,7 +677,7 @@ fn upstream_osv_schema_fields_and_required_modified() {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &MockArchiveTransport::new(archive(&[(
@@ -704,7 +704,7 @@ fn upstream_osv_schema_fields_and_required_modified() {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &MockArchiveTransport::new(archive(&[(
@@ -753,7 +753,7 @@ fn overlapping_ranges_have_one_deterministic_records_digest() {
                     source: CANONICAL_SOURCE,
                     revision: REVISION,
                     output: &output,
-                    imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
                     limits: ImportLimits::default(),
                 },
                 &MockArchiveTransport::new(archive(&[("osv/malicious/overlap.json", body)])),

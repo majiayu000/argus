@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Replace Chrono with Jiff for Rust timestamp APIs. UTC timestamps in reports,
+  snapshots and caches retain their existing RFC 3339 format. Timestamp inputs
+  containing leap seconds now report an error.
+
 - Close the AGT-06 context-injection bypass in step `shell:` commands.
   Shell expressions now use the same checks and input/env/output resolution
   as `run:`, including nested local composites and reusable workflows.

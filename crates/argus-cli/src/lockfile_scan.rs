@@ -23,7 +23,7 @@ use argus_lockfile::{LockfileScanTarget, LockfileScanTargetChange, LockfileScanT
 use argus_pipeline::{CommonFetchOptions, EcosystemFetcher, ExpectedIntegrity};
 use argus_rules::RuleSession;
 use argus_transport::Transport;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -540,7 +540,7 @@ pub(crate) struct LockfileScanArgs {
 
 /// Command entry point: parse, plan, sweep, and emit.
 pub(crate) fn run(args: LockfileScanArgs) -> Result<ExitCode> {
-    let scan_started_at = Utc::now();
+    let scan_started_at = Timestamp::now();
     let execution = args.execution.resolve()?;
     let rules = args.rules.load()?;
     let path = args.path.as_path();

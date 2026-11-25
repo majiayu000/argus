@@ -6,7 +6,7 @@ use argus_core::{
     VulnerabilityQueryEvidence, VulnerabilityQueryStatus, VulnerabilitySourceMode,
     VULNERABILITY_QUERY_EVIDENCE_VERSION,
 };
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -263,14 +263,12 @@ fn advisory_evidence(
         normalized_severity: normalized_level_name(advisory.severity.level).to_string(),
         batch_summary_modified: advisory.batch_summary_modified.clone(),
         detail_modified: advisory.detail_modified.clone(),
-        database_modified: advisory
-            .database_modified
-            .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        database_modified: argus_core::timestamp::format_utc(advisory.database_modified),
         source_url: advisory.source_url.clone(),
     })
 }
 
-fn freshness(snapshot: &ResolvedSnapshot) -> Result<(DateTime<Utc>, DateTime<Utc>, u64), OsvError> {
+fn freshness(snapshot: &ResolvedSnapshot) -> Result<(Timestamp, Timestamp, u64), OsvError> {
     let oldest = snapshot
         .results
         .iter()
@@ -283,10 +281,10 @@ fn freshness(snapshot: &ResolvedSnapshot) -> Result<(DateTime<Utc>, DateTime<Utc
         .map(|result| result.fetched_at)
         .max()
         .unwrap_or(snapshot.resolved_at);
-    let age = snapshot
+    let age: std::time::Duration = snapshot
         .resolved_at
-        .signed_duration_since(oldest)
-        .to_std()
+        .duration_since(oldest)
+        .try_into()
         .map_err(|_| OsvError::incomplete("resolved snapshot freshness is in the future"))?;
     let seconds = age
         .as_secs()

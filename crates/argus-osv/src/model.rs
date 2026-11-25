@@ -1,5 +1,5 @@
 use argus_core::PackageCoordinate;
-use chrono::{DateTime, TimeDelta, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
@@ -271,12 +271,12 @@ pub(crate) fn validate_scalar(label: &str, value: &str, maximum: usize) -> Resul
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModifiedInterval {
-    pub start: DateTime<Utc>,
-    end: DateTime<Utc>,
+    pub start: Timestamp,
+    end: Timestamp,
 }
 
 impl ModifiedInterval {
-    pub(crate) fn contains(self, instant: DateTime<Utc>) -> bool {
+    pub(crate) fn contains(self, instant: Timestamp) -> bool {
         self.start <= instant && instant < self.end
     }
 }
@@ -301,15 +301,13 @@ pub(crate) fn parse_modified(raw: &str) -> Result<ModifiedInterval, OsvError> {
             "modified timestamp `{raw}` precision is outside 0..=9"
         )));
     }
-    let start = DateTime::parse_from_rfc3339(raw)
-        .map_err(|error| {
-            OsvError::malformed(format!("modified timestamp `{raw}` is invalid: {error}"))
-        })?
-        .with_timezone(&Utc);
+    let start = argus_core::timestamp::parse_rfc3339(raw).map_err(|error| {
+        OsvError::malformed(format!("modified timestamp `{raw}` is invalid: {error}"))
+    })?;
     let quantum = 10_i64.pow((9 - fraction.len()) as u32);
     let end = start
-        .checked_add_signed(TimeDelta::nanoseconds(quantum))
-        .ok_or_else(|| OsvError::malformed(format!("modified timestamp `{raw}` overflows")))?;
+        .checked_add(SignedDuration::from_nanos(quantum))
+        .map_err(|_| OsvError::malformed(format!("modified timestamp `{raw}` overflows")))?;
     Ok(ModifiedInterval { start, end })
 }
 
@@ -358,8 +356,10 @@ pub struct NormalizedAdvisory {
     pub references: Vec<AdvisoryReference>,
     pub batch_summary_modified: String,
     pub detail_modified: String,
-    pub database_modified: DateTime<Utc>,
-    pub published: Option<DateTime<Utc>>,
+    #[serde(with = "argus_core::timestamp")]
+    pub database_modified: Timestamp,
+    #[serde(default, with = "argus_core::timestamp::optional")]
+    pub published: Option<Timestamp>,
     pub source_url: String,
 }
 

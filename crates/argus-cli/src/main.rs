@@ -33,8 +33,8 @@ use argus_pypi::{PreferredFormat as PypiPreferredFormat, PypiFetchOptions, PypiP
 use argus_rubygems::GemsFetcher;
 use argus_rules::RuleSession;
 use argus_transport::HttpTransport;
-use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use jiff::Timestamp;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -350,7 +350,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
-    let scan_started_at = Utc::now();
+    let scan_started_at = Timestamp::now();
     match cli.cmd {
         Cmd::Scan {
             path,
@@ -518,7 +518,7 @@ fn cmd_scan(
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
     risk: risk_args::RiskArgs,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
     rules: RuleSession,
     execution: &ExecutionContext,
 ) -> Result<ExitCode> {
@@ -545,7 +545,7 @@ fn cmd_ecosystem_fetch(
     fetcher: &dyn EcosystemFetcher,
     label: &str,
     args: EcosystemFetchArgs,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
 ) -> Result<ExitCode> {
     let execution = args.execution.resolve()?;
     let rules = args.rules.load()?;
@@ -583,7 +583,7 @@ fn cmd_pypi_fetch(
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
     risk: risk_args::RiskArgs,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
     rules: RuleSession,
     execution: &ExecutionContext,
 ) -> Result<ExitCode> {
@@ -627,7 +627,7 @@ fn cmd_fetch(
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
     risk: risk_args::RiskArgs,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
     rules: RuleSession,
     execution: &ExecutionContext,
 ) -> Result<ExitCode> {
@@ -675,7 +675,7 @@ fn finish_scan(
     intel: intel::ScanIntelArgs,
     vulns: vulns::ScanVulnsArgs,
     risk: risk_args::RiskArgs,
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
     rules: &RuleSession,
     execution: &ExecutionContext,
 ) -> Result<ExitCode> {

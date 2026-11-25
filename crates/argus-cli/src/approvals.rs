@@ -2,7 +2,7 @@ use anyhow::{bail, ensure, Context, Result};
 use argus_core::rules::{policy, RulePolicy};
 use argus_core::{Decision, Ecosystem, ScanReport};
 use argus_lockfile::LockfileScanTarget;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,8 @@ struct ApprovalRecord {
     digest: String,
     capability: String,
     reason: String,
-    expires_at: DateTime<Utc>,
+    #[serde(deserialize_with = "argus_core::timestamp::deserialize")]
+    expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,14 +45,15 @@ pub(crate) struct AppliedApproval {
     digest: String,
     capability: String,
     reason: String,
-    expires_at: DateTime<Utc>,
+    #[serde(serialize_with = "argus_core::timestamp::serialize")]
+    expires_at: Timestamp,
 }
 
 pub(crate) fn load_and_assess(
     path: &Path,
     reports: &[ScanReport],
     targets: &[LockfileScanTarget],
-    scan_started_at: DateTime<Utc>,
+    scan_started_at: Timestamp,
 ) -> Result<Vec<ApprovalAssessment>> {
     let raw = argus_core::fs::read_bounded_utf8_regular_file(path, MAX_LEDGER_BYTES)
         .with_context(|| format!("read approval ledger {}", path.display()))?;
@@ -70,7 +72,7 @@ pub(crate) fn load_and_assess(
         .collect()
 }
 
-fn validate_records(records: &[ApprovalRecord], scan_started_at: DateTime<Utc>) -> Result<()> {
+fn validate_records(records: &[ApprovalRecord], scan_started_at: Timestamp) -> Result<()> {
     let mut identities = BTreeSet::new();
     for record in records {
         ensure!(

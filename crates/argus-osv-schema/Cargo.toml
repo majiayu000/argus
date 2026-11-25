@@ -10,7 +10,7 @@ description = "OSV schema parsing, validation, and per-ecosystem version compari
 [dependencies]
 argus-core = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

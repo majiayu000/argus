@@ -424,7 +424,7 @@ mod tests {
     use super::*;
     use crate::import::CANONICAL_SOURCE;
     use crate::snapshot::{finalize_snapshot, SnapshotEnvelope, SNAPSHOT_FORMAT_VERSION};
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
 
     struct FailAfterReplacement;
 
@@ -544,7 +544,7 @@ mod tests {
             schema_versions: vec!["1.7.4".to_string()],
             archive_sha256: "0".repeat(64),
             records_sha256: String::new(),
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             records: Vec::new(),
             snapshot_sha256: String::new(),
         })

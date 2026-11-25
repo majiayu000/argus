@@ -3,8 +3,8 @@ mod fixtures;
 use argus_core::{Ecosystem, PackageCoordinate};
 use argus_intel::{import_snapshot, ImportLimits, ImportRequest, CANONICAL_SOURCE};
 use argus_osv_schema::{validate_osv_coordinate, SUPPORTED_SCHEMA_VERSIONS};
-use chrono::{TimeZone, Utc};
 use fixtures::{archive, exact_record, MockArchiveTransport, REVISION};
+use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::fs;
 
@@ -16,7 +16,7 @@ fn import_record(record: &Value) -> anyhow::Result<argus_intel::ImportOutcome> {
             source: CANONICAL_SOURCE,
             revision: REVISION,
             output: &output,
-            imported_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            imported_at: "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
             limits: ImportLimits::default(),
         },
         &MockArchiveTransport::new(archive(&[(

@@ -260,7 +260,7 @@ pub(crate) fn validate_normalized_advisory(
         "references":references
     });
     if let Some(published) = advisory.published {
-        raw["published"] = serde_json::json!(published);
+        raw["published"] = serde_json::Value::String(argus_core::timestamp::format_utc(published));
     }
     let bytes = serde_json::to_vec(&raw)
         .map_err(|error| OsvError::malformed(format!("serialize cached advisory: {error}")))?;

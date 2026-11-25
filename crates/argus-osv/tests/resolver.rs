@@ -10,7 +10,7 @@ use argus_osv::report::{OsvReportBuilder, ReportBuilder};
 use argus_osv::resolver::{AdvisoryResolver, CoordinateSource, OsvResolver, ResolveRequest};
 use argus_osv::severity::SeverityLevel;
 use argus_osv::{CoordinateQuery, CoordinateSet, OsvError, OsvErrorKind};
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -112,8 +112,8 @@ fn json_response(value: Value) -> TransportResponse {
     }
 }
 
-fn time(second: i64) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 7, 19, 10, 0, 0).unwrap() + Duration::seconds(second)
+fn time(second: i64) -> Timestamp {
+    "2026-07-19T10:00:00Z".parse::<Timestamp>().unwrap() + SignedDuration::from_secs(second)
 }
 
 fn query(name: &str, locators: &[&str]) -> CoordinateQuery {
@@ -134,7 +134,7 @@ fn make_resolver(root: &TempRoot) -> OsvResolver {
 
 fn request<'a>(
     coordinates: &'a CoordinateSet,
-    now: DateTime<Utc>,
+    now: Timestamp,
     offline: bool,
     allow_stale: bool,
     max_age_seconds: u64,
@@ -262,7 +262,7 @@ fn source_modes_cover_mixed_and_current_locator_rebinding() {
         .resolve(
             request(
                 &combined,
-                time(1) + Duration::nanoseconds(1),
+                time(1) + SignedDuration::from_nanos(1),
                 false,
                 false,
                 60,
