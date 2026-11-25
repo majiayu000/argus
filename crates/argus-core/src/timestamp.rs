@@ -1,6 +1,6 @@
 //! RFC 3339 timestamps shared by reports and digested on-disk records.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use jiff::{fmt::temporal::DateTimePrinter, tz::Offset, Timestamp};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serializer};
@@ -10,14 +10,22 @@ use std::sync::LazyLock;
 /// generic timestamp parser also recognizes.
 pub fn parse_rfc3339(raw: &str) -> Result<Timestamp> {
     static SHAPE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})\z")
+        Regex::new(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})\z")
             .expect("valid timestamp expression")
     });
-    ensure!(SHAPE.is_match(raw), "expected an RFC 3339 timestamp");
+    let parts = SHAPE
+        .captures(raw)
+        .context("expected an RFC 3339 timestamp")?;
     ensure!(
         &raw.as_bytes()[17..19] != b"60",
         "leap seconds are not supported"
     );
+    if let Some(fraction) = parts.get(1).filter(|fraction| fraction.len() > 10) {
+        // Retain the first nine digits after the decimal point.
+        let nanos = &raw[..fraction.start() + 10];
+        let offset = &raw[fraction.end()..];
+        return Ok(format!("{nanos}{offset}").parse()?);
+    }
     Ok(raw.parse()?)
 }
 
@@ -88,6 +96,8 @@ mod tests {
             format_with_utc_offset(timestamp),
             "2026-01-01T00:00:00.100+00:00"
         );
+        let timestamp = parse_rfc3339("2026-01-01T02:00:00.1234567899+02:00").unwrap();
+        assert_eq!(format_utc(timestamp), "2026-01-01T00:00:00.123456789Z");
         for malformed in [
             "2026-01-01T00:00Z",
             "2026-01-01T00:00:00+00",
